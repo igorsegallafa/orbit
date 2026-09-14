@@ -1,11 +1,14 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { useConfig } from "./hooks/useConfig";
 import { DashboardPage } from "./pages/DashboardPage";
 import { SettingsPage } from "./pages/SettingsPage";
+import { WorkspaceDetailPage } from "./pages/WorkspaceDetailPage";
 import { SidebarResizer } from "./components/SidebarResizer";
+import { Workspace } from "./types/config";
 import "./App.css";
 
-type Page = "dashboard" | "settings";
+type Page = { kind: "dashboard" } | { kind: "settings" } | { kind: "workspace"; name: string };
 
 const SIDEBAR_KEY = "orbit.sidebar-width";
 const DEFAULT_WIDTH = 220;
@@ -19,8 +22,21 @@ function loadSidebarWidth(): number {
 
 function App() {
   const { config, setConfig, loading, error, setError } = useConfig();
-  const [page, setPage] = useState<Page>("dashboard");
+  const [page, setPage] = useState<Page>({ kind: "dashboard" });
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth);
+
+  const loadWorkspaces = useCallback(async () => {
+    try {
+      setWorkspaces(await invoke<Workspace[]>("list_workspaces"));
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [setError]);
+
+  useEffect(() => {
+    loadWorkspaces();
+  }, [loadWorkspaces]);
 
   const onResize = useCallback((w: number) => {
     setSidebarWidth(w);
@@ -30,6 +46,7 @@ function App() {
   const collapsed = sidebarWidth <= COLLAPSED;
   const repoCount = config.services.length;
   const groupCount = Object.keys(config.groups).length;
+  const activeWorkspace = page.kind === "workspace" ? workspaces.find((w) => w.name === page.name) : undefined;
 
   return (
     <div className="app">
@@ -42,17 +59,31 @@ function App() {
         <nav>
           {!collapsed && <div className="nav-section">Workspaces</div>}
           <button
-            className={`nav-item ${page === "dashboard" ? "active" : ""}`}
-            onClick={() => setPage("dashboard")}
+            className={`nav-item ${page.kind === "dashboard" ? "active" : ""}`}
+            onClick={() => setPage({ kind: "dashboard" })}
             title="Dashboard"
           >
             <span className="nav-icon">🏠</span> {!collapsed && "Dashboard"}
           </button>
+          {!collapsed &&
+            workspaces.map((ws) => (
+              <button
+                key={ws.name}
+                className={`nav-item ${
+                  page.kind === "workspace" && page.name === ws.name ? "active" : ""
+                }`}
+                onClick={() => setPage({ kind: "workspace", name: ws.name })}
+                title={ws.name}
+              >
+                <span className="nav-icon">🛰️</span>
+                <span className="nav-item-label">{ws.name}</span>
+              </button>
+            ))}
 
           {!collapsed && <div className="nav-section">General</div>}
           <button
-            className={`nav-item ${page === "settings" ? "active" : ""}`}
-            onClick={() => setPage("settings")}
+            className={`nav-item ${page.kind === "settings" ? "active" : ""}`}
+            onClick={() => setPage({ kind: "settings" })}
             title="Settings"
           >
             <span className="nav-icon">⚙️</span> {!collapsed && "Settings"}
@@ -86,10 +117,30 @@ function App() {
           <div className="page-loading">
             <span className="spinner" /> Loading…
           </div>
-        ) : page === "dashboard" ? (
-          <DashboardPage config={config} />
-        ) : (
+        ) : page.kind === "dashboard" ? (
+          <DashboardPage
+            config={config}
+            workspaces={workspaces}
+            onOpen={(ws) => setPage({ kind: "workspace", name: ws.name })}
+            onChanged={loadWorkspaces}
+            onError={setError}
+          />
+        ) : page.kind === "settings" ? (
           <SettingsPage config={config} onChange={setConfig} onError={setError} />
+        ) : activeWorkspace ? (
+          <WorkspaceDetailPage
+            workspace={activeWorkspace}
+            onBack={() => setPage({ kind: "dashboard" })}
+            onRemoved={() => {
+              loadWorkspaces();
+              setPage({ kind: "dashboard" });
+            }}
+            onError={setError}
+          />
+        ) : (
+          <div className="page-loading">
+            <span className="spinner" /> Loading workspace…
+          </div>
         )}
       </main>
     </div>

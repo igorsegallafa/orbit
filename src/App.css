@@ -349,14 +349,20 @@ body {
 
 input,
 button {
-  height: var(--control-height);
   font-size: 13px;
   border-radius: 6px;
   border: 1px solid transparent;
   font-family: inherit;
 }
 
+/* Buttons default to control height unless they opt out
+   (cards, links, rows, nav items set their own) */
+button:not(.workspace-card):not(.nav-item):not(.modal-row):not(.link):not(.back-link):not(.chip) {
+  height: var(--control-height);
+}
+
 input {
+  height: var(--control-height);
   background: var(--bg);
   border-color: var(--border-strong);
   color: var(--text);
@@ -453,7 +459,8 @@ button.link.danger:hover:not(:disabled) {
   gap: 12px;
 }
 
-.form label {
+.form label,
+.form-grid label {
   display: flex;
   flex-direction: column;
   gap: 5px;
@@ -462,7 +469,8 @@ button.link.danger:hover:not(:disabled) {
   color: var(--text-dim);
 }
 
-.form label input {
+.form label input,
+.form-grid label input {
   width: 100%;
 }
 
@@ -582,6 +590,18 @@ table.list tbody tr:hover .row-actions,
   background: rgba(74, 222, 128, 0.08);
 }
 
+.tag-warn {
+  color: #fbbf24;
+  border-color: rgba(251, 191, 36, 0.25);
+  background: rgba(251, 191, 36, 0.08);
+}
+
+.tag-info {
+  color: #7aa7ff;
+  border-color: rgba(122, 167, 255, 0.25);
+  background: rgba(122, 167, 255, 0.08);
+}
+
 .tag-muted {
   color: var(--text-faint);
 }
@@ -618,6 +638,213 @@ table.list tbody tr:hover .row-actions,
 }
 
 /* ---------- Stats (dashboard) ---------- */
+
+.workspace-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 14px;
+  margin-bottom: 20px;
+}
+
+.workspace-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  transition: border-color var(--transition), transform 0.12s ease, background var(--transition);
+  animation: card-in 0.2s cubic-bezier(0.25, 0.25, 0, 1) backwards;
+  height: auto;
+  cursor: pointer;
+}
+
+.workspace-card:hover {
+  border-color: var(--accent);
+  background: var(--panel-raised);
+  transform: translateY(-2px);
+}
+
+.workspace-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.workspace-card-icon {
+  font-size: 16px;
+}
+
+.workspace-card-name {
+  font-weight: 600;
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-card-meta {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.empty-state-actions {
+  margin-top: 16px;
+}
+
+/* ---------- Workspace detail ---------- */
+
+.detail-header {
+  margin-bottom: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.back-link {
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  padding: 0;
+  height: 22px;
+  font-size: 12.5px;
+  font-weight: 500;
+  justify-content: flex-start;
+}
+
+.back-link:hover:not(:disabled) {
+  background: transparent;
+  color: var(--text);
+}
+
+.detail-title-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.detail-title-row h2 {
+  margin: 0;
+  font-size: 19px;
+  font-weight: 650;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.detail-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.workspace-meta {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.table-loading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-faint);
+  justify-content: center;
+  padding: 28px 12px;
+}
+
+.danger-outline {
+  background: transparent;
+  border: 1px solid rgba(255, 93, 93, 0.4);
+  color: var(--danger);
+}
+
+.danger-outline:hover:not(:disabled) {
+  background: var(--danger-soft);
+}
+
+/* ---------- Wizard modal (create workspace) ---------- */
+
+.modal-wizard {
+  width: min(540px, 94vw);
+  max-height: 85vh;
+}
+
+.wizard-body {
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+.wizard-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.wizard-field > label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+
+.wizard-field input {
+  width: 100%;
+}
+
+.wizard-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 2px 0;
+}
+
+.wizard-count {
+  font-size: 11px;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.wizard-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+
+.wizard-picker {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 4px;
+  background: var(--bg);
+}
+
+.wizard-picker .modal-row {
+  height: 34px;
+}
+
+.wizard-picker .empty {
+  padding: 12px 8px;
+}
+
+.nav-item-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 .stats-row {
   display: flex;
@@ -886,6 +1113,48 @@ table.list tbody tr:hover .row-actions,
   gap: 8px;
   padding: 12px 16px;
   border-top: 1px solid var(--border);
+}
+
+/* ---------- Context menu ---------- */
+
+.context-menu {
+  position: fixed;
+  z-index: 200;
+  min-width: 200px;
+  background: var(--panel-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+  padding: 4px;
+  animation: modal-in 0.1s cubic-bezier(0.25, 0.25, 0, 1);
+}
+
+.context-menu-item {
+  display: block;
+  width: 100%;
+  height: 30px;
+  background: transparent;
+  border: none;
+  border-radius: 5px;
+  color: var(--text);
+  padding: 0 10px;
+  font-size: 12.5px;
+  font-weight: 400;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.08s ease;
+}
+
+.context-menu-item:hover:not(:disabled) {
+  background: var(--accent-soft);
+}
+
+.context-menu-item.danger {
+  color: var(--danger);
+}
+
+.context-menu-item.danger:hover:not(:disabled) {
+  background: var(--danger-soft);
 }
 
 /* ---------- Feedback ---------- */

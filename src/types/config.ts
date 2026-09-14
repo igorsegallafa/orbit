@@ -19,3 +19,18 @@ export interface GithubRepo {
   sshUrl: string;
   isPrivate: boolean;
 }
+
+export interface Workspace {
+  name: string;
+  branch: string;
+  base: string;
+  repos: string[];
+}
+
+export interface RepoStatus {
+  repo: string;
+  branch: string | null;
+  dirty: boolean;
+  ahead: number;
+  behind: number;
+}

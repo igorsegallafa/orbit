@@ -2,6 +2,7 @@ mod commands;
 mod config;
 mod git;
 mod github;
+mod workspace;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -19,6 +20,13 @@ pub fn run() {
             commands::set_group_members,
             commands::github_is_authenticated,
             commands::github_list_repos,
+            commands::list_workspaces,
+            commands::create_workspace,
+            commands::remove_workspace,
+            commands::workspace_status,
+            commands::refresh_repo,
+            commands::open_in_editor,
+            commands::reveal_workspace_folder,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
