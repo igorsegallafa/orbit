@@ -12,9 +12,12 @@
   "app": {
     "windows": [
       {
-        "title": "orbit",
-        "width": 800,
-        "height": 600
+        "title": "Orbit",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 700,
+        "minHeight": 500,
+        "maximized": true
       }
     ],
     "security": {
