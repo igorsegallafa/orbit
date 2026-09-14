@@ -234,10 +234,7 @@ pub async fn open_in_editor(workspace: String, repo: String) -> Result<(), Strin
 #[tauri::command]
 pub async fn reveal_workspace_folder(name: String) -> Result<(), String> {
     blocking(move || {
-        let dir = workspace::workspace_root()?.join("workspaces").join(&name);
-        if !dir.exists() {
-            return Err(format!("workspace '{name}' folder not found"));
-        }
+        let dir = workspace_dir(&name)?;
         std::process::Command::new("open")
             .arg(&dir)
             .spawn()
@@ -245,6 +242,33 @@ pub async fn reveal_workspace_folder(name: String) -> Result<(), String> {
         Ok(())
     })
     .await
+}
+
+/// Opens the whole workspace folder (all worktrees) in the user's editor.
+#[tauri::command]
+pub async fn open_workspace_in_editor(name: String) -> Result<(), String> {
+    blocking(move || {
+        let dir = workspace_dir(&name)?;
+        for editor in ["code", "zed"] {
+            if which(&editor) {
+                std::process::Command::new(editor)
+                    .arg(&dir)
+                    .spawn()
+                    .map_err(|e| format!("failed to launch {editor}: {e}"))?;
+                return Ok(());
+            }
+        }
+        Err("no editor found (looked for 'code' and 'zed' in PATH)".into())
+    })
+    .await
+}
+
+fn workspace_dir(name: &str) -> Result<PathBuf, String> {
+    let dir = workspace::workspace_root()?.join("workspaces").join(name);
+    if !dir.exists() {
+        return Err(format!("workspace '{name}' folder not found"));
+    }
+    Ok(dir)
 }
 
 fn which(bin: &str) -> bool {

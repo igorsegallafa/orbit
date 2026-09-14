@@ -5,12 +5,14 @@ import { ConfirmDialog } from "../components/ConfirmDialog";
 
 interface Props {
   workspace: Workspace;
+  onOpenEditor: (repo: string) => void;
+  onOpenAgent: (ws: Workspace, agent: "claude" | "opencode") => void;
   onRemoved: () => void;
   onBack: () => void;
   onError: (msg: string) => void;
 }
 
-export function WorkspaceDetailPage({ workspace, onRemoved, onBack, onError }: Props) {
+export function WorkspaceDetailPage({ workspace, onOpenEditor, onOpenAgent, onRemoved, onBack, onError }: Props) {
   const [statuses, setStatuses] = useState<RepoStatus[] | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState<null | "normal" | "force">(null);
@@ -57,7 +59,7 @@ export function WorkspaceDetailPage({ workspace, onRemoved, onBack, onError }: P
   };
 
   return (
-    <div className="page">
+    <div className="page ws-detail">
       <header className="detail-header">
         <button className="back-link" onClick={onBack}>
           ← Workspaces
@@ -65,6 +67,12 @@ export function WorkspaceDetailPage({ workspace, onRemoved, onBack, onError }: P
         <div className="detail-title-row">
           <h2>{workspace.name}</h2>
           <div className="detail-actions">
+            <button className="secondary" onClick={() => onOpenAgent(workspace, "claude")}>
+              ✳ Claude
+            </button>
+            <button className="secondary" onClick={() => onOpenAgent(workspace, "opencode")}>
+              ⚡ OpenCode
+            </button>
             <button className="secondary" disabled={refreshing} onClick={() => load(true)}>
               {refreshing ? "Refreshing…" : "↻ Refresh"}
             </button>
@@ -94,7 +102,12 @@ export function WorkspaceDetailPage({ workspace, onRemoved, onBack, onError }: P
           </thead>
           <tbody>
             {(statuses ?? []).map((st) => (
-              <tr key={st.repo}>
+              <tr
+                key={st.repo}
+                className="ws-repo-row"
+                onClick={() => onOpenEditor(st.repo)}
+                title="Click to browse files"
+              >
                 <td className="cell-name">{st.repo}</td>
                 <td>
                   <span className="mono">{st.branch ?? "—"}</span>
@@ -104,16 +117,26 @@ export function WorkspaceDetailPage({ workspace, onRemoved, onBack, onError }: P
                 </td>
                 <td>{st.ahead > 0 ? <span className="tag tag-info">↑{st.ahead}</span> : <span className="tag tag-muted">—</span>}</td>
                 <td>{st.behind > 0 ? <span className="tag tag-warn">↓{st.behind}</span> : <span className="tag tag-muted">—</span>}</td>
-                <td className="row-actions">
+                <td className="row-actions row-actions-visible">
                   <button
                     className="link"
-                    onClick={() =>
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onOpenEditor(st.repo);
+                    }}
+                  >
+                    Files
+                  </button>
+                  <button
+                    className="link"
+                    onClick={(e) => {
+                      e.stopPropagation();
                       invoke("open_in_editor", { workspace: workspace.name, repo: st.repo }).catch((e) =>
                         onError(String(e))
-                      )
-                    }
+                      );
+                    }}
                   >
-                    Open in editor
+                    VS Code/Zed
                   </button>
                 </td>
               </tr>

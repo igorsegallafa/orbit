@@ -235,7 +235,33 @@ body {
 .content {
   flex: 1;
   overflow-y: auto;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Dashboard/settings page wrapper: owns its padding */
+.nav-page {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
   padding: 28px 36px;
+}
+
+.banner {
+  margin: 12px 20px 0;
+}
+
+/* With tabs open, panes go FULL-BLEED: no outer padding, no margins —
+   each pane fills the viewport edge-to-edge (Orca-style). Inner spacing
+   is handled by the panes themselves. */
+.content:has(.tab-strip) {
+  overflow: hidden;
+}
+
+/* Workspace detail inside a tab keeps its own breathing room */
+.ws-detail {
+  padding: 24px 36px;
 }
 
 .page {
@@ -356,8 +382,8 @@ button {
 }
 
 /* Buttons default to control height unless they opt out
-   (cards, links, rows, nav items set their own) */
-button:not(.workspace-card):not(.nav-item):not(.modal-row):not(.link):not(.back-link):not(.chip) {
+   (cards, links, rows, nav items, tree rows set their own) */
+button:not(.workspace-card):not(.nav-item):not(.modal-row):not(.link):not(.back-link):not(.chip):not(.tree-item):not(.dock-icon):not(.tab-close):not(.icon-button):not(.context-menu-item):not(.nav-ws-add):not(.btn-mini) {
   height: var(--control-height);
 }
 
@@ -567,6 +593,15 @@ table.list tbody tr:hover {
 table.list tbody tr:hover .row-actions,
 .group-row:hover .row-actions {
   opacity: 1;
+}
+
+/* Workspace detail rows: actions always visible, row is clickable */
+.ws-repo-row {
+  cursor: pointer;
+}
+
+.row-actions-visible {
+  opacity: 0.85;
 }
 
 /* ---------- Tags ---------- */
@@ -846,6 +881,51 @@ table.list tbody tr:hover .row-actions,
   white-space: nowrap;
 }
 
+/* Workspace row in the sidebar: name + hover "+" for a new terminal */
+.nav-ws-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.nav-ws-row .nav-item {
+  flex: 1;
+  min-width: 0;
+}
+
+.nav-ws-add {
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  color: var(--text-faint);
+  font-size: 15px;
+  border-radius: 5px;
+  opacity: 0;
+  transition: opacity var(--transition), background var(--transition);
+}
+
+.nav-ws-row:hover .nav-ws-add {
+  opacity: 1;
+}
+
+.nav-ws-add:hover {
+  background: var(--panel-raised);
+  color: var(--text);
+}
+
+/* Sessions (terminals/editors) nested under their workspace */
+.nav-sub {
+  padding-left: 30px !important;
+  height: 28px;
+  font-size: 12.5px;
+}
+
+.nav-sub .nav-icon {
+  font-size: 11px;
+}
+
 .stats-row {
   display: flex;
   gap: 14px;
@@ -1115,6 +1195,448 @@ table.list tbody tr:hover .row-actions,
   border-top: 1px solid var(--border);
 }
 
+/* ---------- Central tabs (VS Code style) ---------- */
+
+.tab-strip {
+  display: flex;
+  gap: 2px;
+  border-bottom: 1px solid var(--border);
+  margin: 0;
+  padding: 6px 8px 0;
+  background: var(--panel);
+  overflow-x: auto;
+  overflow-y: hidden;
+  flex-shrink: 0;
+  height: 42px;
+  align-items: flex-end;
+}
+
+/* Horizontal scroll without a visible horizontal scrollbar */
+.tab-strip::-webkit-scrollbar {
+  height: 0;
+}
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 12px;
+  height: 36px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 12.5px;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: background var(--transition), color var(--transition);
+}
+
+.tab:hover {
+  background: var(--panel-raised);
+  color: var(--text);
+}
+
+.tab-active {
+  background: var(--bg) !important;
+  color: var(--text) !important;
+  border-bottom-color: var(--accent);
+}
+
+.tab-icon {
+  font-size: 12px;
+}
+
+.tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Inline rename input inside a tab */
+.tab-rename {
+  height: 22px;
+  width: 120px;
+  font-size: 12px;
+  padding: 0 6px;
+  border-radius: 4px;
+  border-color: var(--accent);
+}
+
+.tab-close {
+  background: transparent;
+  border: none;
+  color: var(--text-faint);
+  padding: 0 4px;
+  height: 20px;
+  font-size: 14px;
+  line-height: 1;
+  border-radius: 4px;
+}
+
+.tab-close:hover {
+  background: var(--border-strong);
+  color: var(--text);
+}
+
+.tab-body {
+  display: none;
+  min-height: 0;
+  flex: 1;
+}
+
+.tab-body-active {
+  display: flex;
+  flex-direction: column;
+}
+
+/* The no-tab nav page (dashboard/settings) fills the content area */
+/* Full-bleed panes (editor/terminal) stretch to the tab body edges */
+.tab-body .page {
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+/* Editor/terminal panes fill the tab body completely, no outer spacing */
+.tab-body-active > .editor-pane,
+.tab-body-active > .terminal-pane {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  margin: 0;
+}
+
+/* ---------- Editor pane ---------- */
+
+.editor-pane {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+}
+
+/* Right dock (VS Code/Orca style): fixed, full height, activity bar on the
+   far right edge + compact panel. Sibling of the left sidebar. */
+.dock-resizer {
+  width: 4px;
+  margin-left: -2px;
+  cursor: col-resize;
+  flex-shrink: 0;
+  z-index: 10;
+  background: transparent;
+  transition: background var(--transition);
+}
+
+.dock-resizer:hover {
+  background: var(--accent);
+}
+
+.dock {
+  display: flex;
+  flex-shrink: 0;
+  min-height: 0;
+  background: var(--panel);
+}
+
+/* Horizontal icon toolbar above the FILES header (Orca style) */
+.dock-icons {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 8px 2px;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.dock-icon {
+  width: 30px;
+  height: 28px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--text-dim);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background var(--transition), color var(--transition);
+}
+
+.dock-icon:hover {
+  background: var(--panel-raised);
+  color: var(--text);
+}
+
+.dock-icon-active {
+  background: var(--accent-soft) !important;
+  color: #cfe0ff !important;
+}
+
+.dock-panel {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.dock-panel-header {
+  padding: 12px 12px 10px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-faint);
+  flex-shrink: 0;
+}
+
+.dock-toolbar {
+  padding: 0 8px 8px;
+  flex-shrink: 0;
+}
+
+.dock-select {
+  width: 100%;
+  height: 28px;
+  font-size: 12px;
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 0 6px;
+}
+
+.dock-select option {
+  background: var(--panel);
+  color: var(--text);
+}
+
+.dock-panel-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 4px 8px;
+  min-height: 0;
+}
+
+.dock-placeholder {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-faint);
+  font-size: 12px;
+  padding: 32px 16px;
+  text-align: center;
+}
+
+.tree-item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  height: 19px;
+  line-height: 1;
+  padding: 0;
+  margin: 0;
+  border-radius: 3px;
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.08s ease, color 0.08s ease;
+  white-space: nowrap;
+}
+
+.tree-item:hover {
+  background: var(--panel-raised);
+  color: var(--text);
+}
+
+.tree-active {
+  background: var(--accent-soft) !important;
+  color: #cfe0ff !important;
+}
+
+.tree-chevron {
+  width: 10px;
+  font-size: 9px;
+  color: var(--text-faint);
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.tree-chevron.invisible {
+  visibility: hidden;
+}
+
+.tree-file-icon-wrap {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.tree-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* VS Code-style indent: 8px per depth level */
+.tree-item[class*="depth-0"] { padding-left: 5px; }
+.tree-item[class*="depth-1"] { padding-left: 13px; }
+.tree-item[class*="depth-2"] { padding-left: 21px; }
+.tree-item[class*="depth-3"] { padding-left: 29px; }
+.tree-item[class*="depth-4"] { padding-left: 37px; }
+.tree-item[class*="depth-5"] { padding-left: 45px; }
+.tree-item[class*="depth-6"] { padding-left: 53px; }
+
+.editor-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Monaco wrapper: must flex to the remaining height so automaticLayout
+   tracks a container that actually resizes (height:100% against the pane
+   breaks when the filebar sits above). */
+.editor-host {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+
+.editor-filebar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.editor-hint {
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.editor-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-faint);
+}
+
+/* Small variant used inside dock panels (git/search placeholders) */
+.editor-empty.small {
+  font-size: 12px;
+  padding: 32px 16px;
+  text-align: center;
+  line-height: 1.5;
+}
+
+/* ---------- Terminal pane ---------- */
+
+.terminal-pane {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+.terminal-statusbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  font-size: 11.5px;
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+
+.terminal-status-cmd {
+  text-transform: lowercase;
+  font-family: ui-monospace, "SF Mono", monospace;
+  color: var(--text-faint);
+}
+
+.terminal-host {
+  flex: 1;
+  min-height: 0;
+  padding: 8px 10px;
+}
+
+/* ---------- Animated status indicator ---------- */
+
+.status-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  line-height: 1;
+}
+
+.status-label {
+  font-size: 11px;
+  color: var(--text-dim);
+  text-transform: capitalize;
+}
+
+/* Rotating arc — agent is doing work (thinking/running/editing) */
+.status-work .status-ind {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--accent);
+  animation: spin 0.8s linear infinite;
+}
+
+/* Pulsing dot — output flowing but no recognized verb */
+.status-busy .status-ind {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: status-pulse 1.2s ease-in-out infinite;
+}
+
+/* Idle: hollow dot */
+.status-idle .status-ind {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 2px solid var(--text-faint);
+}
+
+/* Exited: solid check-ish dot */
+.status-exited .status-ind {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ok);
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes status-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.35; transform: scale(0.8); }
+}
+
 /* ---------- Context menu ---------- */
 
 .context-menu {
@@ -1130,31 +1652,138 @@ table.list tbody tr:hover .row-actions,
 }
 
 .context-menu-item {
-  display: block;
+  all: unset;
+  display: flex;
+  align-items: center;
   width: 100%;
   height: 30px;
-  background: transparent;
+  box-sizing: border-box;
+  background: transparent !important;
   border: none;
   border-radius: 5px;
-  color: var(--text);
+  color: var(--text) !important;
   padding: 0 10px;
   font-size: 12.5px;
   font-weight: 400;
+  font-family: inherit;
   text-align: left;
+  white-space: nowrap;
   cursor: pointer;
   transition: background 0.08s ease;
 }
 
 .context-menu-item:hover:not(:disabled) {
-  background: var(--accent-soft);
+  background: var(--accent-soft) !important;
 }
 
 .context-menu-item.danger {
-  color: var(--danger);
+  color: var(--danger) !important;
 }
 
 .context-menu-item.danger:hover:not(:disabled) {
-  background: var(--danger-soft);
+  background: var(--danger-soft) !important;
+}
+
+/* ---------- Search Everywhere (double-shift) ---------- */
+
+.search-modal {
+  width: min(640px, 90vw);
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: modal-in 0.14s cubic-bezier(0.25, 0.25, 0, 1);
+}
+
+.search-input-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.search-icon {
+  font-size: 14px;
+  color: var(--text-faint);
+}
+
+.search-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  font-size: 15px;
+  height: 28px;
+  padding: 0;
+}
+
+.search-input:focus {
+  box-shadow: none;
+  border-color: transparent;
+}
+
+.search-hint {
+  font-size: 11px;
+  color: var(--text-faint);
+  background: var(--panel-raised);
+  border-radius: 999px;
+  padding: 3px 10px;
+  flex-shrink: 0;
+}
+
+.search-list {
+  max-height: 380px;
+  overflow-y: auto;
+  padding: 6px;
+}
+
+.search-loading,
+.search-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 40px;
+  color: var(--text-faint);
+  font-size: 13px;
+}
+
+.search-row {
+  width: 100%;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 0 10px;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+
+.search-row:hover,
+.search-row-active {
+  background: var(--accent-soft);
+}
+
+.search-row-name {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.search-row-path {
+  font-size: 11px;
+  color: var(--text-faint);
+  font-family: ui-monospace, "SF Mono", monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ---------- Feedback ---------- */
@@ -1181,19 +1810,11 @@ table.list tbody tr:hover .row-actions,
 
 /* ---------- Responsive ---------- */
 
-/* Content padding scales up on large windows */
-@media (min-width: 1400px) {
-  .content {
-    padding: 32px 48px;
-  }
-}
-
-/* Tighter layout on narrow windows */
+/* ---------- Responsive ----------
+   NOTE: `.content` padding is intentionally NOT touched here — panes are
+   full-bleed and each pane/page owns its own spacing. These rules only
+   tighten forms/tables on narrow windows. */
 @media (max-width: 900px) {
-  .content {
-    padding: 20px 24px;
-  }
-
   .form-grid {
     grid-template-columns: 1fr;
   }
@@ -1222,10 +1843,6 @@ table.list tbody tr:hover .row-actions,
 }
 
 @media (max-width: 720px) {
-  .content {
-    padding: 16px;
-  }
-
   .page-header {
     flex-wrap: wrap;
     gap: 8px;

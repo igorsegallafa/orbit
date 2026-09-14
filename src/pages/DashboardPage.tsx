@@ -2,7 +2,7 @@ import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Config, Workspace } from "../types/config";
 import { WorkspaceCreateModal } from "../components/WorkspaceCreateModal";
-import { ContextMenu, MenuItem } from "../components/ContextMenu";
+import { ContextMenu, MenuItem, useContextMenu } from "../components/ContextMenu";
 
 interface Props {
   config: Config;
@@ -14,7 +14,7 @@ interface Props {
 
 export function DashboardPage({ config, workspaces, onOpen, onChanged, onError }: Props) {
   const [showCreate, setShowCreate] = useState(false);
-  const [menu, setMenu] = useState<{ x: number; y: number; ws: Workspace } | null>(null);
+  const { menu, setMenu, openFromEvent } = useContextMenu<Workspace>();
 
   const repoCount = config.services.length;
   const groupCount = Object.keys(config.groups).length;
@@ -22,13 +22,18 @@ export function DashboardPage({ config, workspaces, onOpen, onChanged, onError }
 
   const menuItems = (ws: Workspace): MenuItem[] => [
     {
+      label: "Open workspace",
+      onSelect: () => onOpen(ws),
+    },
+    {
+      label: "Open in editor",
+      onSelect: () =>
+        invoke("open_workspace_in_editor", { name: ws.name }).catch((e) => onError(String(e))),
+    },
+    {
       label: "Open folder in Finder",
       onSelect: () =>
         invoke("reveal_workspace_folder", { name: ws.name }).catch((e) => onError(String(e))),
-    },
-    {
-      label: "Open workspace",
-      onSelect: () => onOpen(ws),
     },
   ];
 
@@ -72,8 +77,10 @@ export function DashboardPage({ config, workspaces, onOpen, onChanged, onError }
               onClick={() => onOpen(ws)}
               onContextMenu={(e) => {
                 e.preventDefault();
-                setMenu({ x: e.clientX, y: e.clientY, ws });
+                setMenu({ x: e.clientX, y: e.clientY, payload: ws });
               }}
+              onMouseDown={(e) => openFromEvent(e, ws)}
+              onPointerDown={(e) => openFromEvent(e, ws)}
             >
               <div className="workspace-card-head">
                 <span className="workspace-card-icon">🛰️</span>
@@ -107,7 +114,7 @@ export function DashboardPage({ config, workspaces, onOpen, onChanged, onError }
         <ContextMenu
           x={menu.x}
           y={menu.y}
-          items={menuItems(menu.ws)}
+          items={menuItems(menu.payload)}
           onClose={() => setMenu(null)}
         />
       )}

@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 export interface MenuItem {
   label: string;
@@ -11,6 +11,36 @@ interface Props {
   y: number;
   items: MenuItem[];
   onClose: () => void;
+}
+
+interface MenuState<T> {
+  x: number;
+  y: number;
+  payload: T;
+}
+
+/**
+ * Right-click support across WKWebView versions: depending on the macOS/WebKit
+ * build, a right-click may surface as `pointerdown`, `mousedown` (button 2)
+ * and/or `contextmenu` — so trigger from all of them; duplicate opens with the
+ * same coords are harmless (same state).
+ */
+export function useContextMenu<T>() {
+  const [menu, setMenu] = useState<MenuState<T> | null>(null);
+
+  const openFromEvent = useCallback(
+    (
+      e: { button: number; clientX: number; clientY: number; preventDefault: () => void },
+      payload: T
+    ) => {
+      if (e.button !== 2) return;
+      e.preventDefault();
+      setMenu({ x: e.clientX, y: e.clientY, payload });
+    },
+    []
+  );
+
+  return { menu, setMenu, openFromEvent };
 }
 
 export function ContextMenu({ x, y, items, onClose }: Props) {
