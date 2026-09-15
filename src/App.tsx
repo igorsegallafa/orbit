@@ -10,14 +10,21 @@ import { ContextMenu, MenuItem, useContextMenu } from "./components/ContextMenu"
 import { EditorPane } from "./components/EditorPane";
 import { TerminalPane, TerminalTab } from "./components/TerminalPane";
 import { FileTreePanel } from "./components/FileTreePanel";
+import { ReviewPane } from "./components/ReviewPane";
+import { CommitReviewPane } from "./components/CommitReviewPane";
 import { SearchEverywhereModal } from "./components/SearchEverywhereModal";
-import { HomeIcon, SettingsIcon, SatelliteIcon, DocIcon, TerminalIcon, PlusIcon, ChevronRightIcon, PlugIcon } from "./components/Icons";
 import { UsageBar } from "./components/UsageBar";
+import { TooltipHost, tooltip } from "./components/Tooltip";
+import {
+  HomeIcon, SettingsIcon, SatelliteIcon, DocIcon, TerminalIcon, PlusIcon,
+  ChevronRightIcon, PlugIcon, DiffIcon, PanelLeftIcon, PanelLeftExpandIcon,
+  PanelRightIcon, PanelRightExpandIcon,
+} from "./components/Icons";
 import { SkeletonCards, SkeletonTable } from "./components/Skeleton";
 import { randomSessionName } from "./lib/names";
 import { AgentStatus } from "./lib/agentStatus";
 import { StatusIndicator } from "./components/StatusIndicator";
-import { Workspace } from "./types/config";
+import { GitCommit, Workspace } from "./types/config";
 import "./App.css";
 
 type NavPage = { kind: "dashboard" } | { kind: "settings" } | { kind: "integrations" };
@@ -25,6 +32,8 @@ type NavPage = { kind: "dashboard" } | { kind: "settings" } | { kind: "integrati
 type Tab =
   | { kind: "workspace"; workspace: Workspace }
   | { kind: "editor"; workspace: string; repo: string; path: string }
+  | { kind: "review"; workspace: string; repo: string; path: string }
+  | { kind: "commit"; workspace: string; repo: string; commit: GitCommit }
   | { kind: "terminal"; terminal: TerminalTab };
 
 const SIDEBAR_KEY = "orbit.sidebar-width";
@@ -41,6 +50,8 @@ function tabId(tab: Tab): string {
   const t = tab;
   if (t.kind === "workspace") return `ws:${t.workspace.name}`;
   if (t.kind === "editor") return `ed:${t.workspace}/${t.repo}/${t.path}`;
+  if (t.kind === "review") return `rv:${t.workspace}/${t.repo}/${t.path}`;
+  if (t.kind === "commit") return `cm:${t.workspace}/${t.repo}/${t.commit.sha}`;
   // Stable id: must NOT embed the display name, or renaming re-keys the pane
   // and remounts the terminal (killing the PTY session).
   return t.terminal.id;
@@ -55,6 +66,8 @@ function App() {
   const [sessionStatuses, setSessionStatuses] = useState<Record<string, AgentStatus>>({});
   const [renamingTab, setRenamingTab] = useState<string | null>(null);
   const [sidebarWidth, setSidebarWidth] = useState(() => loadStored(SIDEBAR_KEY, DEFAULT_WIDTH, 64, 400));
+  const [sidebarHidden, setSidebarHidden] = useState(() => localStorage.getItem("orbit.sidebar-hidden") === "1");
+  const [dockHidden, setDockHidden] = useState(() => localStorage.getItem("orbit.dock-hidden") === "1");
   const [dockWidth, setDockWidth] = useState(() => loadStored(DOCK_KEY, 240, 180, 460));
   const [searchOpen, setSearchOpen] = useState(false);
   const [plusMenu, setPlusMenu] = useState<{ x: number; y: number } | null>(null);
@@ -104,6 +117,20 @@ function App() {
   const onResize = useCallback((w: number) => {
     setSidebarWidth(w);
     localStorage.setItem(SIDEBAR_KEY, String(w));
+  }, []);
+
+  const toggleSidebar = useCallback(() => {
+    setSidebarHidden((h) => {
+      localStorage.setItem("orbit.sidebar-hidden", h ? "0" : "1");
+      return !h;
+    });
+  }, []);
+
+  const toggleDock = useCallback(() => {
+    setDockHidden((h) => {
+      localStorage.setItem("orbit.dock-hidden", h ? "0" : "1");
+      return !h;
+    });
   }, []);
 
   const onDockResize = useCallback(
@@ -270,13 +297,15 @@ function App() {
   const active = tabs.find((t) => tabId(t) === activeTab) ?? null;
 
   // The right dock shows for whichever workspace is "in focus": the active
-  // workspace tab, else a workspace owning the active editor/terminal tab.
+  // workspace tab, else a workspace owning the active editor/review/terminal tab.
   const focusWorkspace: Workspace | null =
     active?.kind === "workspace"
       ? active.workspace
       : active
         ? (workspaces.find(
-            (w) => w.name === (active.kind === "editor" ? active.workspace : active.terminal.workspace)
+            (w) =>
+              w.name ===
+              (active.kind === "terminal" ? active.terminal.workspace : active.workspace)
           ) ?? null)
         : null;
 
@@ -291,6 +320,26 @@ function App() {
             loadWorkspaces();
             closeTab(tabId(tab));
           }}
+          onError={setError}
+        />
+      );
+    }
+    if (tab.kind === "review") {
+      return (
+        <ReviewPane
+          workspace={tab.workspace}
+          repo={tab.repo}
+          path={tab.path}
+          onError={setError}
+        />
+      );
+    }
+    if (tab.kind === "commit") {
+      return (
+        <CommitReviewPane
+          workspace={tab.workspace}
+          repo={tab.repo}
+          commit={tab.commit}
           onError={setError}
         />
       );
@@ -353,12 +402,52 @@ function App() {
 
   return (
     <div className="app">
+      {/* Titlebar: macOS traffic lights overlay the left end (Overlay style);
+          panel toggles sit right next to them, Orca-style. */}
+      <header
+        className="titlebar"
+        data-tauri-drag-region
+        onMouseDown={(e) => {
+          // Let the drag region move the window; ignore clicks on children.
+          if (e.target === e.currentTarget) e.preventDefault();
+        }}
+      >
+        <span className="titlebar-name" data-tauri-drag-region>
+          Orbit
+        </span>
+        <button
+          className="titlebar-btn"
+          onMouseEnter={(e) =>
+            tooltip.show(sidebarHidden ? "Show sidebar" : "Hide sidebar", e)
+          }
+          onMouseLeave={() => tooltip.hide()}
+          onClick={toggleSidebar}
+        >
+          {sidebarHidden ? <PanelLeftExpandIcon /> : <PanelLeftIcon />}
+        </button>
+        <span className="titlebar-spacer" data-tauri-drag-region />
+        <button
+          className="titlebar-btn"
+          onMouseEnter={(e) =>
+            tooltip.show(dockHidden ? "Show panel" : "Hide panel", e)
+          }
+          onMouseLeave={() => tooltip.hide()}
+          onClick={toggleDock}
+          disabled={!focusWorkspace}
+        >
+          {dockHidden ? <PanelRightExpandIcon /> : <PanelRightIcon />}
+        </button>
+      </header>
       <div className="app-row">
-      <aside className="sidebar" data-collapsed={collapsed} style={{ width: sidebarWidth }}>
-        <div className="brand">
-          <span className="brand-logo"><SatelliteIcon size={18} /></span> {collapsed ? "" : "Orbit"}
-          {!collapsed && <span className="brand-sub">multi-repo workspace</span>}
-        </div>
+      <aside
+        className={`sidebar ${sidebarHidden ? "sidebar-hidden" : ""}`}
+        data-collapsed={collapsed}
+        style={{ width: sidebarHidden ? 0 : sidebarWidth }}
+      >
+          <div className="brand">
+            <span className="brand-logo"><SatelliteIcon size={18} /></span> {collapsed ? "" : "Orbit"}
+            {!collapsed && <span className="brand-sub">multi-repo workspace</span>}
+          </div>
 
         <nav>
           {!collapsed && <div className="nav-section">Workspaces</div>}
@@ -484,7 +573,7 @@ function App() {
         )}
       </aside>
 
-      <SidebarResizer width={sidebarWidth} onResize={onResize} />
+      {!sidebarHidden && <SidebarResizer width={sidebarWidth} onResize={onResize} />}
 
       <main className="content">
         {error && (
@@ -518,12 +607,18 @@ function App() {
                     ? t.workspace.name
                     : t.kind === "editor"
                       ? (t.repo ? `${t.repo}/${t.path.split("/").pop()}` : t.path.split("/").pop()!)
-                      : t.terminal.sessionName;
+                      : t.kind === "review"
+                        ? `${t.repo}/${t.path.split("/").pop()} (diff)`
+                        : t.kind === "commit"
+                          ? `${t.commit.message.slice(0, 24)}…`
+                          : t.terminal.sessionName;
                 const icon =
                   t.kind === "workspace" ? (
                     <SatelliteIcon size={13} />
                   ) : t.kind === "editor" ? (
                     <DocIcon size={13} />
+                  ) : t.kind === "review" || t.kind === "commit" ? (
+                    <DiffIcon size={13} />
                   ) : (
                     <TerminalIcon size={13} />
                   );
@@ -658,29 +753,43 @@ function App() {
       )}
       </main>
 
-      {/* Fixed right dock, full height, visible while a workspace is in focus */}
+      {/* Fixed right dock, full height, visible while a workspace is in focus.
+          Width animates to 0 when hidden; the reveal strip stays clickable. */}
       {focusWorkspace && (
         <>
-          <div
-            className="dock-resizer"
-            onMouseDown={() => {
-              const onMove = (e: MouseEvent) => {
-                onDockResize(Math.min(460, Math.max(180, window.innerWidth - e.clientX)));
-              };
-              const onUp = () => {
-                window.removeEventListener("mousemove", onMove);
-                window.removeEventListener("mouseup", onUp);
-                document.body.style.cursor = "";
-              };
-              document.body.style.cursor = "col-resize";
-              window.addEventListener("mousemove", onMove);
-              window.addEventListener("mouseup", onUp);
-            }}
-          />
-          <aside className="dock" style={{ width: dockWidth }}>
+          {!dockHidden && (
+            <div
+              className="dock-resizer"
+              onMouseDown={() => {
+                const onMove = (e: MouseEvent) => {
+                  onDockResize(Math.min(460, Math.max(180, window.innerWidth - e.clientX)));
+                };
+                const onUp = () => {
+                  window.removeEventListener("mousemove", onMove);
+                  window.removeEventListener("mouseup", onUp);
+                  document.body.style.cursor = "";
+                };
+                document.body.style.cursor = "col-resize";
+                window.addEventListener("mousemove", onMove);
+                window.addEventListener("mouseup", onUp);
+              }}
+            />
+          )}
+          <aside
+            className={`dock ${dockHidden ? "dock-hidden" : ""}`}
+            style={{ width: dockHidden ? 0 : dockWidth }}
+          >
             <FileTreePanel
               workspace={focusWorkspace}
               onOpenFile={(repo, path) => openFileTab(focusWorkspace.name, repo, path)}
+              onReviewFile={(repo, path) => {
+                setNavPage({ kind: "dashboard" });
+                openTab({ kind: "review", workspace: focusWorkspace.name, repo, path });
+              }}
+              onReviewCommit={(repo, commit) => {
+                setNavPage({ kind: "dashboard" });
+                openTab({ kind: "commit", workspace: focusWorkspace.name, repo, commit });
+              }}
               onError={setError}
             />
           </aside>
@@ -690,6 +799,9 @@ function App() {
 
       {/* AI usage bottom bar for the focused workspace */}
       {focusWorkspace && <UsageBar workspace={focusWorkspace.name} />}
+
+      {/* App-owned tooltip (replaces native title hints) */}
+      <TooltipHost />
     </div>
   );
 }

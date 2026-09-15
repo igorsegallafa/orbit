@@ -125,3 +125,62 @@ export function EyeIcon({ size = 14 }: IconProps) {
     </svg>
   );
 }
+
+/** Diff review (git changes). */
+export function DiffIcon({ size = 14 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 3v18" strokeDasharray="2 2" />
+      <path d="M5 8h6M8 5v6" />
+      <path d="M19 16h-6" />
+    </svg>
+  );
+}
+
+/** Collapse the left panel (lucide panel-left style). */
+export function PanelLeftIcon({ size = 15 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <path d="M9 4v16" />
+      <path d="m15 10-2 2 2 2" />
+      <path d="m5.5 12h4" />
+    </svg>
+  );
+}
+
+/** Expand the left panel (arrow pointing right toward the panel). */
+export function PanelLeftExpandIcon({ size = 15 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <path d="M9 4v16" />
+      <path d="m15 10 2 2-2 2" />
+      <path d="m13.5 12h-4" />
+    </svg>
+  );
+}
+
+/** Collapse the right panel (lucide panel-right style). */
+export function PanelRightIcon({ size = 15 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <path d="M15 4v16" />
+      <path d="m9 10-2 2 2 2" />
+      <path d="m18.5 12h-4" />
+    </svg>
+  );
+}
+
+/** Expand the right panel (arrow pointing left toward the panel). */
+export function PanelRightExpandIcon({ size = 15 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <path d="M15 4v16" />
+      <path d="m9 10 2 2-2 2" />
+      <path d="m10.5 12h4" />
+    </svg>
+  );
+}

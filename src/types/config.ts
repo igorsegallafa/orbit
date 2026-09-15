@@ -48,6 +48,25 @@ export interface AiSettings {
   model: string;
 }
 
+export interface GitChange {
+  path: string;
+  status: "M" | "A" | "D" | "U" | string;
+  added: number;
+  deleted: number;
+}
+
+export interface GitCommit {
+  sha: string;
+  message: string;
+  author: string;
+  when: string;
+}
+
+export interface GitFileDiff {
+  original: string;
+  modified: string;
+}
+
 export interface RepoStatus {
   repo: string;
   branch: string | null;

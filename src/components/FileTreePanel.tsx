@@ -4,7 +4,8 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { FolderIcon, GitIcon, SearchIcon } from "./Icons";
 import { FileTypeIcon, FolderTreeIcon } from "./FileIcons";
 import { ContextMenu, MenuItem, useContextMenu } from "./ContextMenu";
-import { Workspace } from "../types/config";
+import { GitPanel } from "./GitPanel";
+import { GitCommit, Workspace } from "../types/config";
 
 interface FileNode {
   name: string;
@@ -23,6 +24,10 @@ interface TreeTarget {
 interface Props {
   workspace: Workspace;
   onOpenFile: (repo: string, path: string) => void;
+  /** Opens the diff review for a changed file (Git tab). */
+  onReviewFile: (repo: string, path: string) => void;
+  /** Opens commit inspection (Git tab). */
+  onReviewCommit: (repo: string, commit: GitCommit) => void;
   onError: (msg: string) => void;
 }
 
@@ -36,7 +41,7 @@ interface Props {
  * move past a 4px threshold → hit-test folders with elementFromPoint →
  * move on mouseup, with a floating ghost and target highlight.
  */
-export function FileTreePanel({ workspace, onOpenFile, onError }: Props) {
+export function FileTreePanel({ workspace, onOpenFile, onReviewFile, onReviewCommit, onError }: Props) {
   const [view, setView] = useState<DockView>("files");
   const [repo, setRepo] = useState(workspace.repos[0] ?? "");
   const [tree, setTree] = useState<Record<string, FileNode[]>>({});
@@ -427,7 +432,14 @@ export function FileTreePanel({ workspace, onOpenFile, onError }: Props) {
           </div>
         </>
       )}
-      {view === "git" && <div className="dock-placeholder">Git status coming soon</div>}
+      {view === "git" && (
+        <GitPanel
+          workspace={workspace}
+          onReviewFile={onReviewFile}
+          onReviewCommit={onReviewCommit}
+          onError={onError}
+        />
+      )}
       {view === "search" && <div className="dock-placeholder">Search coming soon</div>}
 
       {/* Floating ghost with the dragged file name */}

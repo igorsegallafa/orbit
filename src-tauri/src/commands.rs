@@ -240,6 +240,79 @@ pub async fn set_plan_task(name: String, index: usize, done: bool) -> Result<(),
     blocking(move || agent::set_plan_task(&name, index, done)).await
 }
 
+// ---------- Git review (dock Git tab) ----------
+
+fn worktree_of(workspace: &str, repo: &str) -> Result<PathBuf, String> {
+    let dir = workspace::workspace_root()?
+        .join("workspaces")
+        .join(workspace)
+        .join(repo);
+    if !dir.exists() {
+        return Err(format!("worktree for '{repo}' not found in '{workspace}'"));
+    }
+    Ok(dir)
+}
+
+/// Working-tree changes of a workspace repo.
+#[tauri::command]
+pub async fn git_changes(workspace: String, repo: String) -> Result<Vec<git::ChangeEntry>, String> {
+    blocking(move || git::changes(&worktree_of(&workspace, &repo)?)).await
+}
+
+/// Recent commits of a workspace repo.
+#[tauri::command]
+pub async fn git_commits(workspace: String, repo: String) -> Result<Vec<git::CommitEntry>, String> {
+    blocking(move || git::commits(&worktree_of(&workspace, &repo)?, 20)).await
+}
+
+/// Original (HEAD) and current content of a file, for the diff review.
+#[tauri::command]
+pub async fn git_file_diff(
+    workspace: String,
+    repo: String,
+    path: String,
+) -> Result<git::FileDiff, String> {
+    blocking(move || {
+        let dir = worktree_of(&workspace, &repo)?;
+        let original = git::rev_content(&dir, &path, "HEAD").unwrap_or_default();
+        let modified = if path.is_empty() {
+            return Err("empty path".into());
+        } else {
+            std::fs::read_to_string(dir.join(&path)).unwrap_or_default()
+        };
+        Ok(git::FileDiff { original, modified })
+    })
+    .await
+}
+
+/// Files touched by a commit.
+#[tauri::command]
+pub async fn git_commit_files(
+    workspace: String,
+    repo: String,
+    sha: String,
+) -> Result<Vec<git::ChangeEntry>, String> {
+    blocking(move || git::commit_files(&worktree_of(&workspace, &repo)?, &sha)).await
+}
+
+/// Content pair of a file at a commit (sha^ vs sha), for commit inspection.
+#[tauri::command]
+pub async fn git_commit_diff(
+    workspace: String,
+    repo: String,
+    sha: String,
+    path: String,
+) -> Result<git::FileDiff, String> {
+    blocking(move || {
+        let dir = worktree_of(&workspace, &repo)?;
+        let before = format!("{sha}^");
+        let original = git::rev_content(&dir, &path, &before).unwrap_or_default();
+        let modified = git::rev_content(&dir, &path, &sha).unwrap_or_default();
+        Ok(git::FileDiff { original, modified })
+    })
+    .await
+}
+
 // ---------- AI settings ----------
 
 #[tauri::command]
