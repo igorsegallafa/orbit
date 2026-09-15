@@ -1,6 +1,7 @@
 use crate::config::{Config, Service};
 use crate::git;
 use crate::github::{self, GithubRepo};
+use crate::integrations::{self, TrackerKind};
 use crate::usage::{self, AiUsage};
 use crate::workspace::{self, RepoStatus, Workspace};
 use std::path::PathBuf;
@@ -282,6 +283,65 @@ pub async fn workspace_ai_usage(name: String) -> Result<AiUsage, String> {
         }
         let repos = workspace::load_meta(&ws_dir).map(|m| m.repos).unwrap_or_default();
         Ok(usage::workspace_usage(&ws_dir, &repos))
+    })
+    .await
+}
+
+// ---------- Integrations (Shortcut / Linear) ----------
+
+#[tauri::command]
+pub async fn integration_status(kind: String) -> Result<integrations::IntegrationStatus, String> {
+    blocking(move || Ok(integrations::status(TrackerKind::parse(&kind)?))).await
+}
+
+/// Validates the token against the provider, then saves it on success.
+#[tauri::command]
+pub async fn integration_connect(kind: String, token: String) -> Result<String, String> {
+    blocking(move || {
+        let kind = TrackerKind::parse(&kind)?;
+        let account = integrations::validate(kind, &token)?;
+        integrations::save_token(kind, &token)?;
+        Ok(account)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn integration_disconnect(kind: String) -> Result<(), String> {
+    blocking(move || integrations::remove_token(TrackerKind::parse(&kind)?)).await
+}
+
+/// Candidate base branches from the first selected repo (for the wizard's
+/// base-branch select). Always includes main/master fallbacks.
+#[tauri::command]
+pub async fn list_base_branches(repos: Vec<String>) -> Result<Vec<String>, String> {
+    blocking(move || {
+        let mut out = vec!["main".to_string(), "master".to_string()];
+        let rdir = workspace::repos_dir()?;
+        for repo in &repos {
+            let dir = rdir.join(repo);
+            if git::is_cloned(&rdir, repo) {
+                for b in git::list_branches(&dir) {
+                    if !out.contains(&b) {
+                        out.push(b);
+                    }
+                }
+                break; // first cloned repo is enough for suggestions
+            }
+        }
+        Ok(out)
+    })
+    .await
+}
+
+/// Card search from a connected tracker (query filters server-side).
+#[tauri::command]
+pub async fn integration_fetch_cards(
+    kind: String,
+    query: Option<String>,
+) -> Result<Vec<integrations::CardInfo>, String> {
+    blocking(move || {
+        integrations::fetch_cards(TrackerKind::parse(&kind)?, query.as_deref().unwrap_or(""))
     })
     .await
 }

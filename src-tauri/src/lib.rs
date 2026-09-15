@@ -3,6 +3,7 @@ mod config;
 mod files;
 mod git;
 mod github;
+mod integrations;
 mod pty;
 mod usage;
 mod workspace;
@@ -33,6 +34,11 @@ pub fn run() {
             commands::reveal_workspace_folder,
             commands::open_workspace_in_editor,
             commands::workspace_ai_usage,
+            commands::list_base_branches,
+            commands::integration_status,
+            commands::integration_connect,
+            commands::integration_disconnect,
+            commands::integration_fetch_cards,
             files::list_files,
             files::read_file,
             files::write_file,

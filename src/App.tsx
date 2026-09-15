@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { useConfig } from "./hooks/useConfig";
 import { DashboardPage } from "./pages/DashboardPage";
 import { SettingsPage } from "./pages/SettingsPage";
+import { IntegrationsPage } from "./pages/IntegrationsPage";
 import { WorkspaceDetailPage } from "./pages/WorkspaceDetailPage";
 import { SidebarResizer } from "./components/SidebarResizer";
 import { ContextMenu, MenuItem, useContextMenu } from "./components/ContextMenu";
@@ -10,15 +11,16 @@ import { EditorPane } from "./components/EditorPane";
 import { TerminalPane, TerminalTab } from "./components/TerminalPane";
 import { FileTreePanel } from "./components/FileTreePanel";
 import { SearchEverywhereModal } from "./components/SearchEverywhereModal";
-import { HomeIcon, SettingsIcon, SatelliteIcon, DocIcon, TerminalIcon, PlusIcon, ChevronRightIcon } from "./components/Icons";
+import { HomeIcon, SettingsIcon, SatelliteIcon, DocIcon, TerminalIcon, PlusIcon, ChevronRightIcon, PlugIcon } from "./components/Icons";
 import { UsageBar } from "./components/UsageBar";
+import { SkeletonCards, SkeletonTable } from "./components/Skeleton";
 import { randomSessionName } from "./lib/names";
 import { AgentStatus } from "./lib/agentStatus";
 import { StatusIndicator } from "./components/StatusIndicator";
 import { Workspace } from "./types/config";
 import "./App.css";
 
-type NavPage = { kind: "dashboard" } | { kind: "settings" };
+type NavPage = { kind: "dashboard" } | { kind: "settings" } | { kind: "integrations" };
 
 type Tab =
   | { kind: "workspace"; workspace: Workspace }
@@ -315,6 +317,9 @@ function App() {
     if (navPage.kind === "settings") {
       return <SettingsPage config={config} onChange={setConfig} onError={setError} />;
     }
+    if (navPage.kind === "integrations") {
+      return <IntegrationsPage onError={setError} />;
+    }
     return (
       <DashboardPage
         config={config}
@@ -431,6 +436,16 @@ function App() {
               <span className="nav-count">{repoCount + groupCount}</span>
             )}
           </button>
+          <button
+            className={`nav-item ${navPage.kind === "integrations" && !active ? "active" : ""}`}
+            onClick={() => {
+              setActiveTab(null);
+              setNavPage({ kind: "integrations" });
+            }}
+            title="Integrations"
+          >
+            <span className="nav-icon"><PlugIcon size={15} /></span> {!collapsed && "Integrations"}
+          </button>
         </nav>
 
         {!collapsed && (
@@ -454,8 +469,10 @@ function App() {
           </div>
         )}
         {loading ? (
-          <div className="page-loading">
-            <span className="spinner" /> Loading…
+          <div className="nav-page">
+            <SkeletonCards n={4} />
+            <div style={{ marginTop: 20 }} />
+            <SkeletonTable rows={4} cols={3} />
           </div>
         ) : tabs.length > 0 ? (
           <>
@@ -567,6 +584,9 @@ function App() {
                 {renderPane(t)}
               </div>
             ))}
+            {/* No active tab = user navigated to Dashboard/Settings via the
+                sidebar: render the nav page alongside open (hidden) tabs. */}
+            {!activeTab && <div className="nav-page">{renderMain()}</div>}
           </>
         ) : (
           <div className="nav-page">{renderMain()}</div>

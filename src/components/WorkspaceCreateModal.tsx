@@ -1,6 +1,18 @@
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Config, Workspace } from "../types/config";
+import { Skeleton } from "./Skeleton";
+import { Select } from "./Select";
+import { ShortcutLogo, LinearLogo } from "./BrandIcons";
+
+interface CardInfo {
+  id: string;
+  title: string;
+  state: string;
+  url: string;
+}
+
+type Source = "manual" | "shortcut" | "linear";
 
 interface Props {
   config: Config;
@@ -18,17 +30,97 @@ function slugify(s: string): string {
 }
 
 export function WorkspaceCreateModal({ config, onCreated, onClose, onError }: Props) {
+  const [source, setSource] = useState<Source>("manual");
   const [name, setName] = useState("");
   const [branch, setBranch] = useState("");
   const [base, setBase] = useState("main");
+  const [baseOptions, setBaseOptions] = useState<string[]>(["main", "master"]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [creating, setCreating] = useState(false);
 
+  // Card picker (from-tracker mode)
+  const [cardQuery, setCardQuery] = useState("");
+  const [cards, setCards] = useState<CardInfo[] | null>(null);
+  const [cardsLoading, setCardsLoading] = useState(false);
+  const [pickedCard, setPickedCard] = useState<CardInfo | null>(null);
+  // Which trackers are connected (disables their pills when not)
+  const [connected, setConnected] = useState<Record<string, boolean>>({});
+
   const effectiveBranch = useMemo(() => {
     if (branch.trim()) return branch.trim();
+    if (pickedCard) return `feat/${pickedCard.id}`;
     const slug = slugify(name);
     return slug ? `feat/${slug}` : "";
-  }, [branch, name]);
+  }, [branch, name, pickedCard]);
+
+  // Load tracker connection status once on open
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const out: Record<string, boolean> = {};
+      for (const kind of ["shortcut", "linear"]) {
+        try {
+          const st = await invoke<{ connected: boolean }>("integration_status", { kind });
+          out[kind] = st.connected;
+        } catch {
+          out[kind] = false;
+        }
+      }
+      if (!cancelled) setConnected(out);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const fetchCards = useCallback(async () => {
+    setCardsLoading(true);
+    try {
+      const result = await invoke<CardInfo[]>("integration_fetch_cards", {
+        kind: source,
+        query: cardQuery.trim() || null,
+      });
+      setCards(result);
+    } catch (e) {
+      setCards([]);
+      onError(String(e));
+    } finally {
+      setCardsLoading(false);
+    }
+  }, [source, cardQuery, onError]);
+
+  // Load cards when entering a tracker tab (debounced on query too)
+  useEffect(() => {
+    if (source === "manual") return;
+    const t = setTimeout(fetchCards, cardQuery ? 300 : 0);
+    return () => clearTimeout(t);
+  }, [source, cardQuery, fetchCards]);
+
+  const pickCard = (card: CardInfo) => {
+    setPickedCard(card);
+    // Pre-fill the workspace name from the card title
+    setName(slugify(card.title).slice(0, 40));
+    setBranch(`feat/${card.id}`);
+  };
+
+  // Base branch suggestions from the first selected (cloned) repo
+  useEffect(() => {
+    const repos = Array.from(selected);
+    if (repos.length === 0) return;
+    let cancelled = false;
+    invoke<string[]>("list_base_branches", { repos })
+      .then((branches) => {
+        if (!cancelled && branches.length > 0) {
+          setBaseOptions(branches);
+          // keep current base if still valid, else snap to the first option
+          setBase((b) => (branches.includes(b) ? b : branches[0]));
+        }
+      })
+      .catch(() => null);
+    return () => {
+      cancelled = true;
+    };
+  }, [selected]);
 
   const toggleRepo = (repo: string) => {
     setSelected((s) => {
@@ -76,6 +168,12 @@ export function WorkspaceCreateModal({ config, onCreated, onClose, onError }: Pr
 
   const hasGroups = Object.keys(config.groups).length > 0;
 
+  const sourceTabs: { id: Source; label: string; logo?: React.ReactNode }[] = [
+    { id: "manual", label: "Manual" },
+    { id: "shortcut", label: "Shortcut", logo: <ShortcutLogo size={14} /> },
+    { id: "linear", label: "Linear", logo: <LinearLogo size={14} /> },
+  ];
+
   return (
     <div className="modal-overlay" onMouseDown={onClose}>
       <div className="modal modal-wizard" onMouseDown={(e) => e.stopPropagation()}>
@@ -84,15 +182,100 @@ export function WorkspaceCreateModal({ config, onCreated, onClose, onError }: Pr
         </div>
 
         <div className="wizard-body">
-          <div className="wizard-field">
-            <label>Workspace name</label>
-            <input
-              autoFocus
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="checkout-improvements"
-            />
+          {/* Source: manual entry vs picking a tracker card. Plain buttons with
+              comfortable hit areas — no clipped segmented control.
+              Tracker pills are disabled until connected in Integrations. */}
+          <div className="wizard-source-pills">
+            {sourceTabs.map((tab) => {
+              const needsConn = tab.id === "shortcut" || tab.id === "linear";
+              const disabled = needsConn && connected[tab.id] !== true;
+              return (
+                <button
+                  type="button"
+                  key={tab.id}
+                  className={`wizard-source-pill ${source === tab.id ? "wizard-source-active" : ""}`}
+                  disabled={disabled}
+                  title={disabled ? `Connect ${tab.label} in Integrations first` : undefined}
+                  onClick={() => {
+                    if (source === tab.id) return;
+                    setSource(tab.id);
+                    setPickedCard(null);
+                    setCardQuery("");
+                    setCards(null);
+                    // Drop the card pre-fill; keep user-typed text intact
+                    if (pickedCard) {
+                      setBranch("");
+                    }
+                  }}
+                >
+                  {tab.logo}
+                  <span>{tab.label}</span>
+                </button>
+              );
+            })}
           </div>
+
+          {source !== "manual" && (
+            <div className="wizard-field">
+              <label>Pick a card</label>
+              <input
+                className="wizard-card-search"
+                value={cardQuery}
+                placeholder={`Search ${source} cards…`}
+                onChange={(e) => setCardQuery(e.target.value)}
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+                spellCheck={false}
+                name="orbit-card-search"
+              />
+              <div className="wizard-card-list">
+                {cardsLoading && (
+                  <>
+                    <div className="modal-row"><Skeleton w={44} h={12} /> <Skeleton w="70%" h={12} /></div>
+                    <div className="modal-row"><Skeleton w={44} h={12} /> <Skeleton w="55%" h={12} /></div>
+                    <div className="modal-row"><Skeleton w={44} h={12} /> <Skeleton w="62%" h={12} /></div>
+                  </>
+                )}
+                {!cardsLoading && cards !== null && cards.length === 0 && (
+                  <p className="empty">No cards found. Connect {source} in Integrations or try another search.</p>
+                )}
+                {!cardsLoading &&
+                  cards?.map((c) => (
+                    <button
+                      type="button"
+                      key={c.id}
+                      className={`modal-row wizard-card-row ${pickedCard?.id === c.id ? "modal-row-selected" : ""}`}
+                      onClick={() => pickCard(c)}
+                      title={c.url || c.title}
+                    >
+                      <span className="tag tag-info">{c.id}</span>
+                      <span className="wizard-card-title">{c.title}</span>
+                      {c.state && <span className="tag tag-muted">{c.state}</span>}
+                    </button>
+                  ))}
+              </div>
+              {pickedCard && (
+                <p className="wizard-picked">
+                  Selected <strong>{pickedCard.id}</strong> — fields below pre-filled from the card.
+                </p>
+              )}
+            </div>
+          )}
+
+<div className="wizard-field">
+              <label>Workspace name</label>
+              <input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="checkout-improvements"
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+                spellCheck={false}
+                name="orbit-ws-name"
+              />
+            </div>
 
           <div className="wizard-row">
             <div className="wizard-field">
@@ -101,11 +284,20 @@ export function WorkspaceCreateModal({ config, onCreated, onClose, onError }: Pr
                 value={branch}
                 onChange={(e) => setBranch(e.target.value)}
                 placeholder={effectiveBranch || "feat/my-workspace"}
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+                spellCheck={false}
+                name="orbit-ws-branch"
               />
             </div>
             <div className="wizard-field">
               <label>Base branch</label>
-              <input value={base} onChange={(e) => setBase(e.target.value)} placeholder="main" />
+              <Select
+                value={base}
+                options={baseOptions.map((b) => ({ value: b, label: b }))}
+                onChange={setBase}
+              />
             </div>
           </div>
 

@@ -116,6 +116,37 @@ pub fn current_branch(path: &Path) -> Option<String> {
     Some(s)
 }
 
+/// Lists candidate base branches from a repo's remote (origin), stripping
+/// the remote prefix. Falls back to local branches when there is no remote.
+pub fn list_branches(path: &Path) -> Vec<String> {
+    let out = Command::new("git")
+        .args(["branch", "-r", "--format=%(refname:short)"])
+        .current_dir(path)
+        .output();
+    let list: Vec<String> = match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty() && !l.contains("HEAD"))
+            .map(|l| {
+                // strip "origin/" prefix when present
+                match l.split_once('/') {
+                    Some((_remote, rest)) if !rest.is_empty() => rest.to_string(),
+                    _ => l,
+                }
+            })
+            .collect(),
+        _ => vec![],
+    };
+    let mut deduped: Vec<String> = Vec::new();
+    for b in list {
+        if !deduped.contains(&b) {
+            deduped.push(b);
+        }
+    }
+    deduped
+}
+
 fn git(args: &[&str]) -> Result<(), String> {
     let out = Command::new("git")
         .args(args)

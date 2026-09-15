@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { RepoStatus, Workspace } from "../types/config";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { SkeletonTable } from "../components/Skeleton";
 
 interface Props {
   workspace: Workspace;
@@ -109,8 +110,8 @@ export function WorkspaceDetailPage({ workspace, onOpenEditor, onRemoved, onErro
             ))}
             {statuses === null && (
               <tr>
-                <td colSpan={5} className="table-loading">
-                  <span className="spinner" /> Loading status…
+                <td colSpan={5} className="table-skeleton-cell">
+                  <SkeletonTable rows={Math.max(2, workspace.repos.length)} cols={5} />
                 </td>
               </tr>
             )}

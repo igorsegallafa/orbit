@@ -288,6 +288,10 @@ export function FileTreePanel({ workspace, onOpenFile, onError }: Props) {
 
   const renameInput = (currentName: string) => (
     <input
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+                spellCheck={false}
       className="tree-rename"
       autoFocus
       value={renameValue}
@@ -452,6 +456,10 @@ export function FileTreePanel({ workspace, onOpenFile, onError }: Props) {
                 {repo}{createPrompt.dir ? `/${createPrompt.dir}` : ""}
               </p>
               <input
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+                spellCheck={false}
                 className="dock-create-input"
                 autoFocus
                 value={createValue}

@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { Config, GithubRepo, Service } from "../types/config";
 import { GithubRepoModal } from "./GithubRepoModal";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { Skeleton } from "./Skeleton";
 
 interface Props {
   config: Config;
@@ -166,7 +167,7 @@ export function ReposSection({ config, onChange, onError }: Props) {
                     </td>
                     <td>
                       {cloned === undefined ? (
-                        <span className="tag tag-muted">checking…</span>
+                        <Skeleton w={54} h={12} rounded={999} />
                       ) : cloned ? (
                         <span className="tag tag-ok">cloned</span>
                       ) : (

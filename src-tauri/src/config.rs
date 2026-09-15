@@ -63,7 +63,7 @@ impl Config {
     }
 }
 
-fn config_dir() -> Result<PathBuf, String> {
+pub(crate) fn config_dir() -> Result<PathBuf, String> {
     let home = home_dir()?;
     #[cfg(target_os = "macos")]
     {
