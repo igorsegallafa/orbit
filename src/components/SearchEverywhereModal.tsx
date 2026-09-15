@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { FileTypeIcon } from "./FileIcons";
+import { SearchIcon } from "./Icons";
 import { Workspace } from "../types/config";
 
 interface Entry {
@@ -86,7 +87,7 @@ export function SearchEverywhereModal({ workspace, onOpenFile, onClose }: Props)
     <div className="modal-overlay" onMouseDown={onClose}>
       <div className="search-modal" onMouseDown={(e) => e.stopPropagation()}>
         <div className="search-input-row">
-          <span className="search-icon">🔍</span>
+          <span className="search-icon"><SearchIcon size={15} /></span>
           <input
             autoFocus
             className="search-input"

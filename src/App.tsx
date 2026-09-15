@@ -10,6 +10,8 @@ import { EditorPane } from "./components/EditorPane";
 import { TerminalPane, TerminalTab } from "./components/TerminalPane";
 import { FileTreePanel } from "./components/FileTreePanel";
 import { SearchEverywhereModal } from "./components/SearchEverywhereModal";
+import { HomeIcon, SettingsIcon, SatelliteIcon, DocIcon, TerminalIcon, PlusIcon, ChevronRightIcon } from "./components/Icons";
+import { UsageBar } from "./components/UsageBar";
 import { randomSessionName } from "./lib/names";
 import { AgentStatus } from "./lib/agentStatus";
 import { StatusIndicator } from "./components/StatusIndicator";
@@ -53,6 +55,14 @@ function App() {
   const [sidebarWidth, setSidebarWidth] = useState(() => loadStored(SIDEBAR_KEY, DEFAULT_WIDTH, 64, 400));
   const [dockWidth, setDockWidth] = useState(() => loadStored(DOCK_KEY, 240, 180, 460));
   const [searchOpen, setSearchOpen] = useState(false);
+  const [plusMenu, setPlusMenu] = useState<{ x: number; y: number } | null>(null);
+  const [wsExpanded, setWsExpanded] = useState<Record<string, boolean>>(() => {
+    try {
+      return JSON.parse(localStorage.getItem("orbit.ws-expanded") ?? "{}");
+    } catch {
+      return {};
+    }
+  });
   const { menu, setMenu, openFromEvent } = useContextMenu<Workspace>();
   const tabMenu = useContextMenu<Tab>();
 
@@ -197,9 +207,17 @@ function App() {
     });
   };
 
-  const openAgentTerminal = (ws: Workspace, agent: "claude" | "opencode") =>
-    newTerminal(ws.name, agent, agent);
   const openShellTerminal = (wsName: string) => newTerminal(wsName, "shell", null);
+
+  // Collapse/expand of workspace sessions in the sidebar; persisted so the
+  // tree reopens as the user left it.
+  const toggleWsExpanded = (wsName: string) => {
+    setWsExpanded((prev) => {
+      const next = { ...prev, [wsName]: !(prev[wsName] ?? true) };
+      localStorage.setItem("orbit.ws-expanded", JSON.stringify(next));
+      return next;
+    });
+  };
 
   // Rename: display-only. The tab id is stable so the pane never remounts.
   const renameTab = (id: string, newName: string) => {
@@ -266,12 +284,10 @@ function App() {
         <WorkspaceDetailPage
           workspace={tab.workspace}
           onOpenEditor={(repo) => openFileTab(tab.workspace.name, repo, "")}
-          onOpenAgent={openAgentTerminal}
           onRemoved={() => {
             loadWorkspaces();
             closeTab(tabId(tab));
           }}
-          onBack={() => closeTab(tabId(tab))}
           onError={setError}
         />
       );
@@ -312,9 +328,10 @@ function App() {
 
   return (
     <div className="app">
+      <div className="app-row">
       <aside className="sidebar" data-collapsed={collapsed} style={{ width: sidebarWidth }}>
         <div className="brand">
-          🛰️ {collapsed ? "" : "Orbit"}
+          <span className="brand-logo"><SatelliteIcon size={18} /></span> {collapsed ? "" : "Orbit"}
           {!collapsed && <span className="brand-sub">multi-repo workspace</span>}
         </div>
 
@@ -328,7 +345,7 @@ function App() {
             }}
             title="Dashboard"
           >
-            <span className="nav-icon">🏠</span> {!collapsed && "Dashboard"}
+            <span className="nav-icon"><HomeIcon size={15} /></span> {!collapsed && "Dashboard"}
           </button>
           {!collapsed &&
             workspaces.map((ws) => {
@@ -341,49 +358,61 @@ function App() {
               );
               return (
                 <div key={ws.name} className="nav-workspace">
-                  <div className="nav-ws-row">
-                    <button
-                      className={`nav-item ${activeTab === wsId ? "active" : ""}`}
-                      onClick={() => openWorkspaceTab(ws)}
-                      onContextMenu={(e) => {
-                        e.preventDefault();
-                        setMenu({ x: e.clientX, y: e.clientY, payload: ws });
-                      }}
-                      onMouseDown={(e) => openFromEvent(e, ws)}
-                      onPointerDown={(e) => openFromEvent(e, ws)}
-                      title={ws.name}
-                    >
-                      <span className="nav-icon">🛰️</span>
-                      <span className="nav-item-label">{ws.name}</span>
-                    </button>
-                    <button
-                      className="nav-ws-add"
-                      title="New terminal"
-                      onClick={() => openShellTerminal(ws.name)}
-                    >
-                      +
-                    </button>
-                  </div>
-                  {wsSessions.map((t) => {
-                    const id = tabId(t);
-                    const label =
-                      t.kind === "terminal" ? t.terminal.sessionName : `${t.repo}/${t.path.split("/").pop()}`;
-                    return (
-                      <button
-                        key={id}
-                        className={`nav-item nav-sub ${activeTab === id ? "active" : ""}`}
-                        onClick={() => setActiveTab(id)}
-                        title={label}
+                  <button
+                    className={`nav-item nav-ws ${activeTab === wsId ? "active" : ""}`}
+                    onClick={() => openWorkspaceTab(ws)}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      setMenu({ x: e.clientX, y: e.clientY, payload: ws });
+                    }}
+                    onMouseDown={(e) => openFromEvent(e, ws)}
+                    onPointerDown={(e) => openFromEvent(e, ws)}
+                    title={ws.name}
+                  >
+                    <span className="nav-icon"><SatelliteIcon size={15} /></span>
+                    <span className="nav-item-label">{ws.name}</span>
+                    {wsSessions.length > 0 && (
+                      <span
+                        role="button"
+                        tabIndex={0}
+                        className={`nav-chevron ${wsExpanded[ws.name] === false ? "" : "open"}`}
+                        title={wsExpanded[ws.name] === false ? "Expand sessions" : "Collapse sessions"}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          toggleWsExpanded(ws.name);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.stopPropagation();
+                            toggleWsExpanded(ws.name);
+                          }
+                        }}
                       >
-                        {t.kind === "terminal" ? (
-                          <StatusIndicator status={sessionStatuses[id] ?? "idle"} />
-                        ) : (
-                          <span className="nav-icon">📄</span>
-                        )}
-                        <span className="nav-item-label">{label}</span>
-                      </button>
-                    );
-                  })}
+                        <ChevronRightIcon size={8} />
+                      </span>
+                    )}
+                  </button>
+                  {(wsExpanded[ws.name] ?? true) &&
+                    wsSessions.map((t) => {
+                      const id = tabId(t);
+                      const label =
+                        t.kind === "terminal" ? t.terminal.sessionName : `${t.repo}/${t.path.split("/").pop()}`;
+                      return (
+                        <button
+                          key={id}
+                          className={`nav-item nav-sub ${activeTab === id ? "active" : ""}`}
+                          onClick={() => setActiveTab(id)}
+                          title={label}
+                        >
+                          {t.kind === "terminal" ? (
+                            <StatusIndicator status={sessionStatuses[id] ?? "idle"} />
+                          ) : (
+                            <span className="nav-icon"><DocIcon size={13} /></span>
+                          )}
+                          <span className="nav-item-label">{label}</span>
+                        </button>
+                      );
+                    })}
                 </div>
               );
             })}
@@ -397,7 +426,7 @@ function App() {
             }}
             title="Settings"
           >
-            <span className="nav-icon">⚙️</span> {!collapsed && "Settings"}
+            <span className="nav-icon"><SettingsIcon size={15} /></span> {!collapsed && "Settings"}
             {!collapsed && repoCount + groupCount > 0 && (
               <span className="nav-count">{repoCount + groupCount}</span>
             )}
@@ -450,7 +479,13 @@ function App() {
                       ? `${t.repo}/${t.path.split("/").pop()}`
                       : t.terminal.sessionName;
                 const icon =
-                  t.kind === "workspace" ? "🛰️" : t.kind === "editor" ? "📄" : "▶️";
+                  t.kind === "workspace" ? (
+                    <SatelliteIcon size={13} />
+                  ) : t.kind === "editor" ? (
+                    <DocIcon size={13} />
+                  ) : (
+                    <TerminalIcon size={13} />
+                  );
                 const status = t.kind === "terminal" ? sessionStatuses[id] : undefined;
                 return (
                   <div
@@ -513,6 +548,16 @@ function App() {
                   </div>
                 );
               })}
+              <button
+                className="tab-plus"
+                title="New…"
+                onClick={(e) => {
+                  const r = e.currentTarget.getBoundingClientRect();
+                  setPlusMenu({ x: r.left, y: r.bottom + 4 });
+                }}
+              >
+                <PlusIcon size={14} />
+              </button>
             </div>
             {tabs.map((t) => (
               <div
@@ -555,6 +600,18 @@ function App() {
           onClose={() => tabMenu.setMenu(null)}
         />
       )}
+      {plusMenu && focusWorkspace && (
+        <ContextMenu
+          x={plusMenu.x}
+          y={plusMenu.y}
+          items={[
+            { label: "Terminal", onSelect: () => openShellTerminal(focusWorkspace.name) },
+            { label: "Claude Code", onSelect: () => newTerminal(focusWorkspace.name, "claude", "claude") },
+            { label: "Open Code", onSelect: () => newTerminal(focusWorkspace.name, "opencode", "opencode") },
+          ]}
+          onClose={() => setPlusMenu(null)}
+        />
+      )}
       </main>
 
       {/* Fixed right dock, full height, visible while a workspace is in focus */}
@@ -585,6 +642,10 @@ function App() {
           </aside>
         </>
       )}
+      </div>
+
+      {/* AI usage bottom bar for the focused workspace */}
+      {focusWorkspace && <UsageBar workspace={focusWorkspace.name} />}
     </div>
   );
 }

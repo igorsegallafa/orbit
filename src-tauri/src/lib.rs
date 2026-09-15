@@ -4,12 +4,14 @@ mod files;
 mod git;
 mod github;
 mod pty;
+mod usage;
 mod workspace;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             commands::get_config,
             commands::add_service,
@@ -30,10 +32,18 @@ pub fn run() {
             commands::open_in_editor,
             commands::reveal_workspace_folder,
             commands::open_workspace_in_editor,
+            commands::workspace_ai_usage,
             files::list_files,
             files::read_file,
             files::write_file,
             files::list_workspace_files,
+            files::move_file,
+            files::rename_node,
+            files::delete_node,
+            files::create_node,
+            files::reveal_node,
+            files::node_abs_path,
+            files::import_files,
             pty::pty_spawn,
             pty::pty_write,
             pty::pty_resize,

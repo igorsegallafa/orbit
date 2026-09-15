@@ -1,7 +1,8 @@
 use crate::config::{Config, Service};
 use crate::git;
 use crate::github::{self, GithubRepo};
-use crate::workspace::{self, Workspace, RepoStatus};
+use crate::usage::{self, AiUsage};
+use crate::workspace::{self, RepoStatus, Workspace};
 use std::path::PathBuf;
 use tauri::async_runtime::spawn_blocking;
 
@@ -269,6 +270,20 @@ fn workspace_dir(name: &str) -> Result<PathBuf, String> {
         return Err(format!("workspace '{name}' folder not found"));
     }
     Ok(dir)
+}
+
+/// AI token usage for a workspace, from Claude Code's local session logs.
+#[tauri::command]
+pub async fn workspace_ai_usage(name: String) -> Result<AiUsage, String> {
+    blocking(move || {
+        let ws_dir = workspace::workspace_root()?.join("workspaces").join(&name);
+        if !ws_dir.exists() {
+            return Err(format!("workspace '{name}' not found"));
+        }
+        let repos = workspace::load_meta(&ws_dir).map(|m| m.repos).unwrap_or_default();
+        Ok(usage::workspace_usage(&ws_dir, &repos))
+    })
+    .await
 }
 
 fn which(bin: &str) -> bool {

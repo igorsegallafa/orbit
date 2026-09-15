@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { Config, Workspace } from "../types/config";
 import { WorkspaceCreateModal } from "../components/WorkspaceCreateModal";
 import { ContextMenu, MenuItem, useContextMenu } from "../components/ContextMenu";
+import { SatelliteIcon } from "../components/Icons";
 
 interface Props {
   config: Config;
@@ -48,7 +49,7 @@ export function DashboardPage({ config, workspaces, onOpen, onChanged, onError }
 
       {freshSetup ? (
         <div className="empty-state">
-          <div className="empty-state-icon">🛰️</div>
+          <div className="empty-state-icon"><SatelliteIcon size={34} /></div>
           <h3>Welcome to Orbit</h3>
           <p>
             A workspace is a set of git worktrees — one per repo — for working on a feature
@@ -58,7 +59,7 @@ export function DashboardPage({ config, workspaces, onOpen, onChanged, onError }
         </div>
       ) : workspaces.length === 0 ? (
         <div className="empty-state">
-          <div className="empty-state-icon">🛰️</div>
+          <div className="empty-state-icon"><SatelliteIcon size={34} /></div>
           <h3>No workspaces yet</h3>
           <p>
             Create one to start working on a feature: Orbit will set up a git worktree per
@@ -83,7 +84,7 @@ export function DashboardPage({ config, workspaces, onOpen, onChanged, onError }
               onPointerDown={(e) => openFromEvent(e, ws)}
             >
               <div className="workspace-card-head">
-                <span className="workspace-card-icon">🛰️</span>
+                <span className="workspace-card-icon"><SatelliteIcon size={16} /></span>
                 <span className="workspace-card-name">{ws.name}</span>
               </div>
               <div className="workspace-card-meta">

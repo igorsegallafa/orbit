@@ -93,7 +93,14 @@ body {
 
 .app {
   display: flex;
+  flex-direction: column;
   height: 100vh;
+}
+
+.app > .app-row {
+  display: flex;
+  flex: 1;
+  min-height: 0;
 }
 
 /* ---------- Sidebar ---------- */
@@ -129,12 +136,34 @@ body {
   font-size: 15px;
   padding: 0 8px;
   letter-spacing: 0.01em;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.brand-logo {
+  display: inline-flex;
+  align-items: center;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.nav-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  flex-shrink: 0;
 }
 
 .sidebar[data-collapsed="true"] .brand {
   padding: 0;
-  font-size: 18px;
-  text-align: center;
+  justify-content: center;
+}
+
+.sidebar[data-collapsed="true"] .brand svg {
+  width: 20px;
+  height: 20px;
 }
 
 .brand .brand-sub {
@@ -194,10 +223,87 @@ body {
   color: #cfe0ff;
 }
 
-.nav-icon {
-  font-size: 14px;
+/* Workspace rows in the sidebar read as tree headers, not buttons: no hover
+   background — only a subtle text lift. The chevron is the affordance.
+   !important beats the global `button:hover` blue fill. */
+.nav-ws:hover {
+  background: transparent !important;
+  color: var(--text);
+}
+
+.nav-ws:hover:active {
+  background: transparent !important;
+  transform: none !important;
+}
+
+/* Selected workspace: text color marks it, not a filled pill */
+.nav-ws.active {
+  background: transparent !important;
+  color: #cfe0ff;
+}
+
+/* Chevron: the one clearly interactive element on the workspace row —
+   small filled triangle (Orca-style disclosure). Hidden by default, it
+   fades in on row hover so the tree stays visually quiet. When expanded
+   it stays visible (state marker). */
+.nav-chevron {
+  margin-left: auto;
+  flex-shrink: 0;
   width: 18px;
-  text-align: center;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-dim);
+  border-radius: 5px;
+  opacity: 0;
+  transform: rotate(0deg) scale(0.6);
+  transition:
+    opacity var(--transition),
+    transform var(--transition),
+    color var(--transition),
+    background var(--transition);
+  pointer-events: none;
+}
+
+/* Reveal on row hover; keep visible while expanded or self-hovered */
+.nav-ws:hover .nav-chevron,
+.nav-chevron.open,
+.nav-chevron:hover {
+  opacity: 1;
+  transform: rotate(0deg) scale(1);
+  pointer-events: auto;
+}
+
+.nav-chevron.open {
+  transform: rotate(90deg) scale(1);
+  color: var(--text);
+}
+
+.nav-ws:hover .nav-chevron:not(.open) {
+  transform: rotate(0deg) scale(1);
+}
+
+.nav-chevron:hover {
+  color: #cfe0ff;
+  background: var(--accent-soft);
+}
+
+/* Sessions under a workspace: quiet child rows — no hover fill, just a
+   faint text change so they don't look clickable-buttons */
+.nav-sub:hover {
+  background: transparent !important;
+  color: var(--text);
+}
+
+.nav-sub:hover:active {
+  background: transparent !important;
+  transform: none !important;
+}
+
+.nav-sub.active {
+  background: transparent !important;
+  color: #cfe0ff;
 }
 
 .nav-count {
@@ -383,7 +489,7 @@ button {
 
 /* Buttons default to control height unless they opt out
    (cards, links, rows, nav items, tree rows set their own) */
-button:not(.workspace-card):not(.nav-item):not(.modal-row):not(.link):not(.back-link):not(.chip):not(.tree-item):not(.dock-icon):not(.tab-close):not(.icon-button):not(.context-menu-item):not(.nav-ws-add):not(.btn-mini) {
+button:not(.workspace-card):not(.nav-item):not(.modal-row):not(.link):not(.back-link):not(.chip):not(.tree-item):not(.dock-icon):not(.tab-close):not(.icon-button):not(.context-menu-item):not(.tab-plus):not(.mode-btn):not(.btn-mini) {
   height: var(--control-height);
 }
 
@@ -739,22 +845,6 @@ table.list tbody tr:hover .row-actions,
   gap: 10px;
 }
 
-.back-link {
-  background: transparent;
-  border: none;
-  color: var(--text-dim);
-  padding: 0;
-  height: 22px;
-  font-size: 12.5px;
-  font-weight: 500;
-  justify-content: flex-start;
-}
-
-.back-link:hover:not(:disabled) {
-  background: transparent;
-  color: var(--text);
-}
-
 .detail-title-row {
   display: flex;
   justify-content: space-between;
@@ -879,40 +969,6 @@ table.list tbody tr:hover .row-actions,
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-/* Workspace row in the sidebar: name + hover "+" for a new terminal */
-.nav-ws-row {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-}
-
-.nav-ws-row .nav-item {
-  flex: 1;
-  min-width: 0;
-}
-
-.nav-ws-add {
-  width: 24px;
-  height: 24px;
-  flex-shrink: 0;
-  background: transparent;
-  border: none;
-  color: var(--text-faint);
-  font-size: 15px;
-  border-radius: 5px;
-  opacity: 0;
-  transition: opacity var(--transition), background var(--transition);
-}
-
-.nav-ws-row:hover .nav-ws-add {
-  opacity: 1;
-}
-
-.nav-ws-add:hover {
-  background: var(--panel-raised);
-  color: var(--text);
 }
 
 /* Sessions (terminals/editors) nested under their workspace */
@@ -1245,7 +1301,33 @@ table.list tbody tr:hover .row-actions,
 }
 
 .tab-icon {
-  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-dim);
+}
+
+/* "+" button at the end of the tab strip (new terminal/agent) */
+.tab-plus {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--text-faint);
+  cursor: pointer;
+  flex-shrink: 0;
+  align-self: flex-end;
+  margin-bottom: 4px;
+  transition: background var(--transition), color var(--transition);
+}
+
+.tab-plus:hover:not(:disabled) {
+  background: var(--panel-raised);
+  color: var(--text);
 }
 
 .tab-label {
@@ -1398,6 +1480,9 @@ table.list tbody tr:hover .row-actions,
 .dock-toolbar {
   padding: 0 8px 8px;
   flex-shrink: 0;
+  display: flex;
+  gap: 6px;
+  align-items: center;
 }
 
 .dock-select {
@@ -1414,6 +1499,80 @@ table.list tbody tr:hover .row-actions,
 .dock-select option {
   background: var(--panel);
   color: var(--text);
+}
+
+/* Drag & drop target highlight in the tree */
+.tree-drop-target {
+  background: var(--accent-soft) !important;
+  outline: 1px dashed var(--accent);
+  outline-offset: -2px;
+  border-radius: 4px;
+}
+
+/* Whole tree body as "drop to root" target */
+.tree-drop-target-body {
+  outline: 1px dashed var(--accent);
+  outline-offset: -4px;
+  border-radius: 6px;
+}
+
+/* Floating ghost that follows the cursor during a manual tree drag */
+.tree-drag-ghost {
+  position: fixed;
+  z-index: 300;
+  pointer-events: none;
+  background: var(--panel-raised);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  padding: 3px 10px;
+  font-size: 12px;
+  color: var(--text);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+  white-space: nowrap;
+}
+
+.tree-drag-ghost-target {
+  color: #7aa7ff;
+  margin-left: 4px;
+}
+
+/* Inline rename input inside a tree row */
+.tree-rename {
+  height: 16px;
+  width: 100%;
+  min-width: 0;
+  flex: 1;
+  font-size: 12px;
+  padding: 0 4px;
+  border-radius: 3px;
+  border-color: var(--accent);
+  background: var(--bg);
+  color: var(--text);
+}
+
+/* Small chevron for folders in the dock tree */
+.tree-chevron-small {
+  width: 10px;
+  font-size: 9px;
+  color: var(--text-faint);
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.tree-chevron-small.invisible {
+  visibility: hidden;
+}
+
+/* New file/folder inline prompt */
+.dock-create-hint {
+  font-family: ui-monospace, "SF Mono", monospace;
+  font-size: 11.5px;
+  color: var(--text-faint);
+  margin: 4px 0 10px !important;
+}
+
+.dock-create-input {
+  width: 100%;
 }
 
 .dock-panel-body {
@@ -1520,6 +1679,166 @@ table.list tbody tr:hover .row-actions,
   padding: 8px 14px;
   border-bottom: 1px solid var(--border);
   background: var(--panel);
+  gap: 10px;
+}
+
+.editor-filebar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* JetBrains-style Editor/Preview segmented toggle for markdown files */
+.mode-toggle {
+  display: inline-flex;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.mode-btn {
+  height: 22px;
+  padding: 0 12px;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  color: var(--text-faint);
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.mode-btn:hover:not(.mode-active) {
+  color: var(--text-dim);
+}
+
+.mode-active {
+  background: var(--accent-soft) !important;
+  color: #cfe0ff !important;
+}
+
+/* ---------- Markdown preview ---------- */
+
+.md-preview {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  background: var(--bg);
+}
+
+.md-body {
+  max-width: 780px;
+  margin: 0 auto;
+  padding: 28px 40px 60px;
+  font-size: 14px;
+  line-height: 1.65;
+  color: var(--text);
+}
+
+.md-body h1,
+.md-body h2 {
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 8px;
+  margin-top: 1.6em;
+}
+
+.md-body h1 { font-size: 26px; }
+.md-body h2 { font-size: 21px; }
+.md-body h3 { font-size: 17px; }
+
+.md-body h1:first-child,
+.md-body h2:first-child {
+  margin-top: 0;
+}
+
+.md-body p {
+  margin: 0.8em 0;
+}
+
+.md-body a {
+  color: #7aa7ff;
+  text-decoration: none;
+}
+
+.md-body a:hover {
+  text-decoration: underline;
+}
+
+.md-body code {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12.5px;
+  background: var(--panel-raised);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+
+.md-body pre {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+  overflow-x: auto;
+  margin: 1em 0;
+}
+
+.md-body pre code {
+  background: transparent;
+  border: none;
+  padding: 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.md-body ul,
+.md-body ol {
+  padding-left: 24px;
+  margin: 0.6em 0;
+}
+
+.md-body li {
+  margin: 0.25em 0;
+}
+
+.md-body blockquote {
+  border-left: 3px solid var(--accent);
+  background: var(--panel);
+  margin: 1em 0;
+  padding: 8px 16px;
+  color: var(--text-dim);
+  border-radius: 0 6px 6px 0;
+}
+
+.md-body table {
+  border-collapse: collapse;
+  margin: 1em 0;
+  display: block;
+  overflow-x: auto;
+}
+
+.md-body th,
+.md-body td {
+  border: 1px solid var(--border);
+  padding: 6px 12px;
+  font-size: 13px;
+}
+
+.md-body th {
+  background: var(--panel);
+  font-weight: 600;
+}
+
+.md-body img {
+  max-width: 100%;
+  border-radius: 8px;
+}
+
+.md-body hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 1.6em 0;
 }
 
 .editor-hint {
@@ -1784,6 +2103,110 @@ table.list tbody tr:hover .row-actions,
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ---------- AI usage bottom bar ---------- */
+
+.usage-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  height: 26px;
+  flex-shrink: 0;
+  padding: 0 10px;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.usage-stats {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  min-width: 0;
+}
+
+/* Model chip; hover opens the sessions popup anchored above it */
+.usage-model {
+  position: relative;
+  color: #7aa7ff;
+  background: rgba(122, 167, 255, 0.1);
+  border-radius: 999px;
+  padding: 1px 9px;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.usage-nums {
+  color: var(--text-dim);
+  font-weight: 500;
+}
+
+.usage-cost {
+  color: var(--ok);
+  background: rgba(74, 222, 128, 0.1);
+  border-radius: 999px;
+  padding: 1px 9px;
+  font-weight: 600;
+}
+
+.usage-dim {
+  color: var(--text-faint);
+}
+
+.usage-sessions {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 0;
+}
+
+/* Detailed usage summary popup on model hover — fixed so it escapes the bar's overflow */
+.usage-popup {
+  position: fixed;
+  bottom: 32px;
+  min-width: 260px;
+  background: var(--panel-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 150;
+  animation: modal-in 0.12s cubic-bezier(0.25, 0.25, 0, 1);
+}
+
+.usage-popup-title {
+  font-weight: 600;
+  font-size: 11.5px;
+  color: #7aa7ff;
+  padding: 0 2px 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+.usage-popup-grid {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: 18px;
+  row-gap: 5px;
+}
+
+.usage-popup-label {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.usage-popup-value {
+  font-size: 11.5px;
+  color: var(--text);
+  font-weight: 500;
+  text-align: right;
 }
 
 /* ---------- Feedback ---------- */

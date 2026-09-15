@@ -87,6 +87,160 @@ pub async fn write_file(workspace: String, repo: String, path: String, content: 
     std::fs::write(&file, content).map_err(|e| format!("failed to write: {e}"))
 }
 
+// ---------- Tree file operations (context menu / drag & drop) ----------
+
+fn valid_name(name: &str) -> Result<(), String> {
+    if name.trim().is_empty() || name.contains('/') || name == "." || name == ".." {
+        return Err(format!("invalid name: '{name}'"));
+    }
+    Ok(())
+}
+
+/// Moves `src` (file or folder, repo-relative) into `dest_dir` (repo-relative
+/// folder, "" = repo root). Refuses to overwrite and to move a folder into
+/// its own subtree.
+#[tauri::command]
+pub async fn move_file(workspace: String, repo: String, src: String, dest_dir: String) -> Result<(), String> {
+    let src_path = resolve(&workspace, &repo, &src)?;
+    let dest_base = resolve(&workspace, &repo, &dest_dir)?;
+    if !src_path.exists() {
+        return Err(format!("'{src}' does not exist"));
+    }
+    if !dest_base.is_dir() {
+        return Err(format!("'{dest_dir}' is not a folder"));
+    }
+    if dest_base.starts_with(&src_path) {
+        return Err("cannot move a folder into itself".into());
+    }
+    let name = src_path
+        .file_name()
+        .ok_or("source has no file name")?
+        .to_string_lossy()
+        .to_string();
+    let dest_path = dest_base.join(&name);
+    if dest_path.exists() {
+        return Err(format!("'{name}' already exists in the destination folder"));
+    }
+    std::fs::rename(&src_path, &dest_path).map_err(|e| format!("failed to move: {e}"))
+}
+
+/// Renames a file/folder in place (same parent directory).
+#[tauri::command]
+pub async fn rename_node(workspace: String, repo: String, path: String, new_name: String) -> Result<(), String> {
+    valid_name(&new_name)?;
+    let p = resolve(&workspace, &repo, &path)?;
+    if !p.exists() {
+        return Err(format!("'{path}' does not exist"));
+    }
+    let parent = p.parent().ok_or("no parent directory")?.to_path_buf();
+    let dest = parent.join(&new_name);
+    if dest.exists() {
+        return Err(format!("'{new_name}' already exists"));
+    }
+    std::fs::rename(&p, &dest).map_err(|e| format!("failed to rename: {e}"))
+}
+
+/// Deletes a file/folder by moving it to the macOS Trash (recoverable).
+/// Falls back to an error rather than permanent deletion.
+#[tauri::command]
+pub async fn delete_node(workspace: String, repo: String, path: String) -> Result<(), String> {
+    let p = resolve(&workspace, &repo, &path)?;
+    if !p.exists() {
+        return Err(format!("'{path}' does not exist"));
+    }
+    let script = format!(
+        "tell application \"Finder\" to delete (POSIX file \"{}\" as alias)",
+        p.display()
+    );
+    let out = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(&script)
+        .output()
+        .map_err(|e| format!("failed to run osascript: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err("could not move to Trash (Finder automation denied)".into())
+    }
+}
+
+/// Creates an empty file or a folder inside `dir` (repo-relative, "" = root).
+#[tauri::command]
+pub async fn create_node(workspace: String, repo: String, dir: String, name: String, is_dir: bool) -> Result<(), String> {
+    valid_name(&name)?;
+    let base = resolve(&workspace, &repo, &dir)?;
+    if !base.is_dir() {
+        return Err(format!("'{dir}' is not a folder"));
+    }
+    let target = base.join(&name);
+    if target.exists() {
+        return Err(format!("'{name}' already exists"));
+    }
+    if is_dir {
+        std::fs::create_dir_all(&target).map_err(|e| format!("failed to create folder: {e}"))
+    } else {
+        std::fs::File::create(&target)
+            .map(|_| ())
+            .map_err(|e| format!("failed to create file: {e}"))
+    }
+}
+
+/// Reveals a file/folder in Finder (selects it in its parent folder).
+#[tauri::command]
+pub async fn reveal_node(workspace: String, repo: String, path: String) -> Result<(), String> {
+    let p = resolve(&workspace, &repo, &path)?;
+    if !p.exists() {
+        return Err(format!("'{path}' does not exist"));
+    }
+    std::process::Command::new("open")
+        .args(["-R", &p.to_string_lossy()])
+        .spawn()
+        .map_err(|e| format!("failed to open Finder: {e}"))?;
+    Ok(())
+}
+
+/// Absolute path of a node (for "Copy Path").
+#[tauri::command]
+pub async fn node_abs_path(workspace: String, repo: String, path: String) -> Result<String, String> {
+    let p = resolve(&workspace, &repo, &path)?;
+    Ok(p.to_string_lossy().to_string())
+}
+
+/// Copies files picked from anywhere on disk into a folder of the repo
+/// ("Add Files…" in the tree context menu). Returns how many were copied.
+#[tauri::command]
+pub async fn import_files(
+    workspace: String,
+    repo: String,
+    dest_dir: String,
+    sources: Vec<String>,
+) -> Result<usize, String> {
+    let base = resolve(&workspace, &repo, &dest_dir)?;
+    if !base.is_dir() {
+        return Err(format!("'{dest_dir}' is not a folder"));
+    }
+    let mut copied = 0;
+    for src in &sources {
+        let p = std::path::Path::new(src);
+        if !p.is_file() {
+            continue;
+        }
+        let Some(name) = p.file_name() else { continue };
+        let mut dest = base.join(name);
+        // Don't clobber: suffix (1), (2)... like Finder does
+        let mut i = 1;
+        while dest.exists() {
+            let stem = p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+            let ext = p.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+            dest = base.join(format!("{stem} ({i}){ext}"));
+            i += 1;
+        }
+        std::fs::copy(p, &dest).map_err(|e| format!("failed to copy '{}': {e}", p.display()))?;
+        copied += 1;
+    }
+    Ok(copied)
+}
+
 // ---------- Search Everywhere (double-shift) ----------
 
 #[derive(Serialize, Clone)]
