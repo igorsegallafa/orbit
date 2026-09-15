@@ -286,6 +286,7 @@ function App() {
         <WorkspaceDetailPage
           workspace={tab.workspace}
           onOpenEditor={(repo) => openFileTab(tab.workspace.name, repo, "")}
+          onOpenPlan={() => openFileTab(tab.workspace.name, "", "PLAN.md")}
           onRemoved={() => {
             loadWorkspaces();
             closeTab(tabId(tab));
@@ -301,6 +302,25 @@ function App() {
           repo={tab.repo}
           path={tab.path}
           onError={setError}
+          onApplyPlan={(agent, model) => {
+            const prompt = `Read PLAN.md in this directory and implement it: work through the "- [ ]" tasks in order, marking each done (change to "- [x]") as you finish it. Commit nothing unless asked.`;
+            // claude accepts an initial prompt as argv; the opencode TUI does
+            // not (positional = project dir), so we type it into the PTY.
+            const args = agent === "claude" ? ["--model", model, prompt] : ["--model", model];
+            const initialInput = agent === "claude" ? undefined : prompt;
+            openTab({
+              kind: "terminal",
+              terminal: {
+                id: `tm:${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                workspace: tab.workspace,
+                label: agent,
+                sessionName: `apply ${tab.workspace.split("/").pop() ?? ""}`.trim(),
+                cmd: agent,
+                args,
+                initialInput,
+              },
+            });
+          }}
         />
       );
     }
@@ -401,7 +421,11 @@ function App() {
                     wsSessions.map((t) => {
                       const id = tabId(t);
                       const label =
-                        t.kind === "terminal" ? t.terminal.sessionName : `${t.repo}/${t.path.split("/").pop()}`;
+                        t.kind === "terminal"
+                          ? t.terminal.sessionName
+                          : t.repo
+                            ? `${t.repo}/${t.path.split("/").pop()}`
+                            : t.path.split("/").pop()!;
                       return (
                         <button
                           key={id}
@@ -493,7 +517,7 @@ function App() {
                   t.kind === "workspace"
                     ? t.workspace.name
                     : t.kind === "editor"
-                      ? `${t.repo}/${t.path.split("/").pop()}`
+                      ? (t.repo ? `${t.repo}/${t.path.split("/").pop()}` : t.path.split("/").pop()!)
                       : t.terminal.sessionName;
                 const icon =
                   t.kind === "workspace" ? (

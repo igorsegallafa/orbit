@@ -3,18 +3,34 @@ import { invoke } from "@tauri-apps/api/core";
 import { RepoStatus, Workspace } from "../types/config";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { SkeletonTable } from "../components/Skeleton";
+import { PlanModal } from "../components/PlanModal";
+import { PlanProgress } from "../components/PlanProgress";
 
 interface Props {
   workspace: Workspace;
   onOpenEditor: (repo: string) => void;
+  onOpenPlan: () => void;
   onRemoved: () => void;
   onError: (msg: string) => void;
 }
 
-export function WorkspaceDetailPage({ workspace, onOpenEditor, onRemoved, onError }: Props) {
+export function WorkspaceDetailPage({ workspace, onOpenEditor, onOpenPlan, onRemoved, onError }: Props) {
   const [statuses, setStatuses] = useState<RepoStatus[] | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState<null | "normal" | "force">(null);
+  const [planOpen, setPlanOpen] = useState(false);
+  const [planExists, setPlanExists] = useState<boolean | null>(null);
+
+  // Does a PLAN.md already exist for this workspace?
+  useEffect(() => {
+    let cancelled = false;
+    invoke<boolean>("workspace_plan_exists", { name: workspace.name })
+      .then((v) => !cancelled && setPlanExists(v))
+      .catch(() => !cancelled && setPlanExists(false));
+    return () => {
+      cancelled = true;
+    };
+  }, [workspace.name]);
 
   const load = useCallback(
     async (fetch: boolean) => {
@@ -63,6 +79,15 @@ export function WorkspaceDetailPage({ workspace, onOpenEditor, onRemoved, onErro
         <div className="detail-title-row">
           <h2>{workspace.name}</h2>
           <div className="detail-actions">
+            {workspace.card && (
+              <button
+                className="secondary"
+                title={planExists ? "Open the generated PLAN.md" : "Generate a PLAN.md from the linked card"}
+                onClick={() => (planExists ? onOpenPlan() : setPlanOpen(true))}
+              >
+                {planExists ? "Open plan" : "✳ Plan"}
+              </button>
+            )}
             <button className="secondary" disabled={refreshing} onClick={() => load(true)}>
               {refreshing ? "Refreshing…" : "↻ Refresh"}
             </button>
@@ -75,8 +100,30 @@ export function WorkspaceDetailPage({ workspace, onOpenEditor, onRemoved, onErro
           <span className="tag">{workspace.branch}</span>
           <span className="tag tag-muted">base: {workspace.base}</span>
           <span className="tag tag-muted">{workspace.repos.length} repos</span>
+          {workspace.card && (
+            <a
+              className="tag tag-info plan-card-tag"
+              href={workspace.card.url}
+              title={workspace.card.title}
+              onClick={(e) => {
+                e.preventDefault();
+                import("@tauri-apps/plugin-opener")
+                  .then(({ openUrl }) => openUrl(workspace.card!.url))
+                  .catch(() => null);
+              }}
+            >
+              {workspace.card.id}
+            </a>
+          )}
         </div>
       </header>
+
+      <PlanProgress
+        workspace={workspace.name}
+        refreshKey={statuses === null ? 0 : 1}
+        onOpenPlan={onOpenPlan}
+        onError={onError}
+      />
 
       <div className="table-wrap">
         <table className="list">
@@ -131,6 +178,22 @@ export function WorkspaceDetailPage({ workspace, onOpenEditor, onRemoved, onErro
           danger
           onConfirm={() => remove(confirmRemove === "force")}
           onClose={() => setConfirmRemove(null)}
+        />
+      )}
+
+      {planOpen && workspace.card && (
+        <PlanModal
+          workspace={workspace}
+          card={workspace.card}
+          onOpenPlan={() => {
+            setPlanOpen(false);
+            onOpenPlan();
+          }}
+          onClose={() => {
+            setPlanOpen(false);
+            setPlanExists(true);
+          }}
+          onError={onError}
         />
       )}
     </div>

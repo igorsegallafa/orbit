@@ -3,6 +3,8 @@ import Editor, { BeforeMount, OnMount, loader } from "@monaco-editor/react";
 import type * as Monaco from "monaco-editor";
 import { invoke } from "@tauri-apps/api/core";
 import { MarkdownPreview } from "./MarkdownPreview";
+import { Select } from "./Select";
+import { CodeViewIcon, EyeIcon } from "./Icons";
 
 /**
  * "orbit-dark": Monaco theme matching the app's palette (bg #0d0f13,
@@ -62,20 +64,42 @@ interface Props {
   repo: string;
   path: string;
   onError: (msg: string) => void;
+  /** Opens an agent terminal to execute this plan (PLAN.md only). */
+  onApplyPlan?: (agent: string, model: string) => void;
 }
 
 /**
  * Single-file editor tab: Monaco + file bar (path, dirty dot, save).
  * Markdown files get a JetBrains-style Editor/Preview toggle in the bar.
+ * PLAN.md (workspace root) additionally gets an Apply bar: pick the agent
+ * + model and launch a terminal session that executes the plan.
  * The file tree lives in the fixed right dock (FileTreePanel).
  */
-export function EditorPane({ workspace, repo, path, onError }: Props) {
+export function EditorPane({ workspace, repo, path, onError, onApplyPlan }: Props) {
   const [content, setContent] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
   const [mode, setMode] = useState<"editor" | "preview">("editor");
+  const [ai, setAi] = useState<{ agent: string; model: string } | null>(null);
+  const [models, setModels] = useState<string[]>([]);
   const saveRef = useRef<(() => void) | null>(null);
 
   const isMarkdown = /\.(md|markdown)$/i.test(path);
+  const isPlan = path === "PLAN.md" && repo === "";
+
+  // Load AI settings + model list for the Apply bar
+  useEffect(() => {
+    if (!isPlan) return;
+    invoke<{ agent: string; model: string }>("get_ai_settings")
+      .then(setAi)
+      .catch(() => null);
+  }, [isPlan]);
+
+  useEffect(() => {
+    if (!isPlan || !ai) return;
+    invoke<string[]>("list_models", { agentName: ai.agent })
+      .then(setModels)
+      .catch(() => setModels([]));
+  }, [isPlan, ai?.agent]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -130,19 +154,51 @@ export function EditorPane({ workspace, repo, path, onError }: Props) {
           {dirty ? " •" : ""}
         </span>
         <span className="editor-filebar-actions">
+          {isPlan && ai && onApplyPlan && (
+            <span className="plan-apply-bar">
+              <Select
+                className="plan-apply-select"
+                value={ai.agent}
+                options={[
+                  { value: "claude", label: "Claude Code" },
+                  { value: "opencode", label: "OpenCode" },
+                ]}
+                onChange={(a) => {
+                  const next =
+                    a === "opencode"
+                      ? (models.find((m) => m.startsWith("aihub")) ?? models[0] ?? "")
+                      : (models.find((m) => m.startsWith("claude")) ?? models[0] ?? "");
+                  setAi({ agent: a, model: next });
+                }}
+              />
+              <Select
+                className="plan-apply-select model-select"
+                value={ai.model}
+                options={models.map((m) => ({ value: m, label: m }))}
+                onChange={(m) => setAi({ ...ai, model: m })}
+                searchable
+                listWidth={340}
+              />
+              <button className="btn-mini" onClick={() => onApplyPlan(ai.agent, ai.model)}>
+                Apply
+              </button>
+            </span>
+          )}
           {isMarkdown && (
             <span className="mode-toggle">
               <button
                 className={`mode-btn ${mode === "editor" ? "mode-active" : ""}`}
+                title="Editor"
                 onClick={() => setMode("editor")}
               >
-                Editor
+                <CodeViewIcon size={13} />
               </button>
               <button
                 className={`mode-btn ${mode === "preview" ? "mode-active" : ""}`}
+                title="Preview"
                 onClick={() => setMode("preview")}
               >
-                Preview
+                <EyeIcon size={13} />
               </button>
             </span>
           )}

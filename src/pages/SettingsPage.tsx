@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Config } from "../types/config";
 import { ReposSection } from "../components/ReposSection";
 import { GroupsSection } from "../components/GroupsSection";
+import { AiSection } from "../components/AiSection";
 
 interface Props {
   config: Config;
@@ -9,7 +10,7 @@ interface Props {
   onError: (msg: string) => void;
 }
 
-type Tab = "repos" | "groups";
+type Tab = "repos" | "groups" | "ai";
 
 export function SettingsPage({ config, onChange, onError }: Props) {
   const [tab, setTab] = useState<Tab>("repos");
@@ -33,13 +34,17 @@ export function SettingsPage({ config, onChange, onError }: Props) {
         >
           Groups
         </button>
+        <button
+          className={`tab ${tab === "ai" ? "tab-active" : ""}`}
+          onClick={() => setTab("ai")}
+        >
+          AI
+        </button>
       </div>
 
-      {tab === "repos" ? (
-        <ReposSection config={config} onChange={onChange} onError={onError} />
-      ) : (
-        <GroupsSection config={config} onChange={onChange} onError={onError} />
-      )}
+      {tab === "repos" && <ReposSection config={config} onChange={onChange} onError={onError} />}
+      {tab === "groups" && <GroupsSection config={config} onChange={onChange} onError={onError} />}
+      {tab === "ai" && <AiSection onError={onError} />}
     </div>
   );
 }

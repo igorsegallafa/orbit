@@ -1,4 +1,5 @@
 mod commands;
+mod agent;
 mod config;
 mod files;
 mod git;
@@ -35,6 +36,16 @@ pub fn run() {
             commands::open_workspace_in_editor,
             commands::workspace_ai_usage,
             commands::list_base_branches,
+            commands::integration_fetch_card,
+            commands::workspace_plan_exists,
+            commands::generate_plan,
+            commands::cancel_plan,
+            commands::plan_tasks,
+            commands::set_plan_task,
+            commands::get_ai_settings,
+            commands::set_ai_settings,
+            commands::test_agent,
+            commands::list_models,
             commands::integration_status,
             commands::integration_connect,
             commands::integration_disconnect,

@@ -37,6 +37,7 @@ pub async fn pty_spawn(
     app: AppHandle,
     cwd: String,
     cmd: Option<String>,
+    args: Option<Vec<String>>,
     cols: u16,
     rows: u16,
 ) -> Result<u32, String> {
@@ -66,10 +67,16 @@ pub async fn pty_spawn(
             }
         };
 
-        let mut cmd_builder = CommandBuilder::new(match &cmd {
-            Some(c) if !c.trim().is_empty() => c.trim().to_string(),
-            _ => default_shell(),
-        });
+        let mut cmd_builder = match &cmd {
+            Some(c) if !c.trim().is_empty() => CommandBuilder::new(c.trim()),
+            _ => CommandBuilder::new(default_shell()),
+        };
+        // Extra argv for the launched program (e.g. a prompt for an agent).
+        if let Some(extra) = &args {
+            for a in extra {
+                cmd_builder.arg(a);
+            }
+        }
         cmd_builder.cwd(&cwd);
         cmd_builder.env("TERM", "xterm-256color");
 

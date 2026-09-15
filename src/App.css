@@ -1771,6 +1771,44 @@ table.list tbody tr:hover .row-actions,
   flex-shrink: 0;
 }
 
+/* Apply bar on PLAN.md: agent + model selects + launch button */
+.plan-apply-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+/* Trigger: compact like the rest of the filebar controls; the ROOT must
+   also be fixed or it stretches in the flex row */
+.plan-apply-select {
+  width: 130px;
+}
+
+.plan-apply-select.model-select {
+  width: 150px;
+}
+
+.plan-apply-select .select-trigger {
+  height: 24px;
+  font-size: 11.5px;
+  width: 100%;
+}
+
+/* Trigger text truncates; the full name is readable in the dropdown */
+.plan-apply-select .select-value {
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Dropdown: wider than the trigger (width comes from the listWidth prop) */
+.plan-apply-select.model-select .select-list {
+  /* NOTE: percentage min-width on a fixed element resolves against the
+     VIEWPORT, not the trigger — do not use min-width: 100% here. */
+}
+
 /* JetBrains-style Editor/Preview segmented toggle for markdown files */
 .mode-toggle {
   display: inline-flex;
@@ -1782,7 +1820,11 @@ table.list tbody tr:hover .row-actions,
 
 .mode-btn {
   height: 22px;
-  padding: 0 12px;
+  width: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
   background: transparent;
   border: none;
   border-radius: 0;
@@ -1882,6 +1924,18 @@ table.list tbody tr:hover .row-actions,
 
 .md-body li {
   margin: 0.25em 0;
+}
+
+/* Task list items: hide the bullet, pull the checkbox into its place */
+.md-body li:has(> input[type="checkbox"]) {
+  list-style: none;
+}
+
+.md-body li > input[type="checkbox"] {
+  margin: 0 0.45em 0 -1.4em;
+  vertical-align: middle;
+  position: relative;
+  top: -1px;
 }
 
 .md-body blockquote {
@@ -2424,8 +2478,20 @@ table.list tbody tr:hover .row-actions,
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
   padding: 4px;
   max-height: 240px;
+  /* Hard ceiling: a fixed-position list must never exceed the viewport */
+  max-width: calc(100vw - 16px);
+  box-sizing: border-box;
   overflow-y: auto;
   animation: modal-in 0.1s cubic-bezier(0.25, 0.25, 0, 1);
+}
+
+/* Filter input at the top of a searchable select list */
+.select-filter {
+  width: 100%;
+  height: 28px;
+  margin-bottom: 4px;
+  font-size: 12px;
+  border-radius: 5px;
 }
 
 .select-option {
@@ -2617,6 +2683,170 @@ table.list tbody tr:hover .row-actions,
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ---------- Plan modal ---------- */
+
+.modal-plan {
+  width: min(640px, 92vw);
+  max-height: 78vh;
+}
+
+.plan-card-context {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.plan-card-title {
+  font-weight: 600;
+  font-size: 14px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plan-card-link {
+  color: #7aa7ff;
+  font-size: 11.5px;
+  flex-shrink: 0;
+  text-decoration: none;
+}
+
+.plan-card-link:hover {
+  text-decoration: underline;
+}
+
+.plan-card-desc {
+  margin: 10px 0 0;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  line-height: 1.55;
+  max-height: 90px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+}
+
+.plan-log {
+  margin-top: 14px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  height: 220px;
+  overflow-y: auto;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.plan-log-hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-faint);
+  font-family: inherit;
+}
+
+.plan-log-line {
+  white-space: pre-wrap;
+  word-break: break-all;
+  line-height: 1.4;
+}
+
+.plan-done {
+  margin: 12px 0 0;
+  font-size: 12.5px;
+  color: var(--ok);
+}
+
+.plan-card-tag {
+  cursor: pointer;
+  text-decoration: none;
+}
+
+/* ---------- AI settings section ---------- */
+
+.ai-section .wizard-source-pills {
+  margin-top: 4px;
+}
+
+/* ---------- Plan progress (workspace home) ---------- */
+
+.plan-progress-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.plan-progress-bar-wrap {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 4px 0 14px;
+}
+
+.plan-progress-bar {
+  flex: 1;
+  height: 6px;
+  background: var(--panel-raised);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.plan-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 999px;
+  transition: width 0.3s cubic-bezier(0.25, 0.25, 0, 1);
+}
+
+.plan-progress-label {
+  font-size: 11.5px;
+  color: var(--text-dim);
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.plan-tasks {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.plan-task {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  font-size: 12.5px;
+  color: var(--text);
+  cursor: pointer;
+  line-height: 1.45;
+}
+
+.plan-task input[type="checkbox"] {
+  margin: 2px 0 0;
+  flex-shrink: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.plan-task-done .plan-task-text {
+  color: var(--text-faint);
+  text-decoration: line-through;
+  text-decoration-color: var(--text-faint);
+}
+
+.plan-task-text {
+  min-width: 0;
+  overflow-wrap: break-word;
 }
 
 /* ---------- Feedback ---------- */

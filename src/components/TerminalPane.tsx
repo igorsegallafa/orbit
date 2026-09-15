@@ -13,6 +13,12 @@ export interface TerminalTab {
   label: string; // what was launched: "claude" | "opencode" | "shell"
   sessionName: string; // display name (renamable)
   cmd: string | null; // null = interactive shell
+  args?: string[]; // extra argv (claude initial prompt)
+  /**
+   * Text typed into the PTY right after launch (opencode TUI takes no
+   * initial prompt as argv, so we inject it as keystrokes).
+   */
+  initialInput?: string;
 }
 
 interface Props {
@@ -50,9 +56,28 @@ export function TerminalPane({ tab, onError, onStatusChange }: Props) {
     term.focus();
 
     const cwd = `${"$HOME"}/Documents/orbit-workspace/workspaces/${tab.workspace}`;
-    invoke<number>("pty_spawn", { cwd, cmd: tab.cmd, cols: term.cols, rows: term.rows })
+    let delivered = false;
+    invoke<number>("pty_spawn", { cwd, cmd: tab.cmd, args: tab.args, cols: term.cols, rows: term.rows })
       .then((id) => {
         ptyIdRef.current = id;
+        // Inject an initial prompt as keystrokes (opencode TUI has no
+        // argv prompt). First attempt after the TUI boots; a second one
+        // only fires if no output followed the first (TUI wasn't ready).
+        if (tab.initialInput) {
+          const text = tab.initialInput;
+          const send = () => {
+            if (ptyIdRef.current === null || delivered) return;
+            invoke("pty_write", { id: ptyIdRef.current, data: text }).catch(() => null);
+            window.setTimeout(() => {
+              if (ptyIdRef.current !== null && !delivered) {
+                invoke("pty_write", { id: ptyIdRef.current, data: "\r" }).catch(() => null);
+                delivered = true;
+              }
+            }, 300);
+          };
+          window.setTimeout(send, 2500);
+          window.setTimeout(send, 5000);
+        }
       })
       .catch((e) => onError(String(e)));
 

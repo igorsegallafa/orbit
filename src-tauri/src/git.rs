@@ -24,12 +24,18 @@ pub fn clone(repo_url: &str, dest: &Path) -> Result<(), String> {
     git(&["clone", repo_url, &dest.to_string_lossy()])
 }
 
-/// Adds a worktree at `path` on a new branch `branch`, based on `base`
+/// Adds a worktree at `path` on branch `branch`, based on `base`
 /// of the repo cloned at `repo_dir`. Idempotent: if the worktree path
-/// already exists, it is reused as-is.
+/// already exists it is reused; if the branch already exists (leftover
+/// from a removed workspace), it is reused instead of failing on `-b`.
 pub fn worktree_add(repo_dir: &Path, path: &Path, branch: &str, base: &str) -> Result<(), String> {
     if path.exists() {
         return Ok(());
+    }
+    // Branch already present (e.g. previous workspace removed but branch
+    // survived)? Check it out without creating.
+    if branch_exists(repo_dir, branch) {
+        return git_in(repo_dir, &["worktree", "add", &path.to_string_lossy(), branch]);
     }
     git_in(repo_dir, &["worktree", "add", "-b", branch, &path.to_string_lossy(), base])
 }
@@ -60,6 +66,16 @@ pub fn worktree_remove(repo_dir: &Path, path: &Path) -> Result<(), String> {
 pub fn branch_delete(repo_dir: &Path, branch: &str) -> Result<(), String> {
     let _ = git_in(repo_dir, &["branch", "-D", branch]);
     Ok(())
+}
+
+/// True when the repo has a local branch with this name.
+pub fn branch_exists(repo_dir: &Path, branch: &str) -> bool {
+    Command::new("git")
+        .args(["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")])
+        .current_dir(repo_dir)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 pub fn fetch(repo_dir: &Path) -> Result<(), String> {

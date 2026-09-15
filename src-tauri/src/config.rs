@@ -16,6 +16,35 @@ pub struct Config {
     pub services: Vec<Service>,
     #[serde(default)]
     pub groups: HashMap<String, Vec<String>>,
+    /// Which CLI agent + model Orbit uses for AI features (Plan etc).
+    #[serde(default)]
+    pub ai: AiSettings,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct AiSettings {
+    /// "claude" | "opencode"
+    #[serde(default = "default_agent")]
+    pub agent: String,
+    /// claude: model alias ("claude-sonnet-5"); opencode: "provider/model".
+    #[serde(default = "default_model")]
+    pub model: String,
+}
+
+fn default_agent() -> String {
+    "claude".into()
+}
+fn default_model() -> String {
+    "claude-sonnet-5".into()
+}
+
+impl Default for AiSettings {
+    fn default() -> Self {
+        AiSettings {
+            agent: default_agent(),
+            model: default_model(),
+        }
+    }
 }
 
 impl Config {

@@ -20,11 +20,32 @@ export interface GithubRepo {
   isPrivate: boolean;
 }
 
+export interface CardRef {
+  kind: "shortcut" | "linear" | string;
+  id: string;
+  title: string;
+  url: string;
+}
+
+export interface CardDetail {
+  id: string;
+  title: string;
+  description: string;
+  state: string;
+  url: string;
+}
+
 export interface Workspace {
   name: string;
   branch: string;
   base: string;
   repos: string[];
+  card?: CardRef;
+}
+
+export interface AiSettings {
+  agent: string;
+  model: string;
 }
 
 export interface RepoStatus {

@@ -156,6 +156,14 @@ export function WorkspaceCreateModal({ config, onCreated, onClose, onError }: Pr
         branch: effectiveBranch,
         base: base.trim() || "main",
         repos: Array.from(selected),
+        card: pickedCard
+          ? {
+              kind: source,
+              id: pickedCard.id,
+              title: pickedCard.title,
+              url: pickedCard.url,
+            }
+          : null,
       });
       onCreated();
       onClose();

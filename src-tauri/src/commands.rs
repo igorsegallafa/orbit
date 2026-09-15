@@ -1,9 +1,10 @@
-use crate::config::{Config, Service};
+use crate::agent;
+use crate::config::{AiSettings, Config, Service};
 use crate::git;
 use crate::github::{self, GithubRepo};
-use crate::integrations::{self, TrackerKind};
+use crate::integrations::{self, CardDetail, TrackerKind};
 use crate::usage::{self, AiUsage};
-use crate::workspace::{self, RepoStatus, Workspace};
+use crate::workspace::{self, CardRef, RepoStatus, Workspace};
 use std::path::PathBuf;
 use tauri::async_runtime::spawn_blocking;
 
@@ -179,8 +180,93 @@ pub async fn create_workspace(
     branch: String,
     base: String,
     repos: Vec<String>,
+    card: Option<CardRef>,
 ) -> Result<Workspace, String> {
-    blocking(move || workspace::create(&name, &branch, &base, &repos)).await
+    blocking(move || workspace::create(&name, &branch, &base, &repos, card)).await
+}
+
+/// Full card content (description) for the Plan flow.
+#[tauri::command]
+pub async fn integration_fetch_card(kind: String, id: String) -> Result<CardDetail, String> {
+    blocking(move || integrations::fetch_card(TrackerKind::parse(&kind)?, &id)).await
+}
+
+/// Whether a PLAN.md already exists for the workspace.
+#[tauri::command]
+pub async fn workspace_plan_exists(name: String) -> Result<bool, String> {
+    blocking(move || {
+        let dir = workspace::workspace_root()?.join("workspaces").join(&name);
+        Ok(dir.join(agent::PLAN_FILE).exists())
+    })
+    .await
+}
+
+/// Runs the configured agent to generate PLAN.md from the workspace card.
+/// Streams progress via the `plan-progress` event.
+#[tauri::command]
+pub async fn generate_plan(
+    app: tauri::AppHandle,
+    name: String,
+    card: CardRef,
+) -> Result<agent::PlanResult, String> {
+    let ws_dir = workspace::workspace_root()?
+        .join("workspaces")
+        .join(&name);
+    let meta = workspace::load_meta(&ws_dir)?;
+    let ai = Config::load()?.ai;
+    let app = app.clone();
+    spawn_blocking(move || {
+        agent::generate_plan(&app, &name, &card, &meta.repos, &meta.branch, &ai)
+    })
+    .await
+    .map_err(|e| format!("background task failed: {e}"))?
+}
+
+/// Cancels the running plan generation (kills the agent process).
+#[tauri::command]
+pub fn cancel_plan() -> Result<(), String> {
+    agent::cancel_plan()
+}
+
+/// `- [ ]` tasks from the workspace's PLAN.md with their done state.
+#[tauri::command]
+pub async fn plan_tasks(name: String) -> Result<Vec<agent::PlanTask>, String> {
+    blocking(move || agent::plan_tasks(&name)).await
+}
+
+/// Marks the nth PLAN.md task as done/undone (writes back to the file).
+#[tauri::command]
+pub async fn set_plan_task(name: String, index: usize, done: bool) -> Result<(), String> {
+    blocking(move || agent::set_plan_task(&name, index, done)).await
+}
+
+// ---------- AI settings ----------
+
+#[tauri::command]
+pub async fn get_ai_settings() -> Result<AiSettings, String> {
+    blocking(|| Ok(Config::load()?.ai)).await
+}
+
+#[tauri::command]
+pub async fn set_ai_settings(ai: AiSettings) -> Result<Config, String> {
+    blocking(move || {
+        let mut cfg = Config::load()?;
+        cfg.ai = ai;
+        cfg.save()?;
+        Ok(cfg)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn test_agent() -> Result<(), String> {
+    let ai = blocking(|| Ok(Config::load()?.ai)).await?;
+    blocking(move || agent::test_agent(&ai)).await
+}
+
+#[tauri::command]
+pub async fn list_models(agent_name: String) -> Result<Vec<String>, String> {
+    blocking(move || Ok(agent::list_models(&agent_name))).await
 }
 
 #[tauri::command]

@@ -13,6 +13,17 @@ pub struct Workspace {
     pub branch: String,
     pub base: String,
     pub repos: Vec<String>,
+    /// Tracker card this workspace was created from (enables Plan).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card: Option<CardRef>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CardRef {
+    pub kind: String,   // "shortcut" | "linear"
+    pub id: String,     // "sc-123" | "ENG-123"
+    pub title: String,
+    pub url: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -76,7 +87,13 @@ pub fn list() -> Result<Vec<Workspace>, String> {
 /// Creates a workspace: one worktree per selected repo, on branch
 /// `<branch>` based on `base`. Clones repos that aren't cloned yet.
 /// Idempotent: existing worktrees are reused.
-pub fn create(name: &str, branch: &str, base: &str, repos: &[String]) -> Result<Workspace, String> {
+pub fn create(
+    name: &str,
+    branch: &str,
+    base: &str,
+    repos: &[String],
+    card: Option<CardRef>,
+) -> Result<Workspace, String> {
     if name.trim().is_empty() {
         return Err("workspace name is required".into());
     }
@@ -106,6 +123,7 @@ pub fn create(name: &str, branch: &str, base: &str, repos: &[String]) -> Result<
         branch: branch.to_string(),
         base: base.to_string(),
         repos: repos.to_vec(),
+        card,
     };
     let raw = serde_yaml::to_string(&ws).map_err(|e| e.to_string())?;
     std::fs::write(meta_path(&ws_dir), raw).map_err(|e| e.to_string())?;
@@ -176,11 +194,11 @@ mod tests {
     #[test]
     fn create_rejects_unknown_repo_and_empty_selection() {
         // No config on a fresh environment: any repo selection is unknown.
-        let err = create("ws", "feat/ws", "main", &["ghost-repo".into()])
+        let err = create("ws", "feat/ws", "main", &["ghost-repo".into()], None)
             .expect_err("should reject unknown repo");
         assert!(err.contains("unknown repository"));
 
-        let err = create("ws", "feat/ws", "main", &[]).expect_err("should reject empty selection");
+        let err = create("ws", "feat/ws", "main", &[], None).expect_err("should reject empty selection");
         assert!(err.contains("at least one"));
     }
 }

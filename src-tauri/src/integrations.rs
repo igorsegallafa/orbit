@@ -48,6 +48,16 @@ pub struct CardInfo {
     pub url: String,
 }
 
+/// Full card content (used by the Plan flow).
+#[derive(Debug, Serialize, Clone)]
+pub struct CardDetail {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub state: String,
+    pub url: String,
+}
+
 #[derive(Debug, Serialize, Clone)]
 pub struct IntegrationStatus {
     pub kind: String,
@@ -281,6 +291,91 @@ fn figma_validate(tok: &str) -> Result<String, String> {
 }
 
 // ---------- public API ----------
+
+/// Fetches a single card's full content (description included).
+/// Shortcut: GET /stories/<num>; Linear: GraphQL issue by identifier.
+pub fn fetch_card(kind: TrackerKind, id: &str) -> Result<CardDetail, String> {
+    let tok = token(kind).ok_or_else(|| format!("{} is not connected", status_kind_label(kind)))?;
+    match kind {
+        TrackerKind::Shortcut => shortcut_fetch_card(&tok, id),
+        TrackerKind::Linear => linear_fetch_card(&tok, id),
+        TrackerKind::Figma => Err("Figma has no cards".into()),
+    }
+}
+
+fn shortcut_fetch_card(tok: &str, id: &str) -> Result<CardDetail, String> {
+    let num = id
+        .strip_prefix("sc-")
+        .ok_or_else(|| format!("invalid Shortcut id: {id}"))?;
+    let headers: [(&str, String); 1] = [("Shortcut-Token", tok.to_string())];
+    let v = curl_json(&shortcut_headers_url(&format!("/stories/{num}")), &headers, None)?;
+    if let Some(msg) = v.get("message").and_then(|m| m.as_str()) {
+        return Err(msg.to_string());
+    }
+    Ok(CardDetail {
+        id: id.to_string(),
+        title: v.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string(),
+        description: v
+            .get("description")
+            .and_then(|d| d.as_str())
+            .unwrap_or("")
+            .to_string(),
+        state: v
+            .get("workflow_state_type")
+            .and_then(|s| s.as_str())
+            .unwrap_or("")
+            .to_string(),
+        url: v
+            .get("app_url")
+            .and_then(|u| u.as_str())
+            .unwrap_or("")
+            .to_string(),
+    })
+}
+
+fn linear_fetch_card(tok: &str, id: &str) -> Result<CardDetail, String> {
+    // Current Linear API accepts the human identifier (ENG-123) in issue(id:).
+    let q = format!(
+        r#"{{"query":"{{ issue(id: \"{}\") {{ identifier title description url state {{ name }} }} }}"}}"#,
+        escape_gql(id)
+    );
+    let headers: [(&str, String); 1] = [("Authorization", format!("Bearer {tok}"))];
+    let v = curl_json(LINEAR_API, &headers, Some(&q))?;
+    if let Some(errors) = v.get("errors").and_then(|e| e.as_array()) {
+        if !errors.is_empty() {
+            return Err(errors[0]
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("card not found")
+                .to_string());
+        }
+    }
+    let issue = v
+        .pointer("/data/issue")
+        .ok_or("card not found in Linear")?;
+    if issue.is_null() {
+        return Err("card not found in Linear".into());
+    }
+    Ok(CardDetail {
+        id: issue
+            .get("identifier")
+            .and_then(|i| i.as_str())
+            .unwrap_or(id)
+            .to_string(),
+        title: issue.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string(),
+        description: issue
+            .get("description")
+            .and_then(|d| d.as_str())
+            .unwrap_or("")
+            .to_string(),
+        state: issue
+            .pointer("/state/name")
+            .and_then(|s| s.as_str())
+            .unwrap_or("")
+            .to_string(),
+        url: issue.get("url").and_then(|u| u.as_str()).unwrap_or("").to_string(),
+    })
+}
 
 pub fn validate(kind: TrackerKind, tok: &str) -> Result<String, String> {
     match kind {
