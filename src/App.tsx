@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useConfig } from "./hooks/useConfig";
 import { DashboardPage } from "./pages/DashboardPage";
@@ -79,6 +79,7 @@ function App() {
     }
   });
   const { menu, setMenu, openFromEvent } = useContextMenu<Workspace>();
+  const tabStripRef = useRef<HTMLDivElement>(null);
   const tabMenu = useContextMenu<Tab>();
 
   const loadWorkspaces = useCallback(async () => {
@@ -92,6 +93,14 @@ function App() {
   useEffect(() => {
     loadWorkspaces();
   }, [loadWorkspaces]);
+
+  // Keep the active tab visible in the strip: opening/focusing a tab when
+  // the strip overflows should scroll it into view automatically.
+  useEffect(() => {
+    const strip = tabStripRef.current;
+    const active = strip?.querySelector(".tab-active");
+    active?.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "smooth" });
+  }, [activeTab, tabs.length]);
 
   // JetBrains-style double-shift: two bare Shift presses within 350ms open
   // Search Everywhere. Guarded against Shift+key combos (typing capitals).
@@ -590,6 +599,7 @@ function App() {
         ) : tabs.length > 0 ? (
           <>
             <div
+              ref={tabStripRef}
               className="tab-strip"
               onWheel={(e) => {
                 // WKWebView: vertical wheel/two-finger gestures don't scroll
