@@ -4,6 +4,7 @@ import { useConfig } from "./hooks/useConfig";
 import { DashboardPage } from "./pages/DashboardPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { IntegrationsPage } from "./pages/IntegrationsPage";
+import { CodeReviewPage } from "./pages/CodeReviewPage";
 import { WorkspaceDetailPage } from "./pages/WorkspaceDetailPage";
 import { SidebarResizer } from "./components/SidebarResizer";
 import { ContextMenu, MenuItem, useContextMenu } from "./components/ContextMenu";
@@ -12,28 +13,34 @@ import { TerminalPane, TerminalTab, dropFilesIntoTerminal } from "./components/T
 import { FileTreePanel } from "./components/FileTreePanel";
 import { ReviewPane } from "./components/ReviewPane";
 import { CommitReviewPane } from "./components/CommitReviewPane";
+import { PrReviewPane } from "./components/PrReviewPane";
 import { SearchEverywhereModal } from "./components/SearchEverywhereModal";
 import { UsageBar } from "./components/UsageBar";
 import { TooltipHost, tooltip } from "./components/Tooltip";
 import {
   HomeIcon, SettingsIcon, SatelliteIcon, DocIcon, TerminalIcon, PlusIcon,
-  ChevronRightIcon, PlugIcon, DiffIcon, PanelLeftIcon, PanelLeftExpandIcon,
+  ChevronRightIcon, PlugIcon, DiffIcon, GitIcon, PanelLeftIcon, PanelLeftExpandIcon,
   PanelRightIcon, PanelRightExpandIcon,
 } from "./components/Icons";
 import { SkeletonCards, SkeletonTable } from "./components/Skeleton";
 import { randomSessionName } from "./lib/names";
 import { AgentStatus } from "./lib/agentStatus";
 import { StatusIndicator } from "./components/StatusIndicator";
-import { GitCommit, Workspace } from "./types/config";
+import { GitCommit, PullRequest, Workspace } from "./types/config";
 import "./App.css";
 
-type NavPage = { kind: "dashboard" } | { kind: "settings" } | { kind: "integrations" };
+type NavPage =
+  | { kind: "dashboard" }
+  | { kind: "reviews" }
+  | { kind: "settings" }
+  | { kind: "integrations" };
 
 type Tab =
   | { kind: "workspace"; workspace: Workspace }
   | { kind: "editor"; workspace: string; repo: string; path: string }
   | { kind: "review"; workspace: string; repo: string; path: string }
   | { kind: "commit"; workspace: string; repo: string; commit: GitCommit }
+  | { kind: "pr"; prs: PullRequest[] }
   | { kind: "terminal"; terminal: TerminalTab };
 
 const SIDEBAR_KEY = "orbit.sidebar-width";
@@ -52,6 +59,7 @@ function tabId(tab: Tab): string {
   if (t.kind === "editor") return `ed:${t.workspace}/${t.repo}/${t.path}`;
   if (t.kind === "review") return `rv:${t.workspace}/${t.repo}/${t.path}`;
   if (t.kind === "commit") return `cm:${t.workspace}/${t.repo}/${t.commit.sha}`;
+  if (t.kind === "pr") return `pr:${t.prs.map((p) => `${p.ownerRepo}/${p.number}`).join("+")}`;
   // Stable id: must NOT embed the display name, or renaming re-keys the pane
   // and remounts the terminal (killing the PTY session).
   return t.terminal.id;
@@ -366,10 +374,12 @@ function App() {
 
   // The right dock shows for whichever workspace is "in focus": the active
   // workspace tab, else a workspace owning the active editor/review/terminal tab.
+  // PR tabs are not tied to a workspace; only terminal/editor/review/
+  // commit tabs carry one.
   const focusWorkspace: Workspace | null =
     active?.kind === "workspace"
       ? active.workspace
-      : active
+      : active && active.kind !== "pr"
         ? (workspaces.find(
             (w) =>
               w.name ===
@@ -412,6 +422,9 @@ function App() {
         />
       );
     }
+    if (tab.kind === "pr") {
+      return <PrReviewPane prs={tab.prs} onError={setError} />;
+    }
     if (tab.kind === "editor") {
       return (
         <EditorPane
@@ -436,6 +449,17 @@ function App() {
   };
 
   const renderMain = () => {
+    if (navPage.kind === "reviews") {
+      return (
+        <CodeReviewPage
+          onOpenPr={(prs) => {
+            setNavPage({ kind: "dashboard" });
+            openTab({ kind: "pr", prs });
+          }}
+          onError={setError}
+        />
+      );
+    }
     if (navPage.kind === "settings") {
       return <SettingsPage config={config} onChange={setConfig} onError={setError} />;
     }
@@ -514,6 +538,16 @@ function App() {
             title="Dashboard"
           >
             <span className="nav-icon"><HomeIcon size={15} /></span> {!collapsed && "Dashboard"}
+          </button>
+          <button
+            className={`nav-item ${navPage.kind === "reviews" && !active ? "active" : ""}`}
+            onClick={() => {
+              setActiveTab(null);
+              setNavPage({ kind: "reviews" });
+            }}
+            title="Code Review"
+          >
+            <span className="nav-icon"><GitIcon size={15} /></span> {!collapsed && "Code Review"}
           </button>
           {!collapsed &&
             workspaces.map((ws) => {
@@ -666,13 +700,15 @@ function App() {
                         ? `${t.repo}/${t.path.split("/").pop()} (diff)`
                         : t.kind === "commit"
                           ? `${t.commit.message.slice(0, 24)}…`
-                          : t.terminal.sessionName;
+                          : t.kind === "pr"
+                            ? `#` + t.prs[0].number + (t.prs.length > 1 ? ` (+${t.prs.length - 1})` : "")
+                            : t.terminal.sessionName;
                 const icon =
                   t.kind === "workspace" ? (
                     <SatelliteIcon size={13} />
                   ) : t.kind === "editor" ? (
                     <DocIcon size={13} />
-                  ) : t.kind === "review" || t.kind === "commit" ? (
+                  ) : t.kind === "review" || t.kind === "commit" || t.kind === "pr" ? (
                     <DiffIcon size={13} />
                   ) : (
                     <TerminalIcon size={13} />

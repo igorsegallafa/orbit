@@ -169,6 +169,33 @@ pub async fn github_list_repos(force_refresh: bool) -> Result<Vec<GithubRepo>, S
     blocking(move || github::list_accessible_repos(force_refresh)).await
 }
 
+// ---------- Code Review (PRs) ----------
+
+#[tauri::command]
+pub async fn pr_list(force_refresh: bool) -> Result<Vec<github::PrGroup>, String> {
+    blocking(move || github::list_prs(force_refresh)).await
+}
+
+#[tauri::command]
+pub async fn pr_search(query: String) -> Result<Vec<github::PrGroup>, String> {
+    blocking(move || github::search_prs(&query)).await
+}
+
+#[tauri::command]
+pub async fn pr_detail(owner_repo: String, number: u64) -> Result<github::PrDetail, String> {
+    blocking(move || github::pr_detail(&owner_repo, number)).await
+}
+
+#[tauri::command]
+pub async fn pr_file_diff(
+    owner_repo: String,
+    head_sha: String,
+    base_sha: String,
+    path: String,
+) -> Result<github::PrFileDiff, String> {
+    blocking(move || github::pr_file_diff(&owner_repo, &head_sha, &base_sha, &path)).await
+}
+
 #[tauri::command]
 pub async fn list_workspaces() -> Result<Vec<Workspace>, String> {
     blocking(workspace::list).await

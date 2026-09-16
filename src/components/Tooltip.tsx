@@ -73,6 +73,23 @@ export function TooltipHost() {
 
   useEffect(() => tooltip.subscribe(setState), []);
 
+  // Kill tooltips on any click/scroll/keydown: the anchor element can be
+  // unmounted by a screen switch (no mouseleave ever fires) and the
+  // tooltip would float over the new screen forever.
+  useEffect(() => {
+    const kill = () => tooltip.hide();
+    window.addEventListener("pointerdown", kill, true);
+    window.addEventListener("wheel", kill, { capture: true, passive: true });
+    window.addEventListener("scroll", kill, { capture: true, passive: true });
+    window.addEventListener("keydown", kill, true);
+    return () => {
+      window.removeEventListener("pointerdown", kill, true);
+      window.removeEventListener("wheel", kill, true);
+      window.removeEventListener("scroll", kill, true);
+      window.removeEventListener("keydown", kill, true);
+    };
+  }, []);
+
   if (!state) return null;
 
   // Clamp horizontally so the tooltip never leaves the window

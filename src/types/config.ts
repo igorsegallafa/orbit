@@ -54,6 +54,51 @@ export interface GrillOption {
   recommended: boolean;
 }
 
+// ---------- Code Review (PRs) ----------
+
+export interface PullRequest {
+  repo: string; // Orbit service name
+  ownerRepo: string; // "owner/repo" for gh -R
+  number: number;
+  title: string;
+  branch: string;
+  base: string;
+  author: string;
+  isDraft: boolean;
+  url: string;
+  updatedAt: string; // ISO
+}
+
+export interface PrGroup {
+  branch: string;
+  prs: PullRequest[];
+}
+
+export interface PrFile {
+  path: string;
+  additions: number;
+  deletions: number;
+}
+
+export interface PrDetail {
+  title: string;
+  author: string;
+  url: string;
+  branch: string;
+  base: string;
+  body: string;
+  additions: number;
+  deletions: number;
+  files: PrFile[];
+  headSha: string;
+  baseSha: string;
+}
+
+export interface PrFileDiff {
+  original: string;
+  modified: string;
+}
+
 export interface GitChange {
   path: string;
   status: "M" | "A" | "D" | "U" | string;

@@ -3305,6 +3305,207 @@ table.list tbody tr:hover .row-actions,
 }
 
 
+/* ---------- Code Review ---------- */
+
+.pr-search-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.pr-search-row input {
+  flex: 1;
+  font-size: 13px;
+}
+
+.pr-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 14px;
+}
+
+.pr-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  cursor: pointer;
+  transition: border-color var(--transition), background var(--transition),
+    transform 0.12s ease;
+  animation: card-in 0.2s cubic-bezier(0.25, 0.25, 0, 1) backwards;
+}
+
+.pr-card:hover {
+  border-color: var(--accent);
+  background: var(--panel-raised);
+  transform: translateY(-2px);
+}
+
+.pr-card-multi {
+  border-color: rgba(79, 124, 247, 0.35);
+}
+
+.pr-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.pr-card-title {
+  font-weight: 600;
+  font-size: 13.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pr-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-height: 0;
+}
+
+.pr-card-branch {
+  font-size: 11px;
+  color: var(--accent);
+}
+
+.pr-card-meta {
+  font-size: 11.5px;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pr-card-repos {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.pr-repo-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--panel-raised);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 9px;
+  font-size: 11.5px;
+}
+
+.pr-repo-name {
+  color: var(--text);
+}
+
+.pr-repo-num {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.pr-card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+/* PR review tab */
+.pr-review {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+}
+
+.pr-review-side {
+  width: 260px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--border);
+  background: var(--panel);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.pr-selector {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px 10px 0;
+}
+
+.pr-side-loading {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+}
+
+.pr-header {
+  padding: 12px 12px 10px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.pr-header-link {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.pr-header-link:hover {
+  text-decoration: underline;
+}
+
+.pr-header-title {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.pr-header-meta {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.pr-header-stats {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11px;
+}
+
+.pr-files {
+  flex: 1;
+  padding: 4px 6px;
+  min-height: 0;
+}
+
+.pr-diff-col {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.pr-diff-path {
+  font-size: 12px;
+}
+
 /* ---------- Feedback ---------- */
 
 .empty {
