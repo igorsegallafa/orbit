@@ -32,11 +32,20 @@ pub struct PlanResult {
 // ---------- Interactive grill (UI stepper) ----------
 
 #[derive(Serialize, Clone, Debug)]
+pub struct GrillOption {
+    pub label: String,
+    #[serde(default)]
+    pub description: String, // the tradeoff
+    #[serde(default)]
+    pub recommended: bool, // agent's pick, first among equals
+}
+
+#[derive(Serialize, Clone, Debug)]
 pub struct GrillQuestion {
     pub id: String, // q1, q2, ... stable within the round
     pub text: String,
     #[serde(default)]
-    pub options: Vec<String>, // optional suggested answers
+    pub options: Vec<GrillOption>, // 3 concrete options, recommended first
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -103,12 +112,16 @@ Description:
 {cap_note}
 
 # Your job
-Ask the next round of questions — every question you can ask given the answers above (3-6 questions). Focus on behaviors, contracts, edge cases, failure modes and cross-repo impact the developer may have silently assumed. Never ask something already answered.
+Interview the developer grilling-style, working a DECISION TREE: every decision branches into the decisions that hang off it. Each round, ask the whole FRONTIER — every question whose prerequisites are already settled by the answers above (3-6 questions). Never ask something already answered, and never a question that hinges on an answer you haven't heard.
+
+Focus on behaviors, contracts, edge cases, failure modes and cross-repo impact the developer may have silently assumed.
+
+Each question MUST offer exactly 3 concrete options, your RECOMMENDED one first (recommended=true), each with a short label plus a description carrying the tradeoff. Facts are YOUR job: if a question needs a fact from the code, don't ask — assume the repo investigation and phrase the options accordingly.
 
 If EVERYTHING important has been settled (the frontier is empty), set done=true instead and write a summary of the decisions (5-10 bullets).
 
 Reply with ONLY this JSON, no prose before or after:
-{{"done": false, "questions": [{{"id": "q1", "text": "...", "options": ["maybe", "or this"]}}]}}
+{{"done": false, "questions": [{{"id": "q1", "text": "…?", "options": [{{"label": "SQLite", "description": "…tradeoff…", "recommended": true}}, {{"label": "Postgres", "description": "…"}}, {{"label": "Files", "description": "…"}}]}}]}}
 or, when finished:
 {{"done": true, "summary": "- decision 1\n- decision 2", "questions": []}}"#,
         title = detail.title,
@@ -133,6 +146,14 @@ or, when finished:
             .stderr(Stdio::piped())
             .output()
             .map_err(|e| format!("failed to launch opencode: {e}"))?,
+        "omp" => Command::new("omp")
+            .args(["-p", "--auto-approve", "--model", &ai.model, &prompt])
+            .current_dir(&ws_dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|e| format!("failed to launch omp: {e}"))?,
         _ => Command::new("claude")
             .args(["-p", "--model", &ai.model, &prompt])
             .current_dir(&ws_dir)
@@ -150,6 +171,8 @@ or, when finished:
 }
 
 /// Extracts the first JSON object from the agent reply and shapes it.
+/// Tolerates both the new option objects ({label, description, recommended})
+/// and the legacy plain-string options.
 fn parse_grill_json(reply: &str) -> Result<GrillRound, String> {
     let start = reply.find('{').ok_or("agent replied without JSON")?;
     let end = reply.rfind('}').ok_or("agent reply has no closing brace")?;
@@ -170,12 +193,37 @@ fn parse_grill_json(reply: &str) -> Result<GrillRound, String> {
                 .and_then(|i| i.as_str())
                 .map(String::from)
                 .unwrap_or_else(|| format!("q{}", i + 1));
-            let options = q
+            let options: Vec<GrillOption> = q
                 .get("options")
                 .and_then(|o| o.as_array())
                 .map(|a| {
                     a.iter()
-                        .filter_map(|s| s.as_str().map(String::from))
+                        .filter_map(|s| {
+                            if let Some(obj) = s.as_object() {
+                                Some(GrillOption {
+                                    label: obj
+                                        .get("label")
+                                        .and_then(|l| l.as_str())
+                                        .unwrap_or("")
+                                        .to_string(),
+                                    description: obj
+                                        .get("description")
+                                        .and_then(|d| d.as_str())
+                                        .unwrap_or("")
+                                        .to_string(),
+                                    recommended: obj
+                                        .get("recommended")
+                                        .and_then(|r| r.as_bool())
+                                        .unwrap_or(false),
+                                })
+                            } else {
+                                s.as_str().map(|plain| GrillOption {
+                                    label: plain.to_string(),
+                                    description: String::new(),
+                                    recommended: false,
+                                })
+                            }
+                        })
                         .collect()
                 })
                 .unwrap_or_default();
@@ -262,6 +310,12 @@ Write ONLY that file. Do not modify repository code. Reply with the path you wro
             // Same rationale as generate_plan: headless runs can't ask for
             // permission, so auto-approve what isn't denied.
             c.args(["run", "--model", &ai.model, "--auto", &prompt]);
+            c
+        }
+        "omp" => {
+            let mut c = Command::new("omp");
+            // Headless + writes PLAN.md: print mode + auto-approve.
+            c.args(["-p", "--auto-approve", "--model", &ai.model, &prompt]);
             c
         }
         _ => {
@@ -434,6 +488,11 @@ pub fn generate_plan(
             // Same rationale as claude's acceptEdits: headless runs can't
             // ask for permission, so auto-approve what isn't denied.
             c.args(["run", "--model", &ai.model, "--auto", &prompt]);
+            c
+        }
+        "omp" => {
+            let mut c = Command::new("omp");
+            c.args(["-p", "--auto-approve", "--model", &ai.model, &prompt]);
             c
         }
         // default: claude — acceptEdits auto-approves file writes inside the
@@ -612,6 +671,12 @@ fn extract_markdown(reply: &str) -> String {
 /// Quick connectivity check for the configured agent.
 pub fn test_agent(ai: &AiSettings) -> Result<(), String> {
     let out = match ai.agent.as_str() {
+        "omp" => Command::new("omp")
+            .args(["-p", "--model", &ai.model, "Reply with the single word: ok"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output(),
         "opencode" => Command::new("opencode")
             .args(["run", "--model", &ai.model, "Reply with the single word: ok"])
             .stdin(Stdio::null())
@@ -641,6 +706,11 @@ pub fn test_agent(ai: &AiSettings) -> Result<(), String> {
 /// Models known to work with each agent, used as select defaults.
 pub fn default_models(agent: &str) -> Vec<String> {
     match agent {
+        "omp" => vec![
+            "aihub/glm-5.3".into(),
+            "aihub/cheap".into(),
+            "aihub/balanced".into(),
+        ],
         "opencode" => vec![
             "aihub/aihub/best".into(),
             "aihub/aihub/cheap".into(),
@@ -657,6 +727,31 @@ pub fn default_models(agent: &str) -> Vec<String> {
 /// Lists available models for opencode via its CLI (claude has a fixed set).
 pub fn list_models(agent: &str) -> Vec<String> {
     match agent {
+        "omp" => {
+            // `omp models` renders a table with box-drawing chars; rows are
+            // "│ model │ ctx │ max-out │ thinking │ images │" — the model id
+            // is the first cell.
+            let out = Command::new("omp")
+                .arg("models")
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .output();
+            match out {
+                Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .filter(|l| l.contains('│') && l.contains('/'))
+                    .filter_map(|l| {
+                        l.split('│')
+                            .map(|c| c.trim())
+                            .find(|c| c.contains('/') && !c.contains(' '))
+                            .map(String::from)
+                    })
+                    .take(100)
+                    .collect(),
+                _ => default_models(agent),
+            }
+        }
         "opencode" => {
             let out = Command::new("opencode")
                 .arg("models")

@@ -7,7 +7,7 @@ interface Props {
   workspace: Workspace;
   card: CardRef;
   onOpenPlan: () => void;
-  /** Opens the native grill-me interview stepper. */
+  /** Opens the native grill-me interview stepper (claude/opencode). */
   onStartInterview: () => void;
   onClose: () => void;
   onError: (msg: string) => void;
@@ -72,6 +72,7 @@ export function PlanModal({ workspace, card, onOpenPlan, onStartInterview, onClo
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
   }, [log]);
 
+  // Stepper interview — works for every agent (headless rounds).
   const startInterview = () => {
     onStartInterview();
     onCloseRef.current();

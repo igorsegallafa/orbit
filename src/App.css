@@ -170,7 +170,14 @@ body {
   flex-shrink: 0;
   min-width: 0;
   overflow: hidden;
-  transition: width 0.22s cubic-bezier(0.25, 0.25, 0, 1);
+}
+
+/* Collapse/expand animation ONLY — added by JS around toggling, removed on
+   transitionend, so dragging the resizer (which also sets width) never
+   animates and stays 1:1 with the cursor. */
+.sidebar.sidebar-anim {
+  transition: width 0.22s cubic-bezier(0.25, 0.25, 0, 1),
+    padding 0.22s cubic-bezier(0.25, 0.25, 0, 1);
 }
 
 /* Collapsed: with border-box + width:0 the horizontal padding still
@@ -180,8 +187,6 @@ body {
   padding-left: 0;
   padding-right: 0;
   border: none;
-  transition: width 0.22s cubic-bezier(0.25, 0.25, 0, 1),
-    padding 0.22s cubic-bezier(0.25, 0.25, 0, 1);
 }
 
 .sidebar-resizer {
@@ -1574,6 +1579,10 @@ table.list tbody tr:hover .row-actions,
   min-height: 0;
   background: var(--panel);
   overflow: hidden;
+}
+
+/* Collapse/expand animation ONLY (see .sidebar-anim). */
+.dock.dock-anim {
   transition: width 0.22s cubic-bezier(0.25, 0.25, 0, 1);
 }
 
@@ -3182,6 +3191,28 @@ table.list tbody tr:hover .row-actions,
   height: auto;
   min-height: 24px;
   text-align: left;
+}
+
+/* Recommended option: accent border + star */
+.grill-opt-rec {
+  border-color: var(--accent);
+  color: #cfe0ff;
+  background: var(--accent-soft);
+}
+
+.grill-rec-mark {
+  margin-right: 5px;
+  color: var(--accent);
+  font-size: 10px;
+}
+
+/* Tradeoff description of the picked (or recommended) option */
+.grill-opt-desc {
+  width: 100%;
+  margin: 2px 0 0;
+  font-size: 11.5px;
+  color: var(--text-faint);
+  line-height: 1.5;
 }
 
 .grill-answer {

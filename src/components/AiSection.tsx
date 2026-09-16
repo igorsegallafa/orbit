@@ -11,6 +11,7 @@ interface Props {
 const AGENTS = [
   { id: "claude", label: "Claude Code" },
   { id: "opencode", label: "OpenCode" },
+  { id: "omp", label: "OMP" },
 ];
 
 /**
@@ -47,7 +48,12 @@ export function AiSection({ onError }: Props) {
   const changeAgent = (agent: string) => {
     if (!ai || agent === ai.agent) return;
     // model format follows the agent — snap to that agent's default
-    const first = agent === "opencode" ? "aihub/aihub/best" : "claude-sonnet-5";
+    const first =
+      agent === "opencode"
+        ? "aihub/aihub/best"
+        : agent === "omp"
+          ? "aihub/glm-5.3"
+          : "claude-sonnet-5";
     const next = { agent, model: first };
     setAi(next);
     invoke("set_ai_settings", { ai: next }).catch((e) => onError(String(e)));
@@ -107,7 +113,9 @@ export function AiSection({ onError }: Props) {
         <p className="integration-hint">
           {ai.agent === "opencode"
             ? "Provider/model as listed by `opencode models`."
-            : "Model alias passed to `claude -p --model`."}
+            : ai.agent === "omp"
+              ? "Model as listed by `omp models` (fuzzy match supported)."
+              : "Model alias passed to `claude -p --model`."}
         </p>
         {loadingModels ? (
           <Skeleton w="100%" h={34} />

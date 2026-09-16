@@ -150,7 +150,17 @@ function App() {
     localStorage.setItem(SIDEBAR_KEY, String(w));
   }, []);
 
+  // Collapse/expand animation: the width transition lives on a class that
+  // exists ONLY for the duration of a toggle (state-driven — React owns the
+  // className, so adding it via DOM would be wiped by the re-render), so
+  // dragging the resizer (which also sets width) stays instant.
+  const [sidebarAnimating, setSidebarAnimating] = useState(false);
+  const [dockAnimating, setDockAnimating] = useState(false);
+
   const toggleSidebar = useCallback(() => {
+    setSidebarAnimating(true);
+    // Safety net: if no transitionend fires (e.g. width unchanged), clear.
+    window.setTimeout(() => setSidebarAnimating(false), 400);
     setSidebarHidden((h) => {
       localStorage.setItem("orbit.sidebar-hidden", h ? "0" : "1");
       return !h;
@@ -158,6 +168,8 @@ function App() {
   }, []);
 
   const toggleDock = useCallback(() => {
+    setDockAnimating(true);
+    window.setTimeout(() => setDockAnimating(false), 400);
     setDockHidden((h) => {
       localStorage.setItem("orbit.dock-hidden", h ? "0" : "1");
       return !h;
@@ -273,11 +285,13 @@ function App() {
   // interviews, plan application). claude takes the prompt as argv; the
   // opencode TUI types it in after boot.
   const openPromptedSession = (wsName: string, agent: string, model: string, prompt: string) => {
-    const args =
-      agent === "claude"
-        ? ["--model", model, prompt]
-        : ["--model", model];
-    const initialInput = agent === "claude" ? undefined : prompt;
+    // claude and omp both take the initial prompt as an argv message; the
+    // opencode TUI treats the positional as a project dir, so we type it in.
+    const takesArgvPrompt = agent === "claude" || agent === "omp";
+    const args = takesArgvPrompt
+      ? ["--model", model, prompt]
+      : ["--model", model];
+    const initialInput = takesArgvPrompt ? undefined : prompt;
     openTab({
       kind: "terminal",
       terminal: {
@@ -479,8 +493,9 @@ function App() {
       </header>
       <div className="app-row">
       <aside
-        className={`sidebar ${sidebarHidden ? "sidebar-hidden" : ""}`}
+        className={`sidebar ${sidebarHidden ? "sidebar-hidden" : ""} ${sidebarAnimating ? "sidebar-anim" : ""}`}
         data-collapsed={collapsed}
+        onTransitionEnd={() => setSidebarAnimating(false)}
         style={{ width: sidebarHidden ? 0 : sidebarWidth }}
       >
           <div className="brand">
@@ -787,6 +802,7 @@ function App() {
             { label: "Terminal", onSelect: () => openShellTerminal(focusWorkspace.name) },
             { label: "Claude Code", onSelect: () => newTerminal(focusWorkspace.name, "claude", "claude") },
             { label: "Open Code", onSelect: () => newTerminal(focusWorkspace.name, "opencode", "opencode") },
+            { label: "OMP", onSelect: () => newTerminal(focusWorkspace.name, "omp", "omp") },
           ]}
           onClose={() => setPlusMenu(null)}
         />
@@ -816,7 +832,8 @@ function App() {
             />
           )}
           <aside
-            className={`dock ${dockHidden ? "dock-hidden" : ""}`}
+            className={`dock ${dockHidden ? "dock-hidden" : ""} ${dockAnimating ? "dock-anim" : ""}`}
+            onTransitionEnd={() => setDockAnimating(false)}
             style={{ width: dockHidden ? 0 : dockWidth }}
           >
             <FileTreePanel

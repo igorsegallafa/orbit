@@ -48,6 +48,12 @@ export interface AiSettings {
   model: string;
 }
 
+export interface GrillOption {
+  label: string;
+  description: string;
+  recommended: boolean;
+}
+
 export interface GitChange {
   path: string;
   status: "M" | "A" | "D" | "U" | string;

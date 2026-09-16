@@ -162,12 +162,13 @@ export function EditorPane({ workspace, repo, path, onError, onApplyPlan }: Prop
                 options={[
                   { value: "claude", label: "Claude Code" },
                   { value: "opencode", label: "OpenCode" },
+                  { value: "omp", label: "OMP" },
                 ]}
                 onChange={(a) => {
                   const next =
-                    a === "opencode"
-                      ? (models.find((m) => m.startsWith("aihub")) ?? models[0] ?? "")
-                      : (models.find((m) => m.startsWith("claude")) ?? models[0] ?? "");
+                    a === "claude"
+                      ? (models.find((m) => m.startsWith("claude")) ?? models[0] ?? "")
+                      : (models.find((m) => m.startsWith("aihub")) ?? models[0] ?? "");
                   setAi({ agent: a, model: next });
                 }}
               />

@@ -1,12 +1,12 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { CardRef, Workspace } from "../types/config";
+import { CardRef, GrillOption, Workspace } from "../types/config";
 import { Skeleton } from "./Skeleton";
 
 interface GrillQuestion {
   id: string;
   text: string;
-  options: string[];
+  options: GrillOption[];
 }
 
 interface GrillRound {
@@ -48,6 +48,9 @@ export function GrillModal({ workspace, card, onPlanReady, onClose, onError }: P
   const [current, setCurrent] = useState(0); // index within the round's questions
   const [value, setValue] = useState("");
   const [roundsDone, setRoundsDone] = useState(0);
+  // Authoritative round count (state can be stale inside quick successive
+  // submits; the ref is what fetches actually use).
+  const roundsDoneRef = useRef(0);
   const [loading, setLoading] = useState(true);
   const [phase, setPhase] = useState<"interview" | "summary" | "writing" | "done">("interview");
 
@@ -58,14 +61,14 @@ export function GrillModal({ workspace, card, onPlanReady, onClose, onError }: P
   );
 
   const fetchRound = useCallback(
-    async (list: Answer[], roundsSoFar: number) => {
+    async (list: Answer[]) => {
       setLoading(true);
       try {
         const r = await invoke<GrillRound>("grill_step", {
           name: workspace.name,
           card,
           answers: pairAnswers(list),
-          roundsDone: roundsSoFar,
+          roundsDone: roundsDoneRef.current,
           maxRounds: null,
         });
         setRound(r);
@@ -74,7 +77,8 @@ export function GrillModal({ workspace, card, onPlanReady, onClose, onError }: P
         if (r.done) {
           setPhase("summary");
         } else {
-          setRoundsDone(roundsSoFar + 1);
+          roundsDoneRef.current += 1;
+          setRoundsDone(roundsDoneRef.current);
         }
       } catch (e) {
         onError(String(e));
@@ -87,7 +91,7 @@ export function GrillModal({ workspace, card, onPlanReady, onClose, onError }: P
 
   // First round on mount
   useEffect(() => {
-    fetchRound([], 0);
+    fetchRound([]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -105,8 +109,8 @@ export function GrillModal({ workspace, card, onPlanReady, onClose, onError }: P
         name: workspace.name,
         card,
         answers: pairAnswers(answers),
-        roundsDone: roundsDone,
-        maxRounds: roundsDone + 1, // force done on this call
+        roundsDone: roundsDoneRef.current,
+        maxRounds: roundsDoneRef.current + 1, // force done on this call
       });
       setRound({
         done: true,
@@ -132,7 +136,7 @@ export function GrillModal({ workspace, card, onPlanReady, onClose, onError }: P
       setValue("");
     } else {
       // Round finished — fetch the next one with all answers so far.
-      fetchRound(next, roundsDone);
+      fetchRound(next);
     }
   };
 
@@ -159,7 +163,9 @@ export function GrillModal({ workspace, card, onPlanReady, onClose, onError }: P
         <div className="modal-header">
           <h3>
             Interview · {card.id}
-            {phase === "interview" ? ` · round ${roundsDone + (loading ? 0 : 1)}` : ""}
+            {phase === "interview"
+              ? ` · round ${Math.max(1, roundsDone + (loading ? 1 : 0))}${loading ? "…" : ""}`
+              : ""}
           </h3>
 
         </div>
@@ -182,13 +188,21 @@ export function GrillModal({ workspace, card, onPlanReady, onClose, onError }: P
                       {question.options.map((opt) => (
                         <button
                           type="button"
-                          key={opt}
-                          className="chip"
-                          onClick={() => setValue(opt)}
+                          key={opt.label}
+                          className={`chip grill-opt ${opt.recommended ? "grill-opt-rec" : ""} ${value === opt.label ? "chip-active" : ""}`}
+                          title={opt.description || undefined}
+                          onClick={() => setValue(opt.label)}
                         >
-                          {opt}
+                          {opt.recommended && <span className="grill-rec-mark">★</span>}
+                          {opt.label}
                         </button>
                       ))}
+                      {question.options[0]?.description && (
+                        <p className="grill-opt-desc">
+                          {question.options.find((o) => o.label === value)?.description ||
+                            question.options.find((o) => o.recommended)?.description}
+                        </p>
+                      )}
                     </div>
                   )}
                   <textarea
