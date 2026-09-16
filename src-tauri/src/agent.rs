@@ -29,6 +29,314 @@ pub struct PlanResult {
     pub plan_path: String,
 }
 
+// ---------- Interactive grill (UI stepper) ----------
+
+#[derive(Serialize, Clone, Debug)]
+pub struct GrillQuestion {
+    pub id: String, // q1, q2, ... stable within the round
+    pub text: String,
+    #[serde(default)]
+    pub options: Vec<String>, // optional suggested answers
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct GrillRound {
+    pub done: bool,      // true = interview finished, summary field set
+    pub questions: Vec<GrillQuestion>,
+    #[serde(default)]
+    pub summary: String, // final decision summary when done
+}
+
+/// One round of the interview: the agent sees the card + the answers so far
+/// and must reply with ONLY a JSON object. Headless claude call.
+pub fn grill_round(
+    ws_name: &str,
+    card: &CardRef,
+    answers: &[(String, String)], // (questionId, answer) pairs, oldest first
+    rounds_done: usize,           // completed rounds so far (for the cap)
+    max_rounds: Option<usize>,    // user cap; None = interview until settled
+) -> Result<GrillRound, String> {
+    let ws_dir = workspace_root()?.join("workspaces").join(ws_name);
+    if !ws_dir.exists() {
+        return Err(format!("workspace '{ws_name}' not found"));
+    }
+    let meta = crate::workspace::load_meta(&ws_dir)?;
+    let kind = TrackerKind::parse(&card.kind)?;
+    let detail = fetch_card(kind, &card.id)?;
+
+    let history = if answers.is_empty() {
+        "None yet — this is round 1.".to_string()
+    } else {
+        answers
+            .iter()
+            .map(|(q, a)| format!("- Q: {q}\n  A: {a}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+let cap_note = match max_rounds {
+        // The upcoming round IS the last allowed one — force a wrap-up.
+        Some(max) if rounds_done + 1 >= max => format!(
+            "\\n# HARD LIMIT\\nThis is the LAST and FINAL round (the developer capped the interview at {} round(s)). Ask at most 2 final clarification questions. When you reply, you MUST set done=true with a summary of everything decided so far.",
+            max
+        ),
+        Some(max) => format!(
+            "\\n# Round budget\\nRound {} of {}. Wrap up early if the essentials are settled.",
+            rounds_done + 1, max
+        ),
+        None => String::new(),
+    };
+
+    let prompt = format!(
+        r#"You are interviewing a developer to sharpen a plan (grill-me style).
+
+# Feature
+Title: {title}
+Description:
+{description}
+
+# Repositories
+{repos}
+
+# Answers so far
+{history}
+{cap_note}
+
+# Your job
+Ask the next round of questions — every question you can ask given the answers above (3-6 questions). Focus on behaviors, contracts, edge cases, failure modes and cross-repo impact the developer may have silently assumed. Never ask something already answered.
+
+If EVERYTHING important has been settled (the frontier is empty), set done=true instead and write a summary of the decisions (5-10 bullets).
+
+Reply with ONLY this JSON, no prose before or after:
+{{"done": false, "questions": [{{"id": "q1", "text": "...", "options": ["maybe", "or this"]}}]}}
+or, when finished:
+{{"done": true, "summary": "- decision 1\n- decision 2", "questions": []}}"#,
+        title = detail.title,
+        description = detail.description,
+        repos = meta
+            .repos
+            .iter()
+            .map(|r| format!("- `{r}`"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        history = history,
+        cap_note = cap_note,
+    );
+
+    let ai = crate::config::Config::load()?.ai;
+    let out = match ai.agent.as_str() {
+        "opencode" => Command::new("opencode")
+            .args(["run", "--model", &ai.model, &prompt])
+            .current_dir(&ws_dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|e| format!("failed to launch opencode: {e}"))?,
+        _ => Command::new("claude")
+            .args(["-p", "--model", &ai.model, &prompt])
+            .current_dir(&ws_dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|e| format!("failed to launch claude: {e}"))?,
+    };
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    let reply = String::from_utf8_lossy(&out.stdout);
+    parse_grill_json(&reply)
+}
+
+/// Extracts the first JSON object from the agent reply and shapes it.
+fn parse_grill_json(reply: &str) -> Result<GrillRound, String> {
+    let start = reply.find('{').ok_or("agent replied without JSON")?;
+    let end = reply.rfind('}').ok_or("agent reply has no closing brace")?;
+    let slice = &reply[start..=end];
+    let v: serde_json::Value = serde_json::from_str(slice)
+        .map_err(|e| format!("invalid interview JSON: {e}"))?;
+    let done = v.get("done").and_then(|d| d.as_bool()).unwrap_or(false);
+    let summary = v.get("summary").and_then(|s| s.as_str()).unwrap_or("").to_string();
+    let mut questions = Vec::new();
+    if let Some(arr) = v.get("questions").and_then(|q| q.as_array()) {
+        for (i, q) in arr.iter().enumerate() {
+            let text = q.get("text").and_then(|t| t.as_str()).unwrap_or("").to_string();
+            if text.is_empty() {
+                continue;
+            }
+            let id = q
+                .get("id")
+                .and_then(|i| i.as_str())
+                .map(String::from)
+                .unwrap_or_else(|| format!("q{}", i + 1));
+            let options = q
+                .get("options")
+                .and_then(|o| o.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|s| s.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            questions.push(GrillQuestion { id, text, options });
+        }
+    }
+    if !done && questions.is_empty() {
+        return Err("agent finished the round with no questions and no summary".into());
+    }
+    Ok(GrillRound {
+        done,
+        questions,
+        summary,
+    })
+}
+
+/// Generates PLAN.md incorporating the interview decisions (headless, same
+/// contract as generate_plan but with the summary injected as context).
+pub fn generate_plan_with_decisions(
+    app: &AppHandle,
+    ws_name: &str,
+    card: &CardRef,
+    decisions: &str,
+) -> Result<PlanResult, String> {
+    let ws_dir = workspace_root()?.join("workspaces").join(ws_name);
+    if !ws_dir.exists() {
+        return Err(format!("workspace '{ws_name}' not found"));
+    }
+    let meta = crate::workspace::load_meta(&ws_dir)?;
+    let kind = TrackerKind::parse(&card.kind)?;
+    let detail = fetch_card(kind, &card.id)?;
+
+    let prompt = format!(
+        r#"Write the implementation plan for the feature below. The developer was interviewed; their confirmed decisions follow. Honor them.
+
+# Feature
+Title: {title}
+Description:
+{description}
+
+# Repositories
+{repos}
+
+# Confirmed decisions from the interview
+{decisions}
+
+# Task
+Explore the repositories as needed and write a markdown plan to `{plan_path}` (absolute path — write EXACTLY this path). Follow this structure:
+
+```
+# {title}
+
+**Card**: [{id}]({url}) · **Branch**: {branch}
+
+## Context
+
+(3-6 bullets: card summary + the interview decisions)
+
+## Plan
+
+- [ ] <task> — <repo> (4-8 concrete, ordered tasks, each naming its repository)
+```
+
+Write ONLY that file. Do not modify repository code. Reply with the path you wrote."#,
+        title = detail.title,
+        description = detail.description,
+        repos = meta
+            .repos
+            .iter()
+            .map(|r| format!("- `{r}`"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        decisions = decisions,
+        plan_path = ws_dir.join(PLAN_FILE).display(),
+        id = detail.id,
+        url = detail.url,
+        branch = meta.branch,
+    );
+
+    let ai = crate::config::Config::load()?.ai;
+    let mut cmd = match ai.agent.as_str() {
+        "opencode" => {
+            let mut c = Command::new("opencode");
+            // Same rationale as generate_plan: headless runs can't ask for
+            // permission, so auto-approve what isn't denied.
+            c.args(["run", "--model", &ai.model, "--auto", &prompt]);
+            c
+        }
+        _ => {
+            let mut c = Command::new("claude");
+            c.args([
+                "-p",
+                "--model",
+                &ai.model,
+                "--permission-mode",
+                "acceptEdits",
+                &prompt,
+            ]);
+            c
+        }
+    };
+    cmd.current_dir(&ws_dir).stdin(Stdio::null());
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("failed to launch {}: {e}", ai.agent))?;
+    let mut stderr = child.stderr.take();
+    let app_err = app.clone();
+    std::thread::spawn(move || {
+        if let Some(err) = stderr.take() {
+            for line in BufReader::new(err).lines().map_while(Result::ok) {
+                let _ = app_err.emit(
+                    "plan-progress",
+                    PlanEvent {
+                        status: "line",
+                        line: format!("[stderr] {line}"),
+                    },
+                );
+            }
+        }
+    });
+    let stdout = child.stdout.take().ok_or("no stdout from agent")?;
+    for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+        let _ = app.emit("plan-progress", PlanEvent { status: "line", line });
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(AGENT_TIMEOUT_SECS);
+    let exit_ok = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status.success(),
+            Ok(None) => {
+                if std::time::Instant::now() > deadline {
+                    let _ = child.kill();
+                    return Err("agent timed out".into());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => return Err(format!("failed waiting agent: {e}")),
+        }
+    };
+    if !exit_ok {
+        return Err("agent exited with an error — see the log above".into());
+    }
+
+    let plan_path = ws_dir.join(PLAN_FILE);
+    let mut reply = String::new();
+    let _ = &mut reply;
+    if !plan_path.exists() {
+        return Err("agent finished but did not write PLAN.md".into());
+    }
+    let _ = app.emit(
+        "plan-progress",
+        PlanEvent {
+            status: "done",
+            line: plan_path.to_string_lossy().to_string(),
+        },
+    );
+    Ok(PlanResult {
+        plan_path: plan_path.to_string_lossy().to_string(),
+    })
+}
+
 /// Renders the plan prompt. Users can override the template at
 /// ~/.config/orbit/plan-prompt.md; the compiled default covers the
 /// PLAN.md contract (context + `- [ ]` tasks).
@@ -430,6 +738,82 @@ pub fn set_task_in_content(raw: &str, index: usize, done: bool) -> Result<String
 }
 
 /// Tasks from the workspace's PLAN.md (empty when no plan exists).
+/// Renders the interactive "grill" interview prompt (Orca-adjacent
+/// /grill-me style): the agent interviews the user in rounds about the
+/// card, then writes PLAN.md. Runs in an interactive terminal session.
+pub fn build_grill_prompt(
+    card: &CardDetail,
+    repos: &[String],
+    branch: &str,
+    ws_name: &str,
+    ws_dir: &std::path::Path,
+) -> String {
+    let plan_abs = ws_dir.join(PLAN_FILE);
+    format!(
+        r#"We are planning the feature below. You will interview me (grill me) before writing the plan.
+
+# Card
+Title: {title}
+Description:
+{description}
+
+# Workspace
+Name: {ws_name}
+Branch: {branch}
+Repositories (git worktrees in subdirectories of the current folder):
+{repos}
+
+# How to run this session
+1. Ask questions in ROUNDS: each round, ask every question you can ask with what you already know (never a question that hinges on an answer you haven't heard). Wait for my answers before the next round.
+2. One question at a time per message is fine; keep rounds short (3-6 questions).
+3. Focus on behaviors, contracts, edge cases, failure modes, and cross-repo impact I may have silently assumed.
+4. If I say "I don't know", propose 2-3 options with trade-offs instead of rephrasing.
+5. Stop when the frontier is empty: nothing left silently assumed. Then confirm a short summary of decisions.
+6. AFTER I confirm, write the plan to `{plan_path}` (absolute path, write EXACTLY this path) following this structure:
+
+# {title}
+
+**Card**: [{id}]({url}) · **Branch**: {branch}
+
+## Context
+
+(3-6 bullets: card summary + decisions from the interview)
+
+## Plan
+
+- [ ] <task> — <repo> (4-8 concrete, ordered tasks, each naming its repository)
+
+Do not modify repository code. Only write the plan file after I confirm the decisions."#,
+        title = card.title,
+        description = card.description,
+        ws_name = ws_name,
+        branch = branch,
+        repos = repos.iter().map(|r| format!("- `{r}`")).collect::<Vec<_>>().join("\n"),
+        plan_path = plan_abs.display(),
+        id = card.id,
+        url = card.url,
+    )
+}
+
+/// Fetches card detail and renders the grill prompt (for the interactive
+/// interview session opened by the Plan modal).
+pub fn grill_prompt(ws_name: &str, card: &CardRef) -> Result<String, String> {
+    let ws_dir = workspace_root()?.join("workspaces").join(ws_name);
+    if !ws_dir.exists() {
+        return Err(format!("workspace '{ws_name}' not found"));
+    }
+    let meta = crate::workspace::load_meta(&ws_dir)?;
+    let kind = TrackerKind::parse(&card.kind)?;
+    let detail = fetch_card(kind, &card.id)?;
+    Ok(build_grill_prompt(
+        &detail,
+        &meta.repos,
+        &meta.branch,
+        ws_name,
+        &ws_dir,
+    ))
+}
+
 pub fn plan_tasks(ws_name: &str) -> Result<Vec<PlanTask>, String> {
     let path = workspace_root()?.join("workspaces").join(ws_name).join(PLAN_FILE);
     if !path.exists() {

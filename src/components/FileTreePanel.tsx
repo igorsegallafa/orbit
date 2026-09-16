@@ -62,6 +62,7 @@ export function FileTreePanel({ workspace, onOpenFile, onReviewFile, onReviewCom
   const justDraggedRef = useRef(false);
   const [dragging, setDragging] = useState<TreeTarget | null>(null);
   const [dragHover, setDragHover] = useState<string | null>(null);
+  const [dragOverTerminal, setDragOverTerminal] = useState(false);
   const [ghostPos, setGhostPos] = useState<{ x: number; y: number } | null>(null);
 
   const loadDir = async (dir: string) => {
@@ -239,6 +240,13 @@ export function FileTreePanel({ workspace, onOpenFile, onReviewFile, onReviewCom
         setDragging(st.src);
       }
       setGhostPos({ x: e.clientX, y: e.clientY });
+      const overEl = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
+      const overTerminal = !!overEl?.closest(".terminal-host");
+      setDragOverTerminal(overTerminal);
+      if (overTerminal) {
+        setDragHover(null);
+        return;
+      }
       const dir = dropDirAt(e.clientX, e.clientY);
       if (dir === null) {
         setDragHover(null);
@@ -256,16 +264,27 @@ export function FileTreePanel({ workspace, onOpenFile, onReviewFile, onReviewCom
         justDraggedRef.current = true;
         setTimeout(() => (justDraggedRef.current = false), 200);
         if (e) {
-          const dir = dropDirAt(e.clientX, e.clientY);
           const src = st.src;
-          if (dir !== null && dir !== src.path && !dir.startsWith(src.path + "/")) {
-            moveRef.current(src, dir);
+          // 1) Dropped over an agent terminal? Inject the path into its PTY.
+          const el = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
+          const termHost = el?.closest(".terminal-host") as HTMLElement | null;
+          if (termHost) {
+            termHost.dispatchEvent(
+              new CustomEvent("orbit-drop-file", { detail: { path: src.path } })
+            );
+          } else {
+            // 2) Otherwise: folder move, as before.
+            const dir = dropDirAt(e.clientX, e.clientY);
+            if (dir !== null && dir !== src.path && !dir.startsWith(src.path + "/")) {
+              moveRef.current(src, dir);
+            }
           }
         }
       }
       dragRef.current = { startX: 0, startY: 0, src: null, active: false };
       setDragging(null);
       setDragHover(null);
+      setDragOverTerminal(false);
       setGhostPos(null);
     };
 
@@ -446,7 +465,11 @@ export function FileTreePanel({ workspace, onOpenFile, onReviewFile, onReviewCom
       {dragging && ghostPos && (
         <div className="tree-drag-ghost" style={{ left: ghostPos.x + 12, top: ghostPos.y + 14 }}>
           {dragging.path.split("/").pop()}
-          {dragHover !== null ? <span className="tree-drag-ghost-target"> → {dragHover || "root"}</span> : null}
+          {dragOverTerminal ? (
+            <span className="tree-drag-ghost-target"> → agent</span>
+          ) : dragHover !== null ? (
+            <span className="tree-drag-ghost-target"> → {dragHover || "root"}</span>
+          ) : null}
         </div>
       )}
 

@@ -4,6 +4,7 @@ import { RepoStatus, Workspace } from "../types/config";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { SkeletonTable } from "../components/Skeleton";
 import { PlanModal } from "../components/PlanModal";
+import { GrillModal } from "../components/GrillModal";
 import { PlanProgress } from "../components/PlanProgress";
 
 interface Props {
@@ -19,6 +20,7 @@ export function WorkspaceDetailPage({ workspace, onOpenEditor, onOpenPlan, onRem
   const [refreshing, setRefreshing] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState<null | "normal" | "force">(null);
   const [planOpen, setPlanOpen] = useState(false);
+  const [grillOpen, setGrillOpen] = useState(false);
   const [planExists, setPlanExists] = useState<boolean | null>(null);
 
   // Does a PLAN.md already exist for this workspace?
@@ -80,13 +82,24 @@ export function WorkspaceDetailPage({ workspace, onOpenEditor, onOpenPlan, onRem
           <h2>{workspace.name}</h2>
           <div className="detail-actions">
             {workspace.card && (
-              <button
-                className="secondary"
-                title={planExists ? "Open the generated PLAN.md" : "Generate a PLAN.md from the linked card"}
-                onClick={() => (planExists ? onOpenPlan() : setPlanOpen(true))}
-              >
-                {planExists ? "Open plan" : "✳ Plan"}
-              </button>
+              <>
+                <button
+                  className="secondary"
+                  title={planExists ? "Open the generated PLAN.md" : "Generate a PLAN.md from the linked card"}
+                  onClick={() => (planExists ? onOpenPlan() : setPlanOpen(true))}
+                >
+                  {planExists ? "Open plan" : "✳ Plan"}
+                </button>
+                {planExists && (
+                  <button
+                    className="secondary"
+                    title="Discard the current PLAN.md and generate a new one"
+                    onClick={() => setPlanOpen(true)}
+                  >
+                    ↻ Replan
+                  </button>
+                )}
+              </>
             )}
             <button className="secondary" disabled={refreshing} onClick={() => load(true)}>
               {refreshing ? "Refreshing…" : "↻ Refresh"}
@@ -181,6 +194,16 @@ export function WorkspaceDetailPage({ workspace, onOpenEditor, onOpenPlan, onRem
         />
       )}
 
+      {grillOpen && workspace.card && (
+        <GrillModal
+          workspace={workspace}
+          card={workspace.card}
+          onPlanReady={() => setPlanExists(true)}
+          onClose={() => setGrillOpen(false)}
+          onError={onError}
+        />
+      )}
+
       {planOpen && workspace.card && (
         <PlanModal
           workspace={workspace}
@@ -189,6 +212,7 @@ export function WorkspaceDetailPage({ workspace, onOpenEditor, onOpenPlan, onRem
             setPlanOpen(false);
             onOpenPlan();
           }}
+          onStartInterview={() => setGrillOpen(true)}
           onClose={() => {
             setPlanOpen(false);
             setPlanExists(true);

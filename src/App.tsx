@@ -8,7 +8,7 @@ import { WorkspaceDetailPage } from "./pages/WorkspaceDetailPage";
 import { SidebarResizer } from "./components/SidebarResizer";
 import { ContextMenu, MenuItem, useContextMenu } from "./components/ContextMenu";
 import { EditorPane } from "./components/EditorPane";
-import { TerminalPane, TerminalTab } from "./components/TerminalPane";
+import { TerminalPane, TerminalTab, dropFilesIntoTerminal } from "./components/TerminalPane";
 import { FileTreePanel } from "./components/FileTreePanel";
 import { ReviewPane } from "./components/ReviewPane";
 import { CommitReviewPane } from "./components/CommitReviewPane";
@@ -93,6 +93,28 @@ function App() {
   useEffect(() => {
     loadWorkspaces();
   }, [loadWorkspaces]);
+
+  // External file drops (Finder → window): the Tauri native drag-drop event
+  // carries absolute paths; inject them into the active agent terminal.
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    import("@tauri-apps/api/webview").then(({ getCurrentWebview }) => {
+      const w = getCurrentWebview();
+      const off = w.onDragDropEvent((event) => {
+        if (event.payload.type !== "drop") return;
+        const paths = event.payload.paths ?? [];
+        if (paths.length === 0) return;
+        // Route to the active terminal session, if any.
+        const activeTabObj = tabs.find((t) => tabId(t) === activeTab);
+        if (activeTabObj?.kind === "terminal") {
+          dropFilesIntoTerminal(activeTabObj.terminal.id, paths);
+        }
+      });
+      off.then((f: () => void) => (unlisten = f));
+    });
+    return () => unlisten?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, tabs]);
 
   // Keep the active tab visible in the strip: opening/focusing a tab when
   // the strip overflows should scroll it into view automatically.
@@ -247,6 +269,29 @@ function App() {
 
   const openShellTerminal = (wsName: string) => newTerminal(wsName, "shell", null);
 
+  // Opens an interactive agent session seeded with a prompt (grill-me
+  // interviews, plan application). claude takes the prompt as argv; the
+  // opencode TUI types it in after boot.
+  const openPromptedSession = (wsName: string, agent: string, model: string, prompt: string) => {
+    const args =
+      agent === "claude"
+        ? ["--model", model, prompt]
+        : ["--model", model];
+    const initialInput = agent === "claude" ? undefined : prompt;
+    openTab({
+      kind: "terminal",
+      terminal: {
+        id: `tm:${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        workspace: wsName,
+        label: agent,
+        sessionName: `run ${wsName.split("/").pop() ?? ""}`.trim(),
+        cmd: agent,
+        args,
+        initialInput,
+      },
+    });
+  };
+
   // Collapse/expand of workspace sessions in the sidebar; persisted so the
   // tree reopens as the user left it.
   const toggleWsExpanded = (wsName: string) => {
@@ -362,22 +407,7 @@ function App() {
           onError={setError}
           onApplyPlan={(agent, model) => {
             const prompt = `Read PLAN.md in this directory and implement it: work through the "- [ ]" tasks in order, marking each done (change to "- [x]") as you finish it. Commit nothing unless asked.`;
-            // claude accepts an initial prompt as argv; the opencode TUI does
-            // not (positional = project dir), so we type it into the PTY.
-            const args = agent === "claude" ? ["--model", model, prompt] : ["--model", model];
-            const initialInput = agent === "claude" ? undefined : prompt;
-            openTab({
-              kind: "terminal",
-              terminal: {
-                id: `tm:${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-                workspace: tab.workspace,
-                label: agent,
-                sessionName: `apply ${tab.workspace.split("/").pop() ?? ""}`.trim(),
-                cmd: agent,
-                args,
-                initialInput,
-              },
-            });
+            openPromptedSession(tab.workspace, agent, model, prompt);
           }}
         />
       );

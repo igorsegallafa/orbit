@@ -2109,6 +2109,13 @@ table.list tbody tr:hover .row-actions,
   padding: 8px 10px;
 }
 
+/* File drop target highlight on agent terminals */
+.terminal-drop-hover {
+  outline: 2px dashed var(--accent);
+  outline-offset: -4px;
+  background: rgba(79, 124, 247, 0.06);
+}
+
 /* ---------- Animated status indicator ---------- */
 
 .status-wrap {
@@ -3112,6 +3119,160 @@ table.list tbody tr:hover .row-actions,
 /* ---------- Layout toggles (hide/show side docks) ---------- */
 
 /* When a dock is hidden, its toggle glows to hint it's there */
+
+/* ---------- Grill interview (native stepper) ---------- */
+
+.modal-grill {
+  width: min(560px, 92vw);
+  max-height: 80vh;
+}
+
+.grill-body {
+  display: flex;
+  flex-direction: column;
+  min-height: 240px;
+  overflow-y: auto; /* long questions/options scroll inside the modal */
+}
+
+.grill-loading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-faint);
+  font-size: 13px;
+  padding: 40px 0;
+  justify-content: center;
+}
+
+.grill-progress {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--accent);
+  margin-bottom: 10px;
+}
+
+.grill-question {
+  font-size: 15px;
+  font-weight: 550;
+  color: var(--text);
+  line-height: 1.5;
+  margin: 0 0 18px;
+  white-space: pre-wrap;
+}
+
+.grill-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 16px;
+  padding-top: 2px;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+/* Suggestion chips must wrap their text instead of stretching the modal */
+.grill-options .chip {
+  white-space: normal;
+  max-width: 100%;
+  overflow-wrap: break-word;
+  line-height: 1.35;
+  padding: 4px 12px;
+  height: auto;
+  min-height: 24px;
+  text-align: left;
+}
+
+.grill-answer {
+  width: 100%;
+  min-height: 90px;
+  resize: vertical;
+  font-size: 13px;
+  font-family: inherit;
+  line-height: 1.5;
+  padding: 10px;
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  color: var(--text);
+  transition: border-color var(--transition), box-shadow var(--transition);
+}
+
+.grill-answer:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(79, 124, 247, 0.18);
+}
+
+.grill-answer::placeholder {
+  color: var(--text-faint);
+}
+
+.grill-step-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+/* Cancel sits alone on the left when there are 2+ action buttons */
+.grill-step-actions .danger-outline {
+  margin-right: auto;
+}
+
+.grill-summary-intro {
+  font-size: 13px;
+  color: var(--text-dim);
+  margin: 0 0 12px;
+}
+
+.grill-summary-text {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  font-size: 12.5px;
+  color: var(--text);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  max-height: 300px;
+  overflow-y: auto;
+  margin: 0 0 14px;
+  font-family: inherit;
+}
+
+.grill-history {
+  border-top: 1px solid var(--border);
+  padding: 10px 16px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.grill-history-item {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.grill-history-q {
+  font-size: 11px;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.grill-history-a {
+  font-size: 12px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 
 /* ---------- Feedback ---------- */
 

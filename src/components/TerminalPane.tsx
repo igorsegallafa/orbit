@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
@@ -25,6 +25,17 @@ interface Props {
   tab: TerminalTab;
   onError: (msg: string) => void;
   onStatusChange?: (status: AgentStatus) => void;
+  /** Marks this pane as the drop target for external (window-level) drags. */
+  isDropTarget?: boolean;
+}
+
+/** Live PTYs by session id — used to route external file drops. */
+const livePtys = new Map<string, { ptyId: number | null; inject: (text: string) => void }>();
+
+/** Called by the App when files are dropped on the window (native event):
+ *  injects the paths into the given session's prompt. */
+export function dropFilesIntoTerminal(sessionId: string, paths: string[]) {
+  livePtys.get(sessionId)?.inject(paths.join(" "));
 }
 
 export function TerminalPane({ tab, onError, onStatusChange }: Props) {
@@ -35,6 +46,42 @@ export function TerminalPane({ tab, onError, onStatusChange }: Props) {
   const onStatusRef = useRef(onStatusChange);
   onStatusRef.current = onStatusChange;
   const [status, setStatus] = useState<AgentStatus>("idle");
+
+  // Types the text into the running agent's prompt (PTY keystrokes).
+  const injectText = useCallback((text: string) => {
+    if (ptyIdRef.current !== null) {
+      invoke("pty_write", { id: ptyIdRef.current, data: text }).catch(() => null);
+    }
+  }, []);
+
+  // Register in the live-PTY registry (for external window-level drops).
+  useEffect(() => {
+    livePtys.set(tab.id, { ptyId: null, inject: injectText });
+    return () => {
+      livePtys.delete(tab.id);
+    };
+  }, [tab.id, injectText]);
+  // Keep the registry entry's ptyId fresh.
+  useEffect(() => {
+    const entry = livePtys.get(tab.id);
+    if (entry) entry.ptyId = ptyIdRef.current;
+  });
+
+  // Internal drag from the file tree: the tree's manual drag hit-tests
+  // panels and dispatches "orbit-drop-file" with a workspace-relative path.
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+    const onDropFile = (e: Event) => {
+      const detail = (e as CustomEvent<{ path: string }>).detail;
+      if (detail?.path) {
+        injectText(detail.path);
+        termRef.current?.focus();
+      }
+    };
+    host.addEventListener("orbit-drop-file", onDropFile);
+    return () => host.removeEventListener("orbit-drop-file", onDropFile);
+  }, [injectText]);
 
   useEffect(() => {
     if (!hostRef.current) return;

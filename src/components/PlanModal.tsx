@@ -7,6 +7,8 @@ interface Props {
   workspace: Workspace;
   card: CardRef;
   onOpenPlan: () => void;
+  /** Opens the native grill-me interview stepper. */
+  onStartInterview: () => void;
   onClose: () => void;
   onError: (msg: string) => void;
 }
@@ -21,7 +23,7 @@ interface PlanEvent {
  * agent (Settings → AI) to produce PLAN.md in the workspace root, streaming
  * the agent's output live. Closes itself and opens the plan on success.
  */
-export function PlanModal({ workspace, card, onOpenPlan, onClose, onError }: Props) {
+export function PlanModal({ workspace, card, onOpenPlan, onStartInterview, onClose, onError }: Props) {
   const [detail, setDetail] = useState<CardDetail | null>(null);
   const [running, setRunning] = useState(false);
   const [log, setLog] = useState<string[]>([]);
@@ -32,7 +34,7 @@ export function PlanModal({ workspace, card, onOpenPlan, onClose, onError }: Pro
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
 
-  // Load card detail (description) for context
+  // Load card detail (description) + AI settings for context
   useEffect(() => {
     let cancelled = false;
     invoke<CardDetail>("integration_fetch_card", { kind: card.kind, id: card.id })
@@ -69,6 +71,11 @@ export function PlanModal({ workspace, card, onOpenPlan, onClose, onError }: Pro
   useEffect(() => {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
   }, [log]);
+
+  const startInterview = () => {
+    onStartInterview();
+    onCloseRef.current();
+  };
 
   const generate = async () => {
     setRunning(true);
@@ -148,9 +155,15 @@ export function PlanModal({ workspace, card, onOpenPlan, onClose, onError }: Pro
             </button>
           )}
           {!running && !log.length && (
-            <button onClick={generate} disabled={running || !detail}>
-              Generate plan
-            </button>
+            <>
+              <button className="secondary" onClick={startInterview} disabled={!detail}
+                title="Interview me first: the agent asks questions in rounds to confirm behaviors, then writes the plan">
+                Interview first
+              </button>
+              <button onClick={generate} disabled={running || !detail}>
+                Generate plan
+              </button>
+            </>
           )}
         </div>
       </div>
