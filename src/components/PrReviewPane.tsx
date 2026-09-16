@@ -5,6 +5,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { PrDetail, PrFileDiff, PullRequest } from "../types/config";
 import { Skeleton } from "./Skeleton";
 import { tooltip } from "./Tooltip";
+import { useDiffNav } from "./useDiffNav";
 
 interface Props {
   /** All PRs of the feature group (1 for single-repo PRs). */
@@ -64,6 +65,7 @@ export function PrReviewPane({ prs, onError }: Props) {
   const [selected, setSelected] = useState<string | null>(null);
   const [diff, setDiff] = useState<PrFileDiff | null>(null);
   const [split, setSplit] = useState(false); // unified by default
+  const nav = useDiffNav();
 
   const pr = prs[activeIdx];
 
@@ -180,8 +182,31 @@ export function PrReviewPane({ prs, onError }: Props) {
         <div className="pr-diff-col">
           <div className="editor-filebar">
             <span className="mono pr-diff-path">{selected}</span>
-            <span className="editor-filebar-actions">
-              <span className="mode-toggle">
+              <span className="editor-filebar-actions">
+                {nav.count > 0 && (
+                  <span className="diff-nav">
+                    <button
+                      className="mode-btn"
+                      onMouseEnter={(e) => tooltip.show("Previous change (Shift+F7)", e)}
+                      onMouseLeave={() => tooltip.hide()}
+                      onClick={() => nav.jump(-1)}
+                    >
+                      ‹
+                    </button>
+                    <span className="diff-nav-count">
+                      {nav.index < 0 ? "–" : nav.index + 1}/{nav.count}
+                    </span>
+                    <button
+                      className="mode-btn"
+                      onMouseEnter={(e) => tooltip.show("Next change (F7)", e)}
+                      onMouseLeave={() => tooltip.hide()}
+                      onClick={() => nav.jump(1)}
+                    >
+                      ›
+                    </button>
+                  </span>
+                )}
+                <span className="mode-toggle">
                 <button
                   className={`mode-btn ${split ? "mode-active" : ""}`}
                   onMouseEnter={(e) => tooltip.show("Split view — side by side", e)}
@@ -207,6 +232,7 @@ export function PrReviewPane({ prs, onError }: Props) {
                 height="100%"
                 theme="orbit-dark"
                 beforeMount={beforeMount}
+                onMount={nav.onMount}
                 language={langOf(selected)}
                 original={diff.original}
                 modified={diff.modified}
@@ -217,7 +243,8 @@ export function PrReviewPane({ prs, onError }: Props) {
                   minimap: { enabled: false },
                   scrollBeyondLastLine: false,
                   automaticLayout: true,
-                  renderOverviewRuler: false,
+                  renderOverviewRuler: true,
+                  overviewRulerLanes: 3,
                   diffWordWrap: "off",
                 } as never}
                 loading={<div className="table-loading"><span className="spinner" /> Loading diff…</div>}

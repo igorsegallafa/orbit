@@ -3,6 +3,7 @@ import { DiffEditor, type BeforeMount } from "@monaco-editor/react";
 import { invoke } from "@tauri-apps/api/core";
 import { GitChange, GitFileDiff } from "../types/config";
 import { tooltip } from "./Tooltip";
+import { useDiffNav } from "./useDiffNav";
 
 interface Props {
   workspace: string;
@@ -64,6 +65,7 @@ function langOf(path: string): string | undefined {
 export function ReviewPane({ workspace, repo, path, sha, shaLabel, onError }: Props) {
   const [diff, setDiff] = useState<GitFileDiff | null>(null);
   const [split, setSplit] = useState(false); // unified by default (GitHub-style)
+  const nav = useDiffNav();
 
   useEffect(() => {
     setDiff(null);
@@ -87,6 +89,29 @@ export function ReviewPane({ workspace, repo, path, sha, shaLabel, onError }: Pr
           {repo}/{path || "…"}
         </span>
         <span className="editor-filebar-actions">
+          {nav.count > 0 && (
+            <span className="diff-nav">
+              <button
+                className="mode-btn"
+                onMouseEnter={(e) => tooltip.show("Previous change (Shift+F7)", e)}
+                onMouseLeave={() => tooltip.hide()}
+                onClick={() => nav.jump(-1)}
+              >
+                ‹
+              </button>
+              <span className="diff-nav-count">
+                {nav.index < 0 ? "–" : nav.index + 1}/{nav.count}
+              </span>
+              <button
+                className="mode-btn"
+                onMouseEnter={(e) => tooltip.show("Next change (F7)", e)}
+                onMouseLeave={() => tooltip.hide()}
+                onClick={() => nav.jump(1)}
+              >
+                ›
+              </button>
+            </span>
+          )}
           <span className="mode-toggle">
             <button
               className={`mode-btn ${split ? "mode-active" : ""}`}
@@ -113,6 +138,7 @@ export function ReviewPane({ workspace, repo, path, sha, shaLabel, onError }: Pr
             height="100%"
             theme="orbit-dark"
             beforeMount={beforeMount}
+            onMount={nav.onMount}
             language={langOf(path)}
             original={diff.original}
             modified={diff.modified}
@@ -123,7 +149,8 @@ export function ReviewPane({ workspace, repo, path, sha, shaLabel, onError }: Pr
               minimap: { enabled: false },
               scrollBeyondLastLine: false,
               automaticLayout: true,
-              renderOverviewRuler: false,
+              renderOverviewRuler: true,
+              overviewRulerLanes: 3,
               diffWordWrap: "off",
             } as never}
             loading={<div className="table-loading"><span className="spinner" /> Loading diff…</div>}

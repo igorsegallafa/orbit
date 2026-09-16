@@ -1839,6 +1839,17 @@ table.list tbody tr:hover .row-actions,
   position: relative;
 }
 
+/* Diff editors: hide the per-editor scrollbars and keep only the native
+ * .diffOverview strip (red originals + green modifieds, clickable). With
+ * renderOverviewRuler: true Monaco renders BOTH — three scrollbars — so we
+ * collapse the two regular ones. */
+.editor-host .monaco-diff-editor .editor.original .scrollbar.vertical,
+.editor-host .monaco-diff-editor .editor.modified .scrollbar.vertical {
+  width: 0 !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
 .editor-filebar {
   display: flex;
   justify-content: space-between;
@@ -1901,6 +1912,32 @@ table.list tbody tr:hover .row-actions,
   border: 1px solid var(--border);
   border-radius: 6px;
   overflow: hidden;
+}
+
+.diff-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-right: 8px;
+}
+
+.diff-nav .mode-btn {
+  border-radius: 6px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--fg-muted);
+}
+
+.diff-nav .mode-btn:hover {
+  color: var(--fg);
+}
+
+.diff-nav-count {
+  font-size: 11px;
+  color: var(--fg-muted);
+  min-width: 34px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
 }
 
 .mode-btn {
