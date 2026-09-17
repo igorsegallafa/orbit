@@ -84,6 +84,32 @@ export interface WsPrStatus {
   updatedAt: string; // ISO
 }
 
+/** CI check of one PR (GitHub Actions or external status). */
+export interface PrCheck {
+  name: string;
+  state: string;
+  bucket: "pass" | "fail" | "pending" | "skipping" | string;
+  workflow: string;
+  link: string;
+  startedAt: string;
+  completedAt: string;
+}
+
+/** Checks of one PR + aggregate (pass | fail | running | none). */
+export interface WsCheck {
+  repo: string;
+  prNumber: number;
+  checks: PrCheck[];
+  status: string;
+}
+
+/** AI analysis of a failed check. */
+export interface CheckAnalysis {
+  problem: string;
+  fix: string;
+  actionable: boolean;
+}
+
 export interface PrGroup {
   branch: string;
   prs: PullRequest[];

@@ -86,9 +86,9 @@ export function PlusIcon({ size = 17 }: IconProps) {
   );
 }
 
-export function ChevronRightIcon({ size = 17 }: IconProps) {
+export function ChevronRightIcon({ size = 17, className }: IconProps & { className?: string }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" stroke="none">
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" stroke="none" className={className}>
       <path d="M8.6 4.4c-.4-.4-1-.5-1.5-.2-.5.3-.8.8-.8 1.3v13c0 .5.3 1 .8 1.3.5.3 1.1.2 1.5-.2l8-6.5c.35-.3.55-.75.55-1.2s-.2-.9-.55-1.2z" />
     </svg>
   );
@@ -236,6 +236,59 @@ export function SparkIcon({ size = 14 }: IconProps) {
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
       <path d="M12 3l1.9 5.7L19.6 10.6l-5.7 1.9L12 18.2l-1.9-5.7L4.4 10.6l5.7-1.9z" />
       <path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z" />
+    </svg>
+  );
+}
+
+/** CI check states: success, failure, neutral (skipped/no checks). */
+export function CheckIcon({ size = 12 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="m3 8.5 3.5 3.5L13 4.5" />
+    </svg>
+  );
+}
+
+export function XIcon({ size = 12 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="m4 4 8 8M12 4l-8 8" />
+    </svg>
+  );
+}
+
+export function CircleIcon({ size = 12 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2">
+      <circle cx="8" cy="8" r="5.5" />
+    </svg>
+  );
+}
+
+/** Spinning ring (determinate-free loading) — SVG so tiny sizes render
+ *  cleanly in WKWebView (CSS-border rings get squeezed by antialiasing
+ *  at fractional borders). */
+export function SpinnerIcon({ size = 14 }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      className="spinner-svg"
+      aria-label="loading"
+    >
+      <circle cx="12" cy="12" r="9" stroke="currentColor" strokeOpacity="0.25" strokeWidth="2.5" />
+      <path d="M12 3a9 9 0 0 1 9 9" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+        <animateTransform
+          attributeName="transform"
+          type="rotate"
+          from="0 12 12"
+          to="360 12 12"
+          dur="0.7s"
+          repeatCount="indefinite"
+        />
+      </path>
     </svg>
   );
 }

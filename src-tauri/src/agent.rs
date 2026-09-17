@@ -1277,3 +1277,166 @@ mod pr_draft_tests {
         assert!(parse_title_body("no title here").is_none());
     }
 }
+
+// ---------- CI check investigation ----------
+
+#[derive(Serialize, Clone, Debug)]
+pub struct CheckAnalysis {
+    /// What broke, 2-4 sentences, plain text.
+    pub problem: String,
+    /// The proposed fix (may reference files; empty when only infra).
+    pub fix: String,
+    /// true when the fix is code in this worktree (Apply makes sense).
+    pub actionable: bool,
+}
+
+/// AI analysis of a failed CI check: reads the failed-job log (bounded)
+/// and the PR's numstat, then explains the problem and proposes a fix.
+pub fn investigate_check(
+    ws_name: &str,
+    repo: &str,
+    check_name: &str,
+    failed_log: &str,
+) -> Result<CheckAnalysis, String> {
+    let dir = workspace_root()?.join("workspaces").join(ws_name).join(repo);
+    if !dir.exists() {
+        return Err(format!("worktree for '{repo}' not found"));
+    }
+    let out = Command::new("git")
+        .args(["diff", "--numstat", "HEAD"])
+        .current_dir(&dir)
+        .output()
+        .map_err(|e| format!("failed to run git: {e}"))?;
+    let numstat = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let prompt = format!(
+        r#"A GitHub Actions check failed on a pull request in this repository.
+
+Failed check: {check_name}
+
+Failed job log (tail):
+{failed_log}
+
+Local uncommitted changes (numstat, may be empty):
+{numstat}
+
+Analyze what broke. Consider whether the failure is caused by the PR's changes, by a flaky/external dependency, or by something infrastructural.
+
+Reply EXACTLY in this format, plain text, no code fences:
+PROBLEM: <2-4 sentences, objective, what broke and the evidence from the log>
+FIX: <the concrete correction, referencing files; empty string if nothing to fix in code>
+ACTIONABLE: <yes|no>  — yes when the fix is code in this repository"#,
+        check_name = check_name,
+        failed_log = failed_log,
+        numstat = if numstat.is_empty() { "(none)".to_string() } else { numstat },
+    );
+    let reply = agent_answer(&dir, &prompt)?;
+    parse_check_analysis(&reply)
+        .ok_or_else(|| "agent reply was not in PROBLEM:/FIX:/ACTIONABLE: format".into())
+}
+
+pub fn parse_check_analysis(raw: &str) -> Option<CheckAnalysis> {
+    let get = |key: &str| -> String {
+        match raw.find(key) {
+            Some(idx) => {
+                let after = &raw[idx + key.len()..];
+                let line_end = after.find('\n').unwrap_or(after.len());
+                after[..line_end].trim().to_string()
+            }
+            None => String::new(),
+        }
+    };
+    let problem = get("PROBLEM:");
+    let fix = get("FIX:");
+    let actionable = get("ACTIONABLE:")
+        .to_lowercase()
+        .trim_start_matches(|c: char| !c.is_ascii_alphabetic())
+        .starts_with('y');
+    if problem.is_empty() {
+        return None;
+    }
+    Some(CheckAnalysis {
+        problem,
+        fix,
+        actionable,
+    })
+}
+
+#[cfg(test)]
+mod check_analysis_tests {
+    use super::parse_check_analysis;
+
+    #[test]
+    fn parses_analysis_fields() {
+        let a = parse_check_analysis(
+            "PROBLEM: Build fails: missing dep.\nFIX: run go mod tidy.\nACTIONABLE: yes",
+        )
+        .unwrap();
+        assert_eq!(a.problem, "Build fails: missing dep.");
+        assert_eq!(a.fix, "run go mod tidy.");
+        assert!(a.actionable);
+    }
+
+    #[test]
+    fn handles_multiword_and_missing_fix() {
+        let a = parse_check_analysis(
+            "PROBLEM: infra flaked (npm registry 502).\nFIX: \nACTIONABLE: no",
+        )
+        .unwrap();
+        assert!(!a.actionable);
+        assert_eq!(a.fix, "");
+        assert!(parse_check_analysis("garbage").is_none());
+    }
+}
+
+/// Applies an AI-proposed CI fix in the worktree: agent with write
+/// permissions (acceptEdits/--auto), instructed to implement exactly the
+/// given fix. Staging/commit stay with the normal app flow.
+pub fn apply_check_fix(ws_name: &str, repo: &str, fix: &str) -> Result<(), String> {
+    let dir = workspace_root()?.join("workspaces").join(ws_name).join(repo);
+    if !dir.exists() {
+        return Err(format!("worktree for '{repo}' not found"));
+    }
+    let prompt = format!(
+        r#"Apply this fix to the repository code, exactly as described (no extra changes):
+
+{fix}
+
+Edit the files needed to implement it. Do NOT commit or stage — editing is enough. Reply with a one-line summary of what you changed."#,
+        fix = fix,
+    );
+
+    let ai = crate::config::Config::load()?.ai;
+    let mut cmd = match ai.agent.as_str() {
+        "opencode" => {
+            let mut c = Command::new("opencode");
+            c.args(["run", "--model", &ai.model, "--auto", &prompt]);
+            c
+        }
+        "omp" => {
+            let mut c = Command::new("omp");
+            c.args(["-p", "--auto-approve", "--model", &ai.model, &prompt]);
+            c
+        }
+        _ => {
+            let mut c = Command::new("claude");
+            c.args([
+                "-p",
+                "--model",
+                &ai.model,
+                "--permission-mode",
+                "acceptEdits",
+                &prompt,
+            ]);
+            c
+        }
+    };
+    cmd.current_dir(&dir).stdin(Stdio::null());
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let out = cmd
+        .output()
+        .map_err(|e| format!("failed to launch {}: {e}", ai.agent))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    Ok(())
+}

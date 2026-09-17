@@ -914,3 +914,130 @@ mod pr_wire_tests {
         assert_eq!(matched.len(), 2, "title + branch substrings");
     }
 }
+
+// ---------- CI checks (GitHub Actions status of a PR) ----------
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PrCheck {
+    pub name: String,
+    /// SUCCESS | FAILURE | PENDING | SKIPPED | NEUTRAL | ACTION_REQUIRED ...
+    pub state: String,
+    /// pass | fail | skipping | pending — gh's bucket, handy for grouping
+    pub bucket: String,
+    pub workflow: String,
+    pub link: String,
+    pub started_at: String,
+    pub completed_at: String,
+}
+
+/// CI checks attached to a PR (via `gh pr checks --json`).
+pub fn pr_checks(owner_repo: &str, number: u64) -> Result<Vec<PrCheck>, String> {
+    let out = run_gh(&[
+        "pr",
+        "checks",
+        "-R",
+        owner_repo,
+        &number.to_string(),
+        "--json",
+        "name,state,bucket,workflow,link,startedAt,completedAt",
+    ])?;
+    let v: Vec<GhCheck> =
+        serde_json::from_slice(&out).map_err(|e| format!("failed to parse pr checks: {e}"))?;
+    Ok(v.into_iter()
+        .map(|c| PrCheck {
+            name: c.name,
+            state: c.state,
+            bucket: c.bucket,
+            workflow: c.workflow,
+            link: c.link,
+            started_at: c.started_at,
+            completed_at: c.completed_at,
+        })
+        .collect())
+}
+
+#[derive(Deserialize)]
+struct GhCheck {
+    name: String,
+    state: String,
+    #[serde(default)]
+    bucket: String,
+    #[serde(default)]
+    workflow: String,
+    #[serde(default)]
+    link: String,
+    #[serde(rename = "startedAt", default)]
+    started_at: String,
+    #[serde(rename = "completedAt", default)]
+    completed_at: String,
+}
+
+/// Extracts the Actions run id from a check's job link
+/// (".../actions/runs/12345/job/678" → 12345). External statuses
+/// (Aikido, CodeRabbit) have no Actions link → None.
+pub fn run_id_from_link(link: &str) -> Option<u64> {
+    let idx = link.find("/actions/runs/")?;
+    let rest = &link[idx + "/actions/runs/".len()..];
+    let num: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    num.parse().ok()
+}
+
+#[cfg(test)]
+mod checks_tests {
+    use super::*;
+
+    #[test]
+    fn parses_run_id_from_job_link() {
+        assert_eq!(
+            run_id_from_link("https://github.com/o/r/actions/runs/35173937422/job/105051372465"),
+            Some(35173937422)
+        );
+        assert_eq!(
+            run_id_from_link("https://github.com/o/r/actions/runs/123"),
+            Some(123)
+        );
+        assert_eq!(run_id_from_link("https://app.aikido.dev/scan/195"), None);
+        assert_eq!(run_id_from_link(""), None);
+    }
+
+    #[test]
+    fn derives_owner_repo_from_job_link() {
+        assert_eq!(
+            owner_repo_from_link("https://github.com/NSXBet/r/actions/runs/1/job/2"),
+            Some("NSXBet/r".to_string())
+        );
+        assert_eq!(owner_repo_from_link("https://app.aikido.dev/x"), None);
+    }
+
+    #[test]
+    fn check_serializes_camelCase_for_frontend() {
+        // The frontend reads startedAt/completedAt — snake_case output was
+        // the same class of bug as PullRequest/RepoStatus (bit twice).
+        let c = PrCheck {
+            name: "test".into(),
+            state: "FAILURE".into(),
+            bucket: "fail".into(),
+            workflow: "CI".into(),
+            link: "https://x".into(),
+            started_at: "2026-01-01T00:00:00Z".into(),
+            completed_at: "2026-01-01T00:01:00Z".into(),
+        };
+        let v = serde_json::to_value(&c).unwrap();
+        assert!(v.get("startedAt").is_some(), "must be startedAt: {v}");
+        assert!(v.get("completedAt").is_some());
+    }
+}
+
+/// "https://github.com/owner/repo/actions/..." → "owner/repo" (None for
+/// external links).
+pub fn owner_repo_from_link(link: &str) -> Option<String> {
+    let rest = link.strip_prefix("https://github.com/")?;
+    let mut parts = rest.split('/');
+    let owner = parts.next()?;
+    let repo = parts.next()?;
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    Some(format!("{owner}/{repo}"))
+}

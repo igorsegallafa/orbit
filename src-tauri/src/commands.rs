@@ -913,3 +913,172 @@ pub async fn ws_pr_status(workspace: String) -> Result<Vec<github::WsPrStatus>, 
     })
     .await
 }
+
+// ---------- CI checks (tracker) ----------
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WsCheck {
+    pub repo: String,
+    pub pr_number: u64,
+    pub checks: Vec<github::PrCheck>,
+    /// Aggregated bucket for the row indicator: pass | fail | running | none
+    pub status: String,
+}
+
+fn aggregate(checks: &[github::PrCheck]) -> String {
+    if checks.is_empty() {
+        return "none".into();
+    }
+    if checks
+        .iter()
+        .any(|c| matches!(c.bucket.as_str(), "pending" | "queued"))
+    {
+        return "running".into();
+    }
+    if checks.iter().any(|c| c.bucket == "fail") {
+        return "fail".into();
+    }
+    if checks.iter().all(|c| c.bucket == "pass" || c.bucket == "skipping") {
+        "pass".into()
+    } else {
+        "none".into()
+    }
+}
+
+/// CI checks for every saved PR of the workspace, in parallel.
+#[tauri::command]
+pub async fn ws_checks(workspace: String) -> Result<Vec<WsCheck>, String> {
+    blocking(move || {
+        let ws_dir = workspace::workspace_root()?
+            .join("workspaces")
+            .join(&workspace);
+        let meta = workspace::load_meta(&ws_dir)?;
+        let rows: Vec<WsCheck> = std::thread::scope(|scope| {
+            let handles: Vec<_> = meta
+                .pr_refs
+                .iter()
+                .map(|r| {
+                    let (dir, pr) = (ws_dir.join(&r.repo), r.clone());
+                    scope.spawn(move || {
+                        let checks = remote_of(&dir)
+                            .and_then(|or| github::pr_checks(&or, pr.number).ok())
+                            .unwrap_or_default();
+                        let status = aggregate(&checks);
+                        WsCheck {
+                            repo: pr.repo,
+                            pr_number: pr.number,
+                            checks,
+                            status,
+                        }
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .filter_map(|h| h.join().ok())
+                .collect()
+        });
+        Ok(rows)
+    })
+    .await
+}
+
+/// Re-runs a failed workflow run (failed jobs only). `link` is the check's
+/// job URL — owner/repo and run id are both extracted from it.
+#[tauri::command]
+pub async fn check_rerun(link: String) -> Result<(), String> {
+    blocking(move || {
+        let run_id = github::run_id_from_link(&link)
+            .ok_or_else(|| "check has no GitHub Actions run to re-run".to_string())?;
+        let owner_repo = github::owner_repo_from_link(&link)
+            .ok_or_else(|| "cannot derive repository from link".to_string())?;
+        let out = Command::new("gh")
+            .args([
+                "api",
+                "-X",
+                "POST",
+                &format!("repos/{owner_repo}/actions/runs/{run_id}/rerun-failed-jobs"),
+            ])
+            .output()
+            .map_err(|e| format!("failed to run gh: {e}"))?;
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// Bounded failure log of the job behind `link` (for AI investigation).
+#[tauri::command]
+pub async fn check_logs(link: String) -> Result<String, String> {
+    blocking(move || {
+        let run_id = github::run_id_from_link(&link)
+            .ok_or_else(|| "check has no GitHub Actions run".to_string())?;
+        let owner_repo = github::owner_repo_from_link(&link)
+            .ok_or_else(|| "cannot derive repository from link".to_string())?;
+        let job_id = link
+            .rsplit('/')
+            .next()
+            .and_then(|s| s.parse::<u64>().ok())
+            .ok_or_else(|| "cannot parse job id from link".to_string())?;
+        // Failed jobs of the run → the requested job's log url.
+        let out = Command::new("gh")
+            .args([
+                "api",
+                &format!("repos/{owner_repo}/actions/jobs/{job_id}"),
+                "--jq",
+                ".steps[] | select(.conclusion == \"failure\") | .name",
+            ])
+            .output()
+            .map_err(|e| format!("failed to run gh: {e}"))?;
+        let failed_step = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let log = Command::new("gh")
+            .args([
+                "run",
+                "view",
+                &run_id.to_string(),
+                "-R",
+                &owner_repo,
+                "--log-failed",
+            ])
+            .output()
+            .map_err(|e| format!("failed to run gh: {e}"))?;
+        if !log.status.success() {
+            return Err(String::from_utf8_lossy(&log.stderr).trim().to_string());
+        }
+        // ponytail: tail of the failed log — full logs blow the prompt
+        // budget; if diagnosis needs more context, raise to 400 lines.
+        let text = String::from_utf8_lossy(&log.stdout);
+        let lines: Vec<&str> = text.lines().collect();
+        let start = lines.len().saturating_sub(200);
+        let mut bounded = lines[start..].join("\n");
+        if !failed_step.is_empty() {
+            bounded = format!("failed step: {failed_step}\n{bounded}");
+        }
+        Ok(bounded)
+    })
+    .await
+}
+
+/// AI analysis of a failed CI check (problem + proposed fix).
+#[tauri::command]
+pub async fn investigate_check(
+    workspace: String,
+    repo: String,
+    checkName: String,
+    failedLog: String,
+) -> Result<agent::CheckAnalysis, String> {
+    blocking(move || agent::investigate_check(&workspace, &repo, &checkName, &failedLog)).await
+}
+
+/// Applies an AI-proposed CI fix in the repo's worktree (write agent).
+#[tauri::command]
+pub async fn apply_check_fix(
+    workspace: String,
+    repo: String,
+    instruction: String,
+) -> Result<(), String> {
+    blocking(move || agent::apply_check_fix(&workspace, &repo, &instruction)).await
+}
