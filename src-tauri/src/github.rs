@@ -150,6 +150,100 @@ pub struct PrGroup {
     pub prs: Vec<PullRequest>,
 }
 
+/// Workspace PR status row: the workspace home's PR tracker (below the
+/// pipeline bar). Same list as PullRequest plus state/commit count.
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct WsPrStatus {
+    pub repo: String,
+    pub number: u64,
+    pub title: String,
+    pub url: String,
+    pub author: String,
+    /// OPEN | MERGED | CLOSED
+    pub state: String,
+    pub is_draft: bool,
+    pub commits: u64,
+    pub updated_at: String,
+}
+
+/// Status of the workspace branch's PRs (any state) in one repo.
+pub fn pr_status_for_branch(owner_repo: &str, branch: &str) -> Result<Vec<WsPrStatus>, String> {
+    let out = run_gh(&[
+        "pr",
+        "list",
+        "-R",
+        owner_repo,
+        "--head",
+        branch,
+        "--state",
+        "all",
+        "--limit",
+        "10",
+        "--json",
+        "number,title,author,isDraft,url,state,updatedAt,commits",
+    ])?;
+    let v: Vec<GhPrStatus> =
+        serde_json::from_slice(&out).map_err(|e| format!("failed to parse pr status: {e}"))?;
+    Ok(v.into_iter()
+        .map(|p| WsPrStatus {
+            repo: owner_repo.split('/').next_back().unwrap_or(owner_repo).to_string(),
+            number: p.number,
+            title: p.title,
+            url: p.url,
+            author: p.author.map(|a| a.login).unwrap_or_default(),
+            state: p.state,
+            is_draft: p.is_draft,
+            commits: p.commits.len() as u64,
+            updated_at: p.updated_at,
+        })
+        .collect())
+}
+
+#[derive(Deserialize)]
+struct GhPrStatus {
+    number: u64,
+    title: String,
+    author: Option<GhPrAuthor>,
+    #[serde(rename = "isDraft")]
+    is_draft: bool,
+    url: String,
+    state: String,
+    #[serde(rename = "updatedAt")]
+    updated_at: String,
+    #[serde(default)]
+    commits: Vec<serde_json::Value>,
+}
+
+/// Live state of ONE known PR (direct view — no branch scan).
+pub fn pr_status_by_number(
+    owner_repo: &str,
+    pr: &crate::workspace::PrRef,
+) -> Result<Vec<WsPrStatus>, String> {
+    let out = run_gh(&[
+        "pr",
+        "view",
+        "-R",
+        owner_repo,
+        &pr.number.to_string(),
+        "--json",
+        "number,title,author,isDraft,url,state,updatedAt,commits",
+    ])?;
+    let p: GhPrStatus =
+        serde_json::from_slice(&out).map_err(|e| format!("failed to parse pr view: {e}"))?;
+    Ok(vec![WsPrStatus {
+        repo: pr.repo.clone(),
+        number: p.number,
+        title: p.title,
+        url: p.url,
+        author: p.author.map(|a| a.login).unwrap_or_default(),
+        state: p.state,
+        is_draft: p.is_draft,
+        commits: p.commits.len() as u64,
+        updated_at: p.updated_at,
+    }])
+}
+
 const PR_CACHE_TTL: Duration = Duration::from_secs(60);
 
 fn pr_cache() -> &'static Mutex<Option<(Instant, Vec<PrGroup>)>> {
@@ -201,6 +295,29 @@ fn prs_for_repo(service_name: &str, owner_repo: &str, state: &str, limit: u32) -
         "--json",
         "number,title,headRefName,baseRefName,author,isDraft,url,updatedAt",
     ])?;
+    parse_pr_list(service_name, owner_repo, &out)
+}
+
+/// Open PRs of one branch in one repo (workspace "Pull requests" button).
+pub fn prs_for_branch(service_name: &str, owner_repo: &str, branch: &str) -> Result<Vec<PullRequest>, String> {
+    let out = run_gh(&[
+        "pr",
+        "list",
+        "-R",
+        owner_repo,
+        "--head",
+        branch,
+        "--state",
+        "open",
+        "--limit",
+        "10",
+        "--json",
+        "number,title,headRefName,baseRefName,author,isDraft,url,updatedAt",
+    ])?;
+    parse_pr_list(service_name, owner_repo, &out)
+}
+
+fn parse_pr_list(service_name: &str, owner_repo: &str, out: &[u8]) -> Result<Vec<PullRequest>, String> {
     let gh_prs: Vec<GhPr> =
         serde_json::from_slice(&out).map_err(|e| format!("failed to parse pr list: {e}"))?;
     Ok(gh_prs
@@ -222,6 +339,11 @@ fn prs_for_repo(service_name: &str, owner_repo: &str, state: &str, limit: u32) -
 
 /// Groups PRs by identical branch name (multi-repo features share branches).
 fn group_prs(prs: Vec<PullRequest>) -> Vec<PrGroup> {
+    group_prs_pub(prs)
+}
+
+/// Public re-export for commands.rs (workspace PR lookup).
+pub fn group_prs_pub(prs: Vec<PullRequest>) -> Vec<PrGroup> {
     use std::collections::BTreeMap;
     let mut by_branch: BTreeMap<String, Vec<PullRequest>> = BTreeMap::new();
     for pr in prs {

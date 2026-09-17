@@ -16,6 +16,17 @@ pub struct Workspace {
     /// Tracker card this workspace was created from (enables Plan).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub card: Option<CardRef>,
+    /// PRs opened from this workspace, persisted once created — the
+    /// workspace knows its own PRs; no re-searching GitHub every load.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pr_refs: Vec<PrRef>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PrRef {
+    pub repo: String,
+    pub number: u64,
+    pub url: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -27,12 +38,18 @@ pub struct CardRef {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct RepoStatus {
     pub repo: String,
     pub branch: Option<String>,
     pub dirty: bool,
     pub ahead: usize,
     pub behind: usize,
+    /// Commits on origin/<branch> that origin/<base> lacks — the content
+    /// a PR would actually carry. "Pushed, no PR, with content" is the
+    /// resume point of an interrupted PR-creation flow.
+    #[serde(default)]
+    pub pr_commits: usize,
 }
 
 pub fn workspace_root() -> Result<PathBuf, String> {
@@ -124,10 +141,30 @@ pub fn create(
         base: base.to_string(),
         repos: repos.to_vec(),
         card,
+        pr_refs: Vec::new(),
     };
     let raw = serde_yaml::to_string(&ws).map_err(|e| e.to_string())?;
     std::fs::write(meta_path(&ws_dir), raw).map_err(|e| e.to_string())?;
     Ok(ws)
+}
+
+/// Persists newly created PRs into the workspace meta. Idempotent: a PR
+/// already recorded (same repo+number) is kept; entries are never
+/// removed — merged/closed state is live data, presence is history.
+pub fn save_pr_refs(name: &str, new_refs: &[PrRef]) -> Result<(), String> {
+    let ws_dir = workspaces_dir()?.join(name);
+    let mut ws = load_meta(&ws_dir)?;
+    let before = ws.pr_refs.len();
+    for r in new_refs {
+        if !ws.pr_refs.iter().any(|p| p.repo == r.repo && p.number == r.number) {
+            ws.pr_refs.push(r.clone());
+        }
+    }
+    if ws.pr_refs.len() != before {
+        let raw = serde_yaml::to_string(&ws).map_err(|e| e.to_string())?;
+        std::fs::write(meta_path(&ws_dir), raw).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 /// Removes a workspace: deletes each worktree and its branch, then the
@@ -172,15 +209,18 @@ pub fn status(name: &str) -> Result<Vec<RepoStatus>, String> {
                     dirty: false,
                     ahead: 0,
                     behind: 0,
+                    pr_commits: 0,
                 };
             }
-            let (ahead, behind) = git::ahead_behind(&wt);
+            let (ahead, behind) = git::ahead_behind(&wt, &ws.base);
+            let pr_commits = git::remote_branch_feature_commits(&wt, &ws.base);
             RepoStatus {
                 repo: repo.clone(),
                 branch: git::current_branch(&wt),
                 dirty: git::is_dirty(&wt),
                 ahead,
                 behind,
+                pr_commits,
             }
         })
         .collect();
@@ -200,5 +240,29 @@ mod tests {
 
         let err = create("ws", "feat/ws", "main", &[], None).expect_err("should reject empty selection");
         assert!(err.contains("at least one"));
+    }
+}
+#[cfg(test)]
+mod wire_tests {
+    use super::*;
+
+    #[test]
+    fn repo_status_serializes_camelCase_for_frontend() {
+        // pr_commits → prCommits: the frontend reads prCommits; a missing
+        // rename makes the field undefined and every status-driven button
+        // silently breaks (bit us twice — also PullRequest).
+        let st = RepoStatus {
+            repo: "svc".into(),
+            branch: Some("feat/x".into()),
+            dirty: true,
+            ahead: 2,
+            behind: 0,
+            pr_commits: 1,
+        };
+        let v = serde_json::to_value(&st).unwrap();
+        assert!(v.get("prCommits").is_some(), "must serialize prCommits: {v}");
+        // round-trip must also accept camelCase on the way back (if ever)
+        let back: RepoStatus = serde_json::from_value(v).unwrap();
+        assert_eq!(back.pr_commits, 1);
     }
 }

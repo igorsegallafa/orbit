@@ -287,7 +287,7 @@ function App() {
     });
   };
 
-  const openShellTerminal = (wsName: string) => newTerminal(wsName, "shell", null);
+   const openShellTerminal = (wsName: string) => newTerminal(wsName, "shell", null);
 
   // Opens an interactive agent session seeded with a prompt (grill-me
   // interviews, plan application). claude takes the prompt as argv; the
@@ -399,6 +399,7 @@ function App() {
             closeTab(tabId(tab));
           }}
           onError={setError}
+          onOpenPrList={(prs) => openTab({ kind: "pr", prs })}
         />
       );
     }
@@ -701,7 +702,9 @@ function App() {
                         : t.kind === "commit"
                           ? `${t.commit.message.slice(0, 24)}…`
                           : t.kind === "pr"
-                            ? `#` + t.prs[0].number + (t.prs.length > 1 ? ` (+${t.prs.length - 1})` : "")
+                            ? t.prs.length > 0
+                              ? `#${t.prs[0].number}` + (t.prs.length > 1 ? ` (+${t.prs.length - 1})` : "")
+                              : "PRs"
                             : t.terminal.sessionName;
                 const icon =
                   t.kind === "workspace" ? (

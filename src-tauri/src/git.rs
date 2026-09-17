@@ -82,25 +82,180 @@ pub fn fetch(repo_dir: &Path) -> Result<(), String> {
     git_in(repo_dir, &["fetch", "--prune"])
 }
 
-/// Returns (ahead, behind) of HEAD vs its upstream; (0, 0) when no upstream.
-pub fn ahead_behind(path: &Path) -> (usize, usize) {
+// ---------- Workspace pipeline (commit / push / rebase) ----------
+
+/// Stages everything and commits with `message`. Errors when there is
+/// nothing to commit.
+pub fn commit_all(dir: &Path, message: &str) -> Result<(), String> {
+    git_in(dir, &["add", "-A"])?;
     let out = Command::new("git")
-        .args(["rev-list", "--left-right", "--count", "HEAD...@{upstream}"])
-        .current_dir(path)
-        .output();
-    parse_ahead_behind(out)
+        .args(["commit", "-m", message])
+        .current_dir(dir)
+        .output()
+        .map_err(|e| format!("failed to run git: {e}"))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        if err.contains("nothing to commit") || err.is_empty() {
+            return Err("nothing to commit".into());
+        }
+        return Err(err);
+    }
+    Ok(())
 }
 
-fn parse_ahead_behind(out: std::io::Result<std::process::Output>) -> (usize, usize) {
-    let Ok(out) = out else { return (0, 0) };
-    if !out.status.success() {
-        return (0, 0);
+/// Pushes `branch` to origin, creating the upstream on first push.
+pub fn push(dir: &Path, branch: &str) -> Result<(), String> {
+    git_in(dir, &["push", "-u", "origin", branch])
+}
+
+/// Outcome of a rebase attempt.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum RebaseStatus {
+    /// Rebased cleanly.
+    Clean,
+    /// Conflicts left in the worktree (rebase paused; call
+    /// rebase_continue / rebase_abort).
+    Conflicts(Vec<String>),
+}
+
+/// Fetches and rebases onto `origin/<base>`. On conflict the rebase is
+/// left PAUSED with the conflicted files listed — resolve them (by hand
+/// or via the AI agent), then `git add` + `rebase_continue`, or
+/// `rebase_abort` to roll back.
+pub fn rebase_onto(dir: &Path, base: &str) -> Result<RebaseStatus, String> {
+    git_in(dir, &["fetch", "--prune"])?;
+    let target = format!("origin/{base}");
+    let out = Command::new("git")
+        .args(["rebase", &target])
+        .current_dir(dir)
+        .output()
+        .map_err(|e| format!("failed to run git: {e}"))?;
+    if out.status.success() {
+        return Ok(RebaseStatus::Clean);
     }
-    let s = String::from_utf8_lossy(&out.stdout);
-    let mut parts = s.split_whitespace();
-    let ahead = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
-    let behind = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+    let conflicts = conflicted_files(dir);
+    if !conflicts.is_empty() {
+        return Ok(RebaseStatus::Conflicts(conflicts));
+    }
+    let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    // Not a conflict (e.g. behind with local rebase restrictions): roll
+    // back so the worktree is never left mid-rebase.
+    let _ = git_in(dir, &["rebase", "--abort"]);
+    Err(err)
+}
+
+/// Files currently in merge conflict (unmerged paths).
+pub fn conflicted_files(dir: &Path) -> Vec<String> {
+    let out = Command::new("git")
+        .args(["diff", "--name-only", "--diff-filter=U"])
+        .current_dir(dir)
+        .output();
+    let Ok(out) = out else { return vec![] };
+    if !out.status.success() {
+        return vec![];
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
+/// Continues a paused rebase (expects conflicts resolved + staged).
+pub fn rebase_continue(dir: &Path) -> Result<(), String> {
+    git_in(dir, &["rebase", "--continue"])
+}
+
+/// Aborts a paused rebase, restoring the pre-rebase state.
+pub fn rebase_abort(dir: &Path) -> Result<(), String> {
+    git_in(dir, &["rebase", "--abort"])
+}
+
+/// (ahead, behind) for the pipeline badge. "ahead" = commits that are
+/// in HEAD but in NEITHER origin/<base> NOR origin/<branch> — i.e. work
+/// of this feature that no PR/remote branch carries yet. Comparing
+/// against the upstream alone miscounts other people's main commits
+/// (branch created from fresh main, remote branch stale) as "ahead".
+/// "behind" = commits in origin/<branch> missing locally (pull needed).
+pub fn ahead_behind(path: &Path, base: &str) -> (usize, usize) {
+    let remote_branch = current_branch(path)
+        .map(|b| format!("origin/{b}"))
+        .filter(|rb| ref_exists(path, rb));
+    let remote_branch = remote_branch.as_deref();
+
+    // ahead: HEAD --not origin/base origin/branch
+    let mut nots: Vec<String> = vec![format!("origin/{base}")];
+    if let Some(rb) = remote_branch {
+        nots.push(rb.to_string());
+    }
+    let ahead = count_rev_list(path, &["rev-list", "--count", "HEAD", "--not"], &nots);
+
+    // behind: only meaningful when the branch has a remote; commits on
+    // the remote branch that we lack locally (someone pushed / we
+    // rewrote history).
+    let behind = match remote_branch {
+        Some(rb) => {
+            let out = Command::new("git")
+                .args(["rev-list", "--count", &format!("HEAD..{rb}")])
+                .current_dir(path)
+                .output();
+            parse_count(out)
+        }
+        None => 0,
+    };
     (ahead, behind)
+}
+
+/// Commits on origin/<branch> that origin/<base> doesn't have — the
+/// actual content a PR would carry. 0 = the branch has nothing of its
+/// own (no point opening a PR).
+pub fn remote_branch_feature_commits(path: &Path, base: &str) -> usize {
+    let Some(branch) = current_branch(path) else { return 0 };
+    let remote = format!("origin/{branch}");
+    if !ref_exists(path, &remote) {
+        return 0;
+    }
+    let target = format!("origin/{base}");
+    let out = Command::new("git")
+        .args([
+            "rev-list",
+            "--count",
+            &remote,
+            "--not",
+            &target,
+        ])
+        .current_dir(path)
+        .output();
+    parse_count(out)
+}
+
+fn ref_exists(path: &Path, r: &str) -> bool {
+    Command::new("git")
+        .args(["rev-parse", "--verify", "--quiet", &format!("{r}^{{}}")])
+        .current_dir(path)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn count_rev_list(path: &Path, prefix: &[&str], extra: &[String]) -> usize {
+    let mut args: Vec<String> = prefix.iter().map(|s| s.to_string()).collect();
+    args.extend(extra.iter().cloned());
+    let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let out = Command::new("git").args(&args_ref).current_dir(path).output();
+    parse_count(out)
+}
+
+fn parse_count(out: std::io::Result<std::process::Output>) -> usize {
+    let Ok(out) = out else { return 0 };
+    if !out.status.success() {
+        return 0;
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse()
+        .unwrap_or(0)
 }
 
 /// True when the worktree has uncommitted changes.

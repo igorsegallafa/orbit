@@ -562,7 +562,7 @@ button {
 
 /* Buttons default to control height unless they opt out
    (cards, links, rows, nav items, tree rows set their own) */
-button:not(.workspace-card):not(.nav-item):not(.modal-row):not(.link):not(.back-link):not(.chip):not(.tree-item):not(.dock-icon):not(.tab-close):not(.icon-button):not(.context-menu-item):not(.tab-plus):not(.mode-btn):not(.integration-card-row):not(.wizard-source-pill):not(.select-trigger):not(.select-option):not(.git-commit-row):not(.btn-mini) {
+button:not(.workspace-card):not(.nav-item):not(.modal-row):not(.link):not(.back-link):not(.chip):not(.tree-item):not(.dock-icon):not(.tab-close):not(.icon-button):not(.context-menu-item):not(.tab-plus):not(.mode-btn):not(.integration-card-row):not(.wizard-source-pill):not(.select-trigger):not(.select-option):not(.git-commit-row):not(.btn-mini):not(.orbit-check) {
   height: var(--control-height);
 }
 
@@ -3604,4 +3604,498 @@ table.list tbody tr:hover .row-actions,
     flex-wrap: wrap;
     gap: 8px;
   }
+}
+/* ---------- Workspace pipeline bar ---------- */
+
+.ws-pipeline {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: -10px 0 18px;
+}
+
+.ws-pipeline .segmented {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.ws-pipeline .pipe-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 16px;
+  height: 30px;
+  border: none;
+  border-right: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.ws-pipeline .pipe-btn:last-child {
+  border-right: none;
+}
+
+.ws-pipeline .pipe-btn:hover:not(:disabled) {
+  background: var(--panel-hover, rgba(255, 255, 255, 0.04));
+  color: var(--text);
+}
+
+.ws-pipeline .pipe-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.ws-pipeline .pipe-badge {
+  display: inline-flex;
+  align-items: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: rgba(110, 168, 254, 0.16);
+  color: var(--accent, #7aa7ff);
+  font-size: 10.5px;
+  font-weight: 600;
+  justify-content: center;
+}
+
+.ws-pipeline .pipe-badge.pipe-badge-warn {
+  background: rgba(210, 153, 34, 0.18);
+  color: #d29922;
+}
+
+/* ---------- WsActionModal ---------- */
+
+.ws-action-modal {
+  min-width: 480px;
+  max-width: 620px;
+}
+
+.ws-action-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.ws-action-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  min-height: 40px;
+}
+
+.ws-action-row.ws-running {
+  border-color: rgba(110, 168, 254, 0.4);
+}
+
+.ws-action-row.ws-error {
+  border-color: rgba(255, 93, 93, 0.45);
+}
+
+.ws-action-repo {
+  flex-shrink: 0;
+  font-size: 12px;
+}
+
+.ws-action-detail {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+.ws-error .ws-action-detail {
+  color: var(--danger, #f85149);
+  white-space: normal;
+}
+
+.ws-action-state {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ws-dot-ok {
+  color: var(--ok, #2ea043);
+  font-size: 13px;
+}
+
+.ws-action-ok {
+  color: var(--ok, #2ea043);
+  margin: 6px 0 0;
+  font-size: 12px;
+}
+
+.ws-commit-hint {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+.ws-commit-msg {
+  flex: 1;
+  min-width: 0;
+  resize: vertical;
+  min-height: 44px;
+  font-size: 12px;
+  font-family: ui-monospace, "SF Mono", monospace;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+}
+
+.ws-commit-include {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  font-size: 13px;
+  gap: 4px;
+  color: var(--ok);
+}
+
+/* ---------- Orbit checkbox ---------- */
+
+.orbit-check {
+  display: inline-flex;
+  align-items: center;
+  padding: 0;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.orbit-check:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.orbit-check-box {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 5px;
+  border: 1.5px solid var(--text-faint);
+  background: var(--bg);
+  color: transparent;
+  transition: border-color 0.12s ease, background 0.12s ease, color 0.12s ease;
+}
+
+.orbit-check:hover:not(:disabled) .orbit-check-box {
+  border-color: var(--accent);
+}
+
+.orbit-check-on .orbit-check-box {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+/* ---------- Commit modal cards ---------- */
+
+.ws-commit-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.ws-commit-card.ws-done {
+  border-color: rgba(74, 222, 128, 0.35);
+}
+
+.ws-commit-card.ws-loading,
+.ws-commit-card.ws-resolving {
+  border-color: rgba(110, 168, 254, 0.4);
+}
+
+.ws-commit-card.ws-error {
+  border-color: rgba(255, 93, 93, 0.45);
+}
+
+.ws-commit-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ws-commit-head .mono {
+  font-size: 12px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-commit-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+.ws-commit-card .ws-commit-msg {
+  min-height: 56px;
+}
+
+.ws-dot-err {
+  color: var(--danger);
+  font-size: 13px;
+}
+
+.ws-commit-error {
+  font-size: 11.5px;
+  color: var(--danger);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ws-commit-placeholder {
+  font-size: 11.5px;
+  color: var(--text-faint);
+  font-style: italic;
+  min-height: 56px;
+  display: flex;
+  align-items: center;
+}
+
+.ws-commit-titlebar {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.ws-commit-titlebar h3 {
+  margin-bottom: 2px;
+}
+
+.ws-commit-head .btn-mini {
+  flex-shrink: 0;
+}
+
+.ws-push-offer {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  font-size: 12.5px;
+}
+
+.ws-push-offer p {
+  margin: 0 0 6px;
+}
+
+.ws-prs-title-hint {
+  color: var(--text-faint);
+  font-size: 11.5px;
+  margin: 6px 0 0;
+}
+
+/* ---------- PRs modal ---------- */
+
+.ws-prs-existing {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 10px 0;
+}
+
+.ws-prs-existing-row {
+  font-size: 12.5px;
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.ws-prs-existing-row:hover {
+  text-decoration: underline;
+}
+
+.ws-pr-title {
+  width: 100%;
+  font-size: 12.5px;
+  padding: 7px 9px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+}
+
+.ws-pr-body {
+  width: 100%;
+  min-height: 110px;
+  resize: vertical;
+  font-size: 12px;
+  font-family: ui-monospace, "SF Mono", monospace;
+  padding: 7px 9px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.45;
+}
+
+.ws-pr-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.ws-pr-card.ws-creating {
+  opacity: 0.7;
+}
+
+.error-boundary {
+  padding: 40px;
+  color: var(--text);
+  font-family: ui-monospace, "SF Mono", monospace;
+}
+
+.error-boundary h2 {
+  margin: 0 0 16px;
+}
+
+.error-boundary pre {
+  font-size: 11px;
+  color: var(--danger);
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px;
+  max-height: 40vh;
+  overflow: auto;
+}
+
+.error-boundary button {
+  margin-top: 14px;
+}
+
+/* ---------- Workspace PR tracker section ---------- */
+
+.pipe-btn-active {
+  background: var(--accent-soft) !important;
+  color: var(--accent) !important;
+}
+
+.ws-pr-tracker {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  padding: 12px 14px;
+  margin-bottom: 18px;
+}
+
+.ws-pr-tracker-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.ws-pr-tracker-head .btn-mini {
+  margin-left: auto;
+}
+
+.ws-pr-tracker-branch {
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+.ws-pr-tracker-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ws-pr-tracker-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel, transparent);
+}
+
+.ws-pr-tracker-repo {
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.ws-pr-tracker-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-pr-tracker-meta {
+  flex-shrink: 0;
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+.ws-pr-state {
+  flex-shrink: 0;
+  text-transform: capitalize;
+}
+
+.ws-pr-state-open {
+  color: var(--ok);
+  background: rgba(74, 222, 128, 0.12);
+  border-color: rgba(74, 222, 128, 0.3);
+}
+
+.ws-pr-state-merged {
+  color: #a371f7;
+  background: rgba(163, 113, 247, 0.12);
+  border-color: rgba(163, 113, 247, 0.3);
+}
+
+.ws-pr-state-closed {
+  color: var(--danger);
+  background: rgba(255, 93, 93, 0.1);
+  border-color: rgba(255, 93, 93, 0.25);
+}
+
+.ws-pr-tracker-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.ws-pr-tracker-empty .ws-commit-placeholder {
+  margin: 0;
 }

@@ -41,6 +41,8 @@ export interface Workspace {
   base: string;
   repos: string[];
   card?: CardRef;
+  /** PRs created from this workspace (persisted in .workspace.yaml). */
+  prRefs?: { repo: string; number: number; url: string }[];
 }
 
 export interface AiSettings {
@@ -58,7 +60,7 @@ export interface GrillOption {
 
 export interface PullRequest {
   repo: string; // Orbit service name
-  ownerRepo: string; // "owner/repo" for gh -R
+  ownerRepo: string; // "owner/repo" for gh - R
   number: number;
   title: string;
   branch: string;
@@ -66,6 +68,19 @@ export interface PullRequest {
   author: string;
   isDraft: boolean;
   url: string;
+  updatedAt: string; // ISO
+}
+
+/** Workspace home PR tracker row (any state). */
+export interface WsPrStatus {
+  repo: string;
+  number: number;
+  title: string;
+  url: string;
+  author: string;
+  state: "OPEN" | "MERGED" | "CLOSED" | string;
+  isDraft: boolean;
+  commits: number;
   updatedAt: string; // ISO
 }
 
@@ -124,4 +139,6 @@ export interface RepoStatus {
   dirty: boolean;
   ahead: number;
   behind: number;
+  /** Commits on the remote branch that the base lacks — PR-worthy content. */
+  prCommits: number;
 }

@@ -1,11 +1,18 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { RepoStatus, Workspace } from "../types/config";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { PullRequest, RepoStatus, Workspace, WsPrStatus } from "../types/config";
 import { ConfirmDialog } from "../components/ConfirmDialog";
-import { SkeletonTable } from "../components/Skeleton";
+import { SkeletonTable, Skeleton } from "../components/Skeleton";
 import { PlanModal } from "../components/PlanModal";
 import { GrillModal } from "../components/GrillModal";
 import { PlanProgress } from "../components/PlanProgress";
+import { CommitModal } from "../components/CommitModal";
+import { RebaseModal } from "../components/RebaseModal";
+import { PushModal } from "../components/PushModal";
+import { PrsModal } from "../components/PrsModal";
+import { tooltip } from "../components/Tooltip";
+import { RebaseIcon, CommitIcon, PushIcon, PullRequestIcon } from "../components/Icons";
 
 interface Props {
   workspace: Workspace;
@@ -13,15 +20,42 @@ interface Props {
   onOpenPlan: () => void;
   onRemoved: () => void;
   onError: (msg: string) => void;
+  /** Opens a PR review tab for an explicit PR list. */
+  onOpenPrList: (prs: PullRequest[]) => void;
 }
 
-export function WorkspaceDetailPage({ workspace, onOpenEditor, onOpenPlan, onRemoved, onError }: Props) {
+export function WorkspaceDetailPage({ workspace, onOpenEditor, onOpenPlan, onRemoved, onError, onOpenPrList }: Props) {
   const [statuses, setStatuses] = useState<RepoStatus[] | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState<null | "normal" | "force">(null);
   const [planOpen, setPlanOpen] = useState(false);
   const [grillOpen, setGrillOpen] = useState(false);
   const [planExists, setPlanExists] = useState<boolean | null>(null);
+  const [pushOpen, setPushOpen] = useState(false);
+  const [commitOpen, setCommitOpen] = useState(false);
+  const [rebaseOpen, setRebaseOpen] = useState(false);
+  const [prCreateOpen, setPrCreateOpen] = useState(false);
+  const [prsOpen, setPrsOpen] = useState(false);
+  const [prStatuses, setPrStatuses] = useState<WsPrStatus[] | null>(null);
+  const [prsLoading, setPrsLoading] = useState(false);
+
+  // "Pull requests" toggle: expands the tracker section below the
+  // pipeline bar and (re)loads the branch's PR status per repo.
+  const loadPrs = () => {
+    if (prsOpen) {
+      setPrsOpen(false);
+      return;
+    }
+    setPrsLoading(true);
+    setPrsOpen(true);
+    invoke<WsPrStatus[]>("ws_pr_status", { workspace: workspace.name })
+      .then((rows) => setPrStatuses(rows))
+      .catch((e) => {
+        setPrStatuses([]);
+        onError(String(e));
+      })
+      .finally(() => setPrsLoading(false));
+  };
 
   // Does a PLAN.md already exist for this workspace?
   useEffect(() => {
@@ -58,6 +92,15 @@ export function WorkspaceDetailPage({ workspace, onOpenEditor, onOpenPlan, onRem
     setStatuses(null);
     load(false);
   }, [load]);
+
+  const dirtyCount = (statuses ?? []).filter((s) => s.dirty).length;
+  const aheadCount = (statuses ?? []).reduce((a, s) => a + s.ahead, 0);
+  // Branches on origin with PR-worthy content but no PR — the resume
+  // point of an interrupted "Create pull requests" flow.
+  const pushedNoPr =
+    prStatuses !== null &&
+    prStatuses.length === 0 &&
+    (statuses ?? []).some((s) => s.prCommits > 0);
 
   const remove = async (force: boolean) => {
     try {
@@ -131,6 +174,123 @@ export function WorkspaceDetailPage({ workspace, onOpenEditor, onOpenPlan, onRem
         </div>
       </header>
 
+      <div className="ws-pipeline">
+        <div className="segmented">
+          <button
+            className="pipe-btn"
+            disabled={refreshing}
+            onMouseEnter={(e) => tooltip.show(`Rebase every repo onto origin/${workspace.base}`, e)}
+            onMouseLeave={() => tooltip.hide()}
+            onClick={() => setRebaseOpen(true)}
+          >
+            <RebaseIcon size={13} /> Rebase
+          </button>
+          <button
+            className="pipe-btn"
+            disabled={dirtyCount === 0}
+            onMouseEnter={(e) => tooltip.show("AI writes commit messages, you review and commit", e)}
+            onMouseLeave={() => tooltip.hide()}
+            onClick={() => setCommitOpen(true)}
+          >
+            <CommitIcon size={13} /> Commit
+            {dirtyCount > 0 && <span className="pipe-badge pipe-badge-warn">{dirtyCount}</span>}
+          </button>
+          <button
+            className="pipe-btn"
+            disabled={aheadCount === 0}
+            onMouseEnter={(e) => tooltip.show("Push branches to origin, then create the pull requests", e)}
+            onMouseLeave={() => tooltip.hide()}
+            onClick={() => setPushOpen(true)}
+          >
+            <PushIcon size={13} /> Push
+            {aheadCount > 0 && <span className="pipe-badge">{aheadCount}</span>}
+          </button>
+          <button
+            className={`pipe-btn ${prsOpen ? "pipe-btn-active" : ""}`}
+            onMouseEnter={(e) => tooltip.show(`Track the PRs of branch ${workspace.branch} across the workspace repos`, e)}
+            onMouseLeave={() => tooltip.hide()}
+            onClick={loadPrs}
+          >
+            {prsLoading ? <span className="spinner" /> : <PullRequestIcon size={13} />} Pull requests
+          </button>
+        </div>
+      </div>
+
+      {prsOpen && (
+        <div className="ws-pr-tracker">
+          <div className="ws-pr-tracker-head">
+            <span className="mono ws-pr-tracker-branch">{workspace.branch}</span>
+            <button
+              className="btn-mini"
+              onClick={() => {
+                setPrStatuses(null);
+                setPrsLoading(true);
+                invoke<WsPrStatus[]>("ws_pr_status", { workspace: workspace.name })
+                  .then((rows) => setPrStatuses(rows))
+                  .catch((e) => {
+                    setPrStatuses([]);
+                    onError(String(e));
+                  })
+                  .finally(() => setPrsLoading(false));
+              }}
+              onMouseEnter={(e) => tooltip.show("Reload PR statuses", e)}
+              onMouseLeave={() => tooltip.hide()}
+            >
+              Refresh
+            </button>
+          </div>
+          {prStatuses === null ? (
+            <div className="ws-pr-skeleton">
+              <Skeleton w="70%" h={16} />
+              <Skeleton w="100%" h={12} />
+              <Skeleton w="55%" h={12} />
+            </div>
+          ) : prStatuses.length === 0 ? (
+            <div className="ws-pr-tracker-empty">
+              <p className="ws-commit-placeholder">
+                No pull requests for this branch yet.
+              </p>
+              {aheadCount > 0 || pushedNoPr ? (
+                <button type="button" onClick={() => setPrCreateOpen(true)}>
+                  Create pull requests
+                </button>
+              ) : (
+                <p className="ws-commit-placeholder">
+                  Commit and push your work first — the branches aren't on origin yet.
+                </p>
+              )}
+            </div>
+          ) : (
+            <div className="ws-pr-tracker-list">
+              {prStatuses.map((pr) => (
+                <div key={pr.repo + pr.number} className="ws-pr-tracker-row">
+                  <span className={`tag ws-pr-state ws-pr-state-${pr.state.toLowerCase()}`}>
+                    {pr.state === "MERGED" ? "merged" : pr.state === "CLOSED" ? "closed" : pr.isDraft ? "draft" : "open"}
+                  </span>
+                  <span className="mono ws-pr-tracker-repo">{pr.repo}</span>
+                  <span className="ws-pr-tracker-title" title={pr.title}>#{pr.number} {pr.title}</span>
+                  <span className="ws-pr-tracker-meta">
+                    {pr.commits} {pr.commits === 1 ? "commit" : "commits"} · by {pr.author}
+                  </span>
+                  <a
+                    className="btn-mini"
+                    href={pr.url}
+                    onClick={(e) => {
+                      e.preventDefault();
+                      openUrl(pr.url).catch(() => null);
+                    }}
+                    onMouseEnter={(e) => tooltip.show("Open on GitHub ↗", e)}
+                    onMouseLeave={() => tooltip.hide()}
+                  >
+                    View on GitHub ↗
+                  </a>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       <PlanProgress
         workspace={workspace.name}
         refreshKey={statuses === null ? 0 : 1}
@@ -178,6 +338,54 @@ export function WorkspaceDetailPage({ workspace, onOpenEditor, onOpenPlan, onRem
           </tbody>
         </table>
       </div>
+
+      {rebaseOpen && (
+        <RebaseModal
+          workspace={workspace.name}
+          base={workspace.base}
+          repos={workspace.repos}
+          onClose={() => setRebaseOpen(false)}
+          onSettled={() => load(false)}
+        />
+      )}
+
+      {commitOpen && dirtyCount > 0 && (
+        <CommitModal
+          workspace={workspace.name}
+          repos={(statuses ?? []).filter((s) => s.dirty).map((s) => s.repo)}
+          onClose={() => setCommitOpen(false)}
+          onSettled={() => load(false)}
+          onError={onError}
+        />
+      )}
+
+      {pushOpen && (
+        <PushModal
+          workspace={workspace.name}
+          repos={workspace.repos}
+          onCreatePrs={() => {
+            setPushOpen(false);
+            setPrCreateOpen(true);
+          }}
+          onClose={() => setPushOpen(false)}
+          onSettled={() => load(false)}
+        />
+      )}
+
+      {prCreateOpen && (
+        <PrsModal
+          workspace={workspace.name}
+          base={workspace.base}
+          repos={(statuses ?? []).map((s) => ({ repo: s.repo, prCommits: s.prCommits }))}
+          defaultTitle={workspace.card?.title ?? workspace.branch}
+          onOpenPrs={(prs) => {
+            setPrCreateOpen(false);
+            onOpenPrList(prs);
+          }}
+          onClose={() => setPrCreateOpen(false)}
+          onError={onError}
+        />
+      )}
 
       {confirmRemove && (
         <ConfirmDialog

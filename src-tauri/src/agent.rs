@@ -6,6 +6,7 @@ use crate::integrations::{fetch_card, CardDetail, TrackerKind};
 use crate::workspace::{workspace_root, CardRef};
 use serde::Serialize;
 use std::io::{BufRead, BufReader};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter};
@@ -13,6 +14,10 @@ use tauri::{AppHandle, Emitter};
 pub const PLAN_FILE: &str = "PLAN.md";
 const PROMPT_PATH: &str = ".config/orbit/plan-prompt.md";
 const AGENT_TIMEOUT_SECS: u64 = 300;
+/// Headless one-shot answers (commit messages, PR drafts): shorter leash
+/// than the plan agent — these are moments in a UI flow, not background
+/// jobs.
+const DRAFT_TIMEOUT_SECS: u64 = 120;
 
 /// The currently running plan agent (one at a time), kept so the user can
 /// cancel it mid-run.
@@ -928,4 +933,347 @@ pub fn set_plan_task(ws_name: &str, index: usize, done: bool) -> Result<(), Stri
     let content = set_task_in_content(&raw, index, done)?;
     std::fs::write(&path, content).map_err(|e| e.to_string())?;
     Ok(())
+}
+// ---------- Workspace pipeline: commit messages & conflict resolution ----------
+
+/// Runs the configured agent headless with `prompt` in `dir`, no write
+/// permissions needed (read-only answer). Shared by the pipeline calls.
+/// One retry: agent CLIs fail transiently (auth refresh, network blip).
+fn agent_answer(dir: &Path, prompt: &str) -> Result<String, String> {
+    match agent_answer_once(dir, prompt) {
+        Ok(v) => Ok(v),
+        Err(first) => match agent_answer_once(dir, prompt) {
+            Ok(v) => Ok(v),
+            Err(second) => Err(format!("{first} (retried: {second})")),
+        },
+    }
+}
+
+fn agent_answer_once(dir: &Path, prompt: &str) -> Result<String, String> {
+    let ai = crate::config::Config::load()?.ai;
+    let mut cmd = match ai.agent.as_str() {
+        "opencode" => {
+            let mut c = Command::new("opencode");
+            c.args(["run", "--model", &ai.model, prompt]);
+            c
+        }
+        "omp" => {
+            let mut c = Command::new("omp");
+            c.args(["-p", "--model", &ai.model, prompt]);
+            c
+        }
+        _ => {
+            let mut c = Command::new("claude");
+            c.args(["-p", "--model", &ai.model, prompt]);
+            c
+        }
+    };
+    cmd.current_dir(dir).stdin(Stdio::null());
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("failed to launch {}: {e}", ai.agent))?;
+
+    // Drain pipes on threads so a chatty agent can't deadlock on a full
+    // pipe buffer while we poll the deadline.
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let t_out = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut s) = stdout {
+            use std::io::Read;
+            let _ = s.read_to_end(&mut buf);
+        }
+        buf
+    });
+    let t_err = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut s) = stderr {
+            use std::io::Read;
+            let _ = s.read_to_end(&mut buf);
+        }
+        buf
+    });
+
+    // Hard deadline: agent CLIs can hang; without this the UI spinner
+    // would run forever. 2 min covers real repo exploration (the draft
+    // agent reads templates and diffs, 15-60s typical).
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_secs(DRAFT_TIMEOUT_SECS);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if std::time::Instant::now() > deadline {
+                    let _ = child.kill();
+                    return Err(format!("agent timed out after {DRAFT_TIMEOUT_SECS}s"));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            Err(e) => return Err(format!("wait failed: {e}")),
+        }
+    };
+    let out = t_out.join().unwrap_or_default();
+    let err = t_err.join().unwrap_or_default();
+    if !status.success() {
+        return Err(String::from_utf8_lossy(&err).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&out).trim().to_string())
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct CommitMsg {
+    pub repo: String,
+    pub message: String,
+}
+
+/// AI-generated commit message for one dirty repo of a workspace. The
+/// agent sees the numstat diff (bounded) and answers with the message
+/// only — no JSON to parse, the message IS the reply.
+pub fn commit_message(ws_name: &str, repo: &str) -> Result<CommitMsg, String> {
+    let dir = workspace_root()?
+        .join("workspaces")
+        .join(ws_name)
+        .join(repo);
+    if !dir.exists() {
+        return Err(format!("worktree for '{repo}' not found"));
+    }
+    // ponytail: numstat only (no patch body) keeps the prompt small; switch
+    // to a full diff when messages come out too generic.
+    let out = Command::new("git")
+        .args(["diff", "--numstat", "HEAD"])
+        .current_dir(&dir)
+        .output()
+        .map_err(|e| format!("failed to run git: {e}"))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    let numstat = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if numstat.is_empty() {
+        return Err(format!("{repo}: nothing to commit"));
+    }
+    let branch = crate::git::current_branch(&dir).unwrap_or_default();
+    let prompt = format!(
+        r#"You are writing a git commit message for the repository `{repo}` (branch `{branch}`).
+
+Changed files (added removed path):
+{numstat}
+
+Write ONE single-line commit message in conventional-commit style: up to 72 chars, starting with a type (feat/fix/chore/refactor/docs/test) followed by a lowercase summary. Describe WHAT changed, not that files changed.
+
+STRICT RULES:
+- Plain text only. NO markdown, no backticks, no bold, no bullet points, no code blocks.
+- ONE line. No body, no trailing newline junk.
+- No scope prefix, no AI attribution, no quotes around the message.
+
+Reply with ONLY the message itself."#
+    );
+    let message = agent_answer(&dir, &prompt)?;
+    // Strip markdown artifacts the models still slip in (backticks, bold,
+    // quotes) and collapse to the first non-empty line.
+    let message = clean_commit_message(&message);
+    if message.is_empty() {
+        return Err(format!("{repo}: agent returned an empty message"));
+    }
+    Ok(CommitMsg {
+        repo: repo.to_string(),
+        message,
+    })
+}
+
+/// Collapses the agent reply to a single clean line: drops markdown
+/// artifacts (code fences, bold, bullets, quotes) and takes the first
+/// non-empty line.
+fn clean_commit_message(raw: &str) -> String {
+    // First line that isn't empty or a lone code fence.
+    let line = raw
+        .lines()
+        .map(|l| l.trim())
+        .find(|l| !l.is_empty() && *l != "```")
+        .unwrap_or("");
+    let line = line.trim_start_matches("```").trim();
+    let line = line
+        .trim_start_matches(['#', '-', '*', '>', '"'])
+        .trim_end_matches(['*', '"', '`'])
+        .trim();
+    line.trim_start_matches(['-', '*']).trim().to_string()
+}
+
+/// Lets the configured agent resolve rebase conflicts inside the worktree.
+/// The agent edits files freely (acceptEdits / --auto) and stages them;
+/// `git rebase --continue` stays with us so a failed agent never lands
+/// half of a resolution. Returns the agent's summary.
+pub fn resolve_conflicts(ws_name: &str, repo: &str) -> Result<String, String> {
+    let dir = workspace_root()?
+        .join("workspaces")
+        .join(ws_name)
+        .join(repo);
+    if !dir.exists() {
+        return Err(format!("worktree for '{repo}' not found"));
+    }
+    let conflicts = crate::git::conflicted_files(&dir);
+    if conflicts.is_empty() {
+        return Err(format!("{repo}: no conflicts to resolve"));
+    }
+    let list = conflicts.iter().map(|f| format!("- {f}")).collect::<Vec<_>>().join("\n");
+    let prompt = format!(
+        r#"A `git rebase` is paused in this worktree with the following conflicts:
+
+{list}
+
+Resolve every conflict preserving the intent of the feature branch (this worktree), then `git add` each resolved file. Do NOT run `git rebase --continue` or `git commit` — staging is enough. Do not touch anything else.
+
+Reply with a short summary of how you resolved each file."#
+    );
+
+    let ai = crate::config::Config::load()?.ai;
+    let mut cmd = match ai.agent.as_str() {
+        "opencode" => {
+            let mut c = Command::new("opencode");
+            c.args(["run", "--model", &ai.model, "--auto", &prompt]);
+            c
+        }
+        "omp" => {
+            let mut c = Command::new("omp");
+            c.args(["-p", "--auto-approve", "--model", &ai.model, &prompt]);
+            c
+        }
+        _ => {
+            let mut c = Command::new("claude");
+            c.args([
+                "-p",
+                "--model",
+                &ai.model,
+                "--permission-mode",
+                "acceptEdits",
+                &prompt,
+            ]);
+            c
+        }
+    };
+    cmd.current_dir(&dir).stdin(Stdio::null());
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let out = cmd
+        .output()
+        .map_err(|e| format!("failed to launch {}: {e}", ai.agent))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    // Sanity check: agent must have left no unmerged paths behind.
+    let left = crate::git::conflicted_files(&dir);
+    if !left.is_empty() {
+        return Err(format!(
+            "{}: agent finished but {} file(s) still conflicted",
+            repo,
+            left.len()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+#[cfg(test)]
+mod commit_msg_tests {
+    use super::clean_commit_message;
+
+    #[test]
+    fn strips_markdown_artifacts() {
+        assert_eq!(
+            clean_commit_message("  \nfeat: add retry to client  "),
+            "feat: add retry to client"
+        );
+        assert_eq!(clean_commit_message("```feat: add retry```"), "feat: add retry");
+        assert_eq!(clean_commit_message("**feat: add retry**"), "feat: add retry");
+        assert_eq!(clean_commit_message("\"feat: add retry\""), "feat: add retry");
+        assert_eq!(clean_commit_message("- **feat: add retry**"), "feat: add retry");
+        assert_eq!(clean_commit_message("```\nfeat: add retry\n```"), "feat: add retry");
+        assert_eq!(clean_commit_message("> feat: add retry"), "feat: add retry");
+    }
+}
+
+// ---------- Workspace pipeline: PR title/description drafting ----------
+
+#[derive(Serialize, Clone, Debug)]
+pub struct PrDraft {
+    pub title: String,
+    pub body: String,
+}
+
+/// AI-drafted PR title + description for one repo. The agent runs inside
+/// the worktree: it reads the repo's own pull_request_template (if any),
+/// studies the diff vs origin/<base> and fills it in — objective, short,
+/// what/why/how. Reply format is plain "TITLE:" + "---" + body (no JSON
+/// escaping issues with multiline markdown).
+pub fn pr_draft(ws_name: &str, repo: &str) -> Result<PrDraft, String> {
+    let ws_dir = workspace_root()?.join("workspaces").join(ws_name);
+    let meta = crate::workspace::load_meta(&ws_dir)?;
+    let dir = ws_dir.join(repo);
+    if !dir.exists() {
+        return Err(format!("worktree for '{repo}' not found"));
+    }
+    let branch = crate::git::current_branch(&dir).unwrap_or_default();
+    let prompt = format!(
+        r#"You are preparing a pull request for the repository `{repo}` (branch `{branch}` into `{base}`).
+
+Steps:
+1. Look for a PR template in this repo: check .github/pull_request_template.md, .github/PULL_REQUEST_TEMPLATE.md, PULL_REQUEST_TEMPLATE.md, docs/pull_request_template.md or a .github/pull_request_template/ directory. If one exists, use its exact structure.
+2. Study the changes: `git log --oneline origin/{base}..HEAD` and `git diff --stat origin/{base}...HEAD`; read individual file diffs when the stat isn't enough.
+
+Write:
+- title: ONE line, up to 72 chars, objective, no markdown.
+- description: if a template exists, fill it COMPLETELY with concrete facts from the changes (never leave placeholders). If not, write a short objective description: what was done, why and how — bullet points where they help. No AI attribution, no generic filler.
+
+Reply EXACTLY in this format, plain text, no code fences:
+TITLE: <the title>
+---
+<the description>"#,
+        repo = repo,
+        branch = branch,
+        base = meta.base,
+    );
+    let out = agent_answer(&dir, &prompt)?;
+    parse_title_body(&out).ok_or_else(|| "agent reply was not in TITLE:/--- format".into())
+}
+
+/// "TITLE: ...\n---\nbody" → PrDraft. Tolerates surrounding code fences
+/// and stray whitespace; the body keeps its internal markdown.
+pub fn parse_title_body(raw: &str) -> Option<PrDraft> {
+    let raw = raw.trim();
+    let raw = raw.strip_prefix("```").unwrap_or(raw).trim();
+    let idx = raw.find("TITLE:")?;
+    let after = &raw[idx + "TITLE:".len()..];
+    let mut parts = after.splitn(2, '\n');
+    let title = parts.next()?.trim().trim_end_matches("```").trim().to_string();
+    if title.is_empty() {
+        return None;
+    }
+    let rest = parts.next().unwrap_or("");
+    let body = match rest.find("---") {
+        Some(p) => rest[p + 3..]
+            .trim()
+            .trim_end_matches("```")
+            .trim()
+            .to_string(),
+        None => String::new(),
+    };
+    Some(PrDraft { title, body })
+}
+
+#[cfg(test)]
+mod pr_draft_tests {
+    use super::parse_title_body;
+
+    #[test]
+    fn parses_title_body_format() {
+        let d = parse_title_body("TITLE: feat: add optin modal\n---\n## What\n- adds modal").unwrap();
+        assert_eq!(d.title, "feat: add optin modal");
+        assert_eq!(d.body, "## What\n- adds modal");
+    }
+
+    #[test]
+    fn parses_without_body_and_with_fences() {
+        let d = parse_title_body("```\nTITLE: fix thing\n---\n").unwrap();
+        assert_eq!(d.title, "fix thing");
+        assert_eq!(d.body, "");
+        assert!(parse_title_body("no title here").is_none());
+    }
 }

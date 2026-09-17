@@ -6,6 +6,7 @@ use crate::integrations::{self, CardDetail, TrackerKind};
 use crate::usage::{self, AiUsage};
 use crate::workspace::{self, CardRef, RepoStatus, Workspace};
 use std::path::PathBuf;
+use std::process::Command;
 use tauri::async_runtime::spawn_blocking;
 
 fn repos_dir() -> Result<PathBuf, String> {
@@ -574,4 +575,341 @@ fn which(bin: &str) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+// ---------- Workspace pipeline (commit / push / rebase / PRs) ----------
+
+/// AI commit message for one dirty repo.
+#[tauri::command]
+pub async fn ws_commit_message(
+    workspace: String,
+    repo: String,
+) -> Result<agent::CommitMsg, String> {
+    blocking(move || agent::commit_message(&workspace, &repo)).await
+}
+
+/// Stage + commit one repo with the given message.
+#[tauri::command]
+pub async fn ws_commit(workspace: String, repo: String, message: String) -> Result<(), String> {
+    blocking(move || git::commit_all(&worktree_of(&workspace, &repo)?, &message)).await
+}
+
+/// Push one repo's branch to origin.
+#[tauri::command]
+pub async fn ws_push(workspace: String, repo: String) -> Result<(), String> {
+    blocking(move || {
+        let dir = worktree_of(&workspace, &repo)?;
+        let branch = git::current_branch(&dir)
+            .ok_or_else(|| format!("{repo}: detached HEAD, nothing to push"))?;
+        git::push(&dir, &branch)
+    })
+    .await
+}
+
+/// Rebase one repo onto origin/<base>. Conflicts leave the rebase PAUSED
+/// with the file list returned to the caller.
+#[tauri::command]
+pub async fn ws_rebase(
+    workspace: String,
+    repo: String,
+    base: String,
+) -> Result<git::RebaseStatus, String> {
+    blocking(move || git::rebase_onto(&worktree_of(&workspace, &repo)?, &base)).await
+}
+
+/// Let the configured AI agent resolve a paused rebase's conflicts and
+/// stage the result. `rebase --continue` stays with the caller.
+#[tauri::command]
+pub async fn ws_resolve_conflicts(
+    workspace: String,
+    repo: String,
+) -> Result<String, String> {
+    blocking(move || agent::resolve_conflicts(&workspace, &repo)).await
+}
+
+/// Continue a rebase after conflicts were resolved+staged.
+#[tauri::command]
+pub async fn ws_rebase_continue(workspace: String, repo: String) -> Result<(), String> {
+    blocking(move || git::rebase_continue(&worktree_of(&workspace, &repo)?)).await
+}
+
+/// Abort a paused rebase (rollback to pre-rebase state).
+#[tauri::command]
+pub async fn ws_rebase_abort(workspace: String, repo: String) -> Result<(), String> {
+    blocking(move || git::rebase_abort(&worktree_of(&workspace, &repo)?)).await
+}
+
+/// Create a PR for one repo's branch into the workspace base. Persists
+/// the PR ref in the workspace meta. Returns the PR URL.
+#[tauri::command]
+pub async fn ws_create_pr(
+    workspace: String,
+    repo: String,
+    base: String,
+    title: String,
+    body: String,
+) -> Result<String, String> {
+    blocking(move || {
+        let r = create_pr_for_repo(&workspace, &repo, &base, &title, &body)?;
+        let url = r.url.clone();
+        workspace::save_pr_refs(&workspace, &[r])?;
+        Ok(url)
+    })
+    .await
+}
+
+/// AI-drafted PR title + description for one repo (reads the repo's own
+/// pull_request_template).
+#[tauri::command]
+pub async fn ws_pr_draft(workspace: String, repo: String) -> Result<agent::PrDraft, String> {
+    blocking(move || agent::pr_draft(&workspace, &repo)).await
+}
+
+fn create_pr_for_repo(
+    workspace: &str,
+    repo: &str,
+    base: &str,
+    title: &str,
+    body: &str,
+) -> Result<workspace::PrRef, String> {
+    let dir = worktree_of(workspace, repo)?;
+    let owner_repo = remote_of(&dir).ok_or_else(|| format!("{repo}: cannot resolve origin remote"))?;
+    let branch = git::current_branch(&dir)
+        .ok_or_else(|| format!("{repo}: detached HEAD"))?;
+    let out = Command::new("gh")
+        .args([
+            "pr",
+            "create",
+            "-R",
+            &owner_repo,
+            "--base",
+            base,
+            "--head",
+            &branch,
+            "--title",
+            title,
+            "--body",
+            body,
+        ])
+        .current_dir(&dir)
+        .output()
+        .map_err(|e| format!("failed to run gh: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "{repo}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    // "https://github.com/owner/repo/pull/123" → number
+    let number = url
+        .rsplit('/')
+        .next()
+        .and_then(|s| s.parse::<u64>().ok())
+        .ok_or_else(|| format!("{repo}: cannot parse PR number from '{url}'"))?;
+    Ok(workspace::PrRef {
+        repo: repo.to_string(),
+        number,
+        url,
+    })
+}
+
+/// Per-repo PR content as decided in the PR modal.
+#[derive(serde::Deserialize, Clone)]
+pub struct PrSpec {
+    pub repo: String,
+    pub title: String,
+    #[serde(default)]
+    pub body: String,
+}
+
+/// Creates PRs per the modal's specs (title/body per repo), in parallel.
+/// Returns the full PullRequest list (existing + newly created) so the
+/// review tab can open directly. Repos with nothing to PR are skipped
+/// silently; real failures are collected into one error so one broken
+/// repo doesn't hide the others' PRs.
+#[tauri::command]
+pub async fn ws_create_prs(
+    workspace: String,
+    base: String,
+    specs: Vec<PrSpec>,
+) -> Result<Vec<github::PullRequest>, String> {
+    blocking(move || {
+        let created: Vec<Result<workspace::PrRef, String>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = specs
+                .iter()
+                .map(|spec| {
+                    let (ws, base, spec) = (workspace.clone(), base.clone(), spec.clone());
+                    scope.spawn(move || {
+                        create_pr_for_repo(&ws, &spec.repo, &base, &spec.title, &spec.body)
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap_or_else(|_| Err("thread panicked".into())))
+                .collect()
+        });
+
+        // Collect failures that are NOT "no commits/diff" — repos with
+        // nothing to PR are fine to skip.
+        let mut real_errors: Vec<String> = Vec::new();
+        let mut ok_refs: Vec<workspace::PrRef> = Vec::new();
+        for r in created {
+            match r {
+                Ok(r) => ok_refs.push(r),
+                Err(e) => {
+                    let benign = e.contains("No commits between")
+                        || e.contains("already exists")
+                        || e.contains("diff between the head and base")
+                        || e.contains("nothing to compare");
+                    if !benign {
+                        real_errors.push(e);
+                    }
+                }
+            }
+        }
+
+        // The workspace now knows its own PRs — persist them.
+        if !ok_refs.is_empty() {
+            workspace::save_pr_refs(&workspace, &ok_refs)?;
+        }
+
+        // List the PRs (whatever exists now) and hand them to the caller.
+        let prs = ws_prs_list(&workspace)?;
+        if prs.is_empty() && !real_errors.is_empty() {
+            return Err(real_errors.join("\n"));
+        }
+        Ok(prs)
+    })
+    .await
+}
+
+fn ws_prs_list(workspace: &str) -> Result<Vec<github::PullRequest>, String> {
+    let ws_dir = workspace::workspace_root()?
+        .join("workspaces")
+        .join(workspace);
+    let meta = workspace::load_meta(&ws_dir)?;
+    // Repos in parallel — 5 repos sequential is ~10s of dead air.
+    let prs: Vec<github::PullRequest> = std::thread::scope(|scope| {
+        let handles: Vec<_> = meta
+            .repos
+            .iter()
+            .map(|repo| {
+                let (branch, dir) = (meta.branch.clone(), ws_dir.join(repo));
+                scope.spawn(move || {
+                    if !dir.exists() {
+                        return vec![];
+                    }
+                    let Some(owner_repo) = remote_of(&dir) else {
+                        return vec![];
+                    };
+                    github::prs_for_branch(repo, &owner_repo, &branch).unwrap_or_default()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .filter_map(|h| h.join().ok())
+            .flatten()
+            .collect()
+    });
+    Ok(prs)
+}
+
+/// Open PRs of this workspace's branch across its repos (for the PR
+/// review tab). Returns the same shape as pr_search.
+#[tauri::command]
+pub async fn ws_prs(workspace: String) -> Result<Vec<github::PrGroup>, String> {
+    blocking(move || Ok(github::group_prs_pub(ws_prs_list(&workspace)?))).await
+}
+
+/// Same as ws_prs but flat — the push modal checks "any PRs?" and feeds
+/// the review tab directly; grouping buys nothing there.
+#[tauri::command]
+pub async fn ws_prs_flat(workspace: String) -> Result<Vec<github::PullRequest>, String> {
+    blocking(move || ws_prs_list(&workspace)).await
+}
+
+fn remote_of(dir: &std::path::Path) -> Option<String> {
+    let out = Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(dir)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let remote = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    github::parse_owner_repo(&remote).ok()
+}
+
+/// PR status rows for the workspace home tracker. Source of truth is the
+/// saved pr_refs in the meta (fast, direct view by number); when the
+/// meta has none it falls back to scanning the branch. GitHub is only
+/// asked for live state (open/merged/closed), in parallel.
+#[tauri::command]
+pub async fn ws_pr_status(workspace: String) -> Result<Vec<github::WsPrStatus>, String> {
+    blocking(move || {
+        let ws_dir = workspace::workspace_root()?
+            .join("workspaces")
+            .join(&workspace);
+        let meta = workspace::load_meta(&ws_dir)?;
+
+        // Which repos to look at: saved refs win; scan only as fallback.
+        let scan = meta.pr_refs.is_empty();
+        let rows: Vec<github::WsPrStatus> = std::thread::scope(|scope| {
+            let handles: Vec<_> = if scan {
+                meta.repos
+                    .iter()
+                    .map(|repo| {
+                        let (branch, dir) = (meta.branch.clone(), ws_dir.join(repo));
+                        scope.spawn(move || {
+                            if !dir.exists() {
+                                return vec![];
+                            }
+                            let Some(owner_repo) = remote_of(&dir) else {
+                                return vec![];
+                            };
+                            github::pr_status_for_branch(&owner_repo, &branch).unwrap_or_default()
+                        })
+                    })
+                    .collect()
+            } else {
+                meta.pr_refs
+                    .iter()
+                    .map(|r| {
+                        let dir = ws_dir.join(&r.repo);
+                        let pr = r.clone();
+                        scope.spawn(move || {
+                            let Some(owner_repo) = remote_of(&dir) else {
+                                return vec![];
+                            };
+                            github::pr_status_by_number(&owner_repo, &pr).unwrap_or_default()
+                        })
+                    })
+                    .collect()
+            };
+            handles
+                .into_iter()
+                .filter_map(|h| h.join().ok())
+                .flatten()
+                .collect()
+        });
+        // First-ever scan found PRs? Adopt them into the meta so next
+        // loads go through the saved refs (fast path).
+        if scan && !rows.is_empty() {
+            let refs: Vec<workspace::PrRef> = rows
+                .iter()
+                .map(|r| workspace::PrRef {
+                    repo: r.repo.clone(),
+                    number: r.number,
+                    url: r.url.clone(),
+                })
+                .collect();
+            let _ = workspace::save_pr_refs(&workspace, &refs);
+        }
+        Ok(rows)
+    })
+    .await
 }

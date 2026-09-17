@@ -184,3 +184,58 @@ export function PanelRightExpandIcon({ size = 15 }: IconProps) {
     </svg>
   );
 }
+
+/** Rebase: two arrows cycling (git rebase). */
+export function RebaseIcon({ size = 14 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 8h15l-3-3" />
+      <path d="M21 16H6l3 3" />
+    </svg>
+  );
+}
+
+/** Commit: check mark (approve the commit). */
+export function CommitIcon({ size = 14 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="9" />
+      <path d="m8.5 12 2.5 2.5 4.5-5" />
+    </svg>
+  );
+}
+
+/** Push: arrow leaving a tray (upload). */
+export function PushIcon({ size = 14 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 15V4" />
+      <path d="m7 9 5-5 5 5" />
+      <path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" />
+    </svg>
+  );
+}
+
+/** Pull request: branch with merging arrow. */
+export function PullRequestIcon({ size = 14 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="6" cy="5" r="2.2" />
+      <circle cx="18" cy="19" r="2.2" />
+      <circle cx="6" cy="19" r="2.2" />
+      <path d="M6 7.2v9.6" />
+      <path d="M18 16.8V9a3 3 0 0 0-3-3h-3" />
+      <path d="m13 3-3 3 3 3" />
+    </svg>
+  );
+}
+
+/** AI sparkle: generate with AI. */
+export function SparkIcon({ size = 14 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 3l1.9 5.7L19.6 10.6l-5.7 1.9L12 18.2l-1.9-5.7L4.4 10.6l5.7-1.9z" />
+      <path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z" />
+    </svg>
+  );
+}
