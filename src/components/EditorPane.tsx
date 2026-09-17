@@ -115,6 +115,12 @@ export function EditorPane({ workspace, repo, path, onError, onApplyPlan }: Prop
   useEffect(() => {
     setDirty(false);
     setMode("editor");
+    // Empty path = repo browsing mode (no file open): the Files dock lists
+    // the repo; trying to read "" would just error at the user.
+    if (!path) {
+      setContent(null);
+      return;
+    }
     invoke<string>("read_file", { workspace, repo, path })
       .then(setContent)
       .catch((e) => {
@@ -150,7 +156,7 @@ export function EditorPane({ workspace, repo, path, onError, onApplyPlan }: Prop
     <div className="editor-pane">
       <div className="editor-filebar">
         <span className="mono">
-          {repo}/{path}
+          {path ? `${repo}/${path}` : repo}
           {dirty ? " •" : ""}
         </span>
         <span className="editor-filebar-actions">
@@ -231,7 +237,11 @@ export function EditorPane({ workspace, repo, path, onError, onApplyPlan }: Prop
           </div>
         )
       ) : (
-        <div className="editor-empty">Pick a file in the Files panel</div>
+        <div className="editor-empty">
+          {path
+            ? "Pick a file in the Files panel"
+            : `Browsing ${repo} — pick a file in the Files panel to open it`}
+        </div>
       )}
     </div>
   );

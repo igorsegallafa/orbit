@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 interface TooltipState {
   text: string;
@@ -23,9 +23,25 @@ class TooltipRegistry {
   private state: TooltipState | null = null;
 
   show(text: string, source: unknown) {
-    const el = (source as { currentTarget?: EventTarget | null } | undefined)
-      ?.currentTarget as HTMLElement | null | undefined;
-    if (el && typeof el.getBoundingClientRect === "function") {
+    const ev = source as
+      | { currentTarget?: EventTarget | null; clientX?: number; clientY?: number }
+      | null
+      | undefined;
+    const el = ev?.currentTarget as HTMLElement | null | undefined;
+    // Prefer the mouse point when the event carries it — near where the
+    // user is looking. Wide elements (flex rows) would center the
+    // tooltip far from the cursor.
+    if (ev && typeof ev.clientX === "number" && typeof ev.clientY === "number") {
+      const below = ev.clientY + 18;
+      const flip = below + 80 > window.innerHeight && ev.clientY > 90;
+      this.state = {
+        text,
+        x: ev.clientX + 12,
+        y: flip ? ev.clientY - 6 : below,
+        centered: false,
+        flip,
+      };
+    } else if (el && typeof el.getBoundingClientRect === "function") {
       const r = el.getBoundingClientRect();
       const below = r.bottom + 6;
       // Flip above when there's no room below but there is above.
@@ -71,6 +87,22 @@ export const tooltip = new TooltipRegistry();
 export function TooltipHost() {
   const [state, setState] = useState<TooltipState | null>(null);
 
+  // Clamp needs the RENDERED size — hooks stay ABOVE the early return:
+  // a conditional hook count crashes React's reconciler when the
+  // tooltip appears/disappears (bit us: updateWorkInProgressHook).
+  const ref = useRef<HTMLDivElement>(null);
+  const [size, setSize] = useState({ w: 0, h: 0 });
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    if (r.width > 0 && (Math.round(r.width) !== size.w || Math.round(r.height) !== size.h)) {
+      setSize({ w: Math.round(r.width), h: Math.round(r.height) });
+    } else if (r.width === 0 && (size.w !== 0 || size.h !== 0)) {
+      setSize({ w: 0, h: 0 });
+    }
+  }, [state, size.w, size.h]);
+
   useEffect(() => tooltip.subscribe(setState), []);
 
   // Kill tooltips on any click/scroll/keydown: the anchor element can be
@@ -92,10 +124,16 @@ export function TooltipHost() {
 
   if (!state) return null;
 
-  // Clamp horizontally so the tooltip never leaves the window
-  // (centered: assume up to 260px wide → 130 half).
-  const half = state.centered ? 130 : 8;
-  const x = Math.max(half + 4, Math.min(state.x, window.innerWidth - half - 4));
+  // Clamp both axes against the REAL rendered size: tooltips near
+  // screen edges (dock collapse button) would otherwise render half
+  // off-screen. Measured above via ref/layout effect.
+  const margin = 6;
+  const w = size.w || 260;
+  const h = size.h || 26;
+  const minLeft = state.centered ? w / 2 : 0;
+  const maxLeft = window.innerWidth - w - margin;
+  const x = Math.max(minLeft, Math.min(state.x, maxLeft));
+  const y = Math.max(margin, Math.min(state.y, window.innerHeight - h - margin));
 
   const transform = state.centered
     ? state.flip
@@ -106,7 +144,11 @@ export function TooltipHost() {
       : undefined;
 
   return (
-    <div className="orbit-tooltip" style={{ left: x, top: state.y, transform }}>
+    <div
+      ref={ref}
+      className="orbit-tooltip"
+      style={{ left: x, top: y, transform, visibility: size.w ? undefined : "hidden" }}
+    >
       {state.text}
     </div>
   );

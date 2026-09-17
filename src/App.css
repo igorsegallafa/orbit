@@ -4276,3 +4276,13 @@ table.list tbody tr:hover .row-actions,
   flex-shrink: 0;
   color: var(--accent);
 }
+
+.ws-check-link {
+  cursor: pointer;
+  color: var(--text);
+}
+
+.ws-check-link:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}

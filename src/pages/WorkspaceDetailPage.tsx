@@ -559,7 +559,25 @@ function ChecksList({
                 <CircleIcon size={10} />
               )}
             </span>
-            <span className="ws-check-name mono" title={c.workflow || c.name}>{c.name}</span>
+            <span
+              className={`ws-check-name mono ${c.link ? "ws-check-link" : ""}`}
+              title={c.link || c.workflow || c.name}
+              onClick={
+                c.link
+                  ? () => {
+                      openUrl(c.link).catch(() => null);
+                    }
+                  : undefined
+              }
+              onMouseEnter={
+                c.link
+                  ? (e) => tooltip.show("Open this check on GitHub ↗", e)
+                  : undefined
+              }
+              onMouseLeave={() => tooltip.hide()}
+            >
+              {c.name}
+            </span>
             <span className="ws-check-dur">{dur}</span>
             <span className="ws-check-actions">
               {failed && rerunning !== c.link && (

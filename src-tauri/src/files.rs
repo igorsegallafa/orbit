@@ -312,3 +312,25 @@ fn collect_files(dir: &Path, rel: &str, repo: &str, out: &mut Vec<FileSearchEntr
         }
     }
 }
+/// Frontend render crashes (ErrorBoundary) land here so the full stack —
+/// including app frames the on-screen card truncates — is diagnosable.
+#[tauri::command]
+pub async fn log_render_crash(message: String) -> Result<(), String> {
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/orbit-render-crash.log")
+        .map_err(|e| e.to_string())?;
+    writeln!(f, "=== {} ===", chrono_or_now()).ok();
+    writeln!(f, "{message}").ok();
+    writeln!(f).ok();
+    Ok(())
+}
+
+fn chrono_or_now() -> String {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| format!("{}s", d.as_secs()))
+        .unwrap_or_default()
+}

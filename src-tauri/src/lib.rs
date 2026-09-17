@@ -82,6 +82,7 @@ pub fn run() {
             commands::integration_fetch_cards,
             files::list_files,
             files::read_file,
+            files::log_render_crash,
             files::write_file,
             files::list_workspace_files,
             files::move_file,

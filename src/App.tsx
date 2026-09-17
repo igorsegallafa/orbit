@@ -696,7 +696,9 @@ function App() {
                   t.kind === "workspace"
                     ? t.workspace.name
                     : t.kind === "editor"
-                      ? (t.repo ? `${t.repo}/${t.path.split("/").pop()}` : t.path.split("/").pop()!)
+                      ? (t.repo
+                          ? (t.path ? `${t.repo}/${t.path.split("/").pop()}` : t.repo)
+                          : (t.path.split("/").pop() || "Files"))
                       : t.kind === "review"
                         ? `${t.repo}/${t.path.split("/").pop()} (diff)`
                         : t.kind === "commit"

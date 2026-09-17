@@ -16,6 +16,17 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, State> {
 
   componentDidCatch(error: Error, info: unknown) {
     console.error("[orbit] render crash:", error, info);
+    // Land the full stack (with app frames) in /tmp/orbit-render-crash.log
+    // — the on-screen card shows only the first frames.
+    const stack = [
+      String(error.stack ?? error.message),
+      "",
+      "componentStack:",
+      String((info as { componentStack?: string } | null)?.componentStack ?? ""),
+    ].join("\n");
+    import("@tauri-apps/api/core")
+      .then(({ invoke }) => invoke("log_render_crash", { message: stack }))
+      .catch(() => null);
   }
 
   render() {
