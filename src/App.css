@@ -769,6 +769,12 @@ table.list tbody tr:hover {
   transition: opacity var(--transition);
 }
 
+/* Settings-style tables: actions are real buttons, always visible. */
+.row-actions-inline {
+  justify-content: flex-end;
+  opacity: 1;
+}
+
 table.list tbody tr:hover .row-actions,
 .group-row:hover .row-actions {
   opacity: 1;

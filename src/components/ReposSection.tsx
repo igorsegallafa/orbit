@@ -180,13 +180,18 @@ export function ReposSection({ config, onChange, onError }: Props) {
                         </button>
                       )}
                     </td>
-                    <td className="row-actions">
-                      <button className="link" onClick={() => startEdit(s)}>
-                        Edit
-                      </button>
-                      <button className="link danger" onClick={() => setConfirmRemove(s.name)}>
-                        Remove
-                      </button>
+                    <td>
+                      <div className="row-actions row-actions-inline">
+                        <button className="btn-mini" onClick={() => startEdit(s)}>
+                          Edit
+                        </button>
+                        <button
+                          className="btn-mini danger-outline"
+                          onClick={() => setConfirmRemove(s.name)}
+                        >
+                          Remove
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 );
