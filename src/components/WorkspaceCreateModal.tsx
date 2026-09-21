@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { toast } from "./Toast";
 import { invoke } from "@tauri-apps/api/core";
 import { Config, Workspace } from "../types/config";
 import { Skeleton } from "./Skeleton";
+import { CheckBox } from "./CheckBox";
 import { Select } from "./Select";
 import { ShortcutLogo, LinearLogo } from "./BrandIcons";
 
@@ -12,7 +14,7 @@ interface CardInfo {
   url: string;
 }
 
-type Source = "manual" | "shortcut" | "linear";
+type Source = "manual" | "branch" | "shortcut" | "linear";
 
 interface Props {
   config: Config;
@@ -45,6 +47,8 @@ export function WorkspaceCreateModal({ config, onCreated, onClose, onError }: Pr
   const [pickedCard, setPickedCard] = useState<CardInfo | null>(null);
   // Which trackers are connected (disables their pills when not)
   const [connected, setConnected] = useState<Record<string, boolean>>({});
+
+  const fromBranch = source === "branch";
 
   const effectiveBranch = useMemo(() => {
     if (branch.trim()) return branch.trim();
@@ -91,7 +95,7 @@ export function WorkspaceCreateModal({ config, onCreated, onClose, onError }: Pr
 
   // Load cards when entering a tracker tab (debounced on query too)
   useEffect(() => {
-    if (source === "manual") return;
+    if (source === "manual" || source === "branch") return;
     const t = setTimeout(fetchCards, cardQuery ? 300 : 0);
     return () => clearTimeout(t);
   }, [source, cardQuery, fetchCards]);
@@ -144,7 +148,34 @@ export function WorkspaceCreateModal({ config, onCreated, onClose, onError }: Pr
     });
   };
 
+  const createFromBranch = async () => {
+    const wsName = name.trim() || slugify(branch.replace(/^feat\//, ""));
+    if (!branch.trim() || !wsName) {
+      onError("Enter the existing branch name.");
+      return;
+    }
+    setCreating(true);
+    try {
+      const res = await invoke<{ workspace: Workspace; failures: string[] }>(
+        "create_workspace_from_branch",
+        { name: wsName, branch: branch.trim() },
+      );
+      if (res.failures.length) {
+        toast.info(`Workspace ${wsName} created with problems`, { description: res.failures.join("\n") });
+      } else {
+        toast.success(`Workspace ${wsName} created`, { description: `${res.workspace.repos.length} repo(s) on ${branch.trim()}` });
+      }
+      onCreated();
+      onClose();
+    } catch (e) {
+      onError(String(e));
+    } finally {
+      setCreating(false);
+    }
+  };
+
   const create = async () => {
+    if (fromBranch) return createFromBranch();
     if (!name.trim() || selected.size === 0 || !effectiveBranch) {
       onError("Name and at least one repository are required.");
       return;
@@ -165,6 +196,7 @@ export function WorkspaceCreateModal({ config, onCreated, onClose, onError }: Pr
             }
           : null,
       });
+      toast.success(`Workspace ${name.trim()} created`, { description: `${selected.size} repo(s) on ${effectiveBranch}` });
       onCreated();
       onClose();
     } catch (e) {
@@ -178,6 +210,7 @@ export function WorkspaceCreateModal({ config, onCreated, onClose, onError }: Pr
 
   const sourceTabs: { id: Source; label: string; logo?: React.ReactNode }[] = [
     { id: "manual", label: "Manual" },
+    { id: "branch", label: "Existing branch" },
     { id: "shortcut", label: "Shortcut", logo: <ShortcutLogo size={14} /> },
     { id: "linear", label: "Linear", logo: <LinearLogo size={14} /> },
   ];
@@ -223,7 +256,13 @@ export function WorkspaceCreateModal({ config, onCreated, onClose, onError }: Pr
             })}
           </div>
 
-          {source !== "manual" && (
+          {fromBranch && (
+            <p className="wizard-picked">
+              Sets up a branch that already exists on origin, in every cloned repository that has it.
+            </p>
+          )}
+
+          {source !== "manual" && !fromBranch && (
             <div className="wizard-field">
               <label>Pick a card</label>
               <input
@@ -276,7 +315,7 @@ export function WorkspaceCreateModal({ config, onCreated, onClose, onError }: Pr
               <input
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                placeholder="checkout-improvements"
+                placeholder={fromBranch ? slugify(branch.replace(/^feat\//, "")) || "derived from the branch" : "checkout-improvements"}
                 autoComplete="off"
                 autoCorrect="off"
                 autoCapitalize="off"
@@ -291,7 +330,7 @@ export function WorkspaceCreateModal({ config, onCreated, onClose, onError }: Pr
               <input
                 value={branch}
                 onChange={(e) => setBranch(e.target.value)}
-                placeholder={effectiveBranch || "feat/my-workspace"}
+                placeholder={fromBranch ? "feat/existing-branch" : effectiveBranch || "feat/my-workspace"}
                 autoComplete="off"
                 autoCorrect="off"
                 autoCapitalize="off"
@@ -299,17 +338,17 @@ export function WorkspaceCreateModal({ config, onCreated, onClose, onError }: Pr
                 name="orbit-ws-branch"
               />
             </div>
-            <div className="wizard-field">
+            {!fromBranch && <div className="wizard-field">
               <label>Base branch</label>
               <Select
                 value={base}
                 options={baseOptions.map((b) => ({ value: b, label: b }))}
                 onChange={setBase}
               />
-            </div>
+            </div>}
           </div>
 
-          <div className="wizard-field">
+          {!fromBranch && <div className="wizard-field">
             <label>
               Repositories
               <span className="wizard-count">{selected.size} selected</span>
@@ -337,7 +376,7 @@ export function WorkspaceCreateModal({ config, onCreated, onClose, onError }: Pr
                 const checked = selected.has(s.name);
                 return (
                   <label key={s.name} className={`modal-row modal-row-check ${checked ? "modal-row-selected" : ""}`}>
-                    <input type="checkbox" checked={checked} onChange={() => toggleRepo(s.name)} />
+                    <CheckBox label={s.name} checked={checked} onChange={() => toggleRepo(s.name)} />
                     <span className="modal-row-name">{s.name}</span>
                   </label>
                 );
@@ -346,7 +385,7 @@ export function WorkspaceCreateModal({ config, onCreated, onClose, onError }: Pr
                 <p className="empty">No repositories configured. Add some in Settings first.</p>
               )}
             </div>
-          </div>
+          </div>}
         </div>
 
         <div className="modal-footer">
@@ -355,7 +394,7 @@ export function WorkspaceCreateModal({ config, onCreated, onClose, onError }: Pr
           </button>
           <button
             type="button"
-            disabled={creating || !name.trim() || selected.size === 0}
+            disabled={creating || (fromBranch ? !branch.trim() : !name.trim() || selected.size === 0)}
             onClick={create}
           >
             {creating ? "Creating…" : "Create workspace"}

@@ -1,11 +1,27 @@
+/** One command for every platform, or one per platform (Node platform keys). */
+export type BuildCmd = string | { win32?: string; linux?: string; darwin?: string };
+
 export interface Service {
   name: string;
   repo: string;
+  build?: BuildCmd;
+  /** Build output dir shared with the base clone (default "dist"). */
+  buildOutput?: string;
+  /** Share only these sub-paths of the output dir. */
+  buildOutputShared?: string[];
+  /** false = branch-only: checked out in the base clone, no worktree. */
+  worktree?: boolean;
+  /** Custom clone location (existing checkout or chosen clone folder). */
+  path?: string;
 }
 
 export interface Config {
   services: Service[];
   groups: Record<string, string[]>;
+  /** Clones folder override (default <root>/repos). */
+  reposDir?: string;
+  /** Workspaces folder override (default <root>/workspaces). */
+  workspacesDir?: string;
 }
 
 export const emptyConfig: Config = {

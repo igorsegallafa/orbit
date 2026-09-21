@@ -10,16 +10,11 @@ pub struct FileNode {
     pub is_dir: bool,
 }
 
-fn workspace_root() -> Result<PathBuf, String> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or("HOME is not set")?;
-    Ok(home.join("Documents/orbit-workspace"))
-}
+use crate::workspace::workspace_root;
 
 /// Resolves `workspace/repo/rel` and refuses paths escaping the workspace.
 fn resolve(workspace: &str, repo: &str, rel: &str) -> Result<PathBuf, String> {
-    let base = workspace_root()?.join("workspaces").join(workspace).join(repo);
+    let base = crate::workspace::ws_dir(workspace)?.join(repo);
     let joined = if rel.is_empty() {
         base.clone()
     } else {
@@ -140,28 +135,15 @@ pub async fn rename_node(workspace: String, repo: String, path: String, new_name
     std::fs::rename(&p, &dest).map_err(|e| format!("failed to rename: {e}"))
 }
 
-/// Deletes a file/folder by moving it to the macOS Trash (recoverable).
-/// Falls back to an error rather than permanent deletion.
+/// Deletes a file/folder by moving it to the OS Trash / Recycle Bin
+/// (recoverable). Falls back to an error rather than permanent deletion.
 #[tauri::command]
 pub async fn delete_node(workspace: String, repo: String, path: String) -> Result<(), String> {
     let p = resolve(&workspace, &repo, &path)?;
     if !p.exists() {
         return Err(format!("'{path}' does not exist"));
     }
-    let script = format!(
-        "tell application \"Finder\" to delete (POSIX file \"{}\" as alias)",
-        p.display()
-    );
-    let out = std::process::Command::new("osascript")
-        .arg("-e")
-        .arg(&script)
-        .output()
-        .map_err(|e| format!("failed to run osascript: {e}"))?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        Err("could not move to Trash (Finder automation denied)".into())
-    }
+    trash::delete(&p).map_err(|e| format!("could not move to Trash: {e}"))
 }
 
 /// Creates an empty file or a folder inside `dir` (repo-relative, "" = root).
@@ -185,18 +167,14 @@ pub async fn create_node(workspace: String, repo: String, dir: String, name: Str
     }
 }
 
-/// Reveals a file/folder in Finder (selects it in its parent folder).
+/// Reveals a file/folder in the OS file manager (selected in its parent).
 #[tauri::command]
 pub async fn reveal_node(workspace: String, repo: String, path: String) -> Result<(), String> {
     let p = resolve(&workspace, &repo, &path)?;
     if !p.exists() {
         return Err(format!("'{path}' does not exist"));
     }
-    std::process::Command::new("open")
-        .args(["-R", &p.to_string_lossy()])
-        .spawn()
-        .map_err(|e| format!("failed to open Finder: {e}"))?;
-    Ok(())
+    tauri_plugin_opener::reveal_item_in_dir(&p).map_err(|e| format!("failed to reveal: {e}"))
 }
 
 /// Absolute path of a node (for "Copy Path").
@@ -263,9 +241,7 @@ const MAX_FILES: usize = 20_000;
 /// The frontend fuzzy-filters this list locally for instant-as-you-type.
 #[tauri::command]
 pub async fn list_workspace_files(workspace: String) -> Result<Vec<FileSearchEntry>, String> {
-    let ws_dir = crate::workspace::workspace_root()?
-        .join("workspaces")
-        .join(&workspace);
+    let ws_dir = crate::workspace::ws_dir(&workspace)?;
     if !ws_dir.exists() {
         return Err(format!("workspace '{workspace}' not found"));
     }

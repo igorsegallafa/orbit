@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
 
 pub const SHORTCUT_API: &str = "https://api.app.shortcut.com/api/v3";
 pub const LINEAR_API: &str = "https://api.linear.app/graphql";
@@ -68,10 +67,7 @@ pub struct IntegrationStatus {
 // ---------- credentials file (~/.config/orbit/credentials, 0600) ----------
 
 pub fn credentials_path() -> Result<PathBuf, String> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or("HOME is not set")?;
-    let dir = home.join(".config/orbit");
+    let dir = crate::config::home_dir()?.join(".config").join("orbit");
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     Ok(dir.join("credentials"))
 }
@@ -109,7 +105,7 @@ fn curl_json(
     auth_headers: &[(&str, String)],
     body: Option<&str>,
 ) -> Result<serde_json::Value, String> {
-    let mut cmd = Command::new("curl");
+    let mut cmd = crate::proc::cmd("curl");
     cmd.args(["-sS", "--max-time", "10", "-H", "Content-Type: application/json"]);
     for (name, value) in auth_headers {
         cmd.args(["-H", &format!("{name}: {value}")]);
@@ -206,56 +202,58 @@ fn shortcut_fetch_cards(tok: &str, query: &str) -> Result<Vec<CardInfo>, String>
         .collect())
 }
 
+/// Linear personal API keys go in the header raw; OAuth tokens need Bearer.
+fn linear_auth(tok: &str) -> String {
+    let tok = tok.trim();
+    if tok.starts_with("lin_api_") {
+        tok.to_string()
+    } else {
+        format!("Bearer {tok}")
+    }
+}
+
+/// POSTs a GraphQL query (with variables) and returns `data`, surfacing
+/// the first GraphQL error as the message.
+fn linear_request(tok: &str, query: &str, variables: serde_json::Value) -> Result<serde_json::Value, String> {
+    let body = serde_json::json!({ "query": query, "variables": variables }).to_string();
+    let headers: [(&str, String); 1] = [("Authorization", linear_auth(tok))];
+    let v = curl_json(LINEAR_API, &headers, Some(&body))?;
+    if let Some(err) = v.pointer("/errors/0") {
+        return Err(err
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("Linear request failed")
+            .to_string());
+    }
+    v.get("data").cloned().ok_or_else(|| "unexpected Linear response".into())
+}
+
 /// Linear: GraphQL viewer query validates the token.
 fn linear_validate(tok: &str) -> Result<String, String> {
-    let body = r#"{"query":"{ viewer { name email } }"}"#;
-    let headers: [(&str, String); 1] = [("Authorization", format!("Bearer {tok}"))];
-    let v = curl_json(LINEAR_API, &headers, Some(body))?;
-    if let Some(errors) = v.get("errors").and_then(|e| e.as_array()) {
-        if !errors.is_empty() {
-            return Err(
-                errors[0]
-                    .get("message")
-                    .and_then(|m| m.as_str())
-                    .unwrap_or("authentication failed")
-                    .to_string(),
-            );
-        }
-    }
-    v.pointer("/data/viewer/name")
+    let data = linear_request(tok, "{ viewer { name email } }", serde_json::json!({}))?;
+    data.pointer("/viewer/name")
         .and_then(|n| n.as_str())
         .map(String::from)
         .ok_or_else(|| "unexpected Linear response".into())
 }
 
 fn linear_fetch_cards(tok: &str, query: &str) -> Result<Vec<CardInfo>, String> {
-    let filter = if query.trim().is_empty() {
-        String::from("")
+    let q = query.trim();
+    let filter = if q.is_empty() {
+        serde_json::Value::Null
     } else {
-        format!(
-            r#", filter: {{ or: [{{ title: {{ contains: "{}" }} }}, {{ description: {{ contains: "{}" }} }}] }}"#,
-            escape_gql(query.trim()),
-            escape_gql(query.trim())
-        )
+        serde_json::json!({ "or": [
+            { "title": { "containsIgnoreCase": q } },
+            { "description": { "containsIgnoreCase": q } }
+        ]})
     };
-    let body = format!(
-        r#"{{"query":"{{ issues(first: 25, orderBy: updatedAt{filter}) {{ nodes {{ identifier title url state {{ name }} }} }} }} }}"#
-    );
-    let headers: [(&str, String); 1] = [("Authorization", format!("Bearer {tok}"))];
-    let v = curl_json(LINEAR_API, &headers, Some(&body))?;
-    if let Some(errors) = v.get("errors").and_then(|e| e.as_array()) {
-        if !errors.is_empty() {
-            return Err(
-                errors[0]
-                    .get("message")
-                    .and_then(|m| m.as_str())
-                    .unwrap_or("authentication failed")
-                    .to_string(),
-            );
-        }
-    }
-    let nodes = v
-        .pointer("/data/issues/nodes")
+    let data = linear_request(
+        tok,
+        "query($filter: IssueFilter) { issues(first: 25, orderBy: updatedAt, filter: $filter) { nodes { identifier title url state { name } } } }",
+        serde_json::json!({ "filter": filter }),
+    )?;
+    let nodes = data
+        .pointer("/issues/nodes")
         .and_then(|n| n.as_array())
         .cloned()
         .unwrap_or_default();
@@ -335,23 +333,13 @@ fn shortcut_fetch_card(tok: &str, id: &str) -> Result<CardDetail, String> {
 
 fn linear_fetch_card(tok: &str, id: &str) -> Result<CardDetail, String> {
     // Current Linear API accepts the human identifier (ENG-123) in issue(id:).
-    let q = format!(
-        r#"{{"query":"{{ issue(id: \"{}\") {{ identifier title description url state {{ name }} }} }}"}}"#,
-        escape_gql(id)
-    );
-    let headers: [(&str, String); 1] = [("Authorization", format!("Bearer {tok}"))];
-    let v = curl_json(LINEAR_API, &headers, Some(&q))?;
-    if let Some(errors) = v.get("errors").and_then(|e| e.as_array()) {
-        if !errors.is_empty() {
-            return Err(errors[0]
-                .get("message")
-                .and_then(|m| m.as_str())
-                .unwrap_or("card not found")
-                .to_string());
-        }
-    }
+    let v = linear_request(
+        tok,
+        "query($id: String!) { issue(id: $id) { identifier title description url state { name } } }",
+        serde_json::json!({ "id": id }),
+    )?;
     let issue = v
-        .pointer("/data/issue")
+        .get("issue")
         .ok_or("card not found in Linear")?;
     if issue.is_null() {
         return Err("card not found in Linear".into());
@@ -425,7 +413,7 @@ fn status_kind_label(kind: TrackerKind) -> &'static str {
     }
 }
 
-// Minimal URL/GQL escaping for user search text (no new deps).
+// Minimal URL escaping for user search text (no new deps).
 fn url_encode(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {
@@ -439,6 +427,15 @@ fn url_encode(s: &str) -> String {
     out
 }
 
-fn escape_gql(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn linear_api_keys_are_sent_raw_and_oauth_tokens_as_bearer() {
+        assert_eq!(linear_auth("lin_api_abc"), "lin_api_abc");
+        assert_eq!(linear_auth(" lin_api_abc
+"), "lin_api_abc");
+        assert_eq!(linear_auth("oauth-token"), "Bearer oauth-token");
+    }
 }

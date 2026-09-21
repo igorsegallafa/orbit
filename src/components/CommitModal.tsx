@@ -3,12 +3,17 @@ import { invoke } from "@tauri-apps/api/core";
 import { CheckBox } from "./CheckBox";
 import { SparkIcon } from "./Icons";
 import { tooltip } from "./Tooltip";
+import { toast } from "./Toast";
+import { StatusIcon } from "./StatusIcon";
 
 interface RepoMsg {
   repo: string;
   message: string;
   status: "loading" | "ready" | "error" | "done";
+  /** Commit failure (status "error"). */
   error?: string;
+  /** AI draft failed: a note only, the message can still be typed. */
+  draftError?: string;
   included: boolean;
 }
 
@@ -33,7 +38,7 @@ export function CommitModal({ workspace, repos, onClose, onSettled, onError }: P
   // AI message for ONE repo, on demand.
   const generate = (repo: string) => {
     setMsgs((prev) =>
-      prev.map((r) => (r.repo === repo ? { ...r, status: "loading" } : r))
+      prev.map((r) => (r.repo === repo ? { ...r, status: "loading", draftError: undefined, error: undefined } : r))
     );
     invoke<{ repo: string; message: string }>("ws_commit_message", {
       workspace,
@@ -42,14 +47,14 @@ export function CommitModal({ workspace, repos, onClose, onSettled, onError }: P
       .then((m) =>
         setMsgs((prev) =>
           prev.map((r) =>
-            r.repo === repo ? { ...r, message: m.message, status: "ready" } : r
+            r.repo === repo ? { ...r, message: m.message, status: "ready", included: true } : r
           )
         )
       )
       .catch((e) =>
         setMsgs((prev) =>
           prev.map((r) =>
-            r.repo === repo ? { ...r, status: "error", error: String(e) } : r
+            r.repo === repo ? { ...r, status: "ready", draftError: String(e) } : r
           )
         )
       );
@@ -57,7 +62,7 @@ export function CommitModal({ workspace, repos, onClose, onSettled, onError }: P
 
   const generateAll = () => repos.forEach((r) => generate(r));
 
-  const ready = msgs.filter((m) => m.status === "ready" && m.included);
+  const ready = msgs.filter((m) => m.status !== "done" && m.status !== "loading" && m.included && m.message.trim());
   const anyRunning = msgs.some((m) => m.status === "loading") || committing;
 
   const commit = async () => {
@@ -84,6 +89,9 @@ export function CommitModal({ workspace, repos, onClose, onSettled, onError }: P
     );
     setCommitting(false);
     if (failures === 0) {
+      toast.success(`Committed ${ready.length} repo${ready.length === 1 ? "" : "s"}`, {
+        description: ready.map((m) => `${m.repo}: ${m.message.split("\n")[0]}`).join("\n"),
+      });
       onSettled();
       onClose();
     } else {
@@ -131,16 +139,24 @@ export function CommitModal({ workspace, repos, onClose, onSettled, onError }: P
                   <span className="ws-commit-state">
                     {m.status === "loading" && (
                       <>
-                        <span className="spinner" /> drafting…
+                        <StatusIcon kind="working" /> drafting…
                       </>
                     )}
-                    {m.status === "done" && <span className="ws-dot ws-dot-ok">✓</span>}
-                    {m.status === "error" && <span className="ws-dot ws-dot-err">✗</span>}
+                    {m.status === "done" && (
+                      <>
+                        <StatusIcon kind="ok" /> committed
+                      </>
+                    )}
+                    {m.status === "error" && (
+                      <>
+                        <StatusIcon kind="error" /> failed
+                      </>
+                    )}
                   </span>
                   {(m.status === "ready" || m.status === "error") && !committing && (
                     <button
                       type="button"
-                      className="btn-mini"
+                      className="btn-mini secondary"
                       onClick={() => generate(m.repo)}
                       onMouseEnter={(e) => tooltip.show("Ask the agent to draft this message", e)}
                       onMouseLeave={() => tooltip.hide()}
@@ -149,9 +165,7 @@ export function CommitModal({ workspace, repos, onClose, onSettled, onError }: P
                     </button>
                   )}
                 </div>
-                {m.status === "error" ? (
-                  <div className="ws-commit-error">{m.error}</div>
-                ) : m.status === "loading" ? (
+                {m.status === "loading" ? (
                   <div className="ws-commit-placeholder">The agent is drafting…</div>
                 ) : (
                   <textarea
@@ -159,6 +173,12 @@ export function CommitModal({ workspace, repos, onClose, onSettled, onError }: P
                     placeholder="Commit message (write it yourself or draft with AI)"
                     value={m.message}
                     disabled={m.status === "done" || committing}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && ready.length > 0 && !anyRunning) {
+                        e.preventDefault();
+                        commit();
+                      }
+                    }}
                     onChange={(e) =>
                       setMsgs((prev) =>
                         prev.map((r) =>
@@ -167,6 +187,10 @@ export function CommitModal({ workspace, repos, onClose, onSettled, onError }: P
                       )
                     }
                   />
+                )}
+                {m.status === "error" && m.error && <div className="ws-commit-error">{m.error}</div>}
+                {m.draftError && m.status !== "loading" && (
+                  <div className="ws-commit-note">Couldn't draft with AI ({m.draftError.replace(/^.*?: /, "")}). Write the message yourself.</div>
                 )}
               </div>
             ))}
@@ -184,7 +208,9 @@ export function CommitModal({ workspace, repos, onClose, onSettled, onError }: P
           >
             {committing
               ? "Committing…"
-              : `Commit ${ready.length} ${ready.length === 1 ? "repo" : "repos"}`}
+              : ready.length === 0
+                ? "Write a message to commit"
+                : `Commit ${ready.length} ${ready.length === 1 ? "repo" : "repos"}`}
           </button>
         </div>
       </div>

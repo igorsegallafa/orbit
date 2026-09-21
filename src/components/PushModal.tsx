@@ -1,5 +1,7 @@
 import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { toast } from "./Toast";
+import { StatusIcon, StatusKind } from "./StatusIcon";
 
 interface RepoState {
   repo: string;
@@ -30,23 +32,27 @@ export function PushModal({ workspace, repos, onCreatePrs, onClose, onSettled }:
 
   const push = async () => {
     setRunning(true);
-    await Promise.all(
+    const results = await Promise.all(
       repos.map(async (repo) => {
         set(repo, { status: "pushing" });
         try {
           await invoke("ws_push", { workspace, repo });
-          set(repo, { status: "pushed", detail: "pushed" });
+          set(repo, { status: "pushed", detail: "Pushed" });
+          return "pushed";
         } catch (e) {
           const msg = String(e);
-          set(repo, {
-            status: msg.includes("up to date") || msg.includes("Everything up-to-date") ? "skipped" : "error",
-            detail: msg,
-          });
+          const skipped = msg.includes("up to date") || msg.includes("Everything up-to-date");
+          set(repo, { status: skipped ? "skipped" : "error", detail: skipped ? "Already up to date" : msg });
+          return skipped ? "skipped" : "error";
         }
       })
     );
     setRunning(false);
     onSettled();
+    const pushed = results.filter((r) => r === "pushed").length;
+    const failed = results.filter((r) => r === "error").length;
+    if (failed) toast.error(`Push failed in ${failed} repo${failed === 1 ? "" : "s"}`, { description: "See the details in the dialog." });
+    else if (pushed) toast.success(`Pushed ${pushed} repo${pushed === 1 ? "" : "s"}`);
   };
 
   const done = !running && states.every((s) => s.status !== "idle" && s.status !== "pushing");
@@ -56,22 +62,15 @@ export function PushModal({ workspace, repos, onCreatePrs, onClose, onSettled }:
     <div className="modal-overlay" onMouseDown={running ? undefined : onClose}>
       <div className="modal modal-sm" onMouseDown={(e) => e.stopPropagation()}>
         <div className="modal-body">
-          <h3>Push branches to origin</h3>
+          <h3>Push to origin</h3>
+          <p className="ws-commit-hint">Each repo pushes its feature branch and sets the upstream. Nothing is force-pushed.</p>
           <div className="ws-action-list">
             {states.map((s) => (
-              <div key={s.repo} className={`ws-action-row ws-${s.status === "pushed" || s.status === "skipped" ? "ok" : s.status}`}>
-                <span className="ws-action-repo mono">{s.repo}</span>
-                <span className="ws-action-detail">
-                  {s.status === "pushing"
-                    ? "pushing…"
-                    : s.status === "idle"
-                      ? ""
-                      : (s.detail ?? "nothing to push")}
-                </span>
-                <span className="ws-action-state">
-                  {s.status === "pushing" && <span className="spinner" />}
-                  {s.status === "pushed" && <span className="ws-dot ws-dot-ok">✓</span>}
-                  {s.status === "error" && <span className="ws-dot ws-dot-err">✗</span>}
+              <div key={s.repo} className={`status-row ${s.status === "error" ? "status-row-error" : ""}`}>
+                <StatusIcon kind={PUSH_KIND[s.status]} />
+                <span className="status-row-repo">{s.repo}</span>
+                <span className="status-row-detail">
+                  {s.status === "pushing" ? "Pushing…" : s.status === "idle" ? "Ready to push" : s.detail}
                 </span>
               </div>
             ))}
@@ -104,3 +103,11 @@ export function PushModal({ workspace, repos, onCreatePrs, onClose, onSettled }:
     </div>
   );
 }
+
+const PUSH_KIND: Record<"idle" | "pushing" | "pushed" | "skipped" | "error", StatusKind> = {
+  idle: "pending",
+  pushing: "working",
+  pushed: "ok",
+  skipped: "ok",
+  error: "error",
+};

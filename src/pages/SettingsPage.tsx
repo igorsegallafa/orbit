@@ -3,6 +3,7 @@ import { Config } from "../types/config";
 import { ReposSection } from "../components/ReposSection";
 import { GroupsSection } from "../components/GroupsSection";
 import { AiSection } from "../components/AiSection";
+import { HealthSection } from "../components/HealthSection";
 
 interface Props {
   config: Config;
@@ -10,7 +11,7 @@ interface Props {
   onError: (msg: string) => void;
 }
 
-type Tab = "repos" | "groups" | "ai";
+type Tab = "repos" | "groups" | "ai" | "health";
 
 export function SettingsPage({ config, onChange, onError }: Props) {
   const [tab, setTab] = useState<Tab>("repos");
@@ -40,11 +41,18 @@ export function SettingsPage({ config, onChange, onError }: Props) {
         >
           AI
         </button>
+        <button
+          className={`tab ${tab === "health" ? "tab-active" : ""}`}
+          onClick={() => setTab("health")}
+        >
+          Health
+        </button>
       </div>
 
       {tab === "repos" && <ReposSection config={config} onChange={onChange} onError={onError} />}
       {tab === "groups" && <GroupsSection config={config} onChange={onChange} onError={onError} />}
       {tab === "ai" && <AiSection onError={onError} />}
+      {tab === "health" && <HealthSection onError={onError} />}
     </div>
   );
 }

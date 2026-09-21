@@ -88,7 +88,10 @@ export function GitPanel({ workspace, onReviewFile, onReviewCommit, onError }: P
                 onClick={() => onReviewFile(repo, c.path)}
               >
                 <span className={`git-status-badge ${meta.cls}`}>{meta.letter}</span>
-                <span className="git-change-name">{c.path.split("/").pop()}</span>
+                <span className="git-change-name">
+                  {c.path.split("/").pop()}
+                  {c.path.includes("/") && <span className="git-change-dir">{c.path.slice(0, c.path.lastIndexOf("/"))}</span>}
+                </span>
                 {(c.added > 0 || c.deleted > 0) && (
                   <span className="git-change-stats">
                     {c.added > 0 && <span className="git-stat-add">+{c.added}</span>}

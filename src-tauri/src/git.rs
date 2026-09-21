@@ -1,11 +1,6 @@
 // Thin wrappers around the `git` binary via shell-out (same approach as the
 // generosity-workspace CLI: worktree support in pure Rust libs is weak).
 use std::path::Path;
-use std::process::Command;
-
-pub fn is_cloned(repos_dir: &Path, name: &str) -> bool {
-    repos_dir.join(name).join(".git").exists()
-}
 
 pub fn remove_clone(dest: &Path) -> Result<(), String> {
     if !dest.exists() {
@@ -14,14 +9,42 @@ pub fn remove_clone(dest: &Path) -> Result<(), String> {
     std::fs::remove_dir_all(dest).map_err(|e| e.to_string())
 }
 
+/// Clones into `dest` (missing or empty folder). A GitHub SSH URL that
+/// fails for lack of an SSH key is retried over HTTPS, which the `gh`
+/// login covers.
 pub fn clone(repo_url: &str, dest: &Path) -> Result<(), String> {
-    if dest.exists() {
-        return Err(format!("destination already exists: {}", dest.display()));
+    let occupied = std::fs::read_dir(dest).map(|mut d| d.next().is_some()).unwrap_or(false);
+    if occupied {
+        return Err(format!("{} already exists and is not empty", dest.display()));
     }
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    git(&["clone", repo_url, &dest.to_string_lossy()])
+    let dest_s = dest.to_string_lossy();
+    let result = match git(&["clone", repo_url, &dest_s]) {
+        Err(e) if e.contains("Permission denied (publickey)") => match github_https(repo_url) {
+            Some(https) => git(&["clone", &https, &dest_s]),
+            None => Err(e),
+        },
+        r => r,
+    };
+    // git's "Cloning into '...'..." progress line buries the actual cause.
+    result.map_err(|e| {
+        e.lines()
+            .filter(|l| !l.starts_with("Cloning into"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    })
+}
+
+/// `git@github.com:owner/repo(.git)` / `ssh://git@github.com/owner/repo` ->
+/// `https://github.com/owner/repo.git`.
+pub fn github_https(url: &str) -> Option<String> {
+    let path = url
+        .strip_prefix("git@github.com:")
+        .or_else(|| url.strip_prefix("ssh://git@github.com/"))?;
+    let path = path.trim_end_matches('/').trim_end_matches(".git");
+    Some(format!("https://github.com/{path}.git"))
 }
 
 /// Adds a worktree at `path` on branch `branch`, based on `base`
@@ -37,7 +60,72 @@ pub fn worktree_add(repo_dir: &Path, path: &Path, branch: &str, base: &str) -> R
     if branch_exists(repo_dir, branch) {
         return git_in(repo_dir, &["worktree", "add", &path.to_string_lossy(), branch]);
     }
-    git_in(repo_dir, &["worktree", "add", "-b", branch, &path.to_string_lossy(), base])
+    let start = start_point(repo_dir, base);
+    git_in(repo_dir, &["worktree", "add", "-b", branch, &path.to_string_lossy(), &start])
+}
+
+/// `origin/<base>` when it exists: the local base branch is not moved by
+/// `fetch`, so branching from it could start the feature from stale code.
+fn start_point(repo_dir: &Path, base: &str) -> String {
+    let remote = format!("origin/{base}");
+    if ref_exists(repo_dir, &format!("refs/remotes/{remote}")) {
+        remote
+    } else {
+        base.to_string()
+    }
+}
+
+/// Default branch of origin (`main`), from origin/HEAD.
+pub fn default_branch(repo_dir: &Path) -> Option<String> {
+    let r = crate::proc::run("git", &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], Some(repo_dir)).ok()?;
+    Some(r.trim().trim_start_matches("origin/").to_string()).filter(|b| !b.is_empty())
+}
+
+/// True when origin has a branch named `branch`.
+pub fn remote_has_branch(repo_dir: &Path, branch: &str) -> bool {
+    crate::proc::run("git", &["ls-remote", "--exit-code", "--heads", "origin", branch], Some(repo_dir))
+        .is_ok_and(|o| !o.trim().is_empty())
+}
+
+/// Sets up `branch` tracking origin/<branch>: as a worktree at `path`, or
+/// (when `path` is None) checked out in the clone itself. A leftover local
+/// branch is reset to the remote.
+pub fn checkout_remote_branch(repo_dir: &Path, branch: &str, path: Option<&Path>) -> Result<(), String> {
+    git_in(repo_dir, &["fetch", "origin", branch])?;
+    let remote = format!("origin/{branch}");
+    let local = branch_exists(repo_dir, branch);
+    match path {
+        Some(p) => {
+            let p = p.to_string_lossy();
+            if local {
+                git_in(repo_dir, &["worktree", "add", &p, branch])?;
+                git_in(Path::new(p.as_ref()), &["reset", "--hard", &remote])
+            } else {
+                git_in(repo_dir, &["worktree", "add", &p, "-b", branch, &remote])
+            }
+        }
+        None if local => {
+            git_in(repo_dir, &["checkout", branch])?;
+            git_in(repo_dir, &["reset", "--hard", &remote])
+        }
+        None => git_in(repo_dir, &["checkout", "-b", branch, &remote]),
+    }
+}
+
+/// Checks out `branch` in the clone itself (branch-only repos), creating it
+/// from origin/<base> when missing.
+pub fn checkout_branch_in_place(repo_dir: &Path, branch: &str, base: &str) -> Result<(), String> {
+    if branch_exists(repo_dir, branch) {
+        git_in(repo_dir, &["checkout", branch])
+    } else {
+        let start = start_point(repo_dir, base);
+        git_in(repo_dir, &["checkout", "-b", branch, &start])
+    }
+}
+
+/// Switches the clone back to `branch`.
+pub fn checkout(repo_dir: &Path, branch: &str) -> Result<(), String> {
+    git_in(repo_dir, &["checkout", branch])
 }
 
 /// Removes the worktree at `path` from the repo cloned at `repo_dir`,
@@ -48,7 +136,7 @@ pub fn worktree_remove(repo_dir: &Path, path: &Path) -> Result<(), String> {
         let _ = git_in(repo_dir, &["worktree", "prune"]);
         return Ok(());
     }
-    let out = Command::new("git")
+    let out = crate::proc::cmd("git")
         .args(["worktree", "remove", "--force", &path.to_string_lossy()])
         .current_dir(repo_dir)
         .output()
@@ -70,7 +158,7 @@ pub fn branch_delete(repo_dir: &Path, branch: &str) -> Result<(), String> {
 
 /// True when the repo has a local branch with this name.
 pub fn branch_exists(repo_dir: &Path, branch: &str) -> bool {
-    Command::new("git")
+    crate::proc::cmd("git")
         .args(["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")])
         .current_dir(repo_dir)
         .output()
@@ -88,7 +176,7 @@ pub fn fetch(repo_dir: &Path) -> Result<(), String> {
 /// nothing to commit.
 pub fn commit_all(dir: &Path, message: &str) -> Result<(), String> {
     git_in(dir, &["add", "-A"])?;
-    let out = Command::new("git")
+    let out = crate::proc::cmd("git")
         .args(["commit", "-m", message])
         .current_dir(dir)
         .output()
@@ -126,7 +214,7 @@ pub enum RebaseStatus {
 pub fn rebase_onto(dir: &Path, base: &str) -> Result<RebaseStatus, String> {
     git_in(dir, &["fetch", "--prune"])?;
     let target = format!("origin/{base}");
-    let out = Command::new("git")
+    let out = crate::proc::cmd("git")
         .args(["rebase", &target])
         .current_dir(dir)
         .output()
@@ -147,7 +235,7 @@ pub fn rebase_onto(dir: &Path, base: &str) -> Result<RebaseStatus, String> {
 
 /// Files currently in merge conflict (unmerged paths).
 pub fn conflicted_files(dir: &Path) -> Vec<String> {
-    let out = Command::new("git")
+    let out = crate::proc::cmd("git")
         .args(["diff", "--name-only", "--diff-filter=U"])
         .current_dir(dir)
         .output();
@@ -196,7 +284,7 @@ pub fn ahead_behind(path: &Path, base: &str) -> (usize, usize) {
     // rewrote history).
     let behind = match remote_branch {
         Some(rb) => {
-            let out = Command::new("git")
+            let out = crate::proc::cmd("git")
                 .args(["rev-list", "--count", &format!("HEAD..{rb}")])
                 .current_dir(path)
                 .output();
@@ -217,7 +305,7 @@ pub fn remote_branch_feature_commits(path: &Path, base: &str) -> usize {
         return 0;
     }
     let target = format!("origin/{base}");
-    let out = Command::new("git")
+    let out = crate::proc::cmd("git")
         .args([
             "rev-list",
             "--count",
@@ -231,7 +319,7 @@ pub fn remote_branch_feature_commits(path: &Path, base: &str) -> usize {
 }
 
 fn ref_exists(path: &Path, r: &str) -> bool {
-    Command::new("git")
+    crate::proc::cmd("git")
         .args(["rev-parse", "--verify", "--quiet", &format!("{r}^{{}}")])
         .current_dir(path)
         .output()
@@ -243,7 +331,7 @@ fn count_rev_list(path: &Path, prefix: &[&str], extra: &[String]) -> usize {
     let mut args: Vec<String> = prefix.iter().map(|s| s.to_string()).collect();
     args.extend(extra.iter().cloned());
     let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    let out = Command::new("git").args(&args_ref).current_dir(path).output();
+    let out = crate::proc::cmd("git").args(&args_ref).current_dir(path).output();
     parse_count(out)
 }
 
@@ -260,7 +348,7 @@ fn parse_count(out: std::io::Result<std::process::Output>) -> usize {
 
 /// True when the worktree has uncommitted changes.
 pub fn is_dirty(path: &Path) -> bool {
-    let Ok(out) = Command::new("git")
+    let Ok(out) = crate::proc::cmd("git")
         .args(["status", "--porcelain"])
         .current_dir(path)
         .output()
@@ -272,7 +360,7 @@ pub fn is_dirty(path: &Path) -> bool {
 
 /// Name of the current branch, or None.
 pub fn current_branch(path: &Path) -> Option<String> {
-    let out = Command::new("git")
+    let out = crate::proc::cmd("git")
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .current_dir(path)
         .output()
@@ -290,7 +378,7 @@ pub fn current_branch(path: &Path) -> Option<String> {
 /// Lists candidate base branches from a repo's remote (origin), stripping
 /// the remote prefix. Falls back to local branches when there is no remote.
 pub fn list_branches(path: &Path) -> Vec<String> {
-    let out = Command::new("git")
+    let out = crate::proc::cmd("git")
         .args(["branch", "-r", "--format=%(refname:short)"])
         .current_dir(path)
         .output();
@@ -319,26 +407,11 @@ pub fn list_branches(path: &Path) -> Vec<String> {
 }
 
 fn git(args: &[&str]) -> Result<(), String> {
-    let out = Command::new("git")
-        .args(args)
-        .output()
-        .map_err(|e| format!("failed to run git: {e}"))?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
-    }
-    Ok(())
+    crate::proc::run("git", args, None).map(|_| ())
 }
 
 fn git_in(dir: &Path, args: &[&str]) -> Result<(), String> {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .map_err(|e| format!("failed to run git: {e}"))?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
-    }
-    Ok(())
+    crate::proc::run("git", args, Some(dir)).map(|_| ())
 }
 
 // ---------- Git review (dock Git tab) ----------
@@ -371,20 +444,14 @@ pub struct FileDiff {
 }
 
 fn git_out(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .map_err(|e| format!("failed to run git: {e}"))?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    crate::proc::run("git", args, Some(dir))
 }
 
 /// Working-tree changes (unstaged + untracked) with per-file +N/-M stats.
 pub fn changes(dir: &Path) -> Result<Vec<ChangeEntry>, String> {
-    let status = git_out(dir, &["status", "--porcelain"])?;
+    // -uall: list the files inside untracked folders; without it git
+    // reports just "?? folder/", which is not a file that can be diffed.
+    let status = git_out(dir, &["status", "--porcelain", "-uall"])?;
     let numstat = git_out(dir, &["diff", "--numstat", "HEAD"])?;
     // map path -> (added, deleted); numstat lines: "<added>\t<deleted>\t<path>"
     let mut stats: std::collections::HashMap<String, (u32, u32)> = std::collections::HashMap::new();
@@ -395,38 +462,58 @@ pub fn changes(dir: &Path) -> Result<Vec<ChangeEntry>, String> {
         };
         stats.insert(p.to_string(), (a.parse().unwrap_or(0), d.parse().unwrap_or(0)));
     }
-    let mut out = Vec::new();
-    for line in status.lines() {
-        if line.len() < 4 {
-            continue;
-        }
-        let xy = &line[..2];
-        let path = line[3..].trim().to_string();
-        let status = match xy.as_bytes()[1] {
-            b'M' => "M",
-            b'A' => "A",
-            b'D' => "D",
-            b'?' => "U",
-            b => {
-                // staged-only statuses (e.g. first column M with clean second)
-                if xy.as_bytes()[0] == b'?' {
-                    "U"
-                } else if b == b' ' {
-                    "M"
-                } else {
-                    "M"
-                }
-            }
-        };
-        let (added, deleted) = stats.get(&path).copied().unwrap_or((0, 0));
-        out.push(ChangeEntry {
-            path,
-            status: status.to_string(),
-            added,
-            deleted,
-        });
+    Ok(parse_porcelain(&status)
+        .into_iter()
+        .map(|(path, status)| {
+            let (added, deleted) = stats.get(&path).copied().unwrap_or((0, 0));
+            ChangeEntry { path, status: status.to_string(), added, deleted }
+        })
+        .collect())
+}
+
+/// `git status --porcelain` lines -> (path, "M"|"A"|"D"|"U"). Renames keep
+/// the new path; quoted paths (spaces, unicode) are unquoted.
+fn parse_porcelain(status: &str) -> Vec<(String, &'static str)> {
+    status
+        .lines()
+        .filter(|l| l.len() >= 4)
+        .map(|line| {
+            let xy = line.as_bytes();
+            let raw = &line[3..];
+            let path = raw.rsplit(" -> ").next().unwrap_or(raw).trim();
+            let path = path.strip_prefix('"').and_then(|p| p.strip_suffix('"')).unwrap_or(path);
+            let status = match (xy[0], xy[1]) {
+                (b'?', _) | (_, b'?') => "U",
+                (_, b'D') | (b'D', b' ') => "D",
+                (b'A', _) | (_, b'A') => "A",
+                _ => "M",
+            };
+            (path.replace("\\\"", "\""), status)
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod porcelain_tests {
+    use super::parse_porcelain;
+
+    #[test]
+    fn parses_untracked_renamed_quoted_and_deleted_entries() {
+        let out = parse_porcelain(
+            " M src/a.rs\n?? scripts/ralph/prd.json\nR  old.txt -> new.txt\n?? \"with space.md\"\n D gone.rs\nA  added.rs\n",
+        );
+        assert_eq!(
+            out,
+            vec![
+                ("src/a.rs".to_string(), "M"),
+                ("scripts/ralph/prd.json".to_string(), "U"),
+                ("new.txt".to_string(), "M"),
+                ("with space.md".to_string(), "U"),
+                ("gone.rs".to_string(), "D"),
+                ("added.rs".to_string(), "A"),
+            ]
+        );
     }
-    Ok(out)
 }
 
 /// Recent commits on the current branch.
@@ -477,7 +564,7 @@ pub fn commit_files(dir: &Path, sha: &str) -> Result<Vec<ChangeEntry>, String> {
         // "M\tpath" or "R100\told\tnew" (renames keep 3 cols; take the last)
         let mut parts = line.split('\t');
         let Some(letter) = parts.next() else { continue };
-        let path = parts.last().unwrap_or("").to_string();
+        let path = parts.next_back().unwrap_or("").to_string();
         if path.is_empty() {
             continue;
         }
@@ -496,4 +583,15 @@ pub fn commit_files(dir: &Path, sha: &str) -> Result<Vec<ChangeEntry>, String> {
         });
     }
     Ok(out)
+}
+#[cfg(test)]
+mod clone_url_tests {
+    use super::github_https;
+
+    #[test]
+    fn github_https_converts_ssh_urls() {
+        assert_eq!(github_https("git@github.com:org/repo.git").as_deref(), Some("https://github.com/org/repo.git"));
+        assert_eq!(github_https("ssh://git@github.com/org/repo").as_deref(), Some("https://github.com/org/repo.git"));
+        assert_eq!(github_https("https://gitlab.com/org/repo.git"), None);
+    }
 }

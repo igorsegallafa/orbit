@@ -35,7 +35,7 @@ fn next_id() -> u32 {
 #[tauri::command]
 pub async fn pty_spawn(
     app: AppHandle,
-    cwd: String,
+    workspace: String,
     cmd: Option<String>,
     args: Option<Vec<String>>,
     cols: u16,
@@ -43,7 +43,7 @@ pub async fn pty_spawn(
 ) -> Result<u32, String> {
     let id = next_id();
     let app_for_reader = app.clone();
-    let cwd = expand_home(&cwd);
+    let cwd = crate::workspace::ws_dir(&workspace)?.to_string_lossy().to_string();
     if !std::path::Path::new(&cwd).exists() {
         return Err(format!("directory does not exist: {cwd}"));
     }
@@ -134,16 +134,10 @@ pub async fn pty_spawn(
 }
 
 fn default_shell() -> String {
-    std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into())
-}
-
-fn expand_home(p: &str) -> String {
-    if let Some(rest) = p.strip_prefix("$HOME") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return format!("{}/{}", home.to_string_lossy(), rest.trim_start_matches('/'));
-        }
+    if cfg!(windows) {
+        return "powershell.exe".into();
     }
-    p.to_string()
+    std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into())
 }
 
 fn emit_pty_error(app: &AppHandle, msg: String) {

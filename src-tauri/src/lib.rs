@@ -1,11 +1,16 @@
 mod commands;
 mod agent;
+mod build;
 mod config;
 mod files;
 mod git;
 mod github;
+mod health;
 mod integrations;
+mod links;
+mod proc;
 mod pty;
+mod ralph;
 mod usage;
 mod workspace;
 
@@ -32,6 +37,26 @@ pub fn run() {
             commands::pr_file_diff,
             commands::list_workspaces,
             commands::create_workspace,
+            commands::create_workspace_from_branch,
+            ralph::ralph_state,
+            ralph::ralph_save_prd,
+            ralph::ralph_save_prompt,
+            ralph::ralph_interview,
+            ralph::ralph_generate_prd,
+            ralph::ralph_cancel_generate,
+            ralph::ralph_start,
+            ralph::ralph_stop,
+            ralph::ralph_running,
+            ralph::ralph_pause,
+            ralph::ralph_runs,
+            ralph::ralph_run_events,
+            commands::build_repo,
+            commands::cancel_build,
+            commands::health_check,
+            commands::update_service_settings,
+            commands::get_folders,
+            commands::reveal_service,
+            commands::set_folders,
             commands::remove_workspace,
             commands::workspace_status,
             commands::refresh_repo,

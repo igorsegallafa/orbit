@@ -6,7 +6,6 @@ use crate::integrations::{self, CardDetail, TrackerKind};
 use crate::usage::{self, AiUsage};
 use crate::workspace::{self, CardRef, RepoStatus, Workspace};
 use std::path::PathBuf;
-use std::process::Command;
 use tauri::async_runtime::spawn_blocking;
 
 fn repos_dir() -> Result<PathBuf, String> {
@@ -34,14 +33,21 @@ pub async fn get_config() -> Result<Config, String> {
     blocking(Config::load).await
 }
 
+/// Adds a repo. `path` (optional) is where its clone lives: an existing
+/// checkout used as is, or an empty/missing folder to clone into later.
 #[tauri::command]
-pub async fn add_service(name: String, repo: String) -> Result<Config, String> {
+pub async fn add_service(name: String, repo: String, path: Option<String>) -> Result<Config, String> {
     blocking(move || {
         let mut cfg = Config::load()?;
         if cfg.services.iter().any(|s| s.name == name) {
             return Err(format!("a repo named '{name}' already exists"));
         }
-        cfg.services.push(Service { name, repo });
+        let mut svc = Service::new(name, repo);
+        svc.path = path.filter(|p| !p.trim().is_empty());
+        if let Some(p) = svc.custom_path() {
+            check_clone_target(&p)?;
+        }
+        cfg.services.push(svc);
         cfg.validate()?;
         cfg.save()?;
         Ok(cfg)
@@ -59,6 +65,56 @@ pub async fn update_service(name: String, repo: String) -> Result<Config, String
             .find(|s| s.name == name)
             .ok_or_else(|| format!("repo '{name}' not found"))?;
         svc.repo = repo;
+        cfg.save()?;
+        Ok(cfg)
+    })
+    .await
+}
+
+/// A custom clone location must be a git checkout or an empty folder.
+fn check_clone_target(p: &std::path::Path) -> Result<(), String> {
+    if !p.exists() || workspace::is_cloned(p) {
+        return Ok(());
+    }
+    let empty = std::fs::read_dir(p).map(|mut d| d.next().is_none()).unwrap_or(false);
+    if empty {
+        Ok(())
+    } else {
+        Err(format!("{} is not empty and is not a git repository", p.display()))
+    }
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Folders {
+    repos_dir: String,
+    workspaces_dir: String,
+    /// Used when the matching setting is empty.
+    default_repos_dir: String,
+    default_workspaces_dir: String,
+}
+
+#[tauri::command]
+pub async fn get_folders() -> Result<Folders, String> {
+    blocking(|| {
+        let root = workspace::workspace_root()?;
+        Ok(Folders {
+            repos_dir: workspace::repos_dir()?.to_string_lossy().into(),
+            workspaces_dir: workspace::workspaces_dir()?.to_string_lossy().into(),
+            default_repos_dir: root.join("repos").to_string_lossy().into(),
+            default_workspaces_dir: root.join("workspaces").to_string_lossy().into(),
+        })
+    })
+    .await
+}
+
+/// Sets the clones/workspaces folders (None or empty = default).
+#[tauri::command]
+pub async fn set_folders(repos_dir: Option<String>, workspaces_dir: Option<String>) -> Result<Config, String> {
+    blocking(move || {
+        let mut cfg = Config::load()?;
+        cfg.repos_dir = repos_dir.filter(|p| !p.trim().is_empty());
+        cfg.workspaces_dir = workspaces_dir.filter(|p| !p.trim().is_empty());
         cfg.save()?;
         Ok(cfg)
     })
@@ -85,10 +141,18 @@ pub async fn remove_service(name: String) -> Result<Config, String> {
                     .join(", ")
             ));
         }
+        let owned_clone = cfg
+            .services
+            .iter()
+            .find(|s| s.name == name)
+            .is_some_and(|s| s.custom_path().is_none());
         cfg.services.retain(|s| s.name != name);
         cfg.save()?;
-        let dir = repos_dir()?.join(&name);
-        let _ = git::remove_clone(&dir);
+        // Only clones Orbit made in its clones folder; a custom path may be
+        // the user's own checkout.
+        if owned_clone {
+            let _ = git::remove_clone(&repos_dir()?.join(&name));
+        }
         Ok(cfg)
     })
     .await
@@ -103,7 +167,10 @@ pub async fn clone_service(name: String) -> Result<(), String> {
             .iter()
             .find(|s| s.name == name)
             .ok_or_else(|| format!("repo '{name}' not found"))?;
-        let dest = repos_dir()?.join(&svc.name);
+        let dest = workspace::clone_dir(svc)?;
+        if workspace::is_cloned(&dest) {
+            return Ok(());
+        }
         git::clone(&svc.repo, &dest)
     })
     .await
@@ -112,8 +179,20 @@ pub async fn clone_service(name: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn service_clone_status(name: String) -> Result<bool, String> {
     blocking(move || {
-        let dir = repos_dir()?;
-        Ok(git::is_cloned(&dir, &name))
+        Ok(workspace::is_cloned(&workspace::clone_dir_of(&name)?))
+    })
+    .await
+}
+
+/// Opens a repo's base clone in the OS file manager.
+#[tauri::command]
+pub async fn reveal_service(name: String) -> Result<(), String> {
+    blocking(move || {
+        let dir = workspace::clone_dir_of(&name)?;
+        if !dir.exists() {
+            return Err(format!("'{name}' is not cloned"));
+        }
+        tauri_plugin_opener::open_path(&dir, None::<&str>).map_err(|e| format!("failed to open folder: {e}"))
     })
     .await
 }
@@ -213,6 +292,63 @@ pub async fn create_workspace(
     blocking(move || workspace::create(&name, &branch, &base, &repos, card)).await
 }
 
+#[derive(serde::Serialize)]
+pub struct CheckoutResult {
+    pub workspace: Workspace,
+    /// Repos that have the branch but failed to set up ("repo: reason").
+    pub failures: Vec<String>,
+}
+
+/// Workspace from a branch already on origin, in every cloned repo that has it.
+#[tauri::command]
+pub async fn create_workspace_from_branch(name: String, branch: String) -> Result<CheckoutResult, String> {
+    blocking(move || {
+        workspace::create_from_branch(&name, &branch).map(|(workspace, failures)| CheckoutResult { workspace, failures })
+    })
+    .await
+}
+
+/// Builds a repo inside a workspace (or its base clone), streaming
+/// `build-output {key, line}` events.
+#[tauri::command]
+pub async fn build_repo(
+    app: tauri::AppHandle,
+    workspace: Option<String>,
+    repo: String,
+    force: bool,
+) -> Result<crate::build::BuildResult, String> {
+    blocking(move || crate::build::build(&app, workspace.as_deref(), &repo, force)).await
+}
+
+#[tauri::command]
+pub async fn cancel_build(workspace: Option<String>, repo: String) -> Result<bool, String> {
+    Ok(crate::build::cancel(workspace.as_deref(), &repo))
+}
+
+/// Environment checks (git, gh, agents, build toolchain).
+#[tauri::command]
+pub async fn health_check() -> Result<Vec<crate::health::Check>, String> {
+    blocking(|| Ok(crate::health::run())).await
+}
+
+/// Replaces a repo's build/link settings (everything but name and URL).
+#[tauri::command]
+pub async fn update_service_settings(service: Service) -> Result<Config, String> {
+    blocking(move || {
+        let mut cfg = Config::load()?;
+        let svc = cfg
+            .services
+            .iter_mut()
+            .find(|s| s.name == service.name)
+            .ok_or_else(|| format!("repo '{}' not found", service.name))?;
+        let repo = svc.repo.clone();
+        *svc = Service { repo, ..service };
+        cfg.save()?;
+        Ok(cfg)
+    })
+    .await
+}
+
 /// Full card content (description) for the Plan flow.
 #[tauri::command]
 pub async fn integration_fetch_card(kind: String, id: String) -> Result<CardDetail, String> {
@@ -223,7 +359,7 @@ pub async fn integration_fetch_card(kind: String, id: String) -> Result<CardDeta
 #[tauri::command]
 pub async fn workspace_plan_exists(name: String) -> Result<bool, String> {
     blocking(move || {
-        let dir = workspace::workspace_root()?.join("workspaces").join(&name);
+        let dir = crate::workspace::ws_dir(&name)?;
         Ok(dir.join(agent::PLAN_FILE).exists())
     })
     .await
@@ -237,9 +373,7 @@ pub async fn generate_plan(
     name: String,
     card: CardRef,
 ) -> Result<agent::PlanResult, String> {
-    let ws_dir = workspace::workspace_root()?
-        .join("workspaces")
-        .join(&name);
+    let ws_dir = crate::workspace::ws_dir(&name)?;
     let meta = workspace::load_meta(&ws_dir)?;
     let ai = Config::load()?.ai;
     let app = app.clone();
@@ -305,9 +439,7 @@ pub async fn set_plan_task(name: String, index: usize, done: bool) -> Result<(),
 // ---------- Git review (dock Git tab) ----------
 
 fn worktree_of(workspace: &str, repo: &str) -> Result<PathBuf, String> {
-    let dir = workspace::workspace_root()?
-        .join("workspaces")
-        .join(workspace)
+    let dir = crate::workspace::ws_dir(workspace)?
         .join(repo);
     if !dir.exists() {
         return Err(format!("worktree for '{repo}' not found in '{workspace}'"));
@@ -418,7 +550,7 @@ pub async fn workspace_status(name: String) -> Result<Vec<RepoStatus>, String> {
 #[tauri::command]
 pub async fn refresh_repo(name: String) -> Result<(), String> {
     blocking(move || {
-        let dir = repos_dir()?.join(&name);
+        let dir = workspace::clone_dir_of(&name)?;
         if !dir.exists() {
             return Err(format!("'{name}' is not cloned"));
         }
@@ -431,16 +563,14 @@ pub async fn refresh_repo(name: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn open_in_editor(workspace: String, repo: String) -> Result<(), String> {
     blocking(move || {
-        let wt = workspace::workspace_root()?
-            .join("workspaces")
-            .join(&workspace)
+        let wt = crate::workspace::ws_dir(&workspace)?
             .join(&repo);
         if !wt.exists() {
             return Err(format!("worktree for '{repo}' not found"));
         }
         for editor in ["code", "zed"] {
-            if which(&editor) {
-                let out = std::process::Command::new(editor)
+            if which(editor) {
+                let out = crate::proc::cmd(editor)
                     .arg(&wt)
                     .spawn()
                     .map_err(|e| format!("failed to launch {editor}: {e}"))?;
@@ -453,16 +583,13 @@ pub async fn open_in_editor(workspace: String, repo: String) -> Result<(), Strin
     .await
 }
 
-/// Opens a workspace folder in Finder.
+/// Opens a workspace folder in the OS file manager.
 #[tauri::command]
 pub async fn reveal_workspace_folder(name: String) -> Result<(), String> {
     blocking(move || {
         let dir = workspace_dir(&name)?;
-        std::process::Command::new("open")
-            .arg(&dir)
-            .spawn()
-            .map_err(|e| format!("failed to open Finder: {e}"))?;
-        Ok(())
+        tauri_plugin_opener::open_path(&dir, None::<&str>)
+            .map_err(|e| format!("failed to open folder: {e}"))
     })
     .await
 }
@@ -473,8 +600,8 @@ pub async fn open_workspace_in_editor(name: String) -> Result<(), String> {
     blocking(move || {
         let dir = workspace_dir(&name)?;
         for editor in ["code", "zed"] {
-            if which(&editor) {
-                std::process::Command::new(editor)
+            if which(editor) {
+                crate::proc::cmd(editor)
                     .arg(&dir)
                     .spawn()
                     .map_err(|e| format!("failed to launch {editor}: {e}"))?;
@@ -487,7 +614,7 @@ pub async fn open_workspace_in_editor(name: String) -> Result<(), String> {
 }
 
 fn workspace_dir(name: &str) -> Result<PathBuf, String> {
-    let dir = workspace::workspace_root()?.join("workspaces").join(name);
+    let dir = crate::workspace::ws_dir(name)?;
     if !dir.exists() {
         return Err(format!("workspace '{name}' folder not found"));
     }
@@ -498,7 +625,7 @@ fn workspace_dir(name: &str) -> Result<PathBuf, String> {
 #[tauri::command]
 pub async fn workspace_ai_usage(name: String) -> Result<AiUsage, String> {
     blocking(move || {
-        let ws_dir = workspace::workspace_root()?.join("workspaces").join(&name);
+        let ws_dir = crate::workspace::ws_dir(&name)?;
         if !ws_dir.exists() {
             return Err(format!("workspace '{name}' not found"));
         }
@@ -538,10 +665,9 @@ pub async fn integration_disconnect(kind: String) -> Result<(), String> {
 pub async fn list_base_branches(repos: Vec<String>) -> Result<Vec<String>, String> {
     blocking(move || {
         let mut out = vec!["main".to_string(), "master".to_string()];
-        let rdir = workspace::repos_dir()?;
         for repo in &repos {
-            let dir = rdir.join(repo);
-            if git::is_cloned(&rdir, repo) {
+            let dir = workspace::clone_dir_of(repo)?;
+            if workspace::is_cloned(&dir) {
                 for b in git::list_branches(&dir) {
                     if !out.contains(&b) {
                         out.push(b);
@@ -568,13 +694,7 @@ pub async fn integration_fetch_cards(
 }
 
 fn which(bin: &str) -> bool {
-    std::process::Command::new(bin)
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    crate::proc::exists(bin)
 }
 
 // ---------- Workspace pipeline (commit / push / rebase / PRs) ----------
@@ -676,7 +796,7 @@ fn create_pr_for_repo(
     let owner_repo = remote_of(&dir).ok_or_else(|| format!("{repo}: cannot resolve origin remote"))?;
     let branch = git::current_branch(&dir)
         .ok_or_else(|| format!("{repo}: detached HEAD"))?;
-    let out = Command::new("gh")
+    let out = crate::proc::cmd("gh")
         .args([
             "pr",
             "create",
@@ -786,9 +906,7 @@ pub async fn ws_create_prs(
 }
 
 fn ws_prs_list(workspace: &str) -> Result<Vec<github::PullRequest>, String> {
-    let ws_dir = workspace::workspace_root()?
-        .join("workspaces")
-        .join(workspace);
+    let ws_dir = crate::workspace::ws_dir(workspace)?;
     let meta = workspace::load_meta(&ws_dir)?;
     // Repos in parallel — 5 repos sequential is ~10s of dead air.
     let prs: Vec<github::PullRequest> = std::thread::scope(|scope| {
@@ -832,7 +950,7 @@ pub async fn ws_prs_flat(workspace: String) -> Result<Vec<github::PullRequest>, 
 }
 
 fn remote_of(dir: &std::path::Path) -> Option<String> {
-    let out = Command::new("git")
+    let out = crate::proc::cmd("git")
         .args(["remote", "get-url", "origin"])
         .current_dir(dir)
         .output()
@@ -851,9 +969,7 @@ fn remote_of(dir: &std::path::Path) -> Option<String> {
 #[tauri::command]
 pub async fn ws_pr_status(workspace: String) -> Result<Vec<github::WsPrStatus>, String> {
     blocking(move || {
-        let ws_dir = workspace::workspace_root()?
-            .join("workspaces")
-            .join(&workspace);
+        let ws_dir = crate::workspace::ws_dir(&workspace)?;
         let meta = workspace::load_meta(&ws_dir)?;
 
         // Which repos to look at: saved refs win; scan only as fallback.
@@ -950,9 +1066,7 @@ fn aggregate(checks: &[github::PrCheck]) -> String {
 #[tauri::command]
 pub async fn ws_checks(workspace: String) -> Result<Vec<WsCheck>, String> {
     blocking(move || {
-        let ws_dir = workspace::workspace_root()?
-            .join("workspaces")
-            .join(&workspace);
+        let ws_dir = crate::workspace::ws_dir(&workspace)?;
         let meta = workspace::load_meta(&ws_dir)?;
         let rows: Vec<WsCheck> = std::thread::scope(|scope| {
             let handles: Vec<_> = meta
@@ -993,7 +1107,7 @@ pub async fn check_rerun(link: String) -> Result<(), String> {
             .ok_or_else(|| "check has no GitHub Actions run to re-run".to_string())?;
         let owner_repo = github::owner_repo_from_link(&link)
             .ok_or_else(|| "cannot derive repository from link".to_string())?;
-        let out = Command::new("gh")
+        let out = crate::proc::cmd("gh")
             .args([
                 "api",
                 "-X",
@@ -1024,7 +1138,7 @@ pub async fn check_logs(link: String) -> Result<String, String> {
             .and_then(|s| s.parse::<u64>().ok())
             .ok_or_else(|| "cannot parse job id from link".to_string())?;
         // Failed jobs of the run → the requested job's log url.
-        let out = Command::new("gh")
+        let out = crate::proc::cmd("gh")
             .args([
                 "api",
                 &format!("repos/{owner_repo}/actions/jobs/{job_id}"),
@@ -1034,7 +1148,7 @@ pub async fn check_logs(link: String) -> Result<String, String> {
             .output()
             .map_err(|e| format!("failed to run gh: {e}"))?;
         let failed_step = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        let log = Command::new("gh")
+        let log = crate::proc::cmd("gh")
             .args([
                 "run",
                 "view",
@@ -1067,10 +1181,10 @@ pub async fn check_logs(link: String) -> Result<String, String> {
 pub async fn investigate_check(
     workspace: String,
     repo: String,
-    checkName: String,
-    failedLog: String,
+    check_name: String,
+    failed_log: String,
 ) -> Result<agent::CheckAnalysis, String> {
-    blocking(move || agent::investigate_check(&workspace, &repo, &checkName, &failedLog)).await
+    blocking(move || agent::investigate_check(&workspace, &repo, &check_name, &failed_log)).await
 }
 
 /// Applies an AI-proposed CI fix in the repo's worktree (write agent).

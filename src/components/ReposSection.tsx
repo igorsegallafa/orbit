@@ -4,6 +4,11 @@ import { Config, GithubRepo, Service } from "../types/config";
 import { GithubRepoModal } from "./GithubRepoModal";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { Skeleton } from "./Skeleton";
+import { FoldersCard, Folders } from "./FoldersCard";
+import { RepoFormModal } from "./RepoFormModal";
+import { toast } from "./Toast";
+import { tooltip } from "./Tooltip";
+import { DownloadIcon, FolderIcon, GitIcon, PencilIcon, PlusIcon, TrashIcon } from "./Icons";
 
 interface Props {
   config: Config;
@@ -11,27 +16,29 @@ interface Props {
   onError: (msg: string) => void;
 }
 
-const emptyForm = { name: "", repo: "" };
+type CloneState = "unknown" | "cloned" | "missing" | "cloning";
 
 export function ReposSection({ config, onChange, onError }: Props) {
-  const [form, setForm] = useState(emptyForm);
-  const [editing, setEditing] = useState<string | null>(null);
-  const [cloneStatus, setCloneStatus] = useState<Record<string, boolean>>({});
-  const [busy, setBusy] = useState<string | null>(null);
-  const [showGithubModal, setShowGithubModal] = useState(false);
-  const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
+  const [clone, setClone] = useState<Record<string, CloneState>>({});
+  const [folders, setFolders] = useState<Folders | null>(null);
+  const [modal, setModal] = useState<null | { mode: "add" } | { mode: "edit"; service: Service }>(null);
+  const [showGithub, setShowGithub] = useState(false);
+  const [confirmRemove, setConfirmRemove] = useState<Service | null>(null);
 
-  // Check clone status for all repos when the list changes
+  useEffect(() => {
+    invoke<Folders>("get_folders").then(setFolders).catch(() => null);
+  }, [config.reposDir]);
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
       for (const s of config.services) {
-        if (cloneStatus[s.name] !== undefined) continue;
+        if (clone[s.name] && clone[s.name] !== "unknown") continue;
         try {
           const cloned = await invoke<boolean>("service_clone_status", { name: s.name });
-          if (!cancelled) setCloneStatus((prev) => ({ ...prev, [s.name]: cloned }));
+          if (!cancelled) setClone((p) => ({ ...p, [s.name]: cloned ? "cloned" : "missing" }));
         } catch {
-          // ignore individual check failures
+          // status stays unknown
         }
       }
     })();
@@ -41,179 +48,188 @@ export function ReposSection({ config, onChange, onError }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [config.services]);
 
-  const resetForm = () => {
-    setForm(emptyForm);
-    setEditing(null);
-  };
-
-  const startEdit = (s: Service) => {
-    setEditing(s.name);
-    setForm({ name: s.name, repo: s.repo });
-  };
-
-  const submit = async () => {
-    if (!form.name.trim() || !form.repo.trim()) {
-      onError("Name and repo URL are required.");
-      return;
-    }
-    const args = { name: form.name.trim(), repo: form.repo.trim() };
-    try {
-      const cmd = editing ? "update_service" : "add_service";
-      const cfg = await invoke<Config>(cmd, args);
-      onChange(cfg);
-      resetForm();
-    } catch (e) {
-      onError(String(e));
-    }
-  };
-
-  const remove = async (name: string) => {
-    try {
-      const cfg = await invoke<Config>("remove_service", { name });
-      onChange(cfg);
-      setConfirmRemove(null);
-    } catch (e) {
-      onError(String(e));
-    }
-  };
-
   const cloneRepo = async (name: string) => {
-    setBusy(name);
+    setClone((p) => ({ ...p, [name]: "cloning" }));
+    const id = toast.loading(`Cloning ${name}…`);
     try {
       await invoke("clone_service", { name });
-      setCloneStatus((s) => ({ ...s, [name]: true }));
+      setClone((p) => ({ ...p, [name]: "cloned" }));
+      toast.update(id, "success", `${name} cloned`, {
+        action: { label: "Open folder", onClick: () => invoke("reveal_service", { name }).catch((e) => onError(String(e))) },
+      });
     } catch (e) {
-      onError(String(e));
-    } finally {
-      setBusy(null);
+      setClone((p) => ({ ...p, [name]: "missing" }));
+      toast.update(id, "error", `Couldn't clone ${name}`, { description: String(e) });
     }
   };
 
-  const addFromGithub = async (repo: GithubRepo) => {
-    const cfg = await invoke<Config>("add_service", { name: repo.name, repo: repo.sshUrl });
+  const afterAdd = (cfg: Config, name: string, cloneNow: boolean) => {
     onChange(cfg);
+    setClone((p) => ({ ...p, [name]: "unknown" }));
+    if (cloneNow) {
+      cloneRepo(name);
+    } else {
+      toast.success(`${name} added`, { action: { label: "Clone now", onClick: () => cloneRepo(name) } });
+    }
   };
+
+  const addFromGithub = async (repo: GithubRepo, path: string | null, cloneNow: boolean) => {
+    // HTTPS: the gh login authenticates it; SSH would need a key set up.
+    const cfg = await invoke<Config>("add_service", { name: repo.name, repo: `https://github.com/${repo.nameWithOwner}.git`, path });
+    afterAdd(cfg, repo.name, cloneNow);
+  };
+
+  const remove = async (svc: Service) => {
+    try {
+      onChange(await invoke<Config>("remove_service", { name: svc.name }));
+      setConfirmRemove(null);
+      toast.success(`${svc.name} removed`, { description: svc.path ? "Its folder was kept on disk." : undefined });
+    } catch (e) {
+      onError(String(e));
+    }
+  };
+
+  const hint = (text: string) => ({
+    onMouseEnter: (e: React.MouseEvent) => tooltip.show(text, e),
+    onMouseLeave: () => tooltip.hide(),
+  });
 
   return (
     <div className="section">
       <div className="section-header">
-        <h3>Repositories</h3>
-        <button className="secondary" onClick={() => setShowGithubModal(true)}>
-          Add from GitHub…
-        </button>
+        <h3>Folders</h3>
+      </div>
+      <FoldersCard config={config} onChange={onChange} onError={onError} />
+
+      <div className="section-header">
+        <h3>
+          Repositories <span className="section-count">{config.services.length}</span>
+        </h3>
+        <div className="section-actions">
+          <button className="secondary" onClick={() => setModal({ mode: "add" })}>
+            <PlusIcon size={14} /> Add manually
+          </button>
+          <button onClick={() => setShowGithub(true)}>
+            <GitIcon size={14} /> Add from GitHub
+          </button>
+        </div>
       </div>
 
-      <form
-        className="card form"
-        onSubmit={(e) => {
-          e.preventDefault();
-          submit();
-        }}
-      >
-        <div className="form-grid">
-          <label>
-            Name
-            <input
-              value={form.name}
-              disabled={!!editing}
-              onChange={(e) => setForm({ ...form, name: e.target.value })}
-              placeholder="my-service"
-            />
-          </label>
-          <label>
-            Repo URL
-            <input
-              value={form.repo}
-              onChange={(e) => setForm({ ...form, repo: e.target.value })}
-              placeholder="git@github.com:org/repo.git"
-            />
-          </label>
-        </div>
-        <div className="form-actions">
-          <button type="submit">{editing ? "Save changes" : "Add repository"}</button>
-          {editing && (
-            <button type="button" className="secondary" onClick={resetForm}>
-              Cancel
-            </button>
-          )}
-        </div>
-      </form>
-
       {config.services.length === 0 ? (
-        <div className="empty-state small">
-          <p>No repositories configured yet. Add one manually above or import from GitHub.</p>
+        <div className="repo-empty">
+          <span className="repo-empty-icon">
+            <GitIcon size={20} />
+          </span>
+          <strong>No repositories yet</strong>
+          <span>Add the repositories your workspaces will span. Orbit clones them once and creates worktrees per workspace.</span>
+          <button onClick={() => setShowGithub(true)}>Add from GitHub</button>
         </div>
       ) : (
-        <div className="table-wrap">
-          <table className="list">
-            <thead>
-              <tr>
-                <th style={{ width: "30%" }}>Name</th>
-                <th style={{ width: "42%" }}>Repo</th>
-                <th style={{ width: "14%" }}>Clone</th>
-                <th style={{ width: "14%" }} />
-              </tr>
-            </thead>
-            <tbody>
-              {config.services.map((s) => {
-                const cloned = cloneStatus[s.name];
-                return (
-                  <tr key={s.name}>
-                    <td className="cell-name">{s.name}</td>
-                    <td>
-                      <span className="mono truncate" title={s.repo}>
-                        {s.repo}
-                      </span>
-                    </td>
-                    <td>
-                      {cloned === undefined ? (
-                        <Skeleton w={54} h={12} rounded={999} />
-                      ) : cloned ? (
-                        <span className="tag tag-ok">cloned</span>
-                      ) : (
-                        <button
-                          className="btn-mini"
-                          disabled={busy === s.name}
-                          onClick={() => cloneRepo(s.name)}
-                        >
-                          {busy === s.name ? "cloning…" : "clone"}
-                        </button>
-                      )}
-                    </td>
-                    <td>
-                      <div className="row-actions row-actions-inline">
-                        <button className="btn-mini" onClick={() => startEdit(s)}>
-                          Edit
-                        </button>
-                        <button
-                          className="btn-mini danger-outline"
-                          onClick={() => setConfirmRemove(s.name)}
-                        >
-                          Remove
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+        <div className="repo-list">
+          {config.services.map((s) => {
+            const st = clone[s.name] ?? "unknown";
+            return (
+              <div key={s.name} className="repo-row" onDoubleClick={() => setModal({ mode: "edit", service: s })}>
+                <span className="repo-icon">
+                  <GitIcon size={15} />
+                </span>
+                <div className="repo-main">
+                  <div className="repo-title">
+                    <span className="repo-name">{s.name}</span>
+                    {s.build && <span className="repo-tag">build</span>}
+                    {s.worktree === false && <span className="repo-tag">branch in base clone</span>}
+                  </div>
+                  <div className="repo-sub" title={s.repo}>
+                    {s.repo}
+                  </div>
+                  {s.path && (
+                    <div className="repo-sub repo-sub-path" title={s.path}>
+                      <FolderIcon size={11} /> {s.path}
+                    </div>
+                  )}
+                </div>
+
+                <div className="repo-status">
+                  {st === "unknown" ? (
+                    <Skeleton w={70} h={12} rounded={999} />
+                  ) : st === "cloned" ? (
+                    <span className="repo-state repo-state-ok">
+                      <span className="repo-dot" /> Cloned
+                    </span>
+                  ) : st === "cloning" ? (
+                    <span className="repo-state">
+                      <span className="spinner" /> Cloning…
+                    </span>
+                  ) : (
+                    <button className="secondary repo-clone-btn" onClick={() => cloneRepo(s.name)}>
+                      <DownloadIcon size={13} /> Clone
+                    </button>
+                  )}
+                </div>
+
+                <div className="repo-actions">
+                  <button
+                    className="icon-button"
+                    disabled={st !== "cloned"}
+                    aria-label="Open folder"
+                    {...hint("Open folder")}
+                    onClick={() => invoke("reveal_service", { name: s.name }).catch((e) => onError(String(e)))}
+                  >
+                    <FolderIcon size={14} />
+                  </button>
+                  <button className="icon-button" aria-label="Edit" {...hint("Edit")} onClick={() => setModal({ mode: "edit", service: s })}>
+                    <PencilIcon size={14} />
+                  </button>
+                  <button
+                    className="icon-button icon-button-danger"
+                    aria-label="Remove"
+                    {...hint("Remove")}
+                    onClick={() => setConfirmRemove(s)}
+                  >
+                    <TrashIcon size={14} />
+                  </button>
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
 
-      {showGithubModal && (
+      {modal && (
+        <RepoFormModal
+          service={modal.mode === "edit" ? modal.service : undefined}
+          cloned={modal.mode === "edit" && clone[modal.service.name] === "cloned"}
+          folders={folders}
+          onSaved={(cfg, info) => {
+            if (info.added) afterAdd(cfg, info.name, info.cloneNow);
+            else {
+              onChange(cfg);
+              toast.success(`${info.name} saved`);
+            }
+          }}
+          onClose={() => setModal(null)}
+          onError={onError}
+        />
+      )}
+
+      {showGithub && (
         <GithubRepoModal
           knownNames={new Set(config.services.map((s) => s.name))}
+          folders={folders}
           onAdd={addFromGithub}
-          onClose={() => setShowGithubModal(false)}
+          onClose={() => setShowGithub(false)}
           onError={onError}
         />
       )}
 
       {confirmRemove && (
         <ConfirmDialog
-          title="Remove repository"
-          message={`Remove '${confirmRemove}'? This also deletes the local clone.`}
+          title={`Remove ${confirmRemove.name}?`}
+          message={
+            confirmRemove.path
+              ? "It leaves Orbit's list. The folder at its custom path is kept on disk."
+              : "It leaves Orbit's list and its clone in the clones folder is deleted."
+          }
           confirmLabel="Remove"
           danger
           onConfirm={() => remove(confirmRemove)}

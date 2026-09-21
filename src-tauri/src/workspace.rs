@@ -4,6 +4,7 @@
 // of truth pattern as the generosity-workspace CLI).
 use crate::config::Config;
 use crate::git;
+use crate::links;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -52,21 +53,54 @@ pub struct RepoStatus {
     pub pr_commits: usize,
 }
 
+/// Default home of the clones and workspaces folders (each can be moved
+/// in Settings) and of Orbit's build cache.
 pub fn workspace_root() -> Result<PathBuf, String> {
-    // ponytail: single fixed workspace root for now; configurable when
-    // multi-root support lands.
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or("HOME is not set")?;
-    Ok(home.join("Documents/orbit-workspace"))
+    if let Some(root) = std::env::var_os("ORBIT_WORKSPACE_ROOT") {
+        return Ok(PathBuf::from(root));
+    }
+    Ok(crate::config::home_dir()?.join("Documents").join("orbit-workspace"))
 }
 
+/// Folder new base clones go to.
 pub fn repos_dir() -> Result<PathBuf, String> {
-    Ok(workspace_root()?.join("repos"))
+    match Config::load()?.repos_dir_override() {
+        Some(p) => Ok(p),
+        None => Ok(workspace_root()?.join("repos")),
+    }
 }
 
-fn workspaces_dir() -> Result<PathBuf, String> {
-    Ok(workspace_root()?.join("workspaces"))
+pub fn workspaces_dir() -> Result<PathBuf, String> {
+    match Config::load()?.workspaces_dir_override() {
+        Some(p) => Ok(p),
+        None => Ok(workspace_root()?.join("workspaces")),
+    }
+}
+
+/// Where a repo's base clone lives: its custom path, else the clones folder.
+pub fn clone_dir(svc: &crate::config::Service) -> Result<PathBuf, String> {
+    match svc.custom_path() {
+        Some(p) => Ok(p),
+        None => Ok(repos_dir()?.join(&svc.name)),
+    }
+}
+
+/// `clone_dir` by repo name (repos dropped from the config fall back to
+/// the clones folder).
+pub fn clone_dir_of(name: &str) -> Result<PathBuf, String> {
+    match Config::load()?.services.iter().find(|s| s.name == name) {
+        Some(svc) => clone_dir(svc),
+        None => Ok(repos_dir()?.join(name)),
+    }
+}
+
+pub fn is_cloned(dir: &Path) -> bool {
+    dir.join(".git").exists()
+}
+
+/// Folder of the workspace `name` (holds the meta file and one worktree per repo).
+pub fn ws_dir(name: &str) -> Result<PathBuf, String> {
+    Ok(workspaces_dir()?.join(name))
 }
 
 fn meta_path(ws_dir: &Path) -> PathBuf {
@@ -103,7 +137,9 @@ pub fn list() -> Result<Vec<Workspace>, String> {
 
 /// Creates a workspace: one worktree per selected repo, on branch
 /// `<branch>` based on `base`. Clones repos that aren't cloned yet.
-/// Idempotent: existing worktrees are reused.
+/// Idempotent: existing worktrees are reused. Branch-only repos
+/// (`worktree: false`) get the branch checked out in the base clone and a
+/// junction in the workspace folder instead.
 pub fn create(
     name: &str,
     branch: &str,
@@ -119,32 +155,146 @@ pub fn create(
     }
 
     let cfg = Config::load()?;
-    let rdir = repos_dir()?;
-    let ws_dir = workspaces_dir()?.join(name);
+    let ws_dir = ws_dir(name)?;
 
-    for repo in repos {
-        let Some(svc) = cfg.services.iter().find(|s| &s.name == repo) else {
-            return Err(format!("unknown repository: {repo}"));
-        };
-        let clone_dir = rdir.join(repo);
-        if !git::is_cloned(&rdir, repo) {
+    let svcs = repos
+        .iter()
+        .map(|repo| {
+            cfg.services
+                .iter()
+                .find(|s| &s.name == repo)
+                .ok_or_else(|| format!("unknown repository: {repo}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    for svc in svcs {
+        let clone_dir = clone_dir(svc)?;
+        if !is_cloned(&clone_dir) {
             git::clone(&svc.repo, &clone_dir)?;
         }
         git::fetch(&clone_dir)?;
-        git::worktree_add(&clone_dir, &ws_dir.join(repo), branch, base)?;
+        let wt = ws_dir.join(&svc.name);
+        if svc.worktree {
+            git::worktree_add(&clone_dir, &wt, branch, base)?;
+            links::link_shared(svc, &clone_dir, &wt)?;
+        } else {
+            if git::is_dirty(&clone_dir) {
+                return Err(format!(
+                    "{} has uncommitted changes in {}; commit or stash them before switching its branch",
+                    svc.name,
+                    clone_dir.display()
+                ));
+            }
+            git::checkout_branch_in_place(&clone_dir, branch, base)?;
+            links::link_dir(&clone_dir, &wt)?;
+        }
     }
 
+    finish_create(name, branch, base, repos.to_vec(), card)
+}
+
+enum CheckoutResult {
+    Ready(String),
+    Skipped,
+    Failed(String),
+}
+
+/// Creates a workspace from a branch that already exists on origin, in
+/// every cloned repo that has it. Repos without the branch are skipped;
+/// per-repo failures are returned without aborting the rest.
+pub fn create_from_branch(name: &str, branch: &str) -> Result<(Workspace, Vec<String>), String> {
+    if name.trim().is_empty() || branch.trim().is_empty() {
+        return Err("workspace name and branch are required".into());
+    }
+    let ws_dir = ws_dir(name)?;
+    if ws_dir.exists() {
+        return Err(format!("workspace '{name}' already exists"));
+    }
+    let cfg = Config::load()?;
+    let cloned: Vec<(&crate::config::Service, PathBuf)> = cfg
+        .services
+        .iter()
+        .filter_map(|s| clone_dir(s).ok().map(|d| (s, d)))
+        .filter(|(_, d)| is_cloned(d))
+        .collect();
+    if cloned.is_empty() {
+        return Err("no cloned repositories; clone them in Settings first".into());
+    }
+
+    let results: Vec<CheckoutResult> = std::thread::scope(|scope| {
+        let handles: Vec<_> = cloned
+            .iter()
+            .map(|(svc, clone_dir)| {
+                let wt = ws_dir.join(&svc.name);
+                scope.spawn(move || {
+                    if !git::remote_has_branch(clone_dir, branch) {
+                        return CheckoutResult::Skipped;
+                    }
+                    let r = if svc.worktree {
+                        git::checkout_remote_branch(clone_dir, branch, Some(&wt))
+                            .and_then(|_| links::link_shared(svc, clone_dir, &wt).map(|_| ()))
+                    } else if git::is_dirty(clone_dir) {
+                        Err(format!("{} has uncommitted changes in {}", svc.name, clone_dir.display()))
+                    } else {
+                        git::checkout_remote_branch(clone_dir, branch, None)
+                            .and_then(|_| links::link_dir(clone_dir, &wt).map(|_| ()))
+                    };
+                    match r {
+                        Ok(()) => CheckoutResult::Ready(svc.name.clone()),
+                        Err(e) => CheckoutResult::Failed(format!("{}: {e}", svc.name)),
+                    }
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap_or(CheckoutResult::Skipped))
+            .collect()
+    });
+
+    let mut ready = Vec::new();
+    let mut failures = Vec::new();
+    for r in results {
+        match r {
+            CheckoutResult::Ready(n) => ready.push(n),
+            CheckoutResult::Failed(e) => failures.push(e),
+            CheckoutResult::Skipped => {}
+        }
+    }
+    if ready.is_empty() {
+        let _ = std::fs::remove_dir_all(&ws_dir);
+        return Err(if failures.is_empty() {
+            format!("no repository has a '{branch}' branch on origin")
+        } else {
+            failures.join("; ")
+        });
+    }
+    let base = git::default_branch(&clone_dir_of(&ready[0])?).unwrap_or_else(|| "main".into());
+    let ws = finish_create(name, branch, &base, ready, None)?;
+    Ok((ws, failures))
+}
+
+/// Writes the meta file and copies the agent entrypoints into the folder.
+fn finish_create(
+    name: &str,
+    branch: &str,
+    base: &str,
+    repos: Vec<String>,
+    card: Option<CardRef>,
+) -> Result<Workspace, String> {
+    let ws_dir = ws_dir(name)?;
     std::fs::create_dir_all(&ws_dir).map_err(|e| e.to_string())?;
     let ws = Workspace {
         name: name.to_string(),
         branch: branch.to_string(),
         base: base.to_string(),
-        repos: repos.to_vec(),
+        repos,
         card,
         pr_refs: Vec::new(),
     };
     let raw = serde_yaml::to_string(&ws).map_err(|e| e.to_string())?;
     std::fs::write(meta_path(&ws_dir), raw).map_err(|e| e.to_string())?;
+    links::copy_entrypoints(&workspace_root()?, &ws_dir);
     Ok(ws)
 }
 
@@ -152,7 +302,7 @@ pub fn create(
 /// already recorded (same repo+number) is kept; entries are never
 /// removed — merged/closed state is live data, presence is history.
 pub fn save_pr_refs(name: &str, new_refs: &[PrRef]) -> Result<(), String> {
-    let ws_dir = workspaces_dir()?.join(name);
+    let ws_dir = ws_dir(name)?;
     let mut ws = load_meta(&ws_dir)?;
     let before = ws.pr_refs.len();
     for r in new_refs {
@@ -170,7 +320,7 @@ pub fn save_pr_refs(name: &str, new_refs: &[PrRef]) -> Result<(), String> {
 /// Removes a workspace: deletes each worktree and its branch, then the
 /// workspace directory. Refuses when any worktree is dirty unless forced.
 pub fn remove(name: &str, force: bool) -> Result<(), String> {
-    let ws_dir = workspaces_dir()?.join(name);
+    let ws_dir = ws_dir(name)?;
     let ws = load_meta(&ws_dir)?;
 
     for repo in &ws.repos {
@@ -181,10 +331,30 @@ pub fn remove(name: &str, force: bool) -> Result<(), String> {
             ));
         }
     }
+    let cfg = Config::load()?;
     for repo in &ws.repos {
-        let clone_dir = repos_dir()?.join(repo);
+        let clone_dir = clone_dir_of(repo)?;
+        let wt = ws_dir.join(repo);
+        if links::is_link(&wt) {
+            // Branch-only: the folder is a junction into the base clone.
+            links::unlink(&wt)?;
+            if git::current_branch(&clone_dir).as_deref() == Some(ws.branch.as_str()) {
+                if let Some(default) = git::default_branch(&clone_dir) {
+                    let _ = git::checkout(&clone_dir, &default);
+                }
+            }
+            continue;
+        }
+        // Before `git worktree remove`: on Windows git follows junctions
+        // and would delete the shared content inside the base clone.
+        match cfg.services.iter().find(|s| &s.name == repo) {
+            Some(svc) => links::unlink_shared(svc, &wt),
+            None => {
+                let _ = links::unlink(&wt.join("node_modules"));
+            }
+        }
         if clone_dir.exists() {
-            let _ = git::worktree_remove(&clone_dir, &ws_dir.join(repo));
+            let _ = git::worktree_remove(&clone_dir, &wt);
             let _ = git::branch_delete(&clone_dir, &ws.branch);
         }
     }
@@ -194,7 +364,7 @@ pub fn remove(name: &str, force: bool) -> Result<(), String> {
 
 /// Collects per-repo status for a workspace.
 pub fn status(name: &str) -> Result<Vec<RepoStatus>, String> {
-    let ws_dir = workspaces_dir()?.join(name);
+    let ws_dir = ws_dir(name)?;
     let ws = load_meta(&ws_dir)?;
 
     let statuses: Vec<RepoStatus> = ws
@@ -231,8 +401,82 @@ pub fn status(name: &str) -> Result<Vec<RepoStatus>, String> {
 mod tests {
     use super::*;
 
+    /// Tests that point ORBIT_* env vars at a temp root must not overlap.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn git(dir: &Path, args: &[&str]) {
+        let mut full = vec!["-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main"];
+        full.extend_from_slice(args);
+        crate::proc::run("git", &full, Some(dir)).unwrap_or_else(|e| panic!("git {args:?}: {e}"));
+    }
+
+    /// Bare origin with `main` (package.json) and an extra `feat/existing`.
+    fn origin(root: &Path) -> PathBuf {
+        let bare = root.join("origin.git");
+        let seed = root.join("seed");
+        std::fs::create_dir_all(&bare).unwrap();
+        std::fs::create_dir_all(&seed).unwrap();
+        git(&bare, &["init", "--bare"]);
+        git(&seed, &["init"]);
+        std::fs::write(seed.join("package.json"), "{}").unwrap();
+        git(&seed, &["add", "-A"]);
+        git(&seed, &["commit", "-m", "init"]);
+        git(&seed, &["remote", "add", "origin", &bare.to_string_lossy()]);
+        git(&seed, &["push", "origin", "main"]);
+        git(&seed, &["push", "origin", "main:feat/existing"]);
+        git(&bare, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+        bare
+    }
+
+    #[test]
+    fn workspace_lifecycle_links_shared_dirs_and_never_deletes_them() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = std::env::temp_dir().join(format!("orbit-ws-it-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::env::set_var("ORBIT_WORKSPACE_ROOT", root.join("ws-root"));
+        std::env::set_var("ORBIT_CONFIG_DIR", root.join("cfg"));
+
+        let bare = origin(&root);
+        let mut svc = crate::config::Service::new("web".into(), bare.to_string_lossy().into());
+        svc.build = Some(crate::config::BuildCmd::All("echo build".into()));
+        Config { services: vec![svc], ..Default::default() }.save().unwrap();
+
+        // First create clones; then give the base clone an install to share.
+        create("one", "feat/one", "main", &["web".into()], None).unwrap();
+        let clone = repos_dir().unwrap().join("web");
+        std::fs::create_dir_all(clone.join("node_modules/pkg")).unwrap();
+        std::fs::write(clone.join("node_modules/pkg/index.js"), "x").unwrap();
+        let wt = ws_dir("one").unwrap().join("web");
+        assert!(links::is_link(&wt.join("node_modules")));
+        assert!(wt.join("node_modules/pkg/index.js").exists(), "install visible through the link");
+        assert!(links::is_link(&wt.join("dist")));
+
+        remove("one", true).unwrap();
+        assert!(!ws_dir("one").unwrap().exists());
+        assert!(
+            clone.join("node_modules/pkg/index.js").exists(),
+            "removing a workspace must not delete the shared install"
+        );
+
+        let (ws, failures) = create_from_branch("existing", "feat/existing").unwrap();
+        assert!(failures.is_empty(), "{failures:?}");
+        assert_eq!(ws.repos, ["web"]);
+        assert_eq!(ws.base, "main");
+        let wt = ws_dir("existing").unwrap().join("web");
+        assert_eq!(git::current_branch(&wt).as_deref(), Some("feat/existing"));
+        assert!(links::is_link(&wt.join("node_modules")));
+        assert!(create_from_branch("nope", "feat/missing").is_err());
+        remove("existing", true).unwrap();
+
+        std::env::remove_var("ORBIT_WORKSPACE_ROOT");
+        std::env::remove_var("ORBIT_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn create_rejects_unknown_repo_and_empty_selection() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // No config on a fresh environment: any repo selection is unknown.
         let err = create("ws", "feat/ws", "main", &["ghost-repo".into()], None)
             .expect_err("should reject unknown repo");
@@ -247,7 +491,7 @@ mod wire_tests {
     use super::*;
 
     #[test]
-    fn repo_status_serializes_camelCase_for_frontend() {
+    fn repo_status_serializes_camel_case_for_frontend() {
         // pr_commits → prCommits: the frontend reads prCommits; a missing
         // rename makes the field undefined and every status-driven button
         // silently breaks (bit us twice — also PullRequest).

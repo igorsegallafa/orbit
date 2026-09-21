@@ -1,10 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { GithubRepo } from "../types/config";
+import { CheckBox } from "./CheckBox";
+import { PathInput } from "./PathInput";
+import { Folders } from "./FoldersCard";
+import { clonePathFor, defaultClonePath } from "./RepoFormModal";
 
 interface Props {
   knownNames: Set<string>;
-  onAdd: (repo: GithubRepo) => Promise<void>;
+  folders: Folders | null;
+  /** `path` null = the clones folder. */
+  onAdd: (repo: GithubRepo, path: string | null, cloneNow: boolean) => Promise<void>;
   onClose: () => void;
   onError: (msg: string) => void;
 }
@@ -13,13 +19,15 @@ function ownerOf(repo: GithubRepo): string {
   return repo.nameWithOwner.split("/")[0];
 }
 
-export function GithubRepoModal({ knownNames, onAdd, onClose, onError }: Props) {
+export function GithubRepoModal({ knownNames, folders, onAdd, onClose, onError }: Props) {
   const [repos, setRepos] = useState<GithubRepo[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
+  const [path, setPath] = useState("");
+  const [cloneNow, setCloneNow] = useState(true);
 
   const load = async (forceRefresh: boolean) => {
     try {
@@ -66,7 +74,7 @@ export function GithubRepoModal({ knownNames, onAdd, onClose, onError }: Props) 
     if (!selectedRepo) return;
     setAdding(true);
     try {
-      await onAdd(selectedRepo);
+      await onAdd(selectedRepo, path.trim() || null, cloneNow);
       onClose();
     } catch (e) {
       onError(String(e));
@@ -121,7 +129,10 @@ export function GithubRepoModal({ knownNames, onAdd, onClose, onError }: Props) 
                       type="button"
                       className={`modal-row ${isSelected ? "modal-row-selected" : ""} ${already ? "modal-row-disabled" : ""}`}
                       disabled={already}
-                      onClick={() => setSelected(r.nameWithOwner)}
+                      onClick={() => {
+                        setSelected(r.nameWithOwner);
+                        setPath("");
+                      }}
                     >
                       <span className="modal-row-name">{r.name}</span>
                       <span className="modal-row-meta">
@@ -135,12 +146,31 @@ export function GithubRepoModal({ knownNames, onAdd, onClose, onError }: Props) 
           )}
         </div>
 
+        {selectedRepo && (
+          <div className="gh-dest">
+            <div className="field">
+              <span className="field-label">Local path for {selectedRepo.name}</span>
+              <PathInput
+                value={path}
+                onChange={setPath}
+                placeholder={defaultClonePath(folders, selectedRepo.name)}
+                fromPicked={(folder) => clonePathFor(folder, selectedRepo.name)}
+              />
+              <span className="field-hint">Empty uses the clones folder. Pick an existing checkout to use it as is.</span>
+            </div>
+          </div>
+        )}
+
         <div className="modal-footer">
+          <label className="check-item repo-clone-now">
+            <CheckBox label="Clone now" checked={cloneNow} onChange={setCloneNow} />
+            Clone now
+          </label>
           <button type="button" className="secondary" onClick={onClose}>
             Cancel
           </button>
           <button type="button" disabled={!selectedRepo || adding} onClick={confirmAdd}>
-            {adding ? "Adding…" : "Add repository"}
+            {adding ? "Adding…" : cloneNow ? "Add and clone" : "Add repository"}
           </button>
         </div>
       </div>

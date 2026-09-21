@@ -37,13 +37,16 @@ pub struct AiUsage {
 }
 
 fn claude_projects_dir() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join(".claude/projects"))
+    Some(crate::config::home_dir().ok()?.join(".claude/projects"))
 }
 
-/// Claude Code encodes a project dir by replacing `/` with `-` in the cwd.
+/// Claude Code encodes a project dir by replacing every non-alphanumeric
+/// char of the cwd with `-` (`/a/b.c` -> `-a-b-c`, `C:\x` -> `C--x`).
 fn dir_to_project_name(p: &std::path::Path) -> String {
-    p.to_string_lossy().replace('/', "-")
+    p.to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
 }
 
 /// Rough ISO-8601 ("2026-09-14T18:59:59.123Z") -> unix seconds.
@@ -130,9 +133,8 @@ pub fn workspace_usage(ws_dir: &std::path::Path, repos: &[String]) -> AiUsage {
 // or the CLI is missing, swap for rusqlite.
 fn opencode_usage(ws_dir: &std::path::Path, repos: &[String]) -> Raw {
     let mut raw = Raw::default();
-    let home = match std::env::var_os("HOME") {
-        Some(h) => PathBuf::from(h),
-        None => return raw,
+    let Ok(home) = crate::config::home_dir() else {
+        return raw;
     };
     let db = home.join(".local/share/opencode/opencode.db");
     if !db.exists() {
@@ -155,7 +157,7 @@ fn opencode_usage(ws_dir: &std::path::Path, repos: &[String]) -> Raw {
          cost, time_updated, id \
          FROM session WHERE ({filter}) AND model IS NOT NULL"
     );
-    let Ok(out) = std::process::Command::new("sqlite3")
+    let Ok(out) = crate::proc::cmd("sqlite3")
         .arg("-json")
         .arg(&db)
         .arg(&sql)
@@ -308,4 +310,15 @@ fn claude_usage(ws_dir: &std::path::Path, repos: &[String]) -> Raw {
         }
     }
     raw
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn project_name_matches_claude_encoding_on_both_platforms() {
+        use std::path::Path;
+        assert_eq!(dir_to_project_name(Path::new("/Users/x/my.repo")), "-Users-x-my-repo");
+        assert_eq!(dir_to_project_name(Path::new(r"C:\Users\igorc\orbit")), "C--Users-igorc-orbit");
+    }
 }

@@ -102,9 +102,8 @@ export function TerminalPane({ tab, onError, onStatusChange }: Props) {
     requestAnimationFrame(() => fit.fit());
     term.focus();
 
-    const cwd = `${"$HOME"}/Documents/orbit-workspace/workspaces/${tab.workspace}`;
     let delivered = false;
-    invoke<number>("pty_spawn", { cwd, cmd: tab.cmd, args: tab.args, cols: term.cols, rows: term.rows })
+    invoke<number>("pty_spawn", { workspace: tab.workspace, cmd: tab.cmd, args: tab.args, cols: term.cols, rows: term.rows })
       .then((id) => {
         ptyIdRef.current = id;
         // Inject an initial prompt as keystrokes (opencode TUI has no

@@ -4,13 +4,112 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct Service {
     pub name: String,
     pub repo: String,
+    /// Build command, run through the platform shell in the repo folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<BuildCmd>,
+    /// Build output dir shared with the base clone (default `dist`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_output: Option<String>,
+    /// Share only these sub-paths of the output dir instead of all of it
+    /// (e.g. `vcpkg_installed` when the output bakes in worktree paths).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub build_output_shared: Vec<String>,
+    /// false = branch-only: the feature branch is checked out in the base
+    /// clone itself (repos too heavy for a second checkout).
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub worktree: bool,
+    /// Where the base clone lives when not in the clones folder (an
+    /// existing checkout or a folder picked at clone time). Orbit never
+    /// deletes a clone at a custom path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+fn yes() -> bool {
+    true
+}
+fn is_true(b: &bool) -> bool {
+    *b
+}
+
+impl Service {
+    pub fn new(name: String, repo: String) -> Self {
+        Service {
+            name,
+            repo,
+            build: None,
+            build_output: None,
+            build_output_shared: Vec::new(),
+            worktree: true,
+            path: None,
+        }
+    }
+
+    /// The custom clone location, if one was set.
+    pub fn custom_path(&self) -> Option<PathBuf> {
+        self.path.as_deref().map(str::trim).filter(|p| !p.is_empty()).map(PathBuf::from)
+    }
+
+    pub fn output_dir(&self) -> &str {
+        self.build_output.as_deref().filter(|s| !s.trim().is_empty()).unwrap_or("dist")
+    }
+
+    /// Worktree-relative dirs linked to the base clone so a fresh worktree
+    /// reuses its build output (only for repos with a build command).
+    pub fn shared_output_paths(&self) -> Vec<PathBuf> {
+        if self.build.is_none() {
+            return Vec::new();
+        }
+        let out = PathBuf::from(self.output_dir());
+        if self.build_output_shared.is_empty() {
+            vec![out]
+        } else {
+            self.build_output_shared.iter().map(|sub| out.join(sub)).collect()
+        }
+    }
+}
+
+/// A build command for every platform, or one per platform (keys match
+/// Node's `process.platform`, as in the xm config).
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(untagged)]
+pub enum BuildCmd {
+    All(String),
+    PerOs {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        win32: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        linux: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        darwin: Option<String>,
+    },
+}
+
+impl BuildCmd {
+    pub fn for_current_os(&self) -> Option<&str> {
+        let cmd = match self {
+            BuildCmd::All(c) => Some(c),
+            BuildCmd::PerOs { win32, linux, darwin } => {
+                if cfg!(windows) {
+                    win32.as_ref()
+                } else if cfg!(target_os = "macos") {
+                    darwin.as_ref()
+                } else {
+                    linux.as_ref()
+                }
+            }
+        };
+        cmd.map(|c| c.as_str()).filter(|c| !c.trim().is_empty())
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct Config {
     #[serde(default)]
     pub services: Vec<Service>,
@@ -19,6 +118,26 @@ pub struct Config {
     /// Which CLI agent + model Orbit uses for AI features (Plan etc).
     #[serde(default)]
     pub ai: AiSettings,
+    /// Folder for new base clones (default <root>/repos).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repos_dir: Option<String>,
+    /// Folder for workspaces and their worktrees (default <root>/workspaces).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspaces_dir: Option<String>,
+}
+
+fn non_empty(p: &Option<String>) -> Option<PathBuf> {
+    p.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(PathBuf::from)
+}
+
+impl Config {
+    pub fn repos_dir_override(&self) -> Option<PathBuf> {
+        non_empty(&self.repos_dir)
+    }
+
+    pub fn workspaces_dir_override(&self) -> Option<PathBuf> {
+        non_empty(&self.workspaces_dir)
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -36,6 +155,16 @@ fn default_agent() -> String {
 }
 fn default_model() -> String {
     "claude-sonnet-5".into()
+}
+
+impl AiSettings {
+    /// CLI binary for the configured agent (unknown values run claude).
+    pub fn agent_bin(&self) -> String {
+        match self.agent.as_str() {
+            "opencode" | "omp" => self.agent.clone(),
+            _ => "claude".into(),
+        }
+    }
 }
 
 impl Default for AiSettings {
@@ -93,6 +222,9 @@ impl Config {
 }
 
 pub(crate) fn config_dir() -> Result<PathBuf, String> {
+    if let Some(dir) = std::env::var_os("ORBIT_CONFIG_DIR") {
+        return Ok(PathBuf::from(dir));
+    }
     let home = home_dir()?;
     #[cfg(target_os = "macos")]
     {
@@ -104,10 +236,10 @@ pub(crate) fn config_dir() -> Result<PathBuf, String> {
     }
 }
 
-fn home_dir() -> Result<PathBuf, String> {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| "could not resolve $HOME".to_string())
+/// User home. `$HOME` is usually unset on Windows outside Git Bash, so this
+/// goes through `std::env::home_dir` (HOME, then USERPROFILE / profile API).
+pub(crate) fn home_dir() -> Result<PathBuf, String> {
+    std::env::home_dir().ok_or_else(|| "could not resolve the home directory".to_string())
 }
 
 #[cfg(test)]
@@ -136,10 +268,7 @@ groups:
     #[test]
     fn validate_rejects_group_with_unknown_service() {
         let mut cfg = Config::default();
-        cfg.services.push(Service {
-            name: "svc-a".into(),
-            repo: "git@x:svc-a.git".into(),
-        });
+        cfg.services.push(Service::new("svc-a".into(), "git@x:svc-a.git".into()));
         cfg.groups
             .insert("g1".into(), vec!["svc-a".into(), "ghost".into()]);
         let err = cfg
@@ -149,13 +278,44 @@ groups:
     }
 
     #[test]
+    fn parses_xm_style_build_settings() {
+        let raw = "services:
+  - name: engine
+    repo: o/engine
+    build:
+      win32: cmake --preset win
+      linux: cmake --preset lin
+    buildOutput: build
+    buildOutputShared: [vcpkg_installed]
+  - name: assets
+    repo: o/assets
+    worktree: false
+  - name: web
+    repo: o/web
+    build: pnpm build
+";
+        let cfg: Config = serde_yaml::from_str(raw).unwrap();
+        let engine = &cfg.services[0];
+        assert_eq!(
+            engine.shared_output_paths(),
+            vec![PathBuf::from("build").join("vcpkg_installed")]
+        );
+        let expected = if cfg!(windows) { Some("cmake --preset win") } else if cfg!(target_os = "macos") { None } else { Some("cmake --preset lin") };
+        assert_eq!(engine.build.as_ref().unwrap().for_current_os(), expected);
+        assert!(!cfg.services[1].worktree);
+        assert!(cfg.services[1].shared_output_paths().is_empty());
+        assert_eq!(cfg.services[2].shared_output_paths(), vec![PathBuf::from("dist")]);
+        // round-trip keeps the file minimal for plain repos
+        let out = serde_yaml::to_string(&Service::new("a".into(), "o/a".into())).unwrap();
+        assert_eq!(out.trim(), "name: a
+repo: o/a");
+    }
+
+    #[test]
     fn validate_rejects_duplicate_service_names() {
         let mut cfg = Config::default();
         for _ in 0..2 {
-            cfg.services.push(Service {
-                name: "dup".into(),
-                repo: "git@x:dup.git".into(),
-            });
+            cfg.services.push(Service::new("dup".into(), "git@x:dup.git".into()));
         }
         assert!(cfg.validate().is_err());
     }

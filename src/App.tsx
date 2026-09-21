@@ -17,10 +17,16 @@ import { PrReviewPane } from "./components/PrReviewPane";
 import { SearchEverywhereModal } from "./components/SearchEverywhereModal";
 import { UsageBar } from "./components/UsageBar";
 import { TooltipHost, tooltip } from "./components/Tooltip";
+import { WindowControls, isMac } from "./components/WindowControls";
+import { RalphView } from "./components/RalphView";
+import { ToastHost, toast } from "./components/Toast";
+import { useRalphRunning } from "./lib/useRalphRunning";
+import { listen } from "@tauri-apps/api/event";
+import { reasonLabel, StopReason } from "./types/ralph";
 import {
   HomeIcon, SettingsIcon, SatelliteIcon, DocIcon, TerminalIcon, PlusIcon,
   ChevronRightIcon, PlugIcon, DiffIcon, GitIcon, PanelLeftIcon, PanelLeftExpandIcon,
-  PanelRightIcon, PanelRightExpandIcon,
+  PanelRightIcon, PanelRightExpandIcon, SparkIcon,
 } from "./components/Icons";
 import { SkeletonCards, SkeletonTable } from "./components/Skeleton";
 import { randomSessionName } from "./lib/names";
@@ -41,6 +47,7 @@ type Tab =
   | { kind: "review"; workspace: string; repo: string; path: string }
   | { kind: "commit"; workspace: string; repo: string; commit: GitCommit }
   | { kind: "pr"; prs: PullRequest[] }
+  | { kind: "ralph"; workspace: string }
   | { kind: "terminal"; terminal: TerminalTab };
 
 const SIDEBAR_KEY = "orbit.sidebar-width";
@@ -60,6 +67,7 @@ function tabId(tab: Tab): string {
   if (t.kind === "review") return `rv:${t.workspace}/${t.repo}/${t.path}`;
   if (t.kind === "commit") return `cm:${t.workspace}/${t.repo}/${t.commit.sha}`;
   if (t.kind === "pr") return `pr:${t.prs.map((p) => `${p.ownerRepo}/${p.number}`).join("+")}`;
+  if (t.kind === "ralph") return `ralph:${t.workspace}`;
   // Stable id: must NOT embed the display name, or renaming re-keys the pane
   // and remounts the terminal (killing the PTY session).
   return t.terminal.id;
@@ -195,6 +203,37 @@ function App() {
   const collapsed = sidebarWidth <= COLLAPSED;
   const repoCount = config.services.length;
   const groupCount = Object.keys(config.groups).length;
+
+  // Every onError in the app surfaces as an error toast.
+  useEffect(() => {
+    if (!error) return;
+    toast.error("Something went wrong", { description: error });
+    setError(null);
+  }, [error, setError]);
+
+  // A Ralph run finishing matters even when its tab isn't open.
+  useEffect(() => {
+    const off = listen<{ key: string; event: { kind: string; reason?: StopReason; iterations?: number } }>(
+      "ralph-event",
+      (e) => {
+        const ev = e.payload.event;
+        if (ev.kind !== "stopped") return;
+        const [ws, repo] = e.payload.key.split("/");
+        const ok = ev.reason?.kind === "complete";
+        const opts = {
+          description: `${ws} · ${repo} · ${ev.iterations ?? 0} iteration(s)`,
+          action: { label: "Open", onClick: () => openTab({ kind: "ralph", workspace: ws }) },
+        };
+        if (ok) toast.success("Ralph finished every story", opts);
+        else toast.info(`Ralph stopped: ${reasonLabel(ev.reason ?? null)}`, opts);
+      },
+    );
+    return () => {
+      off.then((f) => f());
+    };
+  }, []);
+
+  const ralphRunning = useRalphRunning();
 
   const openTab = (tab: Tab) => {
     const id = tabId(tab);
@@ -400,8 +439,13 @@ function App() {
           }}
           onError={setError}
           onOpenPrList={(prs) => openTab({ kind: "pr", prs })}
+          onOpenRalph={() => openTab({ kind: "ralph", workspace: tab.workspace.name })}
         />
       );
+    }
+    if (tab.kind === "ralph") {
+      const ws = workspaces.find((w) => w.name === tab.workspace);
+      return ws ? <RalphView workspace={ws} onError={setError} /> : null;
     }
     if (tab.kind === "review") {
       return (
@@ -472,6 +516,11 @@ function App() {
         config={config}
         workspaces={workspaces}
         onOpen={openWorkspaceTab}
+        onOpenRalph={(ws) => openTab({ kind: "ralph", workspace: ws.name })}
+        onGoToSettings={() => {
+          setActiveTab(null);
+          setNavPage({ kind: "settings" });
+        }}
         onChanged={loadWorkspaces}
         onError={setError}
       />
@@ -480,10 +529,10 @@ function App() {
 
   return (
     <div className="app">
-      {/* Titlebar: macOS traffic lights overlay the left end (Overlay style);
-          panel toggles sit right next to them, Orca-style. */}
+      {/* Titlebar: on macOS the traffic lights overlay the left end (Overlay
+          style); elsewhere the window is frameless and draws its own controls. */}
       <header
-        className="titlebar"
+        className={`titlebar ${isMac ? "titlebar-mac" : ""}`}
         data-tauri-drag-region
         onMouseDown={(e) => {
           // Let the drag region move the window; ignore clicks on children.
@@ -515,6 +564,7 @@ function App() {
         >
           {dockHidden ? <PanelRightExpandIcon /> : <PanelRightIcon />}
         </button>
+        {!isMac && <WindowControls />}
       </header>
       <div className="app-row">
       <aside
@@ -574,6 +624,7 @@ function App() {
                   >
                     <span className="nav-icon"><SatelliteIcon size={15} /></span>
                     <span className="nav-item-label">{ws.name}</span>
+                    {ralphRunning.has(ws.name) && <span className="nav-ralph" title="Ralph is running" />}
                     {wsSessions.length > 0 && (
                       <span
                         role="button"
@@ -634,9 +685,6 @@ function App() {
             title="Settings"
           >
             <span className="nav-icon"><SettingsIcon size={15} /></span> {!collapsed && "Settings"}
-            {!collapsed && repoCount + groupCount > 0 && (
-              <span className="nav-count">{repoCount + groupCount}</span>
-            )}
           </button>
           <button
             className={`nav-item ${navPage.kind === "integrations" && !active ? "active" : ""}`}
@@ -665,11 +713,6 @@ function App() {
       {!sidebarHidden && <SidebarResizer width={sidebarWidth} onResize={onResize} />}
 
       <main className="content">
-        {error && (
-          <div className="banner error" onClick={() => setError(null)}>
-            {error}
-          </div>
-        )}
         {loading ? (
           <div className="nav-page">
             <SkeletonCards n={4} />
@@ -703,7 +746,9 @@ function App() {
                         ? `${t.repo}/${t.path.split("/").pop()} (diff)`
                         : t.kind === "commit"
                           ? `${t.commit.message.slice(0, 24)}…`
-                          : t.kind === "pr"
+                          : t.kind === "ralph"
+                            ? `Ralph · ${t.workspace}`
+                            : t.kind === "pr"
                             ? t.prs.length > 0
                               ? `#${t.prs[0].number}` + (t.prs.length > 1 ? ` (+${t.prs.length - 1})` : "")
                               : "PRs"
@@ -715,6 +760,8 @@ function App() {
                     <DocIcon size={13} />
                   ) : t.kind === "review" || t.kind === "commit" || t.kind === "pr" ? (
                     <DiffIcon size={13} />
+                  ) : t.kind === "ralph" ? (
+                    <SparkIcon size={13} />
                   ) : (
                     <TerminalIcon size={13} />
                   );
@@ -900,6 +947,7 @@ function App() {
 
       {/* App-owned tooltip (replaces native title hints) */}
       <TooltipHost />
+      <ToastHost />
     </div>
   );
 }

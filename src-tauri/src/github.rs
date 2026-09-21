@@ -6,7 +6,6 @@
 // noticeable startup + network latency, so sequential calls scale badly
 // once someone is in several orgs).
 use serde::{Deserialize, Serialize};
-use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -21,15 +20,18 @@ pub struct GithubRepo {
     pub is_private: bool,
 }
 
+/// A TTL'd in-memory cache slot.
+type Cached<T> = Mutex<Option<(Instant, Vec<T>)>>;
+
 const CACHE_TTL: Duration = Duration::from_secs(300);
 
-fn cache() -> &'static Mutex<Option<(Instant, Vec<GithubRepo>)>> {
-    static CACHE: OnceLock<Mutex<Option<(Instant, Vec<GithubRepo>)>>> = OnceLock::new();
+fn cache() -> &'static Cached<GithubRepo> {
+    static CACHE: OnceLock<Cached<GithubRepo>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(None))
 }
 
 pub fn is_authenticated() -> bool {
-    Command::new("gh")
+    crate::proc::cmd("gh")
         .args(["auth", "status"])
         .output()
         .map(|o| o.status.success())
@@ -37,14 +39,7 @@ pub fn is_authenticated() -> bool {
 }
 
 fn run_gh(args: &[&str]) -> Result<Vec<u8>, String> {
-    let out = Command::new("gh")
-        .args(args)
-        .output()
-        .map_err(|e| format!("failed to run gh: {e}"))?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
-    }
-    Ok(out.stdout)
+    crate::proc::run("gh", args, None).map(String::into_bytes)
 }
 
 fn current_login() -> Result<String, String> {
@@ -246,8 +241,8 @@ pub fn pr_status_by_number(
 
 const PR_CACHE_TTL: Duration = Duration::from_secs(60);
 
-fn pr_cache() -> &'static Mutex<Option<(Instant, Vec<PrGroup>)>> {
-    static CACHE: OnceLock<Mutex<Option<(Instant, Vec<PrGroup>)>>> = OnceLock::new();
+fn pr_cache() -> &'static Cached<PrGroup> {
+    static CACHE: OnceLock<Cached<PrGroup>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(None))
 }
 
@@ -256,8 +251,8 @@ const PR_INDEX_TTL: Duration = Duration::from_secs(300);
 /// Recent-PR pool per repo for local substring search. The GitHub search
 /// API matches title+body (templates pollute results) and does no
 /// substring matching, so we fetch a window and filter locally instead.
-fn pr_index() -> &'static Mutex<Option<(Instant, Vec<PullRequest>)>> {
-    static CACHE: OnceLock<Mutex<Option<(Instant, Vec<PullRequest>)>>> = OnceLock::new();
+fn pr_index() -> &'static Cached<PullRequest> {
+    static CACHE: OnceLock<Cached<PullRequest>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(None))
 }
 
@@ -319,7 +314,7 @@ pub fn prs_for_branch(service_name: &str, owner_repo: &str, branch: &str) -> Res
 
 fn parse_pr_list(service_name: &str, owner_repo: &str, out: &[u8]) -> Result<Vec<PullRequest>, String> {
     let gh_prs: Vec<GhPr> =
-        serde_json::from_slice(&out).map_err(|e| format!("failed to parse pr list: {e}"))?;
+        serde_json::from_slice(out).map_err(|e| format!("failed to parse pr list: {e}"))?;
     Ok(gh_prs
         .into_iter()
         .map(|p| PullRequest {
@@ -846,7 +841,7 @@ mod pr_wire_tests {
     use super::*;
 
     #[test]
-    fn pull_request_serializes_camelCase_for_frontend() {
+    fn pull_request_serializes_camel_case_for_frontend() {
         // The frontend reads pr.ownerRepo / isDraft / updatedAt — serde must
         // emit camelCase or every invoke with these fields fails with
         // "invalid args" before the command even runs.
@@ -897,11 +892,9 @@ mod pr_wire_tests {
     fn local_search_matches_substring_in_title_branch_author() {
         // "trouble" must match "troubleshooting" (substring, any of the
         // three fields), and matching must be case-insensitive.
-        let pool = vec![
-            pr("chore: add troubleshooting endpoint", "feat/x", "lucas"),
+        let pool = [pr("chore: add troubleshooting endpoint", "feat/x", "lucas"),
             pr("feat: unrelated", "fix/troublesome-bug", "MARIA"),
-            pr("docs: onboarding rewrite", "docs/readme", "joao"),
-        ];
+            pr("docs: onboarding rewrite", "docs/readme", "joao")];
         let q = "trouble".to_lowercase();
         let matched: Vec<&PullRequest> = pool
             .iter()
@@ -1011,7 +1004,7 @@ mod checks_tests {
     }
 
     #[test]
-    fn check_serializes_camelCase_for_frontend() {
+    fn check_serializes_camel_case_for_frontend() {
         // The frontend reads startedAt/completedAt — snake_case output was
         // the same class of bug as PullRequest/RepoStatus (bit twice).
         let c = PrCheck {

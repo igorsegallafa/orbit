@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { tooltip } from "./Tooltip";
+import { toast } from "./Toast";
+import { StatusIcon, StatusKind } from "./StatusIcon";
 
 interface RepoState {
   repo: string;
@@ -92,7 +94,13 @@ export function RebaseModal({ workspace, base, repos, onClose, onSettled }: Prop
 
   // When everything settles clean/done, tell the parent (refresh statuses).
   useEffect(() => {
-    if (allSettled && states.length > 0) onSettled();
+    if (!allSettled || states.length === 0) return;
+    onSettled();
+    const conflicts = states.filter((s) => s.status === "conflicts").length;
+    const errors = states.filter((s) => s.status === "error").length;
+    if (conflicts) toast.info(`${conflicts} repo${conflicts === 1 ? "" : "s"} paused with conflicts`, { description: "Resolve them with AI or abort in the dialog." });
+    else if (errors) toast.error(`Rebase failed in ${errors} repo${errors === 1 ? "" : "s"}`);
+    else toast.success(`Rebased onto origin/${base}`);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [allSettled]);
 
@@ -110,11 +118,12 @@ export function RebaseModal({ workspace, base, repos, onClose, onSettled }: Prop
           )}
           <div className="ws-action-list">
             {states.map((s) => (
-              <div key={s.repo} className={`ws-action-row ws-${s.status}`}>
-                <span className="ws-action-repo mono">{s.repo}</span>
-                <span className="ws-action-detail">
+              <div key={s.repo} className={`status-row ${s.status === "error" ? "status-row-error" : ""}`}>
+                <StatusIcon kind={!started ? "pending" : REBASE_KIND[s.status]} />
+                <span className="status-row-repo">{s.repo}</span>
+                <span className="status-row-detail">
                   {!started
-                    ? "waiting for confirmation…"
+                    ? `onto origin/${base}`
                     : s.status === "idle" || s.status === "rebasing"
                       ? "rebasing…"
                       : s.status === "resolving"
@@ -125,13 +134,7 @@ export function RebaseModal({ workspace, base, repos, onClose, onSettled }: Prop
                             ? `${s.conflicts.length} conflicted file(s): ${s.conflicts.join(", ")}`
                             : (s.detail ?? "done")}
                 </span>
-                <span className="ws-action-state">
-                  {(s.status === "rebasing" || s.status === "resolving" || s.status === "continuing") && (
-                    <span className="spinner" />
-                  )}
-                  {(s.status === "clean" || s.status === "done") && (
-                    <span className="ws-dot ws-dot-ok">✓</span>
-                  )}
+                <span className="status-row-actions">
                   {s.status === "conflicts" && s.askAi && (
                     <>
                       <button
@@ -149,7 +152,6 @@ export function RebaseModal({ workspace, base, repos, onClose, onSettled }: Prop
                       </button>
                     </>
                   )}
-                  {s.status === "error" && <span className="ws-dot">✗</span>}
                 </span>
               </div>
             ))}
@@ -175,3 +177,14 @@ export function RebaseModal({ workspace, base, repos, onClose, onSettled }: Prop
     </div>
   );
 }
+
+const REBASE_KIND: Record<string, StatusKind> = {
+  idle: "working",
+  rebasing: "working",
+  resolving: "working",
+  continuing: "working",
+  clean: "ok",
+  done: "ok",
+  conflicts: "warn",
+  error: "error",
+};

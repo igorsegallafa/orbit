@@ -89,62 +89,70 @@ export function AiSection({ onError }: Props) {
   }
 
   return (
-    <div className="section ai-section">
-      <div className="card">
-        <h3>AI agent</h3>
-        <p className="integration-hint">
-          Which CLI agent Orbit uses for AI features like Plan generation.
-        </p>
-        <div className="wizard-source-pills">
-          {AGENTS.map((a) => (
-            <button
-              key={a.id}
-              className={`wizard-source-pill ${ai.agent === a.id ? "wizard-source-active" : ""}`}
-              onClick={() => changeAgent(a.id)}
-            >
-              {a.label}
-            </button>
-          ))}
+    <div className="section">
+      <div className="settings-card">
+        <div className="settings-row">
+          <div className="settings-row-text">
+            <strong>Agent</strong>
+            <span>The CLI Orbit runs for plans, commit messages, PR drafts, CI investigation and Ralph.</span>
+          </div>
+          <span className="mode-toggle seg">
+            {AGENTS.map((a) => (
+              <button key={a.id} className={`mode-btn ${ai.agent === a.id ? "mode-active" : ""}`} onClick={() => changeAgent(a.id)}>
+                {a.label}
+              </button>
+            ))}
+          </span>
         </div>
-      </div>
 
-      <div className="card">
-        <h3>Model</h3>
-        <p className="integration-hint">
-          {ai.agent === "opencode"
-            ? "Provider/model as listed by `opencode models`."
-            : ai.agent === "omp"
-              ? "Model as listed by `omp models` (fuzzy match supported)."
-              : "Model alias passed to `claude -p --model`."}
-        </p>
-        {loadingModels ? (
-          <Skeleton w="100%" h={34} />
-        ) : (
-          <Select
-            value={models.includes(ai.model) ? ai.model : models[0] ?? ai.model}
-            options={models.map((m) => ({ value: m, label: m }))}
-            onChange={changeModel}
-            searchable
-          />
-        )}
-      </div>
-
-      <div className="card">
-        <h3>Test</h3>
-        <p className="integration-hint">
-          Runs the agent with a tiny prompt to confirm it is installed and the
-          model responds.
-        </p>
-        <div className="form-actions">
-          <button onClick={test} disabled={testing}>
-            {testing ? "Testing…" : "Test agent"}
-          </button>
-          {testResult === "ok" && <span className="tag tag-ok">working</span>}
-          {testResult && testResult !== "ok" && (
-            <span className="tag tag-warn" title={testResult}>
-              failed — see tooltip
+        <div className="settings-row">
+          <div className="settings-row-text">
+            <strong>Model</strong>
+            <span>
+              {ai.agent === "opencode"
+                ? "Provider/model as listed by `opencode models`."
+                : ai.agent === "omp"
+                  ? "As listed by `omp models` (fuzzy match supported)."
+                  : "Passed to `claude --model`. Each AI feature uses it unless a run overrides it."}
             </span>
-          )}
+          </div>
+          <div className="settings-row-control">
+            {loadingModels ? (
+              <Skeleton w="100%" h={34} />
+            ) : (
+              <Select
+                value={models.includes(ai.model) ? ai.model : models[0] ?? ai.model}
+                options={models.map((m) => ({ value: m, label: m }))}
+                onChange={changeModel}
+                searchable
+              />
+            )}
+          </div>
+        </div>
+
+        <div className="settings-row">
+          <div className="settings-row-text">
+            <strong>Connection</strong>
+            <span>Sends a tiny prompt to check the agent is installed and the model answers.</span>
+            {testResult && testResult !== "ok" && <code className="settings-error">{testResult}</code>}
+          </div>
+          <div className="settings-row-control settings-row-inline">
+            {testResult === "ok" && (
+              <span className="repo-state">
+                <span className="repo-dot" /> Working
+              </span>
+            )}
+            {testResult && testResult !== "ok" && <span className="settings-fail">Failed</span>}
+            <button className="secondary" onClick={test} disabled={testing}>
+              {testing ? (
+                <>
+                  <span className="spinner" /> Testing…
+                </>
+              ) : (
+                "Test agent"
+              )}
+            </button>
+          </div>
         </div>
       </div>
     </div>

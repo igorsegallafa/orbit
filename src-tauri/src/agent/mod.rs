@@ -1,14 +1,18 @@
 // Plan generation: runs a local CLI agent (claude/opencode) non-interactively
 // in the workspace root with a prompt built from the linked card, streaming
 // its output to the frontend via Tauri events. The agent writes PLAN.md.
+mod cmd;
+pub mod runner;
+
+pub use cmd::{agent_cmd, Access};
+use runner::Line;
 use crate::config::AiSettings;
 use crate::integrations::{fetch_card, CardDetail, TrackerKind};
-use crate::workspace::{workspace_root, CardRef};
+use crate::workspace::CardRef;
 use serde::Serialize;
-use std::io::{BufRead, BufReader};
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
+use std::process::Stdio;
+use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 
 pub const PLAN_FILE: &str = "PLAN.md";
@@ -19,9 +23,8 @@ const AGENT_TIMEOUT_SECS: u64 = 300;
 /// jobs.
 const DRAFT_TIMEOUT_SECS: u64 = 120;
 
-/// The currently running plan agent (one at a time), kept so the user can
-/// cancel it mid-run.
-static ACTIVE_CHILD: Mutex<Option<std::sync::Arc<std::sync::Mutex<Child>>>> = Mutex::new(None);
+/// Run id of the (single) plan agent, for cancellation.
+const PLAN_RUN: &str = "plan";
 
 #[derive(Serialize, Clone)]
 struct PlanEvent<'a> {
@@ -70,7 +73,7 @@ pub fn grill_round(
     rounds_done: usize,           // completed rounds so far (for the cap)
     max_rounds: Option<usize>,    // user cap; None = interview until settled
 ) -> Result<GrillRound, String> {
-    let ws_dir = workspace_root()?.join("workspaces").join(ws_name);
+    let ws_dir = crate::workspace::ws_dir(ws_name)?;
     if !ws_dir.exists() {
         return Err(format!("workspace '{ws_name}' not found"));
     }
@@ -142,43 +145,18 @@ or, when finished:
     );
 
     let ai = crate::config::Config::load()?.ai;
-    let out = match ai.agent.as_str() {
-        "opencode" => Command::new("opencode")
-            .args(["run", "--model", &ai.model, &prompt])
-            .current_dir(&ws_dir)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .map_err(|e| format!("failed to launch opencode: {e}"))?,
-        "omp" => Command::new("omp")
-            .args(["-p", "--auto-approve", "--model", &ai.model, &prompt])
-            .current_dir(&ws_dir)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .map_err(|e| format!("failed to launch omp: {e}"))?,
-        _ => Command::new("claude")
-            .args(["-p", "--model", &ai.model, &prompt])
-            .current_dir(&ws_dir)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .map_err(|e| format!("failed to launch claude: {e}"))?,
-    };
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
-    }
-    let reply = String::from_utf8_lossy(&out.stdout);
+    let reply = runner::run_capture(
+        agent_cmd(&ai, &prompt, Access::ReadOnly, false),
+        &ws_dir,
+        Duration::from_secs(AGENT_TIMEOUT_SECS),
+    )?;
     parse_grill_json(&reply)
 }
 
 /// Extracts the first JSON object from the agent reply and shapes it.
 /// Tolerates both the new option objects ({label, description, recommended})
 /// and the legacy plain-string options.
-fn parse_grill_json(reply: &str) -> Result<GrillRound, String> {
+pub(crate) fn parse_grill_json(reply: &str) -> Result<GrillRound, String> {
     let start = reply.find('{').ok_or("agent replied without JSON")?;
     let end = reply.rfind('}').ok_or("agent reply has no closing brace")?;
     let slice = &reply[start..=end];
@@ -253,7 +231,7 @@ pub fn generate_plan_with_decisions(
     card: &CardRef,
     decisions: &str,
 ) -> Result<PlanResult, String> {
-    let ws_dir = workspace_root()?.join("workspaces").join(ws_name);
+    let ws_dir = crate::workspace::ws_dir(ws_name)?;
     if !ws_dir.exists() {
         return Err(format!("workspace '{ws_name}' not found"));
     }
@@ -309,91 +287,7 @@ Write ONLY that file. Do not modify repository code. Reply with the path you wro
     );
 
     let ai = crate::config::Config::load()?.ai;
-    let mut cmd = match ai.agent.as_str() {
-        "opencode" => {
-            let mut c = Command::new("opencode");
-            // Same rationale as generate_plan: headless runs can't ask for
-            // permission, so auto-approve what isn't denied.
-            c.args(["run", "--model", &ai.model, "--auto", &prompt]);
-            c
-        }
-        "omp" => {
-            let mut c = Command::new("omp");
-            // Headless + writes PLAN.md: print mode + auto-approve.
-            c.args(["-p", "--auto-approve", "--model", &ai.model, &prompt]);
-            c
-        }
-        _ => {
-            let mut c = Command::new("claude");
-            c.args([
-                "-p",
-                "--model",
-                &ai.model,
-                "--permission-mode",
-                "acceptEdits",
-                &prompt,
-            ]);
-            c
-        }
-    };
-    cmd.current_dir(&ws_dir).stdin(Stdio::null());
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("failed to launch {}: {e}", ai.agent))?;
-    let mut stderr = child.stderr.take();
-    let app_err = app.clone();
-    std::thread::spawn(move || {
-        if let Some(err) = stderr.take() {
-            for line in BufReader::new(err).lines().map_while(Result::ok) {
-                let _ = app_err.emit(
-                    "plan-progress",
-                    PlanEvent {
-                        status: "line",
-                        line: format!("[stderr] {line}"),
-                    },
-                );
-            }
-        }
-    });
-    let stdout = child.stdout.take().ok_or("no stdout from agent")?;
-    for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-        let _ = app.emit("plan-progress", PlanEvent { status: "line", line });
-    }
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(AGENT_TIMEOUT_SECS);
-    let exit_ok = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status.success(),
-            Ok(None) => {
-                if std::time::Instant::now() > deadline {
-                    let _ = child.kill();
-                    return Err("agent timed out".into());
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-            Err(e) => return Err(format!("failed waiting agent: {e}")),
-        }
-    };
-    if !exit_ok {
-        return Err("agent exited with an error — see the log above".into());
-    }
-
-    let plan_path = ws_dir.join(PLAN_FILE);
-    let mut reply = String::new();
-    let _ = &mut reply;
-    if !plan_path.exists() {
-        return Err("agent finished but did not write PLAN.md".into());
-    }
-    let _ = app.emit(
-        "plan-progress",
-        PlanEvent {
-            status: "done",
-            line: plan_path.to_string_lossy().to_string(),
-        },
-    );
-    Ok(PlanResult {
-        plan_path: plan_path.to_string_lossy().to_string(),
-    })
+    run_plan_agent(app, &ws_dir, &meta.repos, &prompt, &ai)
 }
 
 /// Renders the plan prompt. Users can override the template at
@@ -441,12 +335,9 @@ Rules:
 - Tasks must be concrete, ordered, and each must name the repository it applies to.
 - Reply with a single line: the path of the file you wrote."#;
 
-    let template = std::env::var_os("HOME")
-        .map(|h| {
-            let p = std::path::PathBuf::from(h).join(PROMPT_PATH);
-            std::fs::read_to_string(p).ok()
-        })
-        .flatten()
+    let template = crate::config::home_dir()
+        .ok()
+        .and_then(|h| std::fs::read_to_string(h.join(PROMPT_PATH)).ok())
         .unwrap_or_else(|| default.to_string());
 
     template
@@ -477,7 +368,7 @@ pub fn generate_plan(
     branch: &str,
     ai: &AiSettings,
 ) -> Result<PlanResult, String> {
-    let ws_dir = workspace_root()?.join("workspaces").join(ws_name);
+    let ws_dir = crate::workspace::ws_dir(ws_name)?;
     if !ws_dir.exists() {
         return Err(format!("workspace '{ws_name}' not found"));
     }
@@ -487,120 +378,36 @@ pub fn generate_plan(
     let detail: CardDetail = fetch_card(kind, &card.id)?;
     let prompt = build_prompt(&detail, repos, branch, ws_name, &ws_dir);
 
-    let mut cmd = match ai.agent.as_str() {
-        "opencode" => {
-            let mut c = Command::new("opencode");
-            // Same rationale as claude's acceptEdits: headless runs can't
-            // ask for permission, so auto-approve what isn't denied.
-            c.args(["run", "--model", &ai.model, "--auto", &prompt]);
-            c
-        }
-        "omp" => {
-            let mut c = Command::new("omp");
-            c.args(["-p", "--auto-approve", "--model", &ai.model, &prompt]);
-            c
-        }
-        // default: claude — acceptEdits auto-approves file writes inside the
-        // session dir; without it, non-interactive runs deny every write
-        // ("I don't have permission to write that file") and PLAN.md is
-        // never created.
-        _ => {
-            let mut c = Command::new("claude");
-            c.args([
-                "-p",
-                "--model",
-                &ai.model,
-                "--permission-mode",
-                "acceptEdits",
-                &prompt,
-            ]);
-            c
-        }
-    };
-    cmd.current_dir(&ws_dir).stdin(Stdio::null());
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    run_plan_agent(app, &ws_dir, repos, &prompt, ai)
+}
 
+/// Streams the plan agent (cancellable as PLAN_RUN) and makes sure PLAN.md
+/// ends up at the workspace root: moved from a repo dir or salvaged from
+/// the reply when the agent didn't write it where asked.
+fn run_plan_agent(
+    app: &AppHandle,
+    ws_dir: &Path,
+    repos: &[String],
+    prompt: &str,
+    ai: &AiSettings,
+) -> Result<PlanResult, String> {
     let emit = |status: &str, line: String| {
         let _ = app.emit("plan-progress", PlanEvent { status, line });
     };
-
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("failed to launch {}: {e}", ai.agent))?;
-
-    // Take stdio handles BEFORE registering the child for cancellation.
-    let mut stderr = child.stderr.take();
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or("no stdout from agent")?;
-
-    // Register for cancellation; only one plan may run at a time.
-    let child = {
-        let mut guard = ACTIVE_CHILD.lock().unwrap();
-        if let Some(existing) = guard.take() {
-            if let Ok(mut old) = existing.lock() {
-                let _ = old.kill();
-            }
-        }
-        let child = std::sync::Arc::new(std::sync::Mutex::new(child));
-        *guard = Some(std::sync::Arc::clone(&child));
-        child
-    };
-
-    // Stream stderr on its own thread (opencode prints chrome there).
-    let app_err = app.clone();
-    std::thread::spawn(move || {
-        if let Some(err) = stderr.take() {
-            for line in BufReader::new(err).lines().map_while(Result::ok) {
-                let _ = app_err.emit(
-                    "plan-progress",
-                    PlanEvent {
-                        status: "line",
-                        line: format!("[stderr] {line}"),
-                    },
-                );
-            }
-        }
-    });
-
-    // Collect stdout while streaming: if the agent failed to write PLAN.md
-    // itself (e.g. permission errors in its sandbox), we salvage the
-    // markdown from its reply instead of failing the whole run.
-    let mut reply = String::new();
-    for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-        reply.push_str(&line);
-        reply.push('\n');
-        emit("line", line);
-    }
-
-    // Wait with timeout: poll try_wait (child shared with cancel_plan).
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(AGENT_TIMEOUT_SECS);
-    let exit_ok = loop {
-        let status = {
-            let mut c = child.lock().map_err(|_| "agent state poisoned")?;
-            match c.try_wait() {
-                Ok(Some(status)) => status,
-                Ok(None) => {
-                    if std::time::Instant::now() > deadline {
-                        let _ = c.kill();
-                        return Err("agent timed out".into());
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                    continue;
-                }
-                Err(e) => return Err(format!("failed waiting agent: {e}")),
-            }
-        };
-        break status.success();
-    };
-
-    // Unregister (no-op when cancelled: cancel_plan already took it).
-    *ACTIVE_CHILD.lock().unwrap() = None;
-
-    if !exit_ok {
+    let outcome = runner::run_streaming(
+        agent_cmd(ai, prompt, Access::Edit, false),
+        ws_dir,
+        Duration::from_secs(AGENT_TIMEOUT_SECS),
+        Some(PLAN_RUN),
+        |line| match line {
+            Line::Out(l) => emit("line", l),
+            Line::Err(l) => emit("line", format!("[stderr] {l}")),
+        },
+    )?;
+    if !outcome.success {
         return Err("agent exited with an error (or was cancelled) — see the log above".into());
     }
+    let reply = outcome.stdout;
 
     let plan_path = ws_dir.join(PLAN_FILE);
     if !plan_path.exists() {
@@ -641,11 +448,7 @@ pub fn generate_plan(
 
 /// Cancels the running plan agent, if any.
 pub fn cancel_plan() -> Result<(), String> {
-    let mut guard = ACTIVE_CHILD.lock().unwrap();
-    if let Some(child) = guard.take() {
-        if let Ok(mut c) = child.lock() {
-            let _ = c.kill();
-        }
+    if runner::cancel(PLAN_RUN) {
         Ok(())
     } else {
         Err("no plan is running".into())
@@ -675,37 +478,12 @@ fn extract_markdown(reply: &str) -> String {
 
 /// Quick connectivity check for the configured agent.
 pub fn test_agent(ai: &AiSettings) -> Result<(), String> {
-    let out = match ai.agent.as_str() {
-        "omp" => Command::new("omp")
-            .args(["-p", "--model", &ai.model, "Reply with the single word: ok"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output(),
-        "opencode" => Command::new("opencode")
-            .args(["run", "--model", &ai.model, "Reply with the single word: ok"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output(),
-        _ => Command::new("claude")
-            .args([
-                "-p",
-                "--model",
-                &ai.model,
-                "Reply with the single word: ok",
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output(),
-    };
-    let out = out.map_err(|e| format!("failed to launch {}: {e}", ai.agent))?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
-    }
+    runner::run_capture(
+        agent_cmd(ai, "Reply with the single word: ok", Access::ReadOnly, false),
+        &std::env::temp_dir(),
+        Duration::from_secs(DRAFT_TIMEOUT_SECS),
+    )
+    .map(|_| ())
 }
 
 /// Models known to work with each agent, used as select defaults.
@@ -736,7 +514,7 @@ pub fn list_models(agent: &str) -> Vec<String> {
             // `omp models` renders a table with box-drawing chars; rows are
             // "│ model │ ctx │ max-out │ thinking │ images │" — the model id
             // is the first cell.
-            let out = Command::new("omp")
+            let out = crate::proc::cmd("omp")
                 .arg("models")
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
@@ -758,7 +536,7 @@ pub fn list_models(agent: &str) -> Vec<String> {
             }
         }
         "opencode" => {
-            let out = Command::new("opencode")
+            let out = crate::proc::cmd("opencode")
                 .arg("models")
                 .stdin(Stdio::null())
                 .output();
@@ -790,11 +568,7 @@ pub fn parse_tasks(raw: &str) -> Vec<PlanTask> {
         let t = l.trim_start();
         if let Some(rest) = t.strip_prefix("- [ ] ") {
             Some(PlanTask { text: rest.trim().to_string(), done: false })
-        } else if let Some(rest) = t.strip_prefix("- [x] ").or_else(|| t.strip_prefix("- [X] ")) {
-            Some(PlanTask { text: rest.trim().to_string(), done: true })
-        } else {
-            None
-        }
+        } else { t.strip_prefix("- [x] ").or_else(|| t.strip_prefix("- [X] ")).map(|rest| PlanTask { text: rest.trim().to_string(), done: true }) }
     }).collect()
 }
 
@@ -898,7 +672,7 @@ Do not modify repository code. Only write the plan file after I confirm the deci
 /// Fetches card detail and renders the grill prompt (for the interactive
 /// interview session opened by the Plan modal).
 pub fn grill_prompt(ws_name: &str, card: &CardRef) -> Result<String, String> {
-    let ws_dir = workspace_root()?.join("workspaces").join(ws_name);
+    let ws_dir = crate::workspace::ws_dir(ws_name)?;
     if !ws_dir.exists() {
         return Err(format!("workspace '{ws_name}' not found"));
     }
@@ -915,7 +689,7 @@ pub fn grill_prompt(ws_name: &str, card: &CardRef) -> Result<String, String> {
 }
 
 pub fn plan_tasks(ws_name: &str) -> Result<Vec<PlanTask>, String> {
-    let path = workspace_root()?.join("workspaces").join(ws_name).join(PLAN_FILE);
+    let path = crate::workspace::ws_dir(ws_name)?.join(PLAN_FILE);
     if !path.exists() {
         return Ok(vec![]);
     }
@@ -925,7 +699,7 @@ pub fn plan_tasks(ws_name: &str) -> Result<Vec<PlanTask>, String> {
 
 /// Marks the nth task in the workspace's PLAN.md as done/undone.
 pub fn set_plan_task(ws_name: &str, index: usize, done: bool) -> Result<(), String> {
-    let path = workspace_root()?.join("workspaces").join(ws_name).join(PLAN_FILE);
+    let path = crate::workspace::ws_dir(ws_name)?.join(PLAN_FILE);
     if !path.exists() {
         return Err("no PLAN.md in this workspace".into());
     }
@@ -951,74 +725,25 @@ fn agent_answer(dir: &Path, prompt: &str) -> Result<String, String> {
 
 fn agent_answer_once(dir: &Path, prompt: &str) -> Result<String, String> {
     let ai = crate::config::Config::load()?.ai;
-    let mut cmd = match ai.agent.as_str() {
-        "opencode" => {
-            let mut c = Command::new("opencode");
-            c.args(["run", "--model", &ai.model, prompt]);
-            c
-        }
-        "omp" => {
-            let mut c = Command::new("omp");
-            c.args(["-p", "--model", &ai.model, prompt]);
-            c
-        }
-        _ => {
-            let mut c = Command::new("claude");
-            c.args(["-p", "--model", &ai.model, prompt]);
-            c
-        }
-    };
-    cmd.current_dir(dir).stdin(Stdio::null());
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("failed to launch {}: {e}", ai.agent))?;
+    // Hard deadline: agent CLIs can hang and the UI spinner would run
+    // forever. 2 min covers real repo exploration (15-60s typical).
+    runner::run_capture(
+        agent_cmd(&ai, prompt, Access::ReadOnly, false),
+        dir,
+        Duration::from_secs(DRAFT_TIMEOUT_SECS),
+    )
+}
 
-    // Drain pipes on threads so a chatty agent can't deadlock on a full
-    // pipe buffer while we poll the deadline.
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    let t_out = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(mut s) = stdout {
-            use std::io::Read;
-            let _ = s.read_to_end(&mut buf);
-        }
-        buf
-    });
-    let t_err = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(mut s) = stderr {
-            use std::io::Read;
-            let _ = s.read_to_end(&mut buf);
-        }
-        buf
-    });
-
-    // Hard deadline: agent CLIs can hang; without this the UI spinner
-    // would run forever. 2 min covers real repo exploration (the draft
-    // agent reads templates and diffs, 15-60s typical).
-    let deadline =
-        std::time::Instant::now() + std::time::Duration::from_secs(DRAFT_TIMEOUT_SECS);
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => {
-                if std::time::Instant::now() > deadline {
-                    let _ = child.kill();
-                    return Err(format!("agent timed out after {DRAFT_TIMEOUT_SECS}s"));
-                }
-                std::thread::sleep(std::time::Duration::from_millis(200));
-            }
-            Err(e) => return Err(format!("wait failed: {e}")),
-        }
-    };
-    let out = t_out.join().unwrap_or_default();
-    let err = t_err.join().unwrap_or_default();
-    if !status.success() {
-        return Err(String::from_utf8_lossy(&err).trim().to_string());
-    }
-    Ok(String::from_utf8_lossy(&out).trim().to_string())
+/// One line per changed file, untracked ones included (a numstat diff
+/// against HEAD leaves new files out entirely).
+// ponytail: stats only, no patch body, keeps the prompt small; send the
+// diff when messages come out too generic.
+fn change_summary(dir: &Path) -> Result<String, String> {
+    Ok(crate::git::changes(dir)?
+        .iter()
+        .map(|c| format!("{} +{} -{} {}", c.status, c.added, c.deleted, c.path))
+        .collect::<Vec<_>>()
+        .join("\n"))
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -1031,24 +756,12 @@ pub struct CommitMsg {
 /// agent sees the numstat diff (bounded) and answers with the message
 /// only — no JSON to parse, the message IS the reply.
 pub fn commit_message(ws_name: &str, repo: &str) -> Result<CommitMsg, String> {
-    let dir = workspace_root()?
-        .join("workspaces")
-        .join(ws_name)
+    let dir = crate::workspace::ws_dir(ws_name)?
         .join(repo);
     if !dir.exists() {
         return Err(format!("worktree for '{repo}' not found"));
     }
-    // ponytail: numstat only (no patch body) keeps the prompt small; switch
-    // to a full diff when messages come out too generic.
-    let out = Command::new("git")
-        .args(["diff", "--numstat", "HEAD"])
-        .current_dir(&dir)
-        .output()
-        .map_err(|e| format!("failed to run git: {e}"))?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
-    }
-    let numstat = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let numstat = change_summary(&dir)?;
     if numstat.is_empty() {
         return Err(format!("{repo}: nothing to commit"));
     }
@@ -1056,7 +769,7 @@ pub fn commit_message(ws_name: &str, repo: &str) -> Result<CommitMsg, String> {
     let prompt = format!(
         r#"You are writing a git commit message for the repository `{repo}` (branch `{branch}`).
 
-Changed files (added removed path):
+Changed files (status, +added -removed, path; U = new file):
 {numstat}
 
 Write ONE single-line commit message in conventional-commit style: up to 72 chars, starting with a type (feat/fix/chore/refactor/docs/test) followed by a lowercase summary. Describe WHAT changed, not that files changed.
@@ -1104,9 +817,7 @@ fn clean_commit_message(raw: &str) -> String {
 /// `git rebase --continue` stays with us so a failed agent never lands
 /// half of a resolution. Returns the agent's summary.
 pub fn resolve_conflicts(ws_name: &str, repo: &str) -> Result<String, String> {
-    let dir = workspace_root()?
-        .join("workspaces")
-        .join(ws_name)
+    let dir = crate::workspace::ws_dir(ws_name)?
         .join(repo);
     if !dir.exists() {
         return Err(format!("worktree for '{repo}' not found"));
@@ -1126,39 +837,7 @@ Resolve every conflict preserving the intent of the feature branch (this worktre
 Reply with a short summary of how you resolved each file."#
     );
 
-    let ai = crate::config::Config::load()?.ai;
-    let mut cmd = match ai.agent.as_str() {
-        "opencode" => {
-            let mut c = Command::new("opencode");
-            c.args(["run", "--model", &ai.model, "--auto", &prompt]);
-            c
-        }
-        "omp" => {
-            let mut c = Command::new("omp");
-            c.args(["-p", "--auto-approve", "--model", &ai.model, &prompt]);
-            c
-        }
-        _ => {
-            let mut c = Command::new("claude");
-            c.args([
-                "-p",
-                "--model",
-                &ai.model,
-                "--permission-mode",
-                "acceptEdits",
-                &prompt,
-            ]);
-            c
-        }
-    };
-    cmd.current_dir(&dir).stdin(Stdio::null());
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let out = cmd
-        .output()
-        .map_err(|e| format!("failed to launch {}: {e}", ai.agent))?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
-    }
+    let summary = run_edit_agent(&dir, &prompt)?;
     // Sanity check: agent must have left no unmerged paths behind.
     let left = crate::git::conflicted_files(&dir);
     if !left.is_empty() {
@@ -1168,7 +847,7 @@ Reply with a short summary of how you resolved each file."#
             left.len()
         ));
     }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    Ok(summary)
 }
 
 #[cfg(test)]
@@ -1204,7 +883,7 @@ pub struct PrDraft {
 /// what/why/how. Reply format is plain "TITLE:" + "---" + body (no JSON
 /// escaping issues with multiline markdown).
 pub fn pr_draft(ws_name: &str, repo: &str) -> Result<PrDraft, String> {
-    let ws_dir = workspace_root()?.join("workspaces").join(ws_name);
+    let ws_dir = crate::workspace::ws_dir(ws_name)?;
     let meta = crate::workspace::load_meta(&ws_dir)?;
     let dir = ws_dir.join(repo);
     if !dir.exists() {
@@ -1298,16 +977,11 @@ pub fn investigate_check(
     check_name: &str,
     failed_log: &str,
 ) -> Result<CheckAnalysis, String> {
-    let dir = workspace_root()?.join("workspaces").join(ws_name).join(repo);
+    let dir = crate::workspace::ws_dir(ws_name)?.join(repo);
     if !dir.exists() {
         return Err(format!("worktree for '{repo}' not found"));
     }
-    let out = Command::new("git")
-        .args(["diff", "--numstat", "HEAD"])
-        .current_dir(&dir)
-        .output()
-        .map_err(|e| format!("failed to run git: {e}"))?;
-    let numstat = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let numstat = change_summary(&dir).unwrap_or_default();
     let prompt = format!(
         r#"A GitHub Actions check failed on a pull request in this repository.
 
@@ -1392,7 +1066,7 @@ mod check_analysis_tests {
 /// permissions (acceptEdits/--auto), instructed to implement exactly the
 /// given fix. Staging/commit stay with the normal app flow.
 pub fn apply_check_fix(ws_name: &str, repo: &str, fix: &str) -> Result<(), String> {
-    let dir = workspace_root()?.join("workspaces").join(ws_name).join(repo);
+    let dir = crate::workspace::ws_dir(ws_name)?.join(repo);
     if !dir.exists() {
         return Err(format!("worktree for '{repo}' not found"));
     }
@@ -1405,38 +1079,15 @@ Edit the files needed to implement it. Do NOT commit or stage — editing is eno
         fix = fix,
     );
 
+    run_edit_agent(&dir, &prompt).map(|_| ())
+}
+
+/// Headless agent allowed to edit files in `dir`; returns its reply.
+fn run_edit_agent(dir: &Path, prompt: &str) -> Result<String, String> {
     let ai = crate::config::Config::load()?.ai;
-    let mut cmd = match ai.agent.as_str() {
-        "opencode" => {
-            let mut c = Command::new("opencode");
-            c.args(["run", "--model", &ai.model, "--auto", &prompt]);
-            c
-        }
-        "omp" => {
-            let mut c = Command::new("omp");
-            c.args(["-p", "--auto-approve", "--model", &ai.model, &prompt]);
-            c
-        }
-        _ => {
-            let mut c = Command::new("claude");
-            c.args([
-                "-p",
-                "--model",
-                &ai.model,
-                "--permission-mode",
-                "acceptEdits",
-                &prompt,
-            ]);
-            c
-        }
-    };
-    cmd.current_dir(&dir).stdin(Stdio::null());
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let out = cmd
-        .output()
-        .map_err(|e| format!("failed to launch {}: {e}", ai.agent))?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
-    }
-    Ok(())
+    runner::run_capture(
+        agent_cmd(&ai, prompt, Access::Edit, false),
+        dir,
+        Duration::from_secs(AGENT_TIMEOUT_SECS),
+    )
 }
