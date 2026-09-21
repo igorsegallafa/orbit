@@ -13,6 +13,10 @@ pub enum Access {
     Full,
 }
 
+/// One `--flag=value` arg: `--allowedTools` is variadic and would swallow the prompt.
+const READ_ONLY_TOOLS: &str =
+    "--allowedTools=Read,Grep,Glob,Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(git status:*),Bash(git ls-files:*)";
+
 /// Argv (after the binary) for one headless agent run. `stream_json` only
 /// applies to claude (one JSON event per line); other agents print text.
 pub fn agent_args(ai: &AiSettings, prompt: &str, access: Access, stream_json: bool) -> Vec<String> {
@@ -34,7 +38,9 @@ pub fn agent_args(ai: &AiSettings, prompt: &str, access: Access, stream_json: bo
         _ => {
             a.extend(["-p".into(), "--model".into(), ai.model.clone()]);
             match access {
-                Access::ReadOnly => {}
+                // Headless claude can't prompt, so unlisted tools are denied and it
+                // may answer "I need approval" instead; read-only git is safe.
+                Access::ReadOnly => a.push(READ_ONLY_TOOLS.into()),
                 Access::Edit => a.extend(["--permission-mode".into(), "acceptEdits".into()]),
                 Access::Full => a.push("--dangerously-skip-permissions".into()),
             }
@@ -64,7 +70,10 @@ mod tests {
 
     #[test]
     fn claude_access_levels_map_to_permission_flags() {
-        assert_eq!(agent_args(&ai("claude"), "hi", Access::ReadOnly, false), ["-p", "--model", "m", "hi"]);
+        assert_eq!(
+            agent_args(&ai("claude"), "hi", Access::ReadOnly, false),
+            ["-p", "--model", "m", READ_ONLY_TOOLS, "hi"]
+        );
         assert_eq!(
             agent_args(&ai("claude"), "hi", Access::Edit, false),
             ["-p", "--model", "m", "--permission-mode", "acceptEdits", "hi"]

@@ -94,6 +94,15 @@ export function ChevronRightIcon({ size = 17, className }: IconProps & { classNa
   );
 }
 
+/** Stroked chevron for prev/next buttons (ChevronRightIcon is a disclosure triangle). */
+export function ChevronIcon({ size = 14, dir = "right" }: IconProps & { dir?: "left" | "right" }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+      <path d={dir === "left" ? "M15 6l-6 6 6 6" : "M9 6l6 6-6 6"} />
+    </svg>
+  );
+}
+
 export function PlugIcon({ size = 17 }: IconProps) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">

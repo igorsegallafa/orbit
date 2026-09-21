@@ -11,6 +11,7 @@ mod links;
 mod proc;
 mod pty;
 mod ralph;
+mod review;
 mod usage;
 mod workspace;
 
@@ -38,6 +39,13 @@ pub fn run() {
             commands::list_workspaces,
             commands::create_workspace,
             commands::create_workspace_from_branch,
+            review::pr_review_data,
+            review::pr_add_comment,
+            review::pr_reply,
+            review::pr_edit_comment,
+            review::pr_delete_comment,
+            review::pr_resolve_thread,
+            review::pr_submit_review,
             ralph::ralph_state,
             ralph::ralph_save_prd,
             ralph::ralph_save_prompt,

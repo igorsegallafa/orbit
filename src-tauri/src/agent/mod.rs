@@ -909,31 +909,42 @@ TITLE: <the title>
         branch = branch,
         base = meta.base,
     );
+    // Models occasionally drift from the format; one more try usually lands.
     let out = agent_answer(&dir, &prompt)?;
-    parse_title_body(&out).ok_or_else(|| "agent reply was not in TITLE:/--- format".into())
+    if let Some(d) = parse_title_body(&out) {
+        return Ok(d);
+    }
+    let out = agent_answer(&dir, &prompt)?;
+    parse_title_body(&out).ok_or_else(|| {
+        let preview: String = out.trim().chars().take(160).collect();
+        format!("agent reply had no TITLE line: {preview}")
+    })
 }
 
-/// "TITLE: ...\n---\nbody" → PrDraft. Tolerates surrounding code fences
-/// and stray whitespace; the body keeps its internal markdown.
+/// "TITLE: ...", "---", body -> PrDraft. Tolerates code fences, markdown
+/// decoration on the label ("**Title:**", "## Title:") and any case; the body
+/// keeps its internal markdown, minus agent attribution lines.
 pub fn parse_title_body(raw: &str) -> Option<PrDraft> {
-    let raw = raw.trim();
-    let raw = raw.strip_prefix("```").unwrap_or(raw).trim();
-    let idx = raw.find("TITLE:")?;
-    let after = &raw[idx + "TITLE:".len()..];
-    let mut parts = after.splitn(2, '\n');
-    let title = parts.next()?.trim().trim_end_matches("```").trim().to_string();
-    if title.is_empty() {
-        return None;
-    }
-    let rest = parts.next().unwrap_or("");
-    let body = match rest.find("---") {
-        Some(p) => rest[p + 3..]
-            .trim()
-            .trim_end_matches("```")
-            .trim()
-            .to_string(),
-        None => String::new(),
-    };
+    let lines: Vec<&str> = raw.lines().collect();
+    let (at, title) = lines.iter().enumerate().find_map(|(i, l)| {
+        let bare = l.trim().trim_start_matches(['#', '*', '_', ' ', '>']);
+        let head = bare.get(..6)?;
+        if !head.eq_ignore_ascii_case("title:") {
+            return None;
+        }
+        let t = bare[6..].trim().trim_matches(['*', '_', '`', '"']).trim();
+        (!t.is_empty()).then(|| (i, t.to_string()))
+    })?;
+    let rest = &lines[at + 1..];
+    let start = rest.iter().position(|l| l.trim() == "---").map_or(0, |p| p + 1);
+    let body = rest[start..]
+        .iter()
+        .filter(|l| !l.contains("Generated with [Claude Code]") && !l.starts_with("Co-Authored-By:"))
+        .copied()
+        .collect::<Vec<_>>()
+        .join("
+");
+    let body = body.trim().trim_end_matches("```").trim().to_string();
     Some(PrDraft { title, body })
 }
 
@@ -954,6 +965,27 @@ mod pr_draft_tests {
         assert_eq!(d.title, "fix thing");
         assert_eq!(d.body, "");
         assert!(parse_title_body("no title here").is_none());
+    }
+
+    #[test]
+    fn tolerates_markdown_label_preamble_and_attribution() {
+        let d = parse_title_body(
+            "Here is the PR:
+
+**Title:** Add deploy lock
+
+---
+## Summary
+- lock
+
+Generated with [Claude Code](https://claude.com/claude-code)",
+        )
+        .unwrap();
+        assert_eq!(d.title, "Add deploy lock");
+        assert_eq!(d.body, "## Summary
+- lock");
+        assert_eq!(parse_title_body("## title: fix x
+body").unwrap().body, "body");
     }
 }
 

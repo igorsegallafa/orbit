@@ -6,6 +6,7 @@
 // noticeable startup + network latency, so sequential calls scale badly
 // once someone is in several orgs).
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -707,19 +708,35 @@ pub fn pr_file_diff(
     base_sha: &str,
     path: &str,
 ) -> Result<PrFileDiff, String> {
-    // File ADDED in the PR: not present at base — empty original, not an error.
-    // File DELETED: not present at head — empty modified, not an error.
-    let modified = match fetch_content_at(owner_repo, head_sha, path) {
+    // Both sides at once: each is a separate gh round trip.
+    let (modified, original) = std::thread::scope(|sc| {
+        let head = sc.spawn(|| content_or_empty(owner_repo, head_sha, path));
+        let base = content_or_empty(owner_repo, base_sha, path);
+        (head.join().unwrap_or_else(|_| Err("fetch panicked".into())), base)
+    });
+    Ok(PrFileDiff { original: original?, modified: modified? })
+}
+
+/// File contents at a commit, memoized: a (repo, sha, path) never changes.
+/// Missing at that commit (added/deleted in the PR) is an empty file.
+// ponytail: in-memory and unbounded; the session's reviewed files are small
+// next to the app, persist to disk if cold starts matter.
+fn content_or_empty(owner_repo: &str, sha: &str, path: &str) -> Result<String, String> {
+    static CONTENTS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    let key = format!("{owner_repo}@{sha}:{path}");
+    let map = CONTENTS.get_or_init(Default::default);
+    if let Some(c) = map.lock().ok().and_then(|m| m.get(&key).cloned()) {
+        return Ok(c);
+    }
+    let c = match fetch_content_at(owner_repo, sha, path) {
         Ok(c) => c,
         Err(e) if e.contains("Not Found") || e.contains("404") => String::new(),
         Err(e) => return Err(e),
     };
-    let original = match fetch_content_at(owner_repo, base_sha, path) {
-        Ok(c) => c,
-        Err(e) if e.contains("Not Found") || e.contains("404") => String::new(),
-        Err(e) => return Err(e),
-    };
-    Ok(PrFileDiff { original, modified })
+    if let Ok(mut m) = map.lock() {
+        m.insert(key, c.clone());
+    }
+    Ok(c)
 }
 
 fn fetch_content_at(owner_repo: &str, sha: &str, path: &str) -> Result<String, String> {
