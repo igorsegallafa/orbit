@@ -51,6 +51,26 @@ const beforeMount: BeforeMount = (monaco) => {
   defineOrbitTheme(monaco);
 };
 
+/** A spot to show once the file is open (Find in Files results). */
+export interface RevealTarget {
+  workspace: string;
+  repo: string;
+  path: string;
+  line: number;
+  col: number;
+  length: number;
+}
+
+// Kept until the editor for that file has mounted (the tab may be opening).
+const pendingReveal = new Map<string, RevealTarget>();
+const revealKey = (t: { workspace: string; repo: string; path: string }) => `${t.workspace}/${t.repo}/${t.path}`;
+
+/** Scrolls the file's editor to the target and selects it; call right after opening its tab. */
+export function revealInEditor(t: RevealTarget) {
+  pendingReveal.set(revealKey(t), t);
+  window.dispatchEvent(new CustomEvent("orbit-reveal", { detail: t }));
+}
+
 // Define the theme as soon as the monaco loader resolves (module scope, runs
 // once for the whole app) — the component prop "theme" then always finds it
 // registered, regardless of mount order or HMR state.
@@ -82,6 +102,34 @@ export function EditorPane({ workspace, repo, path, onError, onApplyPlan }: Prop
   const [ai, setAi] = useState<{ agent: string; model: string } | null>(null);
   const [models, setModels] = useState<string[]>([]);
   const saveRef = useRef<(() => void) | null>(null);
+  const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null);
+
+  const applyReveal = () => {
+    const key = revealKey({ workspace, repo, path });
+    const t = pendingReveal.get(key);
+    const ed = editorRef.current;
+    if (!t || !ed) return;
+    pendingReveal.delete(key);
+    // After the tab becomes visible, so the layout has a real size.
+    requestAnimationFrame(() => {
+      ed.revealLineInCenter(t.line);
+      ed.setSelection({ startLineNumber: t.line, startColumn: t.col, endLineNumber: t.line, endColumn: t.col + t.length });
+      ed.focus();
+    });
+  };
+
+  useEffect(() => {
+    const onReveal = (e: Event) => {
+      const t = (e as CustomEvent<RevealTarget>).detail;
+      if (revealKey(t) === revealKey({ workspace, repo, path })) {
+        setMode("editor");
+        applyReveal();
+      }
+    };
+    window.addEventListener("orbit-reveal", onReveal);
+    return () => window.removeEventListener("orbit-reveal", onReveal);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspace, repo, path]);
 
   const isMarkdown = /\.(md|markdown)$/i.test(path);
   const isPlan = path === "PLAN.md" && repo === "";
@@ -146,6 +194,8 @@ export function EditorPane({ workspace, repo, path, onError, onApplyPlan }: Prop
     // raced with the monaco loader.
     defineOrbitTheme(monaco);
     monaco.editor.setTheme("orbit-dark");
+    editorRef.current = editor;
+    applyReveal();
     editor.onDidChangeModelContent(() => {
       setContent(editor.getValue());
       setDirty(true);

@@ -8,7 +8,8 @@ import { CodeReviewPage } from "./pages/CodeReviewPage";
 import { WorkspaceDetailPage } from "./pages/WorkspaceDetailPage";
 import { SidebarResizer } from "./components/SidebarResizer";
 import { ContextMenu, MenuItem, useContextMenu } from "./components/ContextMenu";
-import { EditorPane } from "./components/EditorPane";
+import { EditorPane, revealInEditor } from "./components/EditorPane";
+import { FindPopup, OpenMatch } from "./components/FindInFiles";
 import { AgentSignal, TerminalPane, TerminalTab, claudeSessionArgs, dropFilesIntoTerminal } from "./components/TerminalPane";
 import { InboxButton, InboxItem, InboxKind, notifyOs } from "./components/Inbox";
 import { FileTreePanel } from "./components/FileTreePanel";
@@ -106,6 +107,7 @@ function App() {
   const [dockHidden, setDockHidden] = useState(() => localStorage.getItem("orbit.dock-hidden") === "1");
   const [dockWidth, setDockWidth] = useState(() => loadStored(DOCK_KEY, 240, 180, 460));
   const [searchOpen, setSearchOpen] = useState(false);
+  const [findOpen, setFindOpen] = useState(false);
   const [plusMenu, setPlusMenu] = useState<{ x: number; y: number } | null>(null);
   const [wsExpanded, setWsExpanded] = useState<Record<string, boolean>>(() => {
     try {
@@ -533,6 +535,27 @@ function App() {
               (active.kind === "terminal" ? active.terminal.workspace : active.workspace)
           ) ?? null)
         : null;
+
+  const openMatch =
+    (wsName: string): OpenMatch =>
+    (m, length) => {
+      openFileTab(wsName, m.repo, m.path);
+      revealInEditor({ workspace: wsName, repo: m.repo, path: m.path, line: m.line, col: m.col, length });
+    };
+
+  // Ctrl/Cmd+Shift+F: Find in Files for the workspace in focus.
+  const focusWsRef = useRef<Workspace | null>(null);
+  focusWsRef.current = focusWorkspace;
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.code === "KeyF" && focusWsRef.current) {
+        e.preventDefault();
+        setFindOpen(true);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   const renderPane = (tab: Tab) => {
     if (tab.kind === "workspace") {
@@ -1015,6 +1038,10 @@ function App() {
         />
       )}
 
+      {findOpen && focusWorkspace && (
+        <FindPopup workspace={focusWorkspace} onOpen={openMatch(focusWorkspace.name)} onClose={() => setFindOpen(false)} />
+      )}
+
       {menu && (
           <ContextMenu
             x={menu.x}
@@ -1080,6 +1107,7 @@ function App() {
                 setNavPage({ kind: "dashboard" });
                 openTab({ kind: "review", workspace: focusWorkspace.name, repo, path });
               }}
+              onOpenFind={() => setFindOpen(true)}
               onReviewCommit={(repo, commit) => {
                 setNavPage({ kind: "dashboard" });
                 openTab({ kind: "commit", workspace: focusWorkspace.name, repo, commit });

@@ -5823,3 +5823,66 @@ button .spinner {
 .ar-count { margin-right: auto; font-size: 12px; color: var(--text-faint); }
 .ar-footer button { display: inline-flex; align-items: center; gap: 6px; }
 .pr-feedback-btn { flex-shrink: 0; }
+
+/* ---------- Find in Files ---------- */
+/* Top where the full-size popup is vertically centered, so the compact
+   (no results) state opens at the same spot and only grows downward. */
+.find-overlay { align-items: flex-start; padding-top: calc((100vh - min(600px, 70vh)) / 2); }
+.find-popup {
+  width: 760px; max-width: calc(100vw - 32px); height: min(600px, 70vh); display: flex; flex-direction: column;
+  border: 1px solid var(--border-strong); border-radius: 12px; background: var(--panel);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55); overflow: hidden;
+}
+.find-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px 6px; }
+.find-title { font-size: 12.5px; font-weight: 650; }
+.find-summary { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--text-faint); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.find-summary.error { color: var(--danger); }
+.find-summary .spinner { width: 11px; height: 11px; border-width: 1.5px; }
+.find-inputrow {
+  display: flex; align-items: center; gap: 8px; margin: 0 14px; padding: 0 6px 0 10px;
+  border: 1px solid var(--border-strong); border-radius: 8px; background: var(--bg); color: var(--text-faint);
+}
+.find-inputrow:focus-within { border-color: var(--accent); }
+.find-input { flex: 1; min-width: 0; height: 34px; border: none !important; background: transparent !important; box-shadow: none !important; padding: 0 !important; font-size: 13px; color: var(--text); }
+.find-toggles { display: inline-flex; gap: 2px; flex-shrink: 0; }
+.find-toggle {
+  min-width: 24px; height: 22px !important; padding: 0 5px; border: 1px solid transparent; border-radius: 5px;
+  background: none; color: var(--text-faint); font-size: 11px; font-weight: 600; font-family: var(--mono, ui-monospace, monospace); cursor: pointer;
+}
+.find-toggle:hover:not(:disabled) { background: var(--panel-raised); color: var(--text); }
+.find-toggle.on, .find-toggle.on:hover:not(:disabled) { background: var(--accent-soft); color: var(--accent); border-color: rgba(79, 124, 247, 0.4); }
+.find-scope { display: flex; align-items: center; gap: 8px; margin: 8px 14px; min-width: 0; }
+.find-chips { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+.find-chip {
+  height: 24px !important; padding: 0 9px; border: 1px solid var(--border); border-radius: 999px;
+  background: none; color: var(--text-dim); font-size: 11.5px; cursor: pointer;
+}
+.find-chip:hover:not(:disabled) { background: var(--panel-raised); color: var(--text); }
+.find-chip.on, .find-chip.on:hover:not(:disabled) { background: var(--accent-soft); color: var(--text); border-color: rgba(79, 124, 247, 0.45); }
+.find-mask { flex: 1; min-width: 120px; height: 26px; font-size: 12px; font-family: var(--mono, ui-monospace, monospace); }
+/* Nothing typed yet: just the inputs and a hint, no empty panes. */
+.find-popup.idle { height: auto; }
+.find-popup.idle .find-results { flex: none; }
+.find-popup.idle .find-empty { min-height: 0; height: auto; padding: 14px; }
+.find-results { flex: 0 0 40%; overflow-y: auto; border-top: 1px solid var(--border); padding: 4px 0; }
+.find-row {
+  display: flex; align-items: center; gap: 12px; width: 100%; height: 24px !important; padding: 0 14px;
+  border: none; border-radius: 0; background: none; text-align: left; cursor: pointer;
+  font-family: var(--mono, ui-monospace, monospace); font-size: 12px; color: var(--text-dim);
+}
+.find-row * { cursor: pointer; }
+.find-row:hover:not(:disabled) { background: var(--panel-raised); }
+.find-row.on, .find-row.on:hover:not(:disabled) { background: var(--accent-soft); color: var(--text); }
+.find-row-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: pre; }
+.find-row-loc { flex-shrink: 0; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 11.5px; color: var(--text-faint); }
+.find-row-line { color: var(--text-faint); opacity: 0.8; }
+.find-row mark { background: rgba(227, 179, 65, 0.28); color: #ffe6a8; border-radius: 2px; padding: 0 1px; }
+.find-empty { display: flex; align-items: center; justify-content: center; gap: 8px; height: 100%; min-height: 60px; padding: 16px; font-size: 12px; color: var(--text-faint); text-align: center; }
+.find-preview { flex: 1; min-height: 0; border-top: 1px solid var(--border); background: var(--bg); }
+.find-preview-line { background: rgba(79, 124, 247, 0.1); }
+.find-preview-hit { background: rgba(227, 179, 65, 0.22); border-radius: 2px; }
+.find-preview-hit.on { background: rgba(227, 179, 65, 0.45); outline: 1px solid rgba(227, 179, 65, 0.7); }
+.find-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 14px; border-top: 1px solid var(--border); font-size: 11px; color: var(--text-faint); }
+.find-foot-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+
+

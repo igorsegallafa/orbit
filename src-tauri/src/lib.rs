@@ -13,6 +13,7 @@ mod proc;
 mod pty;
 mod ralph;
 mod review;
+mod search;
 mod usage;
 mod workspace;
 
@@ -147,6 +148,7 @@ pub fn run() {
             pty::pty_write,
             pty::pty_resize,
             pty::pty_kill,
+            search::search_workspace,
             pty::pty_scrollback,
             pty::pty_forget,
             pty::claude_session_exists,

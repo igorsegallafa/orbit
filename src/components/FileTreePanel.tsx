@@ -13,7 +13,7 @@ interface FileNode {
   is_dir: boolean;
 }
 
-type DockView = "files" | "git" | "search";
+type DockView = "files" | "git";
 
 interface TreeTarget {
   repo: string;
@@ -28,6 +28,8 @@ interface Props {
   onReviewFile: (repo: string, path: string) => void;
   /** Opens commit inspection (Git tab). */
   onReviewCommit: (repo: string, commit: GitCommit) => void;
+  /** Opens the Find in Files popup. */
+  onOpenFind: () => void;
   onError: (msg: string) => void;
 }
 
@@ -41,7 +43,7 @@ interface Props {
  * move past a 4px threshold → hit-test folders with elementFromPoint →
  * move on mouseup, with a floating ghost and target highlight.
  */
-export function FileTreePanel({ workspace, onOpenFile, onReviewFile, onReviewCommit, onError }: Props) {
+export function FileTreePanel({ workspace, onOpenFile, onReviewFile, onReviewCommit, onOpenFind, onError }: Props) {
   const [view, setView] = useState<DockView>("files");
   const [repo, setRepo] = useState(workspace.repos[0] ?? "");
   const [tree, setTree] = useState<Record<string, FileNode[]>>({});
@@ -409,9 +411,9 @@ export function FileTreePanel({ workspace, onOpenFile, onReviewFile, onReviewCom
     );
   };
 
-  const dockItems: { id: DockView; label: string; icon: React.ReactNode }[] = [
+  const dockItems: { id: DockView | "find"; label: string; icon: React.ReactNode }[] = [
     { id: "files", label: "Files", icon: <FolderIcon /> },
-    { id: "search", label: "Find", icon: <SearchIcon /> },
+    { id: "find", label: "Find in Files (Ctrl+Shift+F)", icon: <SearchIcon /> },
     { id: "git", label: "Git", icon: <GitIcon /> },
   ];
 
@@ -423,7 +425,7 @@ export function FileTreePanel({ workspace, onOpenFile, onReviewFile, onReviewCom
             key={item.id}
             className={`dock-icon ${view === item.id ? "dock-icon-active" : ""}`}
             title={item.label}
-            onClick={() => setView(item.id)}
+            onClick={() => (item.id === "find" ? onOpenFind() : setView(item.id))}
           >
             {item.icon}
           </button>
@@ -459,7 +461,6 @@ export function FileTreePanel({ workspace, onOpenFile, onReviewFile, onReviewCom
           onError={onError}
         />
       )}
-      {view === "search" && <div className="dock-placeholder">Search coming soon</div>}
 
       {/* Floating ghost with the dragged file name */}
       {dragging && ghostPos && (
