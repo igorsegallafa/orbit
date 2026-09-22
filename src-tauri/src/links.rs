@@ -82,6 +82,38 @@ pub fn link_shared(svc: &Service, clone_dir: &Path, wt: &Path) -> Result<Vec<Str
     Ok(linked)
 }
 
+/// Copies the untracked files the base clone's `.worktreeinclude` lists
+/// (gitignore syntax, e.g. `.env`, `.vscode/settings.json`) into a new
+/// worktree; each worktree owns its copy. Same file Claude Code and Orca read.
+// ponytail: copies whatever the patterns match; a pattern like
+// `node_modules` would copy the whole tree (shared paths are linked instead).
+pub fn copy_worktreeinclude(clone_dir: &Path, wt: &Path) -> Vec<String> {
+    if !clone_dir.join(".worktreeinclude").is_file() {
+        return vec![];
+    }
+    let Ok(out) = crate::proc::run(
+        "git",
+        &["ls-files", "--others", "--ignored", "--exclude-from=.worktreeinclude"],
+        Some(clone_dir),
+    ) else {
+        return vec![];
+    };
+    let mut copied = Vec::new();
+    for rel in out.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let (src, dst) = (clone_dir.join(rel), wt.join(rel));
+        if dst.exists() || !src.is_file() {
+            continue;
+        }
+        if let Some(parent) = dst.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if std::fs::copy(&src, &dst).is_ok() {
+            copied.push(rel.to_string());
+        }
+    }
+    copied
+}
+
 /// Removes the links made by `link_shared`. Must run before
 /// `git worktree remove`: on Windows git follows junctions and deletes
 /// the shared content inside the base clone.

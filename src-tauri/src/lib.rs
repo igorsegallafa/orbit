@@ -1,5 +1,6 @@
 mod commands;
 mod agent;
+mod agent_hooks;
 mod build;
 mod config;
 mod files;
@@ -15,11 +16,22 @@ mod review;
 mod usage;
 mod workspace;
 
+/// `Orbit --orbit-statusline <file>`: status line helper for the Claude
+/// sessions Orbit launches (see agent_hooks).
+pub fn statusline_helper(file: Option<String>) {
+    agent_hooks::statusline_helper(file)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
+        .setup(|app| {
+            agent_hooks::start(app.handle().clone());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::get_config,
             commands::add_service,
@@ -66,6 +78,10 @@ pub fn run() {
             commands::reveal_service,
             commands::set_folders,
             commands::remove_workspace,
+            commands::race_create_variant,
+            commands::race_variant_stats,
+            commands::race_adopt,
+            commands::race_discard,
             commands::workspace_status,
             commands::refresh_repo,
             commands::open_in_editor,
@@ -129,6 +145,10 @@ pub fn run() {
             pty::pty_write,
             pty::pty_resize,
             pty::pty_kill,
+            pty::pty_scrollback,
+            pty::pty_forget,
+            pty::claude_session_exists,
+            agent_hooks::claude_rate_limits,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

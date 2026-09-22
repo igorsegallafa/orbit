@@ -4,7 +4,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { AgentStatus, AgentStatusTracker } from "../lib/agentStatus";
+import { AgentStatus, AgentStatusTracker, HookState } from "../lib/agentStatus";
 import { StatusIndicator } from "./StatusIndicator";
 
 export interface TerminalTab {
@@ -19,12 +19,26 @@ export interface TerminalTab {
    * initial prompt as argv, so we inject it as keystrokes).
    */
   initialInput?: string;
+  /** Claude conversation id (`--session-id`), so a restart can `--resume` it. */
+  agentSessionId?: string;
+  /** Reopened from the saved session after an app restart. */
+  restored?: boolean;
 }
+
+/** Launch argv for a new claude session: a fixed id makes it resumable. */
+export function claudeSessionArgs(extra: string[] = []): { args: string[]; agentSessionId: string } {
+  const agentSessionId = crypto.randomUUID();
+  return { args: ["--session-id", agentSessionId, ...extra], agentSessionId };
+}
+
+/** Something the user may want to hear about even when not looking. */
+export type AgentSignal = { kind: "done" } | { kind: "waiting"; message?: string };
 
 interface Props {
   tab: TerminalTab;
   onError: (msg: string) => void;
   onStatusChange?: (status: AgentStatus) => void;
+  onSignal?: (signal: AgentSignal) => void;
   /** Marks this pane as the drop target for external (window-level) drags. */
   isDropTarget?: boolean;
 }
@@ -38,13 +52,19 @@ export function dropFilesIntoTerminal(sessionId: string, paths: string[]) {
   livePtys.get(sessionId)?.inject(paths.join(" "));
 }
 
-export function TerminalPane({ tab, onError, onStatusChange }: Props) {
+const WAITING_TYPES = new Set(["permission_prompt", "elicitation_dialog", "elicitation_url_dialog", "agent_needs_input"]);
+/** Agents without hooks: a stretch of activity this long ending in silence counts as "done". */
+const FALLBACK_DONE_MS = 10_000;
+
+export function TerminalPane({ tab, onError, onStatusChange, onSignal }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const ptyIdRef = useRef<number | null>(null);
   const trackerRef = useRef(new AgentStatusTracker());
   const onStatusRef = useRef(onStatusChange);
   onStatusRef.current = onStatusChange;
+  const onSignalRef = useRef(onSignal);
+  onSignalRef.current = onSignal;
   const [status, setStatus] = useState<AgentStatus>("idle");
 
   // Types the text into the running agent's prompt (PTY keystrokes).
@@ -103,14 +123,47 @@ export function TerminalPane({ tab, onError, onStatusChange }: Props) {
     term.focus();
 
     let delivered = false;
-    invoke<number>("pty_spawn", { workspace: tab.workspace, cmd: tab.cmd, args: tab.args, cols: term.cols, rows: term.rows })
-      .then((id) => {
+    // Unmounted before the spawn resolved (StrictMode, fast tab close): that
+    // PTY has no pane and must not keep running or writing its scrollback.
+    let disposed = false;
+    // After a restart: claude picks its conversation back up (and redraws it);
+    // other programs start fresh under the output they printed before.
+    const launch = async (): Promise<{ args?: string[]; initialInput?: string }> => {
+      if (!tab.restored) return { args: tab.args, initialInput: tab.initialInput };
+      if (tab.agentSessionId) {
+        const exists = await invoke<boolean>("claude_session_exists", { workspace: tab.workspace, sessionId: tab.agentSessionId }).catch(() => false);
+        return { args: exists ? ["--resume", tab.agentSessionId] : ["--session-id", tab.agentSessionId] };
+      }
+      const saved = await invoke<number[]>("pty_scrollback", { key: tab.id }).catch(() => []);
+      if (saved.length) {
+        // Screen clears (ConPTY starts every session with one) would wipe the
+        // replay: turn each into a push of the viewport into scrollback, and
+        // push once more so the new session's clear keeps the last screen too.
+        const push = "\r\n".repeat(term.rows);
+        const text = new TextDecoder().decode(new Uint8Array(saved)).split("\x1b[2J").join(push);
+        term.write(`${text}\r\n\x1b[90m── restored after restart ──\x1b[0m${push}`);
+      }
+      return {};
+    };
+    launch()
+      .then(({ args, initialInput }) =>
+        disposed
+          ? null
+          : invoke<number>("pty_spawn", { workspace: tab.workspace, cmd: tab.cmd, args, cols: term.cols, rows: term.rows, key: tab.id }).then((id) => ({ id, initialInput })),
+      )
+      .then((spawned) => {
+        if (!spawned) return;
+        const { id, initialInput } = spawned;
+        if (disposed) {
+          invoke("pty_kill", { id }).catch(() => null);
+          return;
+        }
         ptyIdRef.current = id;
         // Inject an initial prompt as keystrokes (opencode TUI has no
         // argv prompt). First attempt after the TUI boots; a second one
         // only fires if no output followed the first (TUI wasn't ready).
-        if (tab.initialInput) {
-          const text = tab.initialInput;
+        if (initialInput) {
+          const text = initialInput;
           const send = () => {
             if (ptyIdRef.current === null || delivered) return;
             invoke("pty_write", { id: ptyIdRef.current, data: text }).catch(() => null);
@@ -133,11 +186,35 @@ export function TerminalPane({ tab, onError, onStatusChange }: Props) {
       }
     });
 
+    let busySince = 0;
     const publish = () => {
-      const s = trackerRef.current.status();
+      const tracker = trackerRef.current;
+      const s = tracker.status();
       setStatus(s);
       onStatusRef.current?.(s);
+      // Heuristic "done" for agents that don't report their own lifecycle.
+      if (tab.cmd && !tracker.hasHooks()) {
+        if (s !== "idle" && s !== "exited") busySince ||= Date.now();
+        else if (busySince) {
+          if (s === "idle" && Date.now() - busySince >= FALLBACK_DONE_MS) onSignalRef.current?.({ kind: "done" });
+          busySince = 0;
+        }
+      }
     };
+
+    const offHook = listen<{ key: string; event: string; notificationType?: string; message?: string }>("agent-event", (e) => {
+      const ev = e.payload;
+      if (ev.key !== tab.id) return;
+      let state: HookState | null = null;
+      if (ev.event === "UserPromptSubmit" || ev.event === "PostToolUse") state = "working";
+      else if (ev.event === "Stop" || ev.event === "StopFailure") state = "done";
+      else if (ev.event === "Notification" && WAITING_TYPES.has(ev.notificationType ?? "")) state = "waiting";
+      if (!state) return;
+      trackerRef.current.setHook(state);
+      publish();
+      if (state === "done") onSignalRef.current?.({ kind: "done" });
+      if (state === "waiting") onSignalRef.current?.({ kind: "waiting", message: ev.message });
+    });
 
     const offOutput = listen<{ id: number; data: number[] }>("pty-output", (event) => {
       if (event.payload.id !== ptyIdRef.current) return;
@@ -171,11 +248,13 @@ export function TerminalPane({ tab, onError, onStatusChange }: Props) {
     resizeObserver.observe(hostRef.current);
 
     return () => {
+      disposed = true;
       if (ptyIdRef.current !== null) {
         invoke("pty_kill", { id: ptyIdRef.current }).catch(() => null);
       }
       offOutput.then((f) => f());
       offExit.then((f) => f());
+      offHook.then((f) => f());
       window.clearInterval(statusPoll);
       resizeObserver.disconnect();
       term.dispose();

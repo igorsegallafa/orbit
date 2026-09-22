@@ -59,6 +59,10 @@ export interface Workspace {
   card?: CardRef;
   /** PRs created from this workspace (persisted in .workspace.yaml). */
   prRefs?: { repo: string; number: number; url: string }[];
+  /** Race variant: the workspace it competes for. */
+  variant_of?: string;
+  /** Agent racing in this variant ("claude · model"). */
+  agent?: string;
 }
 
 export interface AiSettings {

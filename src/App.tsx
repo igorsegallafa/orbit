@@ -9,7 +9,8 @@ import { WorkspaceDetailPage } from "./pages/WorkspaceDetailPage";
 import { SidebarResizer } from "./components/SidebarResizer";
 import { ContextMenu, MenuItem, useContextMenu } from "./components/ContextMenu";
 import { EditorPane } from "./components/EditorPane";
-import { TerminalPane, TerminalTab, dropFilesIntoTerminal } from "./components/TerminalPane";
+import { AgentSignal, TerminalPane, TerminalTab, claudeSessionArgs, dropFilesIntoTerminal } from "./components/TerminalPane";
+import { InboxButton, InboxItem, InboxKind, notifyOs } from "./components/Inbox";
 import { FileTreePanel } from "./components/FileTreePanel";
 import { ReviewPane } from "./components/ReviewPane";
 import { CommitReviewPane } from "./components/CommitReviewPane";
@@ -73,13 +74,32 @@ function tabId(tab: Tab): string {
   return t.terminal.id;
 }
 
+const SESSION_KEY = "orbit.session";
+
+/** Open tabs from the last run; terminals come back marked as restored. */
+function loadSession(): { tabs: Tab[]; active: string | null } {
+  try {
+    const raw = JSON.parse(localStorage.getItem(SESSION_KEY) ?? "null");
+    if (!raw || !Array.isArray(raw.tabs)) return { tabs: [], active: null };
+    const tabs = (raw.tabs as Tab[]).map((t) => (t.kind === "terminal" ? { ...t, terminal: { ...t.terminal, restored: true } } : t));
+    const active = tabs.some((t) => tabId(t) === raw.active) ? raw.active : (tabs[0] ? tabId(tabs[0]) : null);
+    return { tabs, active };
+  } catch {
+    return { tabs: [], active: null };
+  }
+}
+
 function App() {
   const { config, setConfig, loading, error, setError } = useConfig();
   const [navPage, setNavPage] = useState<NavPage>({ kind: "dashboard" });
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
-  const [tabs, setTabs] = useState<Tab[]>([]);
-  const [activeTab, setActiveTab] = useState<string | null>(null);
+  const [initialSession] = useState(loadSession);
+  const [tabs, setTabs] = useState<Tab[]>(initialSession.tabs);
+  const [activeTab, setActiveTab] = useState<string | null>(initialSession.active);
   const [sessionStatuses, setSessionStatuses] = useState<Record<string, AgentStatus>>({});
+  const [inbox, setInbox] = useState<InboxItem[]>([]);
+  const activeTabRef = useRef<string | null>(null);
+  activeTabRef.current = activeTab;
   const [renamingTab, setRenamingTab] = useState<string | null>(null);
   const [sidebarWidth, setSidebarWidth] = useState(() => loadStored(SIDEBAR_KEY, DEFAULT_WIDTH, 64, 400));
   const [sidebarHidden, setSidebarHidden] = useState(() => localStorage.getItem("orbit.sidebar-hidden") === "1");
@@ -100,11 +120,32 @@ function App() {
 
   const loadWorkspaces = useCallback(async () => {
     try {
-      setWorkspaces(await invoke<Workspace[]>("list_workspaces"));
+      const list = await invoke<Workspace[]>("list_workspaces");
+      setWorkspaces(list);
+      // Tabs of workspaces that no longer exist (removed elsewhere) can't come back.
+      const names = new Set(list.map((w) => w.name));
+      const owner = (t: Tab) =>
+        t.kind === "workspace" ? t.workspace.name : t.kind === "terminal" ? t.terminal.workspace : t.kind === "pr" ? null : t.workspace;
+      setTabs((ts) => {
+        const kept = ts.filter((t) => {
+          const ws = owner(t);
+          return ws === null || names.has(ws);
+        });
+        return kept.length === ts.length ? ts : kept;
+      });
     } catch (e) {
       setError(String(e));
     }
   }, [setError]);
+
+  // Persist open tabs so a restart reopens them.
+  useEffect(() => {
+    try {
+      localStorage.setItem(SESSION_KEY, JSON.stringify({ tabs, active: activeTab }));
+    } catch {
+      // storage full/unavailable: the session just won't be restored
+    }
+  }, [tabs, activeTab]);
 
   useEffect(() => {
     loadWorkspaces();
@@ -226,6 +267,7 @@ function App() {
         };
         if (ok) toast.success("Ralph finished every story", opts);
         else toast.info(`Ralph stopped: ${reasonLabel(ev.reason ?? null)}`, opts);
+        pushInbox(`ralph:${ws}`, ok ? "ralph-done" : "ralph-stopped", ok ? "Ralph finished every story" : `Ralph stopped: ${reasonLabel(ev.reason ?? null)}`, opts.description);
       },
     );
     return () => {
@@ -235,13 +277,63 @@ function App() {
 
   const ralphRunning = useRalphRunning();
 
+  // ---------- notifications ----------
+  // Unread unless the user is looking at that tab right now; the OS
+  // notification only fires when they aren't.
+  const pushInbox = (tabId: string, kind: InboxKind, title: string, detail: string) => {
+    const looking = document.hasFocus() && activeTabRef.current === tabId;
+    setInbox((all) => [
+      { id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, tabId, kind, title, detail, at: Date.now(), read: looking },
+      // One live item per tab: older ones for it are settled.
+      ...all.map((i) => (i.tabId === tabId ? { ...i, read: true } : i)),
+    ].slice(0, 50));
+    if (!looking) notifyOs(title, detail);
+  };
+
+  const onAgentSignal = (t: TerminalTab, sig: AgentSignal) => {
+    const name = t.sessionName;
+    if (sig.kind === "done") pushInbox(t.id, "done", `${name} finished`, t.workspace);
+    else pushInbox(t.id, "waiting", `${name} needs your attention`, sig.message ? `${t.workspace} · ${sig.message}` : t.workspace);
+  };
+
+  // Seeing the tab settles its notifications.
+  useEffect(() => {
+    const settle = () => {
+      const id = activeTabRef.current;
+      if (!id || !document.hasFocus()) return;
+      setInbox((all) => (all.some((i) => i.tabId === id && !i.read) ? all.map((i) => (i.tabId === id ? { ...i, read: true } : i)) : all));
+    };
+    settle();
+    window.addEventListener("focus", settle);
+    return () => window.removeEventListener("focus", settle);
+  }, [activeTab]);
+
+  const unreadByTab = new Map<string, InboxKind>();
+  for (const i of inbox) if (!i.read && !unreadByTab.has(i.tabId)) unreadByTab.set(i.tabId, i.kind);
+
   const openTab = (tab: Tab) => {
     const id = tabId(tab);
     setTabs((ts) => (ts.some((t) => tabId(t) === id) ? ts : [...ts, tab]));
     setActiveTab(id);
   };
 
+  // Workspace folders can't be deleted on Windows while a session runs in
+  // them: close their tabs (killing the processes) before a removal.
+  const closeWorkspaceSessions = (names: string[]) => {
+    const doomed = tabs.filter((t) => t.kind !== "pr" && t.kind !== "workspace" && names.includes(t.kind === "terminal" ? t.terminal.workspace : t.workspace));
+    if (!doomed.length) return;
+    doomed.forEach(forgetTerminal);
+    const ids = new Set(doomed.map(tabId));
+    setTabs((ts) => ts.filter((t) => !ids.has(tabId(t))));
+    if (activeTab && ids.has(activeTab)) setActiveTab(null);
+  };
+
+  const forgetTerminal = (t: Tab | undefined) => {
+    if (t?.kind === "terminal") invoke("pty_forget", { key: t.terminal.id }).catch(() => null);
+  };
+
   const closeTab = (id: string) => {
+    forgetTerminal(tabs.find((t) => tabId(t) === id));
     setTabs((ts) => {
       const idx = ts.findIndex((t) => tabId(t) === id);
       const next = ts.filter((t) => tabId(t) !== id);
@@ -267,6 +359,7 @@ function App() {
     setTabs((ts) => {
       for (const t of ts) {
         if (tabId(t) !== keepId) {
+          forgetTerminal(t);
           setSessionStatuses((s) => {
             const { [tabId(t)]: _drop, ...rest } = s;
             return rest;
@@ -279,6 +372,7 @@ function App() {
   };
 
   const closeAllTabs = () => {
+    tabs.forEach(forgetTerminal);
     setTabs([]);
     setActiveTab(null);
     setSessionStatuses({});
@@ -314,6 +408,7 @@ function App() {
     const taken = tabs
       .filter((t): t is Extract<Tab, { kind: "terminal" }> => t.kind === "terminal")
       .map((t) => t.terminal.sessionName);
+    const claude = cmd === "claude" ? claudeSessionArgs() : null;
     openTab({
       kind: "terminal",
       terminal: {
@@ -322,6 +417,8 @@ function App() {
         label,
         sessionName: randomSessionName(taken),
         cmd,
+        args: claude?.args,
+        agentSessionId: claude?.agentSessionId,
       },
     });
   };
@@ -331,23 +428,25 @@ function App() {
   // Opens an interactive agent session seeded with a prompt (grill-me
   // interviews, plan application). claude takes the prompt as argv; the
   // opencode TUI types it in after boot.
-  const openPromptedSession = (wsName: string, agent: string, model: string, prompt: string) => {
+  const openPromptedSession = (wsName: string, agent: string, model: string, prompt: string, opts: { name?: string; autoEdit?: boolean } = {}) => {
     // claude and omp both take the initial prompt as an argv message; the
     // opencode TUI treats the positional as a project dir, so we type it in.
     const takesArgvPrompt = agent === "claude" || agent === "omp";
     const args = takesArgvPrompt
-      ? ["--model", model, prompt]
+      ? ["--model", model, ...(opts.autoEdit && agent === "claude" ? ["--permission-mode", "acceptEdits"] : []), prompt]
       : ["--model", model];
     const initialInput = takesArgvPrompt ? undefined : prompt;
+    const claude = agent === "claude" ? claudeSessionArgs(args) : null;
     openTab({
       kind: "terminal",
       terminal: {
         id: `tm:${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
         workspace: wsName,
         label: agent,
-        sessionName: `run ${wsName.split("/").pop() ?? ""}`.trim(),
+        sessionName: opts.name ?? `run ${wsName.split("/").pop() ?? ""}`.trim(),
         cmd: agent,
-        args,
+        args: claude?.args ?? args,
+        agentSessionId: claude?.agentSessionId,
         initialInput,
       },
     });
@@ -388,6 +487,15 @@ function App() {
           : t
       )
     );
+  };
+
+  // Most telling status among a workspace's agent sessions (race cards).
+  const workspaceAgentStatus = (ws: string): AgentStatus | null => {
+    const order: AgentStatus[] = ["waiting", "thinking", "running", "editing", "busy", "idle", "exited"];
+    const found = tabs
+      .filter((t): t is Extract<Tab, { kind: "terminal" }> => t.kind === "terminal" && t.terminal.workspace === ws && t.terminal.cmd !== null)
+      .map((t) => sessionStatuses[tabId(t)] ?? "idle");
+    return found.sort((a, b) => order.indexOf(a) - order.indexOf(b))[0] ?? null;
   };
 
   const setSessionStatus = (id: string, status: AgentStatus) => {
@@ -440,6 +548,19 @@ function App() {
           onError={setError}
           onOpenPrList={(prs) => openTab({ kind: "pr", prs })}
           onOpenRalph={() => openTab({ kind: "ralph", workspace: tab.workspace.name })}
+          onStartSession={(ws, agent, model, prompt, name) => openPromptedSession(ws, agent, model, prompt, { name, autoEdit: true })}
+          onOpenWorkspace={(name) => {
+            const w = workspaces.find((x) => x.name === name);
+            if (w) openWorkspaceTab(w);
+            else invoke<Workspace[]>("list_workspaces").then((all) => {
+              setWorkspaces(all);
+              const found = all.find((x) => x.name === name);
+              if (found) openWorkspaceTab(found);
+            }).catch(() => null);
+          }}
+          statusOf={workspaceAgentStatus}
+          onWorkspacesChanged={loadWorkspaces}
+          onBeforeRemove={closeWorkspaceSessions}
         />
       );
     }
@@ -489,6 +610,7 @@ function App() {
         tab={tab.terminal}
         onError={setError}
         onStatusChange={(s) => setSessionStatus(tabId(tab), s)}
+        onSignal={(sig) => onAgentSignal(tab.terminal, sig)}
       />
     );
   };
@@ -553,6 +675,21 @@ function App() {
           {sidebarHidden ? <PanelLeftExpandIcon /> : <PanelLeftIcon />}
         </button>
         <span className="titlebar-spacer" data-tauri-drag-region />
+        <InboxButton
+          items={inbox}
+          onOpen={(it) => {
+            setInbox((all) => all.map((i) => (i.tabId === it.tabId ? { ...i, read: true } : i)));
+            if (tabs.some((t) => tabId(t) === it.tabId)) {
+              setNavPage({ kind: "dashboard" });
+              setActiveTab(it.tabId);
+            } else if (it.tabId.startsWith("ralph:")) {
+              setNavPage({ kind: "dashboard" });
+              openTab({ kind: "ralph", workspace: it.tabId.slice("ralph:".length) });
+            }
+          }}
+          onMarkAllRead={() => setInbox((all) => all.map((i) => ({ ...i, read: true })))}
+          onClear={() => setInbox([])}
+        />
         <button
           className="titlebar-btn"
           onMouseEnter={(e) =>
@@ -601,7 +738,9 @@ function App() {
             <span className="nav-icon"><GitIcon size={15} /></span> {!collapsed && "Code Review"}
           </button>
           {!collapsed &&
-            workspaces.map((ws) => {
+            [...workspaces]
+              .sort((a, b) => (a.variant_of ?? a.name).localeCompare(b.variant_of ?? b.name) || (a.variant_of ? 1 : 0) - (b.variant_of ? 1 : 0) || a.name.localeCompare(b.name))
+              .map((ws) => {
               const wsId = `ws:${ws.name}`;
               // Sessions under this workspace: terminals (agents/shells) and editors
               const wsSessions = tabs.filter(
@@ -610,7 +749,7 @@ function App() {
                   (t.kind === "editor" && t.workspace === ws.name)
               );
               return (
-                <div key={ws.name} className="nav-workspace">
+                <div key={ws.name} className={`nav-workspace ${ws.variant_of ? "nav-variant" : ""}`}>
                   <button
                     className={`nav-item nav-ws ${activeTab === wsId ? "active" : ""}`}
                     onClick={() => openWorkspaceTab(ws)}
@@ -623,8 +762,15 @@ function App() {
                     title={ws.name}
                   >
                     <span className="nav-icon"><SatelliteIcon size={15} /></span>
-                    <span className="nav-item-label">{ws.name}</span>
+                    <span className="nav-item-label">{ws.variant_of ? ws.name.slice(ws.variant_of.length + 2) : ws.name}</span>
                     {ralphRunning.has(ws.name) && <span className="nav-ralph" title="Ralph is running" />}
+                    {(() => {
+                      const kinds = wsSessions.map((t) => unreadByTab.get(tabId(t)));
+                      kinds.push(unreadByTab.get(`ralph:${ws.name}`));
+                      const live = kinds.filter(Boolean);
+                      if (!live.length) return null;
+                      return <span className={`nav-unread ${live.includes("waiting") ? "nav-unread-waiting" : ""}`} />;
+                    })()}
                     {wsSessions.length > 0 && (
                       <span
                         role="button"
@@ -668,6 +814,9 @@ function App() {
                             <span className="nav-icon"><DocIcon size={13} /></span>
                           )}
                           <span className="nav-item-label">{label}</span>
+                          {unreadByTab.has(id) && (
+                            <span className={`nav-unread ${unreadByTab.get(id) === "waiting" ? "nav-unread-waiting" : ""}`} />
+                          )}
                         </button>
                       );
                     })}

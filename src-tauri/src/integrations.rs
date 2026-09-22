@@ -45,6 +45,9 @@ pub struct CardInfo {
     pub title: String,
     pub state: String,
     pub url: String,
+    /// Tracker-suggested git branch (Linear's `branchName`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
 }
 
 /// Full card content (used by the Plan flow).
@@ -197,6 +200,7 @@ fn shortcut_fetch_cards(tok: &str, query: &str) -> Result<Vec<CardInfo>, String>
                 title,
                 state,
                 url,
+                branch: None,
             })
         })
         .collect())
@@ -249,7 +253,7 @@ fn linear_fetch_cards(tok: &str, query: &str) -> Result<Vec<CardInfo>, String> {
     };
     let data = linear_request(
         tok,
-        "query($filter: IssueFilter) { issues(first: 25, orderBy: updatedAt, filter: $filter) { nodes { identifier title url state { name } } } }",
+        "query($filter: IssueFilter) { issues(first: 25, orderBy: updatedAt, filter: $filter) { nodes { identifier title url branchName state { name } } } }",
         serde_json::json!({ "filter": filter }),
     )?;
     let nodes = data
@@ -269,6 +273,7 @@ fn linear_fetch_cards(tok: &str, query: &str) -> Result<Vec<CardInfo>, String> {
                     .unwrap_or("")
                     .to_string(),
                 url: i.get("url").and_then(|u| u.as_str()).unwrap_or("").to_string(),
+                branch: i.get("branchName").and_then(|b| b.as_str()).filter(|b| !b.is_empty()).map(str::to_string),
             })
         })
         .collect())

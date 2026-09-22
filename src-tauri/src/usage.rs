@@ -42,7 +42,7 @@ fn claude_projects_dir() -> Option<PathBuf> {
 
 /// Claude Code encodes a project dir by replacing every non-alphanumeric
 /// char of the cwd with `-` (`/a/b.c` -> `-a-b-c`, `C:\x` -> `C--x`).
-fn dir_to_project_name(p: &std::path::Path) -> String {
+pub(crate) fn dir_to_project_name(p: &std::path::Path) -> String {
     p.to_string_lossy()
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })

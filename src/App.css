@@ -2412,6 +2412,15 @@ button .spinner {
   border: 2px solid var(--text-faint);
 }
 
+/* Waiting on the user (permission prompt, question): amber pulse */
+.status-waiting .status-ind {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--warn, #e3b341);
+  animation: status-pulse 1.2s ease-in-out infinite;
+}
+
 /* Exited: solid check-ish dot */
 .status-exited .status-ind {
   width: 8px;
@@ -5715,3 +5724,76 @@ button .spinner {
 .rv-ov-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--warn, #e3b341); flex-shrink: 0; }
 .rv-ov-path { color: var(--text-dim); flex-shrink: 0; font-size: 11.5px; }
 .rv-ov-snippet { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-faint); }
+
+/* ---------- Notifications inbox ---------- */
+.inbox { position: relative; display: inline-flex; }
+.inbox-btn { position: relative; }
+.inbox-btn.on { background: var(--panel-raised); color: var(--text); }
+.inbox-badge {
+  position: absolute; top: 1px; right: 1px; min-width: 14px; height: 14px; padding: 0 3px;
+  border-radius: 999px; background: var(--accent); color: #fff; font-size: 9px; font-weight: 700;
+  line-height: 14px; text-align: center; pointer-events: none;
+}
+.inbox-pop {
+  position: absolute; right: 0; top: calc(100% + 6px); z-index: 200; width: 340px;
+  border: 1px solid var(--border-strong); border-radius: 10px; background: var(--panel);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5); overflow: hidden;
+}
+.inbox-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 12.5px; }
+.inbox-head-actions { display: inline-flex; gap: 10px; }
+.inbox-link { height: auto !important; padding: 0; border: none; background: none; color: var(--text-faint); font-size: 11.5px; cursor: pointer; }
+.inbox-link:hover:not(:disabled) { background: none; color: var(--text); }
+.inbox-empty { padding: 18px 14px; font-size: 12px; color: var(--text-faint); line-height: 1.5; }
+.inbox-list { max-height: 360px; overflow-y: auto; padding: 4px; }
+.inbox-item {
+  display: flex; align-items: flex-start; gap: 10px; width: 100%; height: auto !important;
+  padding: 8px 10px; border: none; border-radius: 6px; background: none; text-align: left; color: var(--text-dim); cursor: pointer;
+}
+.inbox-item * { cursor: pointer; }
+.inbox-item:hover:not(:disabled) { background: var(--panel-raised); }
+.inbox-item.unread { color: var(--text); }
+.inbox-item.unread .inbox-title { font-weight: 600; }
+.inbox-dot { width: 8px; height: 8px; margin-top: 4px; border-radius: 50%; flex-shrink: 0; background: var(--text-faint); }
+.inbox-item.unread .inbox-dot-done, .inbox-item.unread .inbox-dot-ralph-done { background: var(--ok); }
+.inbox-item.unread .inbox-dot-waiting, .inbox-item.unread .inbox-dot-ralph-stopped { background: var(--warn, #e3b341); }
+.inbox-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.inbox-title { font-size: 12.5px; }
+.inbox-detail { font-size: 11px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nav-unread { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); flex-shrink: 0; margin-left: auto; }
+.nav-unread-waiting { background: var(--warn, #e3b341); animation: status-pulse 1.2s ease-in-out infinite; }
+
+/* Claude subscription rate-limit windows in the usage bar */
+.rate-limits { display: inline-flex; align-items: center; gap: 12px; margin-left: auto; flex-shrink: 0; }
+.rate-limits + .usage-sessions { margin-left: 14px; }
+.rate-chip { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; cursor: default; }
+.rate-bar { width: 38px; height: 4px; border-radius: 2px; background: var(--border-strong); overflow: hidden; }
+.rate-bar > span { display: block; height: 100%; background: var(--accent); border-radius: 2px; }
+.rate-chip.warn { color: var(--warn, #e3b341); }
+.rate-chip.warn .rate-bar > span { background: var(--warn, #e3b341); }
+.rate-chip.crit { color: var(--danger); }
+.rate-chip.crit .rate-bar > span { background: var(--danger); }
+
+/* ---------- Agent races ---------- */
+.modal-race { width: 600px; max-width: calc(100vw - 32px); }
+.race-intro { margin: 0 0 4px; font-size: 12.5px; color: var(--text-dim); line-height: 1.55; }
+.race-rows { display: flex; flex-direction: column; gap: 8px; }
+.race-row { display: grid; grid-template-columns: 160px 1fr 30px; gap: 8px; align-items: center; }
+.race-add { display: inline-flex; align-items: center; gap: 6px; margin-top: 10px; }
+.race-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
+.race-card { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel); }
+.race-card-head { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.race-card-head strong { font-size: 13px; text-transform: capitalize; }
+.race-model { font-size: 11px; color: var(--text-faint); font-family: var(--mono, ui-monospace, monospace); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.race-status { min-height: 16px; }
+.race-stats { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-dim); }
+.race-muted { color: var(--text-faint); font-size: 12px; }
+.race-actions { display: flex; gap: 6px; margin-top: 2px; }
+.race-banner {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 14px; padding: 8px 12px;
+  border: 1px solid var(--accent-soft); border-radius: 8px; background: rgba(79, 124, 247, 0.06);
+  font-size: 12.5px; color: var(--text-dim);
+}
+.race-banner strong { color: var(--text); }
+.race-banner .btn-link { margin-left: auto; }
+.nav-variant .nav-item.nav-ws { padding-left: 26px; font-size: 12px; }
+.nav-variant .nav-item.nav-ws .nav-icon { opacity: 0.6; }

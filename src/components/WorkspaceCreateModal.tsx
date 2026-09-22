@@ -12,6 +12,8 @@ interface CardInfo {
   title: string;
   state: string;
   url: string;
+  /** Branch name the tracker suggests (Linear). */
+  branch?: string;
 }
 
 type Source = "manual" | "branch" | "shortcut" | "linear";
@@ -38,7 +40,6 @@ export function WorkspaceCreateModal({ config, onCreated, onClose, onError }: Pr
   const [base, setBase] = useState("main");
   const [baseOptions, setBaseOptions] = useState<string[]>(["main", "master"]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [creating, setCreating] = useState(false);
 
   // Card picker (from-tracker mode)
   const [cardQuery, setCardQuery] = useState("");
@@ -104,7 +105,7 @@ export function WorkspaceCreateModal({ config, onCreated, onClose, onError }: Pr
     setPickedCard(card);
     // Pre-fill the workspace name from the card title
     setName(slugify(card.title).slice(0, 40));
-    setBranch(`feat/${card.id}`);
+    setBranch(card.branch ?? `feat/${card.id}`);
   };
 
   // Base branch suggestions from the first selected (cloned) repo
@@ -154,23 +155,20 @@ export function WorkspaceCreateModal({ config, onCreated, onClose, onError }: Pr
       onError("Enter the existing branch name.");
       return;
     }
-    setCreating(true);
+    // Fetching and checking out can take a while: close now, report in a toast.
+    const branchName = branch.trim();
+    const t = toast.loading(`Creating workspace ${wsName}…`, { description: `Checking out ${branchName}` });
+    onClose();
     try {
-      const res = await invoke<{ workspace: Workspace; failures: string[] }>(
-        "create_workspace_from_branch",
-        { name: wsName, branch: branch.trim() },
-      );
+      const res = await invoke<{ workspace: Workspace; failures: string[] }>("create_workspace_from_branch", { name: wsName, branch: branchName });
       if (res.failures.length) {
-        toast.info(`Workspace ${wsName} created with problems`, { description: res.failures.join("\n") });
+        toast.update(t, "info", `Workspace ${wsName} created with problems`, { description: res.failures.join("\n") });
       } else {
-        toast.success(`Workspace ${wsName} created`, { description: `${res.workspace.repos.length} repo(s) on ${branch.trim()}` });
+        toast.update(t, "success", `Workspace ${wsName} created`, { description: `${res.workspace.repos.length} repo(s) on ${branchName}` });
       }
       onCreated();
-      onClose();
     } catch (e) {
-      onError(String(e));
-    } finally {
-      setCreating(false);
+      toast.update(t, "error", `Couldn't create ${wsName}`, { description: String(e) });
     }
   };
 
@@ -180,29 +178,18 @@ export function WorkspaceCreateModal({ config, onCreated, onClose, onError }: Pr
       onError("Name and at least one repository are required.");
       return;
     }
-    setCreating(true);
+    const wsName = name.trim();
+    const repos = Array.from(selected);
+    const card = pickedCard ? { kind: source, id: pickedCard.id, title: pickedCard.title, url: pickedCard.url } : null;
+    // Cloning/fetching/worktrees can take a while: close now, report in a toast.
+    const t = toast.loading(`Creating workspace ${wsName}…`, { description: `${repos.length} repo(s) on ${effectiveBranch}` });
+    onClose();
     try {
-      await invoke<Workspace>("create_workspace", {
-        name: name.trim(),
-        branch: effectiveBranch,
-        base: base.trim() || "main",
-        repos: Array.from(selected),
-        card: pickedCard
-          ? {
-              kind: source,
-              id: pickedCard.id,
-              title: pickedCard.title,
-              url: pickedCard.url,
-            }
-          : null,
-      });
-      toast.success(`Workspace ${name.trim()} created`, { description: `${selected.size} repo(s) on ${effectiveBranch}` });
+      await invoke<Workspace>("create_workspace", { name: wsName, branch: effectiveBranch, base: base.trim() || "main", repos, card });
+      toast.update(t, "success", `Workspace ${wsName} created`, { description: `${repos.length} repo(s) on ${effectiveBranch}` });
       onCreated();
-      onClose();
     } catch (e) {
-      onError(String(e));
-    } finally {
-      setCreating(false);
+      toast.update(t, "error", `Couldn't create ${wsName}`, { description: String(e) });
     }
   };
 
@@ -394,10 +381,10 @@ export function WorkspaceCreateModal({ config, onCreated, onClose, onError }: Pr
           </button>
           <button
             type="button"
-            disabled={creating || (fromBranch ? !branch.trim() : !name.trim() || selected.size === 0)}
+            disabled={fromBranch ? !branch.trim() : !name.trim() || selected.size === 0}
             onClick={create}
           >
-            {creating ? "Creating…" : "Create workspace"}
+            Create workspace
           </button>
         </div>
       </div>

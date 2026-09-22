@@ -1,5 +1,44 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { tooltip } from "./Tooltip";
+
+interface RateWindow {
+  usedPercentage: number;
+  resetsAt: number;
+}
+
+interface RateLimits {
+  fiveHour: RateWindow | null;
+  sevenDay: RateWindow | null;
+  updatedAt: number | null;
+}
+
+function fmtIn(unix: number): string {
+  const m = Math.max(0, Math.round((unix - Date.now() / 1000) / 60));
+  if (m < 60) return `${m}m`;
+  if (m < 60 * 24) return `${Math.floor(m / 60)}h ${m % 60}m`;
+  return `${Math.floor(m / 1440)}d ${Math.floor((m % 1440) / 60)}h`;
+}
+
+/** Claude subscription window: label, fill bar and percentage; reset time on hover. */
+function RateChip({ label, name, w }: { label: string; name: string; w: RateWindow }) {
+  const pct = Math.min(100, Math.max(0, w.usedPercentage));
+  const level = pct >= 90 ? "crit" : pct >= 80 ? "warn" : "";
+  const resets = new Date(w.resetsAt * 1000).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" });
+  return (
+    <span
+      className={`rate-chip ${level}`}
+      onMouseEnter={(e) => tooltip.show(`Claude ${name} limit: ${pct.toFixed(0)}% used · resets in ${fmtIn(w.resetsAt)} (${resets})`, e)}
+      onMouseLeave={() => tooltip.hide()}
+    >
+      {label}
+      <span className="rate-bar">
+        <span style={{ width: `${pct}%` }} />
+      </span>
+      {pct.toFixed(0)}%
+    </span>
+  );
+}
 
 interface SessionDetail {
   title: string;
@@ -55,6 +94,7 @@ function fmtAgo(unix: number): string {
 export function UsageBar({ workspace }: Props) {
   const [usage, setUsage] = useState<AiUsage | null>(null);
   const [popup, setPopup] = useState<{ model: ModelUsage; x: number } | null>(null);
+  const [limits, setLimits] = useState<RateLimits | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -62,6 +102,7 @@ export function UsageBar({ workspace }: Props) {
     } catch {
       setUsage(null);
     }
+    invoke<RateLimits>("claude_rate_limits").then(setLimits).catch(() => null);
   }, [workspace]);
 
   useEffect(() => {
@@ -98,6 +139,12 @@ export function UsageBar({ workspace }: Props) {
         </span>
       ) : (
         <span className="usage-dim">{usage ? "no AI usage yet" : "loading…"}</span>
+      )}
+      {(limits?.fiveHour || limits?.sevenDay) && (
+        <span className="rate-limits">
+          {limits.fiveHour && <RateChip label="5h" name="5-hour" w={limits.fiveHour} />}
+          {limits.sevenDay && <RateChip label="Week" name="weekly" w={limits.sevenDay} />}
+        </span>
       )}
       <span className="usage-dim usage-sessions">
         {usage && usage.sessions > 0 ? `${usage.sessions} sessions · ${workspace}` : workspace}

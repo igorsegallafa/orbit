@@ -537,8 +537,28 @@ pub async fn list_models(agent_name: String) -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
-pub async fn remove_workspace(name: String, force: bool) -> Result<(), String> {
+pub async fn remove_workspace(name: String, force: bool) -> Result<Vec<String>, String> {
     blocking(move || workspace::remove(&name, force)).await
+}
+
+#[tauri::command]
+pub async fn race_create_variant(parent: String, label: String, agent: String) -> Result<Workspace, String> {
+    blocking(move || workspace::create_variant(&parent, &label, &agent)).await
+}
+
+#[tauri::command]
+pub async fn race_variant_stats(name: String) -> Result<workspace::VariantStats, String> {
+    blocking(move || workspace::variant_stats(&name)).await
+}
+
+#[tauri::command]
+pub async fn race_adopt(variant: String) -> Result<Vec<String>, String> {
+    blocking(move || workspace::adopt_variant(&variant)).await
+}
+
+#[tauri::command]
+pub async fn race_discard(parent: String) -> Result<Vec<String>, String> {
+    blocking(move || workspace::discard_race(&parent)).await
 }
 
 #[tauri::command]

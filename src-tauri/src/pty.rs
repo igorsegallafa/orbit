@@ -40,6 +40,7 @@ pub async fn pty_spawn(
     args: Option<Vec<String>>,
     cols: u16,
     rows: u16,
+    key: Option<String>,
 ) -> Result<u32, String> {
     let id = next_id();
     let app_for_reader = app.clone();
@@ -71,6 +72,14 @@ pub async fn pty_spawn(
             Some(c) if !c.trim().is_empty() => CommandBuilder::new(c.trim()),
             _ => CommandBuilder::new(default_shell()),
         };
+        // Claude sessions report their lifecycle back to Orbit via hooks.
+        if let (Some(c), Some(k)) = (&cmd, &key) {
+            if is_claude(c) {
+                for a in crate::agent_hooks::claude_args(k) {
+                    cmd_builder.arg(a);
+                }
+            }
+        }
         // Extra argv for the launched program (e.g. a prompt for an agent).
         if let Some(extra) = &args {
             for a in extra {
@@ -79,6 +88,9 @@ pub async fn pty_spawn(
         }
         cmd_builder.cwd(&cwd);
         cmd_builder.env("TERM", "xterm-256color");
+        for k in crate::proc::CLAUDE_SESSION_ENV {
+            cmd_builder.env_remove(k);
+        }
 
         let child = match pair.slave.spawn_command(cmd_builder) {
             Ok(c) => c,
@@ -113,6 +125,7 @@ pub async fn pty_spawn(
                 .insert(id, Session { writer, child, master });
         }
 
+        let scrollback = key.as_deref().map(Scrollback::start);
         let mut buf = [0u8; 8192];
         loop {
             match reader.read(&mut buf) {
@@ -122,15 +135,119 @@ pub async fn pty_spawn(
                         "pty-output",
                         PtyOutput { id, data: &buf[..n] },
                     );
+                    if let Some(sb) = &scrollback {
+                        if let Ok(mut sb) = sb.lock() {
+                            sb.push(&buf[..n]);
+                        }
+                    }
                 }
                 Err(_) => break,
             }
+        }
+        if let Some(Ok(mut sb)) = scrollback.as_ref().map(|s| s.lock()) {
+            sb.flush();
         }
         let _ = app_for_reader.emit("pty-exit", id);
         sessions().lock().unwrap().as_mut().and_then(|m| m.remove(&id));
     });
 
     Ok(id)
+}
+
+const SCROLLBACK_MAX: usize = 256 * 1024;
+
+/// Tail of a session's output, persisted per tab so a restarted Orbit can
+/// show what a terminal printed before. Seeded from the previous file so
+/// history accumulates across restarts.
+struct Scrollback {
+    path: Option<std::path::PathBuf>,
+    data: Vec<u8>,
+    dirty: bool,
+}
+
+fn scrollback_path(key: &str) -> Option<std::path::PathBuf> {
+    let safe = key.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '-' | '_'));
+    if !safe || key.is_empty() {
+        return None;
+    }
+    Some(crate::config::config_dir().ok()?.join("scrollback").join(format!("{}.log", key.replace(':', "_"))))
+}
+
+impl Scrollback {
+    /// Loads the previous tail and flushes every 2s while the session lives:
+    /// the app can be killed, and a quiet terminal gets no more output to
+    /// trigger a write.
+    fn start(key: &str) -> std::sync::Arc<Mutex<Self>> {
+        let path = scrollback_path(key);
+        let data = path.as_ref().and_then(|p| std::fs::read(p).ok()).unwrap_or_default();
+        let sb = std::sync::Arc::new(Mutex::new(Scrollback { path, data, dirty: false }));
+        let weak = std::sync::Arc::downgrade(&sb);
+        std::thread::spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            let Some(sb) = weak.upgrade() else { break };
+            if let Ok(mut guard) = sb.lock() {
+                guard.flush();
+            };
+        });
+        sb
+    }
+
+    fn push(&mut self, bytes: &[u8]) {
+        self.data.extend_from_slice(bytes);
+        if self.data.len() > SCROLLBACK_MAX {
+            let cut = self.data.len() - SCROLLBACK_MAX;
+            self.data.drain(..cut);
+        }
+        self.dirty = true;
+    }
+
+    fn flush(&mut self) {
+        let Some(path) = &self.path else { return };
+        if !self.dirty {
+            return;
+        }
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(path, &self.data);
+        self.dirty = false;
+    }
+}
+
+/// Saved output of a tab's previous session (empty when none).
+#[tauri::command]
+pub fn pty_scrollback(key: String) -> Vec<u8> {
+    scrollback_path(&key).and_then(|p| std::fs::read(p).ok()).unwrap_or_default()
+}
+
+/// A tab closed for good: drop what was kept to restore it.
+#[tauri::command]
+pub fn pty_forget(key: String) {
+    if let Some(p) = scrollback_path(&key) {
+        let _ = std::fs::remove_file(p);
+    }
+    if let Ok(dir) = crate::config::config_dir() {
+        let _ = std::fs::remove_file(dir.join("agent-settings").join(format!("{}.json", key.replace(':', "_"))));
+    }
+}
+
+/// True when Claude Code has a transcript for this session id in the
+/// workspace folder, i.e. `--resume <id>` will find it.
+#[tauri::command]
+pub fn claude_session_exists(workspace: String, session_id: String) -> bool {
+    if session_id.is_empty() || !session_id.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
+        return false;
+    }
+    let (Ok(ws), Ok(home)) = (crate::workspace::ws_dir(&workspace), crate::config::home_dir()) else { return false };
+    home.join(".claude/projects")
+        .join(crate::usage::dir_to_project_name(&ws))
+        .join(format!("{session_id}.jsonl"))
+        .exists()
+}
+
+fn is_claude(cmd: &str) -> bool {
+    let name = std::path::Path::new(cmd.trim()).file_stem().map(|s| s.to_string_lossy().to_lowercase());
+    name.as_deref() == Some("claude")
 }
 
 fn default_shell() -> String {
@@ -170,6 +287,22 @@ pub fn pty_resize(id: u32, cols: u16, rows: u16) -> Result<(), String> {
             pixel_height: 0,
         })
         .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scrollback_keeps_the_tail_and_rejects_unsafe_keys() {
+        let mut sb = Scrollback { path: None, data: vec![], dirty: false };
+        sb.push(&vec![b'a'; SCROLLBACK_MAX]);
+        sb.push(b"END");
+        assert_eq!(sb.data.len(), SCROLLBACK_MAX);
+        assert!(sb.data.ends_with(b"END"));
+        assert!(scrollback_path("../../etc").is_none());
+        assert!(scrollback_path("").is_none());
+    }
 }
 
 #[tauri::command]

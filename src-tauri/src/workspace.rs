@@ -21,6 +21,12 @@ pub struct Workspace {
     /// workspace knows its own PRs; no re-searching GitHub every load.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pr_refs: Vec<PrRef>,
+    /// Race variant: the workspace this one competes for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variant_of: Option<String>,
+    /// Agent racing in this variant, e.g. "claude · claude-opus-5".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -147,6 +153,19 @@ pub fn create(
     repos: &[String],
     card: Option<CardRef>,
 ) -> Result<Workspace, String> {
+    create_at(name, branch, base, repos, card, None)
+}
+
+/// `create`, with worktree branches started at `start` (a local ref) instead
+/// of the up-to-date base.
+fn create_at(
+    name: &str,
+    branch: &str,
+    base: &str,
+    repos: &[String],
+    card: Option<CardRef>,
+    start: Option<&str>,
+) -> Result<Workspace, String> {
     if name.trim().is_empty() {
         return Err("workspace name is required".into());
     }
@@ -175,8 +194,12 @@ pub fn create(
         git::fetch(&clone_dir)?;
         let wt = ws_dir.join(&svc.name);
         if svc.worktree {
-            git::worktree_add(&clone_dir, &wt, branch, base)?;
+            match start {
+                Some(s) => git::worktree_add_from(&clone_dir, &wt, branch, s)?,
+                None => git::worktree_add(&clone_dir, &wt, branch, base)?,
+            }
             links::link_shared(svc, &clone_dir, &wt)?;
+            links::copy_worktreeinclude(&clone_dir, &wt);
         } else {
             if git::is_dirty(&clone_dir) {
                 return Err(format!(
@@ -233,6 +256,9 @@ pub fn create_from_branch(name: &str, branch: &str) -> Result<(Workspace, Vec<St
                     let r = if svc.worktree {
                         git::checkout_remote_branch(clone_dir, branch, Some(&wt))
                             .and_then(|_| links::link_shared(svc, clone_dir, &wt).map(|_| ()))
+                            .map(|_| {
+                                links::copy_worktreeinclude(clone_dir, &wt);
+                            })
                     } else if git::is_dirty(clone_dir) {
                         Err(format!("{} has uncommitted changes in {}", svc.name, clone_dir.display()))
                     } else {
@@ -291,11 +317,130 @@ fn finish_create(
         repos,
         card,
         pr_refs: Vec::new(),
+        variant_of: None,
+        agent: None,
     };
     let raw = serde_yaml::to_string(&ws).map_err(|e| e.to_string())?;
     std::fs::write(meta_path(&ws_dir), raw).map_err(|e| e.to_string())?;
     links::copy_entrypoints(&workspace_root()?, &ws_dir);
     Ok(ws)
+}
+
+fn save_meta(ws_dir: &Path, ws: &Workspace) -> Result<(), String> {
+    let raw = serde_yaml::to_string(ws).map_err(|e| e.to_string())?;
+    std::fs::write(meta_path(ws_dir), raw).map_err(|e| e.to_string())
+}
+
+// ---------- agent races ----------
+// A race runs the same task with several agents, each in its own variant
+// workspace (same repos and base as the parent, branch `<branch>-<slug>`).
+// The winner's work is merged into the parent; the variants go away.
+
+fn slug(s: &str) -> String {
+    let out: String = s.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
+    out.split('-').filter(|p| !p.is_empty()).collect::<Vec<_>>().join("-")
+}
+
+pub fn create_variant(parent: &str, label: &str, agent: &str) -> Result<Workspace, String> {
+    let p = load_meta(&ws_dir(parent)?)?;
+    if p.variant_of.is_some() {
+        return Err("a variant can't start its own race".into());
+    }
+    let s = slug(label);
+    if s.is_empty() {
+        return Err("variant label is required".into());
+    }
+    let name = format!("{parent}--{s}");
+    if ws_dir(&name)?.exists() {
+        return Err(format!("workspace '{name}' already exists"));
+    }
+    // Branch-only repos switch the base clone itself: variants would fight over it.
+    let cfg = Config::load()?;
+    if let Some(r) = p.repos.iter().find(|r| cfg.services.iter().any(|s| &s.name == *r && !s.worktree)) {
+        return Err(format!("{r} is set to branch-only (no worktree), so it can't be raced"));
+    }
+    // Variants build on the parent's current work, so the winner merges cleanly.
+    create_at(&name, &format!("{}-{s}", p.branch), &p.base, &p.repos, p.card.clone(), Some(&p.branch))?;
+    let dir = ws_dir(&name)?;
+    let mut ws = load_meta(&dir)?;
+    ws.variant_of = Some(parent.to_string());
+    ws.agent = Some(agent.to_string());
+    save_meta(&dir, &ws)?;
+    Ok(ws)
+}
+
+#[derive(Debug, Serialize, Clone, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct VariantStats {
+    pub files: usize,
+    pub insertions: usize,
+    pub deletions: usize,
+    pub commits: usize,
+}
+
+/// What a workspace changed since its base, summed over its repos.
+pub fn variant_stats(name: &str) -> Result<VariantStats, String> {
+    let dir = ws_dir(name)?;
+    let ws = load_meta(&dir)?;
+    // A variant is measured against its parent's branch (what it started from).
+    let parent_branch = ws.variant_of.as_deref().and_then(|p| ws_dir(p).ok()).and_then(|d| load_meta(&d).ok()).map(|p| p.branch);
+    let mut st = VariantStats::default();
+    for repo in &ws.repos {
+        let wt = dir.join(repo);
+        let (f, i, d, c) = match &parent_branch {
+            Some(b) => git::diff_since(&wt, b),
+            None => git::diff_since_base(&wt, &ws.base),
+        };
+        st.files += f;
+        st.insertions += i;
+        st.deletions += d;
+        st.commits += c;
+    }
+    Ok(st)
+}
+
+/// Merges the winning variant into its parent (committing any work the
+/// agent left uncommitted) and removes every variant of that race.
+// ponytail: repos merge one by one; a conflict in a later repo leaves the
+// earlier ones merged (reported). Pre-check with `git merge-tree` if it bites.
+pub fn adopt_variant(variant: &str) -> Result<Vec<String>, String> {
+    let vdir = ws_dir(variant)?;
+    let v = load_meta(&vdir)?;
+    let parent = v.variant_of.clone().ok_or_else(|| format!("'{variant}' is not a race variant"))?;
+    let pdir = ws_dir(&parent)?;
+    let p = load_meta(&pdir)?;
+    for repo in &p.repos {
+        if git::is_dirty(&pdir.join(repo)) {
+            return Err(format!("{repo} in {parent} has uncommitted changes; commit or stash them first"));
+        }
+    }
+    let label = v.agent.clone().unwrap_or_else(|| variant.to_string());
+    for repo in &v.repos {
+        let wt = vdir.join(repo);
+        if git::is_dirty(&wt) {
+            git::commit_all(&wt, &format!("{label}: race result"))?;
+        }
+    }
+    let mut merged = Vec::new();
+    for repo in p.repos.iter().filter(|r| v.repos.contains(r)) {
+        if let Err(e) = git::merge(&pdir.join(repo), &v.branch) {
+            let done = if merged.is_empty() { String::new() } else { format!(" (already merged: {})", merged.join(", ")) };
+            return Err(format!("{repo}: {e}{done}"));
+        }
+        merged.push(repo.clone());
+    }
+    discard_race(&parent)
+}
+
+/// Removes every variant of `parent`, branches included.
+pub fn discard_race(parent: &str) -> Result<Vec<String>, String> {
+    let mut notes = Vec::new();
+    for ws in list()?.into_iter().filter(|w| w.variant_of.as_deref() == Some(parent)) {
+        if let Err(e) = remove_opts(&ws.name, true, true) {
+            notes.push(format!("{}: {e}", ws.name));
+        }
+    }
+    Ok(notes)
 }
 
 /// Persists newly created PRs into the workspace meta. Idempotent: a PR
@@ -319,7 +464,15 @@ pub fn save_pr_refs(name: &str, new_refs: &[PrRef]) -> Result<(), String> {
 
 /// Removes a workspace: deletes each worktree and its branch, then the
 /// workspace directory. Refuses when any worktree is dirty unless forced.
-pub fn remove(name: &str, force: bool) -> Result<(), String> {
+/// Branches holding commits no remote has are kept (never silently lose
+/// work); returns one note per kept branch.
+pub fn remove(name: &str, force: bool) -> Result<Vec<String>, String> {
+    remove_opts(name, force, false)
+}
+
+/// `discard`: delete branches even with unpushed commits (race losers,
+/// merged winners).
+pub fn remove_opts(name: &str, force: bool, discard: bool) -> Result<Vec<String>, String> {
     let ws_dir = ws_dir(name)?;
     let ws = load_meta(&ws_dir)?;
 
@@ -332,6 +485,7 @@ pub fn remove(name: &str, force: bool) -> Result<(), String> {
         }
     }
     let cfg = Config::load()?;
+    let mut kept = Vec::new();
     for repo in &ws.repos {
         let clone_dir = clone_dir_of(repo)?;
         let wt = ws_dir.join(repo);
@@ -355,11 +509,31 @@ pub fn remove(name: &str, force: bool) -> Result<(), String> {
         }
         if clone_dir.exists() {
             let _ = git::worktree_remove(&clone_dir, &wt);
-            let _ = git::branch_delete(&clone_dir, &ws.branch);
+            match if discard { 0 } else { git::unpushed_commits(&clone_dir, &ws.branch) } {
+                0 => {
+                    let _ = git::branch_delete(&clone_dir, &ws.branch);
+                }
+                n => kept.push(format!("{repo}: kept {} ({n} unpushed commit{})", ws.branch, if n == 1 { "" } else { "s" })),
+            }
         }
     }
-    std::fs::remove_dir_all(&ws_dir).map_err(|e| e.to_string())?;
-    Ok(())
+    remove_dir_retrying(&ws_dir)?;
+    Ok(kept)
+}
+
+/// Windows refuses to delete a folder a process still runs in; sessions
+/// closed just before removal can take a moment to exit.
+fn remove_dir_retrying(dir: &Path) -> Result<(), String> {
+    let mut last = String::new();
+    for _ in 0..10 {
+        match std::fs::remove_dir_all(dir) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => last = e.to_string(),
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+    Err(format!("couldn't delete {}: {last}", dir.display()))
 }
 
 /// Collects per-repo status for a workspace.
@@ -419,6 +593,10 @@ mod tests {
         git(&bare, &["init", "--bare"]);
         git(&seed, &["init"]);
         std::fs::write(seed.join("package.json"), "{}").unwrap();
+        std::fs::write(seed.join(".gitignore"), "node_modules
+dist
+.env
+").unwrap();
         git(&seed, &["add", "-A"]);
         git(&seed, &["commit", "-m", "init"]);
         git(&seed, &["remote", "add", "origin", &bare.to_string_lossy()]);
@@ -452,8 +630,44 @@ mod tests {
         assert!(wt.join("node_modules/pkg/index.js").exists(), "install visible through the link");
         assert!(links::is_link(&wt.join("dist")));
 
-        remove("one", true).unwrap();
+        // Local-only commit: removing must keep the branch.
+        std::fs::write(wt.join("local.txt"), "x").unwrap();
+        git(&wt, &["add", "local.txt"]);
+        git(&wt, &["commit", "-m", "local"]);
+        let kept = remove("one", true).unwrap();
         assert!(!ws_dir("one").unwrap().exists());
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        assert!(git::branch_exists(&clone, "feat/one"), "unpushed branch must survive");
+
+        // .worktreeinclude copies untracked files into new worktrees.
+        std::fs::write(clone.join(".env"), "SECRET=1").unwrap();
+        std::fs::write(clone.join(".worktreeinclude"), ".env\n").unwrap();
+        create("two", "feat/two", "main", &["web".into()], None).unwrap();
+        assert_eq!(std::fs::read_to_string(ws_dir("two").unwrap().join("web/.env")).unwrap(), "SECRET=1");
+        assert!(remove("two", true).unwrap().is_empty(), "nothing unpushed on a fresh branch");
+
+        // Race: two variants, the winner's (uncommitted) work lands in the parent.
+        create("race", "feat/race", "main", &["web".into()], None).unwrap();
+        let race_wt = ws_dir("race").unwrap().join("web");
+        std::fs::write(race_wt.join("parent.txt"), "p").unwrap();
+        git(&race_wt, &["add", "parent.txt"]);
+        git(&race_wt, &["commit", "-m", "parent work"]);
+        let a = create_variant("race", "Claude", "claude").unwrap();
+        assert!(ws_dir(&a.name).unwrap().join("web/parent.txt").exists(), "variants start from the parent's work");
+        let b = create_variant("race", "opencode", "opencode").unwrap();
+        assert_eq!(a.name, "race--claude");
+        assert_eq!(a.branch, "feat/race-claude");
+        assert_eq!(list().unwrap().iter().filter(|w| w.variant_of.as_deref() == Some("race")).count(), 2);
+        std::fs::write(ws_dir(&a.name).unwrap().join("web/win.txt"), "a\nb\n").unwrap();
+        let st = variant_stats(&a.name).unwrap();
+        assert_eq!(st, VariantStats { files: 1, insertions: 0, deletions: 0, commits: 0 }, "only the variant's own work counts");
+        assert!(create_variant(&a.name, "x", "x").is_err(), "no nested races");
+        let notes = adopt_variant(&a.name).unwrap();
+        assert!(notes.is_empty(), "{notes:?}");
+        assert!(ws_dir("race").unwrap().join("web/win.txt").exists(), "winner merged into parent");
+        assert!(!ws_dir(&a.name).unwrap().exists() && !ws_dir(&b.name).unwrap().exists());
+        assert!(!git::branch_exists(&clone, "feat/race-opencode"), "loser branch discarded");
+        remove("race", true).unwrap();
         assert!(
             clone.join("node_modules/pkg/index.js").exists(),
             "removing a workspace must not delete the shared install"

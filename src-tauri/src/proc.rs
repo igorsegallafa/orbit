@@ -5,9 +5,29 @@ use std::process::Command;
 /// `Command::new(bin)` that also works on Windows for npm/editor shims
 /// (`code.cmd`, `opencode.cmd`), which std only finds when given a full
 /// path, and never flashes a console window from the GUI app.
+/// Markers of the Claude Code session Orbit itself may have been started
+/// from (e.g. `tauri dev` in a Claude terminal). Inherited, they make every
+/// agent Orbit launches think it's a nested child: no transcripts, so no
+/// `--resume`. User config vars (CLAUDE_CODE_GIT_BASH_PATH, ...) stay.
+pub const CLAUDE_SESSION_ENV: &[&str] = &[
+    "CLAUDECODE",
+    "CLAUDE_PID",
+    "CLAUDE_EFFORT",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_BRIDGE_SESSION_ID",
+];
+
 pub fn cmd(bin: &str) -> Command {
-    #[allow(unused_mut)]
     let mut c = Command::new(resolve(bin));
+    for k in CLAUDE_SESSION_ENV {
+        c.env_remove(k);
+    }
     if bin == "git" {
         git_env(&mut c);
     }

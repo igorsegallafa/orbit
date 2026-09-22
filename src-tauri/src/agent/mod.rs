@@ -502,7 +502,7 @@ pub fn default_models(agent: &str) -> Vec<String> {
         _ => vec![
             "claude-sonnet-5".into(),
             "claude-opus-5".into(),
-            "claude-haiku-4.5".into(),
+            "claude-haiku-4-5".into(),
         ],
     }
 }

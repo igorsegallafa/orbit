@@ -52,6 +52,12 @@ pub fn github_https(url: &str) -> Option<String> {
 /// already exists it is reused; if the branch already exists (leftover
 /// from a removed workspace), it is reused instead of failing on `-b`.
 pub fn worktree_add(repo_dir: &Path, path: &Path, branch: &str, base: &str) -> Result<(), String> {
+    worktree_add_from(repo_dir, path, branch, &start_point(repo_dir, base))
+}
+
+/// `worktree_add` starting a new branch at an explicit ref (e.g. another
+/// local branch) instead of the up-to-date base.
+pub fn worktree_add_from(repo_dir: &Path, path: &Path, branch: &str, start: &str) -> Result<(), String> {
     if path.exists() {
         return Ok(());
     }
@@ -60,8 +66,7 @@ pub fn worktree_add(repo_dir: &Path, path: &Path, branch: &str, base: &str) -> R
     if branch_exists(repo_dir, branch) {
         return git_in(repo_dir, &["worktree", "add", &path.to_string_lossy(), branch]);
     }
-    let start = start_point(repo_dir, base);
-    git_in(repo_dir, &["worktree", "add", "-b", branch, &path.to_string_lossy(), &start])
+    git_in(repo_dir, &["worktree", "add", "-b", branch, &path.to_string_lossy(), start])
 }
 
 /// `origin/<base>` when it exists: the local base branch is not moved by
@@ -151,6 +156,15 @@ pub fn worktree_remove(repo_dir: &Path, path: &Path) -> Result<(), String> {
 }
 
 /// Deletes a local branch, ignoring "not found".
+/// Commits on `branch` that no remote ref has: work that deleting the
+/// branch would lose.
+pub fn unpushed_commits(repo_dir: &Path, branch: &str) -> usize {
+    git_out(repo_dir, &["rev-list", "--count", branch, "--not", "--remotes"])
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0)
+}
+
 pub fn branch_delete(repo_dir: &Path, branch: &str) -> Result<(), String> {
     let _ = git_in(repo_dir, &["branch", "-D", branch]);
     Ok(())
@@ -189,6 +203,45 @@ pub fn commit_all(dir: &Path, message: &str) -> Result<(), String> {
         return Err(err);
     }
     Ok(())
+}
+
+/// Merges `branch` into the checked-out branch of `dir`; on conflict the
+/// merge is aborted so the worktree is left as it was.
+pub fn merge(dir: &Path, branch: &str) -> Result<(), String> {
+    let out = crate::proc::cmd("git")
+        .args(["merge", "--no-ff", "--no-edit", branch])
+        .current_dir(dir)
+        .output()
+        .map_err(|e| format!("failed to run git: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let _ = git_in(dir, &["merge", "--abort"]);
+    let msg = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    Err(if msg.contains("CONFLICT") { format!("merge conflict: {}", msg.lines().find(|l| l.contains("CONFLICT")).unwrap_or(&msg)) } else { msg })
+}
+
+/// Files, added and removed lines and commits of `dir` since it forked
+/// from `base`, uncommitted and untracked work included.
+pub fn diff_since_base(dir: &Path, base: &str) -> (usize, usize, usize, usize) {
+    diff_since(dir, &start_point(dir, base))
+}
+
+/// Same as `diff_since_base`, measured from where HEAD forked off `start`.
+pub fn diff_since(dir: &Path, start: &str) -> (usize, usize, usize, usize) {
+    let Ok(mb) = git_out(dir, &["merge-base", "HEAD", start]) else { return (0, 0, 0, 0) };
+    let mb = mb.trim();
+    let (mut files, mut ins, mut del) = (0, 0, 0);
+    for line in git_out(dir, &["diff", "--numstat", mb]).unwrap_or_default().lines() {
+        let mut parts = line.split_whitespace();
+        let (a, d) = (parts.next().unwrap_or("0"), parts.next().unwrap_or("0"));
+        files += 1;
+        ins += a.parse::<usize>().unwrap_or(0);
+        del += d.parse::<usize>().unwrap_or(0);
+    }
+    files += git_out(dir, &["ls-files", "--others", "--exclude-standard"]).unwrap_or_default().lines().filter(|l| !l.trim().is_empty()).count();
+    let commits = git_out(dir, &["rev-list", "--count", &format!("{mb}..HEAD")]).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+    (files, ins, del, commits)
 }
 
 /// Pushes `branch` to origin, creating the upstream on first push.

@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
+import { RaceModal, RaceSection, StartSession } from "../components/Race";
+import { AgentStatus } from "../lib/agentStatus";
 import { toast } from "../components/Toast";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -22,7 +24,7 @@ import { PushModal } from "../components/PushModal";
 import { PrsModal } from "../components/PrsModal";
 import { BuildModal } from "../components/BuildModal";
 import { tooltip } from "../components/Tooltip";
-import { RebaseIcon, CommitIcon, PushIcon, PullRequestIcon, ChevronRightIcon, SparkIcon, CheckIcon, XIcon, CircleIcon, SpinnerIcon, GitIcon, DocIcon, TrashIcon, RefreshIcon, PlayIcon } from "../components/Icons";
+import { RebaseIcon, CommitIcon, PushIcon, PullRequestIcon, ChevronRightIcon, SparkIcon, CheckIcon, XIcon, CircleIcon, SpinnerIcon, GitIcon, DocIcon, TrashIcon, RefreshIcon, PlayIcon, RaceIcon } from "../components/Icons";
 import { GitHubIcon } from "../components/BrandIcons";
 
 interface Props {
@@ -35,9 +37,30 @@ interface Props {
   onOpenPrList: (prs: PullRequest[]) => void;
   /** Opens the workspace's Ralph tab. */
   onOpenRalph: () => void;
+  /** Race support: start an agent session, open another workspace, live status, list refresh. */
+  onStartSession: StartSession;
+  onOpenWorkspace: (name: string) => void;
+  statusOf: (ws: string) => AgentStatus | null;
+  onWorkspacesChanged: () => void;
+  /** Closes the sessions running in these workspaces (before deleting them). */
+  onBeforeRemove: (names: string[]) => void;
 }
 
-export function WorkspaceDetailPage({ workspace, onOpenEditor, onOpenPlan, onRemoved, onError, onOpenPrList, onOpenRalph }: Props) {
+export function WorkspaceDetailPage({
+  workspace,
+  onOpenEditor,
+  onOpenPlan,
+  onRemoved,
+  onError,
+  onOpenPrList,
+  onOpenRalph,
+  onStartSession,
+  onOpenWorkspace,
+  statusOf,
+  onWorkspacesChanged,
+  onBeforeRemove,
+}: Props) {
+  const [raceOpen, setRaceOpen] = useState(false);
   const [statuses, setStatuses] = useState<RepoStatus[] | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState<null | "normal" | "force">(null);
@@ -143,9 +166,11 @@ export function WorkspaceDetailPage({ workspace, onOpenEditor, onOpenPlan, onRem
 
   const remove = async (force: boolean) => {
     try {
-      await invoke("remove_workspace", { name: workspace.name, force });
+      onBeforeRemove([workspace.name]);
+      const kept = await invoke<string[]>("remove_workspace", { name: workspace.name, force });
       setConfirmRemove(null);
-      toast.success(`Workspace ${workspace.name} removed`);
+      if (kept.length) toast.info(`Workspace ${workspace.name} removed; branches with unpushed work kept`, { description: kept.join("\n") });
+      else toast.success(`Workspace ${workspace.name} removed`);
       onRemoved();
     } catch (e) {
       const msg = String(e);
@@ -235,6 +260,18 @@ export function WorkspaceDetailPage({ workspace, onOpenEditor, onOpenPlan, onRem
 
   return (
     <div className="page ws-detail">
+      {workspace.variant_of && (
+        <div className="race-banner">
+          <RaceIcon size={13} />
+          <span>
+            Race variant of <strong>{workspace.variant_of}</strong>
+            {workspace.agent && <> · {workspace.agent}</>}
+          </span>
+          <button className="btn-link" onClick={() => onOpenWorkspace(workspace.variant_of!)}>
+            Compare in {workspace.variant_of} →
+          </button>
+        </div>
+      )}
       <header className="ws-head">
         <div className="ws-head-main">
           <h2>{workspace.name}</h2>
@@ -268,6 +305,11 @@ export function WorkspaceDetailPage({ workspace, onOpenEditor, onOpenPlan, onRem
           <button className="secondary ws-tool" onClick={onOpenRalph} {...hint("Write a PRD and let the agent implement it story by story")}>
             <SparkIcon size={14} /> Ralph
           </button>
+          {!workspace.variant_of && (
+            <button className="secondary ws-tool" onClick={() => setRaceOpen(true)} {...hint("Run the same task with several agents and keep the best result")}>
+              <RaceIcon size={14} /> Race
+            </button>
+          )}
           <button className="secondary ws-tool" onClick={() => setBuildOpen(true)} {...hint("Run each repo's build (skips unchanged ones)")}>
             <PlayIcon size={13} /> Build
           </button>
@@ -311,6 +353,23 @@ export function WorkspaceDetailPage({ workspace, onOpenEditor, onOpenPlan, onRem
       </div>
 
       <PlanProgress workspace={workspace.name} refreshKey={statuses === null ? 0 : 1} onOpenPlan={onOpenPlan} onError={onError} />
+
+      {!workspace.variant_of && (
+        <RaceSection
+          workspace={workspace}
+          statusOf={statusOf}
+          onOpenWorkspace={onOpenWorkspace}
+          onChanged={() => {
+            onWorkspacesChanged();
+            load(false);
+          }}
+          onBeforeRemove={onBeforeRemove}
+          onError={onError}
+        />
+      )}
+      {raceOpen && (
+        <RaceModal workspace={workspace} onStartSession={onStartSession} onStarted={onWorkspacesChanged} onClose={() => setRaceOpen(false)} />
+      )}
 
       <section className="ws-section">
         <div className="ws-section-head">

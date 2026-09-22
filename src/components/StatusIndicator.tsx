@@ -16,6 +16,8 @@ export function StatusIndicator({ status, withLabel }: Props) {
       ? "status-work"
       : status === "busy"
         ? "status-busy"
+        : status === "waiting"
+          ? "status-waiting"
         : status === "exited"
           ? "status-exited"
           : "status-idle";

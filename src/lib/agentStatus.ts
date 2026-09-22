@@ -3,7 +3,10 @@
 // we match those verb patterns on each output chunk and remember the most
 // recent one. Best-effort by design: agents change wording between versions,
 // so matches are fuzzy and fall back to "idle"/"busy".
-export type AgentStatus = "idle" | "busy" | "thinking" | "running" | "editing" | "exited";
+export type AgentStatus = "idle" | "busy" | "thinking" | "running" | "editing" | "waiting" | "exited";
+
+/** Lifecycle reported by the agent itself (Claude Code hooks), when available. */
+export type HookState = "working" | "waiting" | "done";
 
 interface Pattern {
   status: Extract<AgentStatus, "thinking" | "running" | "editing">;
@@ -31,6 +34,16 @@ export class AgentStatusTracker {
   private lastVerbAt = 0;
   private lastActivity = 0;
   private exited = false;
+  private hook: HookState | null = null;
+
+  /** Authoritative state from agent hooks; overrides the output heuristics. */
+  setHook(state: HookState): void {
+    this.hook = state;
+  }
+
+  hasHooks(): boolean {
+    return this.hook !== null;
+  }
 
   feed(data: string): void {
     // Scan the last few lines of the chunk for spinner verbs.
@@ -55,8 +68,10 @@ export class AgentStatusTracker {
 
   status(): AgentStatus {
     if (this.exited) return "exited";
+    if (this.hook === "waiting") return "waiting";
     const now = Date.now();
-    if (now - this.lastActivity > ACTIVITY_WINDOW_MS) return "idle";
+    // Long silent thinking still counts as working when the agent says so.
+    if (now - this.lastActivity > ACTIVITY_WINDOW_MS) return this.hook === "working" ? "busy" : "idle";
     // No fresh verb: output is flowing (answers, redraws) but the agent is
     // not visibly "thinking/running/editing" — show generic busy instead of
     // a stale spinner.
