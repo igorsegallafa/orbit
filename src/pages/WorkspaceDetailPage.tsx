@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { AddressReviewModal } from "../components/AddressReview";
 import { RaceModal, RaceSection, StartSession } from "../components/Race";
 import { AgentStatus } from "../lib/agentStatus";
 import { toast } from "../components/Toast";
@@ -61,6 +62,7 @@ export function WorkspaceDetailPage({
   onBeforeRemove,
 }: Props) {
   const [raceOpen, setRaceOpen] = useState(false);
+  const [addressing, setAddressing] = useState<WsPrStatus | null>(null);
   const [statuses, setStatuses] = useState<RepoStatus[] | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState<null | "normal" | "force">(null);
@@ -501,6 +503,18 @@ export function WorkspaceDetailPage({
                       <CheckDot status={wsCheck?.status ?? "none"} />
                       {total > 0 ? `${passed}/${total} checks` : "No checks"}
                     </span>
+                    {state === "open" || state === "draft" ? (
+                      <button
+                        className="btn-mini secondary pr-feedback-btn"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setAddressing(pr);
+                        }}
+                        {...hint("Apply review comments with AI, reply and resolve")}
+                      >
+                        Review feedback
+                      </button>
+                    ) : null}
                     <button
                       className="icon-button"
                       aria-label="Open on GitHub"
@@ -535,6 +549,19 @@ export function WorkspaceDetailPage({
           </div>
         )}
       </section>
+
+      {addressing && (
+        <AddressReviewModal
+          workspace={workspace.name}
+          repo={addressing.repo}
+          number={addressing.number}
+          title={addressing.title}
+          url={addressing.url}
+          onClose={() => setAddressing(null)}
+          onSettled={() => load(false)}
+          onError={onError}
+        />
+      )}
 
       {buildOpen && <BuildModal workspace={workspace.name} repos={workspace.repos} onClose={() => setBuildOpen(false)} onError={onError} />}
 

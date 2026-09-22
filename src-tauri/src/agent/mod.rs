@@ -9,7 +9,7 @@ use runner::Line;
 use crate::config::AiSettings;
 use crate::integrations::{fetch_card, CardDetail, TrackerKind};
 use crate::workspace::CardRef;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
@@ -1122,4 +1122,116 @@ fn run_edit_agent(dir: &Path, prompt: &str) -> Result<String, String> {
         dir,
         Duration::from_secs(AGENT_TIMEOUT_SECS),
     )
+}
+
+// ---------- Addressing code review feedback ----------
+
+/// What the agent did about one review thread, plus the reply to post.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ThreadReply {
+    pub id: String,
+    /// "fixed" (code changed) | "answered" (question / disagreement, no change).
+    pub status: String,
+    pub reply: String,
+}
+
+/// Several threads at once is deliberate: one pass keeps the fixes
+/// coherent instead of the agent swinging back and forth per comment.
+fn address_prompt(number: u64, threads: &[&crate::review::ReviewThread]) -> String {
+    let mut list = String::new();
+    for (i, t) in threads.iter().enumerate() {
+        let loc = match (t.line, t.original_line) {
+            (Some(l), _) => format!("{}:{l}", t.path),
+            (None, Some(l)) => format!("{}:{l} (outdated: the code may have moved since)", t.path),
+            _ => t.path.clone(),
+        };
+        list.push_str(&format!("\n### Thread {} (id: {}) — {loc}\n", i + 1, t.id));
+        for c in &t.comments {
+            list.push_str(&format!("@{}: {}\n", c.author, c.body.trim()));
+        }
+    }
+    format!(
+        r#"You are addressing code review feedback on pull request #{number} of the repository in this folder.
+
+For each review thread below decide:
+- "fixed": the request is valid. Change the code accordingly: minimal, focused, matching the surrounding style.
+- "answered": it is a question, not applicable, or you disagree. Do not change code for it; answer it.
+
+Do not commit or push. Do not touch unrelated code.
+{list}
+When you are done, reply with ONLY a JSON array (no prose, no code fences), one entry per thread:
+[{{"id": "<thread id>", "status": "fixed" | "answered", "reply": "<reply to post on the thread>"}}]
+
+Reply rules: one or two short sentences, objective and clear. Write each reply in the language of its own thread (threads may differ). No greetings, no thanks, no mention of AI. For "fixed", say what changed (e.g. "Done, moved the check into validate()."). For "answered", give the reason plainly."#
+    )
+}
+
+/// The JSON array the agent ends with; tolerant of prose or fences around it.
+pub fn parse_thread_replies(raw: &str) -> Option<Vec<ThreadReply>> {
+    let mut starts: Vec<usize> = raw.match_indices('[').map(|(i, _)| i).collect();
+    starts.reverse();
+    let end = raw.rfind(']')?;
+    starts
+        .into_iter()
+        .filter(|&s| s < end)
+        .find_map(|s| serde_json::from_str::<Vec<ThreadReply>>(&raw[s..=end]).ok())
+        .filter(|v| !v.is_empty())
+}
+
+/// Runs the agent in the repo's worktree on the selected unresolved threads
+/// of a PR; it edits files (no commit) and drafts one reply per thread.
+pub fn address_review(workspace: &str, repo: &str, owner_repo: &str, number: u64, thread_ids: &[String]) -> Result<Vec<ThreadReply>, String> {
+    let dir = crate::workspace::ws_dir(workspace)?.join(repo);
+    if !dir.exists() {
+        return Err(format!("worktree for '{repo}' not found"));
+    }
+    let data = crate::review::review_data(owner_repo, number, false)?;
+    let threads: Vec<&crate::review::ReviewThread> = data.threads.iter().filter(|t| thread_ids.contains(&t.id)).collect();
+    if threads.is_empty() {
+        return Err("none of the selected conversations are open anymore".into());
+    }
+    let ai = crate::config::Config::load()?.ai;
+    // Several fixes in one run: give it more room than a single edit.
+    let out = runner::run_capture(
+        agent_cmd(&ai, &address_prompt(number, &threads), Access::Edit, false),
+        &dir,
+        Duration::from_secs(AGENT_TIMEOUT_SECS * 3),
+    )?;
+    let replies = parse_thread_replies(&out).ok_or_else(|| {
+        let preview: String = out.trim().chars().rev().take(200).collect::<Vec<_>>().into_iter().rev().collect();
+        format!("the agent finished without the reply list: …{preview}")
+    })?;
+    Ok(replies.into_iter().filter(|r| thread_ids.contains(&r.id)).collect())
+}
+
+#[cfg(test)]
+mod address_tests {
+    use super::*;
+
+    #[test]
+    fn parses_the_trailing_reply_list() {
+        let raw = "I updated [the parser].\n```json\n[{\"id\":\"T1\",\"status\":\"fixed\",\"reply\":\"Done, renamed it.\"}]\n```";
+        let r = parse_thread_replies(raw).unwrap();
+        assert_eq!(r, vec![ThreadReply { id: "T1".into(), status: "fixed".into(), reply: "Done, renamed it.".into() }]);
+        assert!(parse_thread_replies("no list here").is_none());
+        assert!(parse_thread_replies("[]").is_none());
+    }
+
+    #[test]
+    fn prompt_lists_every_thread_with_id_and_location() {
+        let t = crate::review::ReviewThread {
+            id: "PRRT_1".into(),
+            path: "src/a.rs".into(),
+            side: "RIGHT".into(),
+            line: None,
+            start_line: None,
+            original_line: Some(7),
+            is_resolved: false,
+            is_outdated: true,
+            comments: vec![],
+        };
+        let p = address_prompt(3, &[&t]);
+        assert!(p.contains("(id: PRRT_1) — src/a.rs:7 (outdated"));
+        assert!(p.contains("pull request #3"));
+    }
 }

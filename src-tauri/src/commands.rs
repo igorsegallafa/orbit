@@ -969,6 +969,23 @@ pub async fn ws_prs_flat(workspace: String) -> Result<Vec<github::PullRequest>, 
     blocking(move || ws_prs_list(&workspace)).await
 }
 
+/// `owner/repo` of a workspace repo (for the review commands).
+#[tauri::command]
+pub fn ws_owner_repo(workspace: String, repo: String) -> Result<String, String> {
+    remote_of(&worktree_of(&workspace, &repo)?).ok_or_else(|| format!("{repo}: origin is not a GitHub repository"))
+}
+
+/// Applies the selected review threads of a PR with the agent (no commit)
+/// and drafts one short reply per thread.
+#[tauri::command]
+pub async fn ws_address_review(workspace: String, repo: String, number: u64, thread_ids: Vec<String>) -> Result<Vec<agent::ThreadReply>, String> {
+    blocking(move || {
+        let owner_repo = remote_of(&worktree_of(&workspace, &repo)?).ok_or_else(|| format!("{repo}: origin is not a GitHub repository"))?;
+        agent::address_review(&workspace, &repo, &owner_repo, number, &thread_ids)
+    })
+    .await
+}
+
 fn remote_of(dir: &std::path::Path) -> Option<String> {
     let out = crate::proc::cmd("git")
         .args(["remote", "get-url", "origin"])

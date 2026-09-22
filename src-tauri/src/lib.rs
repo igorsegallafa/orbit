@@ -78,6 +78,8 @@ pub fn run() {
             commands::reveal_service,
             commands::set_folders,
             commands::remove_workspace,
+            commands::ws_owner_repo,
+            commands::ws_address_review,
             commands::race_create_variant,
             commands::race_variant_stats,
             commands::race_adopt,

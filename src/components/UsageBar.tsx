@@ -140,12 +140,22 @@ export function UsageBar({ workspace }: Props) {
       ) : (
         <span className="usage-dim">{usage ? "no AI usage yet" : "loading…"}</span>
       )}
-      {(limits?.fiveHour || limits?.sevenDay) && (
-        <span className="rate-limits">
-          {limits.fiveHour && <RateChip label="5h" name="5-hour" w={limits.fiveHour} />}
-          {limits.sevenDay && <RateChip label="Week" name="weekly" w={limits.sevenDay} />}
-        </span>
-      )}
+      <span className="rate-limits">
+        {limits?.fiveHour || limits?.sevenDay ? (
+          <>
+            {limits.fiveHour && <RateChip label="5h" name="5-hour" w={limits.fiveHour} />}
+            {limits.sevenDay && <RateChip label="Week" name="weekly" w={limits.sevenDay} />}
+          </>
+        ) : (
+          <span
+            className="rate-chip rate-empty"
+            onMouseEnter={(e) => tooltip.show("Claude plan limits (Pro/Max) show up after the first reply of a Claude session opened in Orbit", e)}
+            onMouseLeave={() => tooltip.hide()}
+          >
+            Limits —
+          </span>
+        )}
+      </span>
       <span className="usage-dim usage-sessions">
         {usage && usage.sessions > 0 ? `${usage.sessions} sessions · ${workspace}` : workspace}
       </span>

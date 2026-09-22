@@ -5768,6 +5768,7 @@ button .spinner {
 .rate-chip { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; cursor: default; }
 .rate-bar { width: 38px; height: 4px; border-radius: 2px; background: var(--border-strong); overflow: hidden; }
 .rate-bar > span { display: block; height: 100%; background: var(--accent); border-radius: 2px; }
+.rate-empty { color: var(--text-faint); }
 .rate-chip.warn { color: var(--warn, #e3b341); }
 .rate-chip.warn .rate-bar > span { background: var(--warn, #e3b341); }
 .rate-chip.crit { color: var(--danger); }
@@ -5797,3 +5798,28 @@ button .spinner {
 .race-banner .btn-link { margin-left: auto; }
 .nav-variant .nav-item.nav-ws { padding-left: 26px; font-size: 12px; }
 .nav-variant .nav-item.nav-ws .nav-icon { opacity: 0.6; }
+
+/* ---------- Address review feedback ---------- */
+.modal-address { width: 760px; max-width: calc(100vw - 32px); max-height: calc(100vh - 64px); display: flex; flex-direction: column; }
+.ar-header { display: flex; align-items: baseline; gap: 12px; }
+.ar-pr { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.ar-body { display: flex; flex-direction: column; gap: 10px; overflow-y: auto; min-height: 0; }
+.ar-loading { display: flex; flex-direction: column; gap: 10px; }
+.ar-empty { display: flex; flex-direction: column; gap: 4px; padding: 24px 4px; text-align: center; color: var(--text-dim); font-size: 12.5px; }
+.ar-empty strong { color: var(--text); font-size: 13.5px; }
+.ar-running { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 8px; background: var(--accent-soft); font-size: 12.5px; color: var(--text); }
+.ar-thread { border: 1px solid var(--border); border-radius: 10px; background: var(--panel); padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+.ar-thread.off { opacity: 0.55; }
+.ar-thread-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.ar-loc { font-size: 12px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
+.ar-comments { display: flex; flex-direction: column; gap: 6px; padding-left: 26px; }
+.ar-comment { font-size: 12.5px; }
+.ar-comment strong { font-size: 12px; color: var(--text-dim); }
+.ar-reply { display: flex; flex-direction: column; gap: 6px; padding-left: 26px; }
+.ar-reply textarea { font-size: 12.5px; resize: vertical; }
+.ar-resolve { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-dim); cursor: pointer; align-self: flex-start; }
+.ar-resolve * { cursor: pointer; }
+.ar-footer { align-items: center; }
+.ar-count { margin-right: auto; font-size: 12px; color: var(--text-faint); }
+.ar-footer button { display: inline-flex; align-items: center; gap: 6px; }
+.pr-feedback-btn { flex-shrink: 0; }

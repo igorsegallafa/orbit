@@ -124,30 +124,20 @@ export function TooltipHost() {
 
   if (!state) return null;
 
-  // Clamp both axes against the REAL rendered size: tooltips near
-  // screen edges (dock collapse button) would otherwise render half
-  // off-screen. Measured above via ref/layout effect.
+  // Clamp the box's final edges against its REAL rendered size (measured
+  // above): clamping the anchor and then translating by the box size would
+  // push flipped tooltips far from the cursor near the bottom edge.
   const margin = 6;
   const w = size.w || 260;
   const h = size.h || 26;
-  const minLeft = state.centered ? w / 2 : 0;
-  const maxLeft = window.innerWidth - w - margin;
-  const x = Math.max(minLeft, Math.min(state.x, maxLeft));
-  const y = Math.max(margin, Math.min(state.y, window.innerHeight - h - margin));
-
-  const transform = state.centered
-    ? state.flip
-      ? "translate(-50%, -100%)"
-      : "translateX(-50%)"
-    : state.flip
-      ? "translateY(-100%)"
-      : undefined;
+  const left = Math.max(margin, Math.min(state.centered ? state.x - w / 2 : state.x, window.innerWidth - w - margin));
+  const top = Math.max(margin, Math.min(state.flip ? state.y - h : state.y, window.innerHeight - h - margin));
 
   return (
     <div
       ref={ref}
       className="orbit-tooltip"
-      style={{ left: x, top: y, transform, visibility: size.w ? undefined : "hidden" }}
+      style={{ left, top, visibility: size.w ? undefined : "hidden" }}
     >
       {state.text}
     </div>
