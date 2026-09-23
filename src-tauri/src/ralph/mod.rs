@@ -112,7 +112,7 @@ fn human_time(secs: u64) -> String {
 }
 
 fn repo_dir(workspace: &str, repo: &str) -> Result<PathBuf, String> {
-    let dir = crate::workspace::ws_dir(workspace)?.join(repo);
+    let dir = crate::workspace::repo_path(workspace, repo)?;
     if !dir.exists() {
         return Err(format!("worktree for '{repo}' not found"));
     }
@@ -120,7 +120,11 @@ fn repo_dir(workspace: &str, repo: &str) -> Result<PathBuf, String> {
 }
 
 fn custom_prompt_path(workspace: &str) -> Result<PathBuf, String> {
-    Ok(crate::workspace::ws_dir(workspace)?.join(".orbit").join("ralph-prompt.md"))
+    Ok(crate::workspace::orbit_dir(workspace)?.join("ralph-prompt.md"))
+}
+
+fn runs_dir(workspace: &str) -> Result<PathBuf, String> {
+    Ok(crate::workspace::orbit_dir(workspace)?.join("ralph").join("runs"))
 }
 
 fn iteration_template(workspace: &str) -> (String, bool) {
@@ -498,12 +502,12 @@ pub async fn ralph_generate_prd(
 ) -> Result<Prd, String> {
     blocking(move || {
         let dir = repo_dir(&workspace, &repo)?;
-        let meta = crate::workspace::load_meta(&crate::workspace::ws_dir(&workspace)?)?;
+        let branch = crate::workspace::scope_branch(&workspace)?;
         let date = human_time(now())[..10].to_string();
-        if let Some(dest) = prd::archive_if_other_branch(&dir, &meta.branch, &date)? {
+        if let Some(dest) = prd::archive_if_other_branch(&dir, &branch, &date)? {
             let _ = app.emit("ralph-prd-progress", format!("[orbit] archived the previous PRD to {}", dest.display()));
         }
-        let md = dir.join("tasks").join(format!("prd-{workspace}.md"));
+        let md = dir.join("tasks").join(format!("prd-{}.md", workspace.trim_start_matches('@')));
         std::fs::create_dir_all(md.parent().unwrap()).map_err(|e| e.to_string())?;
         std::fs::create_dir_all(prd::ralph_dir(&dir)).map_err(|e| e.to_string())?;
         let prompt = prompts::write_prd(
@@ -511,7 +515,7 @@ pub async fn ralph_generate_prd(
             if decisions.trim().is_empty() { "(none: use your judgment and list assumptions under Open Questions)" } else { &decisions },
             &md.to_string_lossy(),
             &prd::prd_path(&dir).to_string_lossy(),
-            &meta.branch,
+            &branch,
             &repo,
         );
         let ai = Config::load()?.ai;
@@ -535,7 +539,7 @@ pub async fn ralph_generate_prd(
         if prd.user_stories.is_empty() {
             return Err("the generated PRD has no user stories".into());
         }
-        prd::normalize(&mut prd, &meta.branch);
+        prd::normalize(&mut prd, &branch);
         prd::write(&dir, &prd)?;
         Ok(prd)
     })
@@ -555,7 +559,12 @@ pub async fn ralph_start(app: AppHandle, workspace: String, repo: String, config
     if prd.all_passed() {
         return Err("every story already passes".into());
     }
-    let meta = crate::workspace::load_meta(&crate::workspace::ws_dir(&workspace)?)?;
+    let branch = crate::workspace::scope_branch(&workspace)?;
+    // In a repo view Ralph works in the clone itself: it commits every story,
+    // which must not land straight on the default branch.
+    if crate::workspace::repo_scope(&workspace).is_some() && crate::git::default_branch(&dir).as_deref() == Some(branch.as_str()) {
+        return Err(format!("Ralph commits each story: switch {repo} to a feature branch first (it's on {branch})"));
+    }
     let mut ai = Config::load()?.ai;
     if let Some(a) = config.agent.clone().filter(|a| !a.is_empty()) {
         ai.agent = a;
@@ -564,11 +573,7 @@ pub async fn ralph_start(app: AppHandle, workspace: String, repo: String, config
         ai.model = m;
     }
     let started = now();
-    let run_dir = crate::workspace::ws_dir(&workspace)?
-        .join(".orbit")
-        .join("ralph")
-        .join("runs")
-        .join(format!("{started}-{repo}"));
+    let run_dir = runs_dir(&workspace)?.join(format!("{started}-{repo}"));
     std::fs::create_dir_all(&run_dir).map_err(|e| e.to_string())?;
     prd::ensure_progress(&dir, &human_time(started))?;
 
@@ -608,7 +613,7 @@ pub async fn ralph_start(app: AppHandle, workspace: String, repo: String, config
         key: key.clone(),
         last_pushed: crate::proc::run("git", &["rev-parse", "@{u}"], Some(&dir)).ok().map(|s| s.trim().to_string()),
         dir,
-        branch: meta.branch,
+        branch,
         repo,
         workspace,
         ai,
@@ -663,7 +668,7 @@ pub async fn ralph_pause(workspace: String, repo: String) -> Result<(), String> 
 #[tauri::command]
 pub async fn ralph_runs(workspace: String) -> Result<Vec<Value>, String> {
     blocking(move || {
-        let dir = crate::workspace::ws_dir(&workspace)?.join(".orbit").join("ralph").join("runs");
+        let dir = runs_dir(&workspace)?;
         let mut out: Vec<Value> = std::fs::read_dir(&dir)
             .map(|rd| {
                 rd.flatten()
@@ -685,12 +690,7 @@ pub async fn ralph_run_events(workspace: String, id: String) -> Result<Vec<Value
         if id.contains(['/', '\\']) || id.contains("..") {
             return Err("invalid run id".into());
         }
-        let p: PathBuf = crate::workspace::ws_dir(&workspace)?
-            .join(".orbit")
-            .join("ralph")
-            .join("runs")
-            .join(&id)
-            .join("events.jsonl");
+        let p: PathBuf = runs_dir(&workspace)?.join(&id).join("events.jsonl");
         Ok(read_jsonl(&p))
     })
     .await

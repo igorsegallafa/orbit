@@ -45,7 +45,10 @@ interface Props {
  */
 export function FileTreePanel({ workspace, onOpenFile, onReviewFile, onReviewCommit, onOpenFind, onError }: Props) {
   const [view, setView] = useState<DockView>("files");
-  const [repo, setRepo] = useState(workspace.repos[0] ?? "");
+  // The picked repo only counts while it belongs to the focused workspace:
+  // switching focus must never pair the new workspace with the old repo.
+  const [picked, setRepo] = useState(workspace.repos[0] ?? "");
+  const repo = workspace.repos.includes(picked) ? picked : (workspace.repos[0] ?? "");
   const [tree, setTree] = useState<Record<string, FileNode[]>>({});
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [renameTarget, setRenameTarget] = useState<TreeTarget | null>(null);

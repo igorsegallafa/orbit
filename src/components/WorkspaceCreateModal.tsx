@@ -20,6 +20,8 @@ type Source = "manual" | "branch" | "shortcut" | "linear";
 
 interface Props {
   config: Config;
+  /** Repos checked when the modal opens (e.g. from a repository view). */
+  initialRepos?: string[];
   onCreated: () => void;
   onClose: () => void;
   onError: (msg: string) => void;
@@ -33,13 +35,13 @@ function slugify(s: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
-export function WorkspaceCreateModal({ config, onCreated, onClose, onError }: Props) {
+export function WorkspaceCreateModal({ config, initialRepos, onCreated, onClose, onError }: Props) {
   const [source, setSource] = useState<Source>("manual");
   const [name, setName] = useState("");
   const [branch, setBranch] = useState("");
   const [base, setBase] = useState("main");
   const [baseOptions, setBaseOptions] = useState<string[]>(["main", "master"]);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [selected, setSelected] = useState<Set<string>>(() => new Set(initialRepos ?? []));
 
   // Card picker (from-tracker mode)
   const [cardQuery, setCardQuery] = useState("");

@@ -176,6 +176,81 @@ export interface GitCommit {
   when: string;
 }
 
+/** A repo's base clone as the repository view shows it (see repo.rs). */
+export interface RepoOverview {
+  name: string;
+  path: string;
+  cloned: boolean;
+  /** null = detached HEAD. */
+  branch: string | null;
+  head: string;
+  defaultBranch: string | null;
+  /** Tracking branch ("origin/feat/x"); null = never pushed. */
+  upstream: string | null;
+  /** The upstream was deleted on the remote (e.g. its PR was merged). */
+  upstreamGone: boolean;
+  ahead: number;
+  behind: number;
+  changes: number;
+  ownerRepo: string | null;
+  /** A paused "rebase" | "merge" | "cherry-pick" | "revert". */
+  operation: string | null;
+  conflicts: string[];
+  stashes: StashEntry[];
+  /** Unix seconds of the last fetch. */
+  lastFetch: number | null;
+  branches: BranchInfo[];
+  worktrees: WorktreeInfo[];
+}
+
+export interface BranchInfo {
+  name: string;
+  current: boolean;
+  /** Only on origin: switching creates the local tracking branch. */
+  remoteOnly: boolean;
+  upstream: string | null;
+  gone: boolean;
+  ahead: number;
+  behind: number;
+  subject: string;
+  updated: string;
+  updatedUnix: number;
+  /** Checked out in another worktree. */
+  worktree: string | null;
+}
+
+export interface WorktreeInfo {
+  path: string;
+  branch: string | null;
+  main: boolean;
+  workspace: string | null;
+  missing: boolean;
+}
+
+/** How the current branch and another differ (repo view's Compare tab). */
+export interface Comparison {
+  /** Commits only on the current branch. */
+  ahead: GitCommit[];
+  /** Commits only on the other branch (cherry-pick candidates). */
+  behind: GitCommit[];
+}
+
+/** Sidebar status of a repo's clone. */
+export interface RepoBrief {
+  name: string;
+  cloned: boolean;
+  branch: string | null;
+  changes: number;
+  ahead: number;
+  behind: number;
+}
+
+export interface StashEntry {
+  index: number;
+  message: string;
+  when: string;
+}
+
 export interface GitFileDiff {
   original: string;
   modified: string;

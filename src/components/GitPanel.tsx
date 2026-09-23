@@ -25,7 +25,9 @@ const STATUS_LABEL: Record<string, { letter: string; cls: string }> = {
  * repo. Clicking a changed file opens the diff review tab.
  */
 export function GitPanel({ workspace, onReviewFile, onReviewCommit, onError }: Props) {
-  const [repo, setRepo] = useState(workspace.repos[0] ?? "");
+  // Only while it belongs to the focused workspace (see FileTreePanel).
+  const [picked, setRepo] = useState(workspace.repos[0] ?? "");
+  const repo = workspace.repos.includes(picked) ? picked : (workspace.repos[0] ?? "");
   const [changes, setChanges] = useState<GitChange[] | null>(null);
   const [commits, setCommits] = useState<GitCommit[] | null>(null);
 

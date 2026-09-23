@@ -157,7 +157,8 @@ export function UsageBar({ workspace }: Props) {
         )}
       </span>
       <span className="usage-dim usage-sessions">
-        {usage && usage.sessions > 0 ? `${usage.sessions} sessions · ${workspace}` : workspace}
+        {/* A repo view's scope ("@repo") reads as the repo's name. */}
+        {usage && usage.sessions > 0 ? `${usage.sessions} sessions · ${workspace.replace(/^@/, "")}` : workspace.replace(/^@/, "")}
       </span>
 
       {popup && (

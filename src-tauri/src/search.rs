@@ -150,17 +150,18 @@ pub fn search(workspace: &str, q: &SearchQuery) -> Result<SearchResult, String> 
     if q.query.is_empty() {
         return Ok(SearchResult::default());
     }
-    let ws_dir = crate::workspace::ws_dir(workspace)?;
-    let meta = crate::workspace::load_meta(&ws_dir)?;
-    let repos: Vec<&String> = meta.repos.iter().filter(|r| q.repos.is_empty() || q.repos.contains(r)).collect();
+    let all = crate::workspace::scope_repos(workspace)?;
+    let mut repos: Vec<(&String, std::path::PathBuf)> = Vec::new();
+    for r in all.iter().filter(|r| q.repos.is_empty() || q.repos.contains(r)) {
+        repos.push((r, crate::workspace::repo_path(workspace, r)?));
+    }
     let specs = pathspecs(&q.mask);
     let results: Vec<Result<(Vec<SearchMatch>, bool), String>> = std::thread::scope(|scope| {
         let handles: Vec<_> = repos
             .iter()
-            .map(|repo| {
-                let dir = ws_dir.join(repo);
+            .map(|(repo, dir)| {
                 let specs = &specs;
-                scope.spawn(move || if dir.exists() { grep_repo(repo, &dir, q, specs, MAX_MATCHES) } else { Ok((vec![], false)) })
+                scope.spawn(move || if dir.exists() { grep_repo(repo, dir, q, specs, MAX_MATCHES) } else { Ok((vec![], false)) })
             })
             .collect();
         handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err("search thread panicked".into()))).collect()

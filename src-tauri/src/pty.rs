@@ -44,7 +44,7 @@ pub async fn pty_spawn(
 ) -> Result<u32, String> {
     let id = next_id();
     let app_for_reader = app.clone();
-    let cwd = crate::workspace::ws_dir(&workspace)?.to_string_lossy().to_string();
+    let cwd = crate::workspace::scope_dir(&workspace)?.to_string_lossy().to_string();
     if !std::path::Path::new(&cwd).exists() {
         return Err(format!("directory does not exist: {cwd}"));
     }
@@ -238,7 +238,7 @@ pub fn claude_session_exists(workspace: String, session_id: String) -> bool {
     if session_id.is_empty() || !session_id.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
         return false;
     }
-    let (Ok(ws), Ok(home)) = (crate::workspace::ws_dir(&workspace), crate::config::home_dir()) else { return false };
+    let (Ok(ws), Ok(home)) = (crate::workspace::scope_dir(&workspace), crate::config::home_dir()) else { return false };
     home.join(".claude/projects")
         .join(crate::usage::dir_to_project_name(&ws))
         .join(format!("{session_id}.jsonl"))
