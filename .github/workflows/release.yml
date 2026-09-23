@@ -1,15 +1,10 @@
 name: Release
 
+# Publishing a release on GitHub (tag v1.2.3) builds the app and attaches
+# the installers and the updater's latest.json to that release.
 on:
-  push:
-    tags:
-      - "v*"
-  workflow_dispatch:
-    inputs:
-      version:
-        description: "Version to release (e.g. 0.2.0)"
-        required: true
-        type: string
+  release:
+    types: [published]
 
 permissions:
   contents: write
@@ -42,15 +37,10 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      # The version comes from the "Run workflow" input or the pushed tag
-      # (v1.2.3 -> 1.2.3), never from a committed file.
-      - name: Set version
+      # The release tag is the source of truth for the version: v1.2.3 -> 1.2.3.
+      - name: Set version from tag
         shell: bash
-        env:
-          INPUT_VERSION: ${{ inputs.version }}
-        run: |
-          v="${INPUT_VERSION:-$GITHUB_REF_NAME}"
-          npm version "${v#v}" --no-git-tag-version --allow-same-version
+        run: npm version "${GITHUB_REF_NAME#v}" --no-git-tag-version --allow-same-version
 
       - uses: tauri-apps/tauri-action@v0
         env:
@@ -58,9 +48,5 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: v__VERSION__
-          releaseName: "Orbit v__VERSION__"
-          releaseBody: "Baixe o instalador `Orbit_x.y.z_x64-setup.exe` abaixo."
-          releaseDraft: true
-          prerelease: false
+          releaseId: ${{ github.event.release.id }}
           args: ${{ matrix.args }}
