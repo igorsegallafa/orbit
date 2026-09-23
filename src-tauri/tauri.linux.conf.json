@@ -1,0 +1,15 @@
+{
+  "app": {
+    "windows": [
+      {
+        "title": "Orbit",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 700,
+        "minHeight": 500,
+        "maximized": true,
+        "decorations": false
+      }
+    ]
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "app": {
+    "windows": [
+      {
+        "title": "Orbit",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 700,
+        "minHeight": 500,
+        "visible": false,
+        "backgroundColor": "#0d0f13",
+        "decorations": false
+      }
+    ]
+  }
+}

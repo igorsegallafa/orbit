@@ -1,0 +1,53 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Orbit",
+  "version": "../package.json",
+  "identifier": "com.nsx001220.orbit",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Orbit",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 700,
+        "minHeight": 500,
+        "maximized": true,
+        "backgroundColor": "#0d0f13",
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "createUpdaterArtifacts": true,
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDMyMTcyQTlEQzQ3NjRDQUUKUldTdVRIYkVuU29YTWxDbU9vbHpyakI4dVh1dGE0L3hNV1ZKRjB1Y3dSWi9HUTVCajR0VVM3NDYK",
+      "endpoints": [
+        "https://github.com/igorsegallafa/orbit/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}
