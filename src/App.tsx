@@ -23,6 +23,7 @@ import { WindowControls, isMac } from "./components/WindowControls";
 import { RalphView } from "./components/RalphView";
 import { ToastHost, toast } from "./components/Toast";
 import { useRalphRunning } from "./lib/useRalphRunning";
+import { checkForUpdates } from "./lib/updater";
 import { listen } from "@tauri-apps/api/event";
 import { reasonLabel, StopReason } from "./types/ralph";
 import {
@@ -152,6 +153,10 @@ function App() {
   useEffect(() => {
     loadWorkspaces();
   }, [loadWorkspaces]);
+
+  useEffect(() => {
+    checkForUpdates();
+  }, []);
 
   // External file drops (Finder → window): the Tauri native drag-drop event
   // carries absolute paths; inject them into the active agent terminal.
