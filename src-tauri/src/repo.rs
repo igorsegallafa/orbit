@@ -417,6 +417,112 @@ pub fn prune_worktrees(name: &str) -> Result<(), String> {
     git_ok(&clone_of(name)?, &["worktree", "prune"])
 }
 
+/// Light status of one clone for the sidebar: a single `git status` call.
+#[derive(Serialize, Debug, Clone, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoBrief {
+    pub name: String,
+    pub cloned: bool,
+    pub branch: Option<String>,
+    pub changes: usize,
+    pub ahead: usize,
+    pub behind: usize,
+}
+
+pub fn brief(name: &str) -> RepoBrief {
+    let mut b = RepoBrief { name: name.to_string(), ..Default::default() };
+    let Ok(dir) = workspace::clone_dir_of(name) else { return b };
+    if !workspace::is_cloned(&dir) {
+        return b;
+    }
+    b.cloned = true;
+    if let Ok(raw) = git_out(&dir, &["status", "--porcelain=v2", "--branch", "--untracked-files=all"]) {
+        parse_status_v2(&raw, &mut b);
+    }
+    b
+}
+
+/// `git status --porcelain=v2 --branch`: "# branch.head", "# branch.ab +A -B",
+/// then one line per changed file.
+fn parse_status_v2(raw: &str, b: &mut RepoBrief) {
+    for line in raw.lines() {
+        if let Some(head) = line.strip_prefix("# branch.head ") {
+            b.branch = Some(head.trim().to_string()).filter(|h| h != "(detached)");
+        } else if let Some(ab) = line.strip_prefix("# branch.ab ") {
+            let mut parts = ab.split_whitespace();
+            b.ahead = parts.next().and_then(|a| a.trim_start_matches('+').parse().ok()).unwrap_or(0);
+            b.behind = parts.next().and_then(|a| a.trim_start_matches('-').parse().ok()).unwrap_or(0);
+        } else if !line.starts_with('#') && !line.trim().is_empty() {
+            b.changes += 1;
+        }
+    }
+}
+
+/// How the current branch and `other` differ: commits only on HEAD and
+/// commits only on `other` (candidates to cherry-pick), newest first.
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Comparison {
+    pub ahead: Vec<git::CommitEntry>,
+    pub behind: Vec<git::CommitEntry>,
+}
+
+pub fn compare(name: &str, other: &str) -> Result<Comparison, String> {
+    let dir = clone_of(name)?;
+    git_ok(&dir, &["rev-parse", "--verify", "--quiet", other]).map_err(|_| format!("'{other}' doesn't exist"))?;
+    Ok(Comparison {
+        ahead: git::commits_in(&dir, &[&format!("{other}..HEAD")], 100)?,
+        behind: git::commits_in(&dir, &[&format!("HEAD..{other}")], 100)?,
+    })
+}
+
+/// Git for commands that would open an editor for their message: take the
+/// default one instead (the app has no terminal to edit it in).
+fn git_no_editor(dir: &Path, args: &[&str]) -> Result<(), String> {
+    let mut full = vec!["-c", "core.editor=true"];
+    full.extend_from_slice(args);
+    git_ok(dir, &full)
+}
+
+/// Applies `sha` on top of the current branch. Conflicts leave the
+/// cherry-pick paused for the view's continue/abort banner.
+pub fn cherry_pick(name: &str, sha: &str) -> Result<(), String> {
+    let dir = clone_of(name)?;
+    match git_ok(&dir, &["cherry-pick", sha]) {
+        Err(_) if !git::conflicted_files(&dir).is_empty() => Ok(()),
+        r => r,
+    }
+}
+
+/// Adds a commit undoing `sha` (history is kept, safe on pushed commits).
+pub fn revert(name: &str, sha: &str) -> Result<(), String> {
+    let dir = clone_of(name)?;
+    match git_no_editor(&dir, &["revert", "--no-edit", sha]) {
+        Err(_) if !git::conflicted_files(&dir).is_empty() => Ok(()),
+        r => r,
+    }
+}
+
+/// Continues or aborts the paused rebase / merge / cherry-pick / revert.
+pub fn operation(name: &str, action: &str) -> Result<(), String> {
+    let dir = clone_of(name)?;
+    let git_dir = PathBuf::from(git_out(&dir, &["rev-parse", "--absolute-git-dir"])?.trim());
+    let op = operation_in_progress(&git_dir).ok_or("nothing is in progress")?;
+    let flag = match action {
+        "continue" => "--continue",
+        "abort" => "--abort",
+        _ => return Err(format!("unknown action '{action}'")),
+    };
+    if action == "continue" {
+        // Resolved files must be staged before git continues.
+        git_ok(&dir, &["add", "--update"])?;
+        if op == "merge" {
+            return git_no_editor(&dir, &["commit", "--no-edit"]);
+        }
+    }
+    git_no_editor(&dir, &[op.as_str(), flag])
+}
+
 // ---------- Tauri commands ----------
 
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
@@ -493,6 +599,39 @@ pub async fn repo_prune_worktrees(name: String) -> Result<(), String> {
     blocking(move || prune_worktrees(&name)).await
 }
 
+/// Sidebar status of every configured repo, in parallel.
+#[tauri::command]
+pub async fn repo_briefs() -> Result<Vec<RepoBrief>, String> {
+    blocking(|| {
+        let names: Vec<String> = crate::config::Config::load()?.services.into_iter().map(|s| s.name).collect();
+        Ok(std::thread::scope(|scope| {
+            let handles: Vec<_> = names.iter().map(|n| scope.spawn(move || brief(n))).collect();
+            handles.into_iter().filter_map(|h| h.join().ok()).collect()
+        }))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn repo_compare(name: String, other: String) -> Result<Comparison, String> {
+    blocking(move || compare(&name, &other)).await
+}
+
+#[tauri::command]
+pub async fn repo_cherry_pick(name: String, sha: String) -> Result<(), String> {
+    blocking(move || cherry_pick(&name, &sha)).await
+}
+
+#[tauri::command]
+pub async fn repo_revert(name: String, sha: String) -> Result<(), String> {
+    blocking(move || revert(&name, &sha)).await
+}
+
+#[tauri::command]
+pub async fn repo_operation(name: String, action: String) -> Result<(), String> {
+    blocking(move || operation(&name, &action)).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -532,6 +671,73 @@ mod tests {
         assert!(wt[0].main && wt[0].workspace.is_none());
         assert_eq!((wt[1].workspace.as_deref(), wt[1].branch.as_deref()), (Some("one"), Some("feat/one")));
         assert!(wt[2].missing && wt[2].branch.is_none());
+    }
+
+    #[test]
+    fn parses_status_v2() {
+        let mut b = RepoBrief::default();
+        parse_status_v2("# branch.oid abc\n# branch.head feat/x\n# branch.upstream origin/feat/x\n# branch.ab +2 -1\n1 .M N... 100644 100644 100644 a b src/a.rs\n? new.txt\n", &mut b);
+        assert_eq!((b.branch.as_deref(), b.ahead, b.behind, b.changes), (Some("feat/x"), 2, 1, 2));
+        let mut d = RepoBrief::default();
+        parse_status_v2("# branch.head (detached)\n", &mut d);
+        assert_eq!(d.branch, None);
+    }
+
+    /// A throwaway clone "web" under a temp Orbit root, with one commit.
+    fn temp_clone(tag: &str) -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!("orbit-repo-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("repos/web")).unwrap();
+        std::env::set_var("ORBIT_WORKSPACE_ROOT", &root);
+        std::env::set_var("ORBIT_CONFIG_DIR", root.join("cfg"));
+        for (k, v) in [("GIT_AUTHOR_NAME", "t"), ("GIT_AUTHOR_EMAIL", "t@t"), ("GIT_COMMITTER_NAME", "t"), ("GIT_COMMITTER_EMAIL", "t@t")] {
+            std::env::set_var(k, v);
+        }
+        let dir = root.join("repos/web");
+        git(&dir, &["init"]);
+        std::fs::write(dir.join("a.txt"), "a").unwrap();
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-m", "init"]);
+        (root, dir)
+    }
+
+    #[test]
+    fn compares_cherry_picks_reverts_and_aborts() {
+        let _g = crate::workspace::tests::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (root, dir) = temp_clone("ops");
+
+        create_branch("web", "feat/y", None).unwrap();
+        std::fs::write(dir.join("b.txt"), "b").unwrap();
+        commit("web", "add b", &["b.txt".into()]).unwrap();
+        switch("web", "main", false).unwrap();
+
+        let c = compare("web", "feat/y").unwrap();
+        assert_eq!((c.ahead.len(), c.behind.len()), (0, 1));
+        assert_eq!(c.behind[0].message, "add b");
+
+        cherry_pick("web", &c.behind[0].sha).unwrap();
+        assert!(dir.join("b.txt").exists());
+        revert("web", "HEAD").unwrap();
+        assert!(!dir.join("b.txt").exists());
+        assert_eq!(history("web", 10).unwrap().len(), 3, "init, the pick and its revert");
+
+        // A conflicting pick pauses; abort brings the branch back.
+        std::fs::write(dir.join("a.txt"), "main").unwrap();
+        commit("web", "a on main", &["a.txt".into()]).unwrap();
+        switch("web", "feat/y", false).unwrap();
+        std::fs::write(dir.join("a.txt"), "y").unwrap();
+        commit("web", "a on y", &["a.txt".into()]).unwrap();
+        switch("web", "main", false).unwrap();
+        cherry_pick("web", "feat/y").unwrap();
+        let o = overview("web").unwrap();
+        assert_eq!((o.operation.as_deref(), o.conflicts.as_slice()), (Some("cherry-pick"), ["a.txt".to_string()].as_slice()));
+        operation("web", "abort").unwrap();
+        assert_eq!(overview("web").unwrap().operation, None);
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "main");
+
+        let b = brief("web");
+        assert_eq!((b.cloned, b.branch.as_deref(), b.changes), (true, Some("main"), 0));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn git(dir: &Path, args: &[&str]) {

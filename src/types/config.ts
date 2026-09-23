@@ -227,6 +227,24 @@ export interface WorktreeInfo {
   missing: boolean;
 }
 
+/** How the current branch and another differ (repo view's Compare tab). */
+export interface Comparison {
+  /** Commits only on the current branch. */
+  ahead: GitCommit[];
+  /** Commits only on the other branch (cherry-pick candidates). */
+  behind: GitCommit[];
+}
+
+/** Sidebar status of a repo's clone. */
+export interface RepoBrief {
+  name: string;
+  cloned: boolean;
+  branch: string | null;
+  changes: number;
+  ahead: number;
+  behind: number;
+}
+
 export interface StashEntry {
   index: number;
   message: string;

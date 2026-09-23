@@ -498,9 +498,9 @@ pub async fn git_commit_diff(
 ) -> Result<git::FileDiff, String> {
     blocking(move || {
         let dir = worktree_of(&workspace, &repo)?;
-        let before = format!("{sha}^");
+        let (before, after) = git::diff_sides(&dir, &sha);
         let original = git::rev_content(&dir, &path, &before).unwrap_or_default();
-        let modified = git::rev_content(&dir, &path, &sha).unwrap_or_default();
+        let modified = git::rev_content(&dir, &path, &after).unwrap_or_default();
         Ok(git::FileDiff { original, modified })
     })
     .await

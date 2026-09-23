@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   BranchInfo,
+  Comparison,
   Config,
   GitChange,
   GitCommit,
@@ -16,6 +17,7 @@ import { ConfirmDialog } from "../components/ConfirmDialog";
 import { ContextMenu, MenuItem } from "../components/ContextMenu";
 import { MergeModal } from "../components/MergeModal";
 import { PrsModal } from "../components/PrsModal";
+import { Select } from "../components/Select";
 import { Skeleton } from "../components/Skeleton";
 import { toast } from "../components/Toast";
 import { tooltip } from "../components/Tooltip";
@@ -51,6 +53,12 @@ interface Props {
   onOpenPrList: (prs: PullRequest[]) => void;
   /** Opens a terminal in the clone: a shell (null) or an agent CLI. */
   onNewSession: (label: string, cmd: string | null) => void;
+  /** Ralph tab for the clone. */
+  onOpenRalph: () => void;
+  /** New-workspace wizard with this repo preselected. */
+  onNewWorkspace: () => void;
+  /** Status changed (sidebar badges refresh). */
+  onChanged: () => void;
   onError: (msg: string) => void;
 }
 
@@ -81,6 +89,9 @@ export function RepoPage({
   onReviewCommit,
   onOpenPrList,
   onNewSession,
+  onOpenRalph,
+  onNewWorkspace,
+  onChanged,
   onError,
 }: Props) {
   const scope = `@${repo}`;
@@ -103,11 +114,15 @@ export function RepoPage({
   const [sessionMenu, setSessionMenu] = useState<{ x: number; y: number } | null>(null);
   const [branchFilter, setBranchFilter] = useState("");
   const [showRemote, setShowRemote] = useState(false);
+  const [historyTab, setHistoryTab] = useState<"history" | "compare">("history");
+  const [compareWith, setCompareWith] = useState<string | null>(null);
+  const [comparison, setComparison] = useState<Comparison | null>(null);
 
   const load = useCallback(async () => {
     try {
       const o = await invoke<RepoOverview>("repo_overview", { name: repo });
       setOv(o);
+      onChanged();
       if (!o.cloned) return;
       const [c, h] = await Promise.all([
         invoke<GitChange[]>("git_changes", { workspace: scope, repo }),
@@ -121,7 +136,7 @@ export function RepoPage({
     } catch (e) {
       onError(String(e));
     }
-  }, [repo, scope, onError]);
+  }, [repo, scope, onChanged, onError]);
 
   const fetchOrigin = useCallback(async () => {
     setFetching(true);
@@ -186,6 +201,37 @@ export function RepoPage({
   const matches = (b: BranchInfo) => !filterText || b.name.toLowerCase().includes(filterText);
   const worktreeOwner = (b: BranchInfo) =>
     b.worktree ? ov?.worktrees.find((w) => norm(w.path) === norm(b.worktree!))?.workspace ?? null : null;
+
+  // Compare: against the fresh default branch by default (what a PR would
+  // carry); any other branch to cherry-pick from it.
+  const compareOptions = useMemo(() => {
+    if (!ov) return [];
+    const opts = [`origin/${defaultBranch}`];
+    for (const b of ov.branches) {
+      if (b.current) continue;
+      const ref = b.remoteOnly ? `origin/${b.name}` : b.name;
+      if (!opts.includes(ref)) opts.push(ref);
+    }
+    return opts.map((o) => ({ value: o, label: o }));
+  }, [ov, defaultBranch]);
+  const compareTarget =
+    compareWith ?? (branch && branch !== defaultBranch ? `origin/${defaultBranch}` : compareOptions.find((o) => o.value !== `origin/${defaultBranch}`)?.value ?? `origin/${defaultBranch}`);
+
+  useEffect(() => {
+    if (historyTab !== "compare" || !compareTarget || !ov?.cloned) return;
+    let dead = false;
+    invoke<Comparison>("repo_compare", { name: repo, other: compareTarget })
+      .then((c) => !dead && setComparison(c))
+      .catch((e) => {
+        if (dead) return;
+        setComparison({ ahead: [], behind: [] });
+        onError(String(e));
+      });
+    return () => {
+      dead = true;
+    };
+    // `history` changes after every git action: re-compare then too.
+  }, [historyTab, compareTarget, repo, history, ov?.cloned, onError]);
 
   // ---------- actions ----------
   const requestSwitch = (target: string) => {
@@ -305,6 +351,9 @@ export function RepoPage({
   return (
     <div className="page repo-page">
       <RepoHeader repo={repo} ov={ov}>
+        <button className="secondary ws-tool" onClick={onOpenRalph} {...hint("Write a PRD and let the agent implement it story by story on this branch")}>
+          <SparkIcon size={14} /> Ralph
+        </button>
         <button className="secondary ws-tool" onClick={(e) => setSessionMenu({ x: e.clientX, y: e.clientY })} {...hint("Terminal or agent session in this clone")}>
           <TerminalIcon size={14} /> New session
         </button>
@@ -424,21 +473,24 @@ export function RepoPage({
             <strong>{capitalize(ov.operation)} in progress</strong>
             {ov.conflicts.length > 0 ? ` · ${ov.conflicts.length} conflicted file${ov.conflicts.length === 1 ? "" : "s"}` : " · no conflicts left"}
           </span>
-          {ov.operation === "rebase" && (
-            <span className="repo-banner-actions">
-              {ov.conflicts.length > 0 && (
-                <button className="secondary btn-mini" disabled={busy !== null} onClick={() => run("Resolve conflicts", () => invoke("ws_resolve_conflicts", { workspace: scope, repo }), "Conflicts resolved by the agent")}>
-                  <SparkIcon size={12} /> Resolve with AI
-                </button>
-              )}
-              <button className="btn-mini" disabled={busy !== null || ov.conflicts.length > 0} onClick={() => run("Continue rebase", () => invoke("ws_rebase_continue", { workspace: scope, repo }))}>
-                Continue
+          <span className="repo-banner-actions">
+            {ov.conflicts.length > 0 && (
+              <button className="secondary btn-mini" disabled={busy !== null} onClick={() => run("Resolve conflicts", () => invoke("ws_resolve_conflicts", { workspace: scope, repo }), "Conflicts resolved by the agent")}>
+                <SparkIcon size={12} /> Resolve with AI
               </button>
-              <button className="secondary btn-mini" disabled={busy !== null} onClick={() => run("Abort rebase", () => invoke("ws_rebase_abort", { workspace: scope, repo }), "Rebase aborted")}>
-                Abort
-              </button>
-            </span>
-          )}
+            )}
+            <button
+              className="btn-mini"
+              disabled={busy !== null || ov.conflicts.length > 0}
+              onClick={() => run(`Continue ${ov.operation}`, () => invoke("repo_operation", { name: repo, action: "continue" }), `${capitalize(ov.operation!)} finished`)}
+              {...hint(ov.conflicts.length > 0 ? "Resolve the conflicts first (they're in Changes)" : "")}
+            >
+              Continue
+            </button>
+            <button className="secondary btn-mini" disabled={busy !== null} onClick={() => run(`Abort ${ov.operation}`, () => invoke("repo_operation", { name: repo, action: "abort" }), `${capitalize(ov.operation!)} aborted`)}>
+              Abort
+            </button>
+          </span>
         </div>
       )}
       {ov?.upstreamGone && !onDefault && (
@@ -591,9 +643,84 @@ export function RepoPage({
         {/* ---------- History ---------- */}
         <section className="repo-panel repo-history">
           <div className="repo-panel-head">
-            <h3>History</h3>
-            {ov && ov.ahead > 0 && <span className="repo-pill repo-pill-info">↑ {ov.ahead} not pushed</span>}
+            <span className="repo-tabs">
+              <button className={`btn-plain repo-tab ${historyTab === "history" ? "active" : ""}`} onClick={() => setHistoryTab("history")}>
+                History
+              </button>
+              <button className={`btn-plain repo-tab ${historyTab === "compare" ? "active" : ""}`} onClick={() => setHistoryTab("compare")}>
+                Compare
+              </button>
+            </span>
+            {historyTab === "history" && ov && ov.ahead > 0 && <span className="repo-pill repo-pill-info">↑ {ov.ahead} not pushed</span>}
+            {historyTab === "compare" && compareOptions.length > 0 && (
+              <span className="repo-compare-pick">
+                <span className="repo-compare-label">{branch ?? "HEAD"} vs</span>
+                <Select value={compareTarget ?? ""} options={compareOptions} onChange={setCompareWith} searchable />
+              </span>
+            )}
           </div>
+          {historyTab === "compare" ? (
+            <div className="repo-commits">
+              {!compareTarget ? (
+                <div className="rv-empty">
+                  <span>No other branch to compare with yet.</span>
+                </div>
+              ) : comparison === null ? (
+                <div className="repo-commit-row">
+                  <Skeleton w="70%" h={12} />
+                </div>
+              ) : (
+                <>
+                  <div className="repo-compare-summary">
+                    <span>
+                      <strong>{comparison.ahead.length}</strong> commit{comparison.ahead.length === 1 ? "" : "s"} only on {branch ?? "HEAD"} ·{" "}
+                      <strong>{comparison.behind.length}</strong> only on {compareTarget}
+                    </span>
+                    <button
+                      className="secondary btn-mini"
+                      disabled={comparison.ahead.length === 0}
+                      onClick={() =>
+                        onReviewCommit({ sha: `${compareTarget}...HEAD`, message: `${branch ?? "HEAD"} vs ${compareTarget}`, author: "", when: "" })
+                      }
+                      {...hint(`Everything ${branch ?? "HEAD"} changed since it left ${compareTarget}`)}
+                    >
+                      View diff
+                    </button>
+                  </div>
+                  {comparison.behind.length > 0 && <div className="repo-compare-group">Only on {compareTarget}</div>}
+                  {comparison.behind.map((c) => (
+                    <div key={`b:${c.sha}`} className="repo-commit-row">
+                      <button className="btn-plain repo-commit-main" onClick={() => onReviewCommit(c)} {...hint(`${c.message}\n\n${c.sha} · ${c.author}`)}>
+                        <span className="repo-commit-msg">{c.message}</span>
+                        <span className="repo-commit-meta">
+                          {c.author} · {c.when}
+                        </span>
+                      </button>
+                      <button
+                        className="secondary btn-mini repo-row-action"
+                        disabled={busy !== null || !!ov?.operation}
+                        onClick={() => run("Cherry-pick", () => invoke("repo_cherry_pick", { name: repo, sha: c.sha }), `Applied "${c.message}" to ${branch}`)}
+                        {...hint(`Apply this commit on top of ${branch ?? "HEAD"}`)}
+                      >
+                        Cherry-pick
+                      </button>
+                    </div>
+                  ))}
+                  {comparison.ahead.length > 0 && <div className="repo-compare-group">Only on {branch ?? "HEAD"}</div>}
+                  {comparison.ahead.map((c) => (
+                    <div key={`a:${c.sha}`} className="repo-commit-row">
+                      <button className="btn-plain repo-commit-main" onClick={() => onReviewCommit(c)} {...hint(`${c.message}\n\n${c.sha} · ${c.author}`)}>
+                        <span className="repo-commit-msg">{c.message}</span>
+                        <span className="repo-commit-meta">
+                          {c.author} · {c.when}
+                        </span>
+                      </button>
+                    </div>
+                  ))}
+                </>
+              )}
+            </div>
+          ) : (
           <div className="repo-commits">
             {history === null ? (
               <div className="repo-commit-row">
@@ -615,7 +742,7 @@ export function RepoPage({
                         {c.author} · {c.when}
                       </span>
                     </button>
-                    {i === 0 && unpushed && (
+                    {i === 0 && unpushed ? (
                       <button
                         className="icon-button"
                         aria-label="Undo commit"
@@ -625,12 +752,29 @@ export function RepoPage({
                       >
                         <UndoIcon size={13} />
                       </button>
+                    ) : (
+                      <button
+                        className="secondary btn-mini repo-row-action"
+                        disabled={busy !== null || !!ov?.operation}
+                        onClick={() =>
+                          setConfirm({
+                            title: "Revert commit",
+                            message: `Add a new commit that undoes "${c.message}"? History stays as it is, so this is safe on pushed commits.`,
+                            label: "Revert",
+                            run: () => run("Revert", () => invoke("repo_revert", { name: repo, sha: c.sha }), `Reverted "${c.message}"`),
+                          })
+                        }
+                        {...hint("Add a commit that undoes this one")}
+                      >
+                        Revert
+                      </button>
                     )}
                   </div>
                 );
               })
             )}
           </div>
+          )}
         </section>
       </div>
 
@@ -687,11 +831,14 @@ export function RepoPage({
             <h3>
               Workspaces {repoWorkspaces.length > 0 && <span className="section-count">{repoWorkspaces.length}</span>}
             </h3>
+            <button className="secondary btn-mini repo-head-action" onClick={onNewWorkspace} {...hint(`New workspace with ${repo}: a branch in its own worktree`)}>
+              <PlusIcon size={11} /> New workspace
+            </button>
           </div>
           <div className="repo-side-list">
             {repoWorkspaces.length === 0 ? (
               <div className="rv-empty">
-                <span>No workspace uses {repo}. Create one from the Dashboard to work on a branch in its own worktree.</span>
+                <span>No workspace uses {repo} yet. A workspace puts a feature branch in its own worktree, so the clone stays free.</span>
               </div>
             ) : (
               repoWorkspaces.map((w) => (

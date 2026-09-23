@@ -851,11 +851,11 @@ pub fn resolve_conflicts(ws_name: &str, repo: &str) -> Result<String, String> {
     }
     let list = conflicts.iter().map(|f| format!("- {f}")).collect::<Vec<_>>().join("\n");
     let prompt = format!(
-        r#"A `git rebase` is paused in this worktree with the following conflicts:
+        r#"A git operation (rebase, merge, cherry-pick or revert) is paused in this worktree with the following conflicts:
 
 {list}
 
-Resolve every conflict preserving the intent of the feature branch (this worktree), then `git add` each resolved file. Do NOT run `git rebase --continue` or `git commit` — staging is enough. Do not touch anything else.
+Resolve every conflict keeping the intent of both sides (the branch checked out here and the changes being applied), then `git add` each resolved file. Do NOT continue the operation (no `--continue`) or `git commit` — staging is enough. Do not touch anything else.
 
 Reply with a short summary of how you resolved each file."#
     );

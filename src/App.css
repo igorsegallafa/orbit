@@ -5907,6 +5907,13 @@ button .spinner {
 .find-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 14px; border-top: 1px solid var(--border); font-size: 11px; color: var(--text-faint); }
 .find-foot-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 
+/* Sidebar repo rows: sync counts, dirty dot, Ralph and unread indicators */
+.nav-repo-badges { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.nav-repo-badges > * { margin-left: 0 !important; }
+.nav-repo-sync { font-size: 10.5px; font-weight: 600; color: #8eaaff; letter-spacing: 0.02em; }
+.nav-repo-dirty { width: 6px; height: 6px; border-radius: 50%; background: var(--warn, #e3b341); }
+.nav-repo-uncloned { font-size: 10px; color: var(--text-faint); }
+
 /* ---------- Repository view ---------- */
 .repo-page { padding: 24px 36px; }
 .repo-title { display: flex; align-items: center; gap: 10px; }
@@ -6014,6 +6021,21 @@ button .spinner {
 .repo-commit-meta { font-size: 11px; color: var(--text-faint); display: flex; gap: 6px; }
 .repo-commit-flag { color: #8eaaff; font-weight: 700; }
 .repo-commit-unpushed { box-shadow: inset 2px 0 0 var(--accent); }
+.repo-row-action { opacity: 0; flex-shrink: 0; }
+.repo-commit-row:hover .repo-row-action, .repo-row-action:focus-visible { opacity: 1; }
+
+/* History / Compare tabs and the compare picker */
+.repo-tabs { display: flex; gap: 2px; }
+.repo-tab { padding: 4px 10px !important; border-radius: 6px; font-size: 12px; font-weight: 600 !important; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-faint); }
+.repo-page button.repo-tab:hover:not(:disabled) { color: var(--text); background: var(--panel-raised); }
+.repo-tab.active { color: var(--text); background: var(--panel-raised); }
+.repo-compare-pick { margin-left: auto; display: flex; align-items: center; gap: 8px; min-width: 0; }
+.repo-compare-pick .select-trigger { height: 28px; min-width: 180px; max-width: 260px; font-size: 12px; }
+.repo-compare-label { font-size: 11.5px; color: var(--text-faint); white-space: nowrap; }
+.repo-compare-summary { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 14px; font-size: 12px; color: var(--text-dim); border-bottom: 1px solid var(--border); }
+.repo-compare-summary strong { color: var(--text); }
+.repo-compare-group { padding: 10px 14px 4px; font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-faint); }
+.repo-head-action { margin-left: auto; display: inline-flex; align-items: center; gap: 5px; }
 
 /* Pills */
 .repo-pill { display: inline-flex; align-items: center; height: 18px; padding: 0 7px !important; border-radius: 9px; border: 1px solid var(--border-strong); font-size: 10.5px; font-weight: 500; color: var(--text-dim); white-space: nowrap; flex-shrink: 0; }

@@ -140,6 +140,25 @@ pub fn scope_dir(workspace: &str) -> Result<PathBuf, String> {
     }
 }
 
+/// Orbit's own files for a workspace (Ralph runs, custom prompts): its
+/// `.orbit` folder, or for a repo scope one outside the clone, so nothing
+/// lands in the repo's working tree.
+pub fn orbit_dir(workspace: &str) -> Result<PathBuf, String> {
+    match repo_scope(workspace) {
+        Some(repo) => Ok(workspace_root()?.join(".orbit").join("repos").join(repo)),
+        None => Ok(ws_dir(workspace)?.join(".orbit")),
+    }
+}
+
+/// Branch a workspace works on; the clone's checked-out branch for a repo scope.
+pub fn scope_branch(workspace: &str) -> Result<String, String> {
+    match repo_scope(workspace) {
+        Some(repo) => git::current_branch(&clone_dir_of(repo)?)
+            .ok_or_else(|| format!("{repo} is on a detached HEAD: switch to a branch first")),
+        None => Ok(load_meta(&ws_dir(workspace)?)?.branch),
+    }
+}
+
 /// Repos of a workspace; just the one for a repo scope.
 pub fn scope_repos(workspace: &str) -> Result<Vec<String>, String> {
     match repo_scope(workspace) {

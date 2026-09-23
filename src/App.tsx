@@ -22,6 +22,8 @@ import { TooltipHost, tooltip } from "./components/Tooltip";
 import { WindowControls, isMac } from "./components/WindowControls";
 import { RalphView } from "./components/RalphView";
 import { RepoPage } from "./pages/RepoPage";
+import { WorkspaceCreateModal } from "./components/WorkspaceCreateModal";
+import { useRepoBriefs } from "./lib/useRepoBriefs";
 import { ToastHost, toast } from "./components/Toast";
 import { useRalphRunning } from "./lib/useRalphRunning";
 import { startUpdateChecks } from "./lib/updater";
@@ -291,7 +293,8 @@ function App() {
         const [ws, repo] = e.payload.key.split("/");
         const ok = ev.reason?.kind === "complete";
         const opts = {
-          description: `${ws} · ${repo} · ${ev.iterations ?? 0} iteration(s)`,
+          // A repo view's run ("@repo/repo") reads as just the repo.
+          description: `${isScope(ws) ? repo : `${ws} · ${repo}`} · ${ev.iterations ?? 0} iteration(s)`,
           action: { label: "Open", onClick: () => openTab({ kind: "ralph", workspace: ws }) },
         };
         if (ok) toast.success("Ralph finished every story", opts);
@@ -305,6 +308,9 @@ function App() {
   }, []);
 
   const ralphRunning = useRalphRunning();
+  const { briefs: repoBriefs, refresh: refreshRepoBriefs } = useRepoBriefs(config.services.length);
+  // New-workspace wizard opened from a repo view, with that repo preselected.
+  const [createWsFor, setCreateWsFor] = useState<string | null>(null);
 
   // ---------- notifications ----------
   // Unread unless the user is looking at that tab right now; the OS
@@ -666,7 +672,7 @@ function App() {
       );
     }
     if (tab.kind === "ralph") {
-      const ws = workspaces.find((w) => w.name === tab.workspace);
+      const ws = isScope(tab.workspace) ? repoScope(tab.workspace) : workspaces.find((w) => w.name === tab.workspace);
       return ws ? <RalphView workspace={ws} onError={setError} /> : null;
     }
     if (tab.kind === "repo") {
@@ -681,6 +687,9 @@ function App() {
           onReviewCommit={(commit) => openTab({ kind: "commit", workspace: scope, repo: tab.repo, commit })}
           onOpenPrList={(prs) => openTab({ kind: "pr", prs })}
           onNewSession={(label, cmd) => newTerminal(scope, label, cmd)}
+          onOpenRalph={() => openTab({ kind: "ralph", workspace: scope })}
+          onNewWorkspace={() => setCreateWsFor(tab.repo)}
+          onChanged={refreshRepoBriefs}
           onError={setError}
         />
       );
@@ -918,16 +927,41 @@ function App() {
                 const id = `repo:${svc.name}`;
                 const sessions = sessionsOf(`@${svc.name}`);
                 const unread = sessions.some((t) => unreadByTab.has(tabId(t)));
+                const b = repoBriefs[svc.name];
+                const tip = !b
+                  ? svc.name
+                  : !b.cloned
+                    ? `${svc.name} · not cloned`
+                    : [
+                        `${svc.name} on ${b.branch ?? "detached HEAD"}`,
+                        b.changes > 0 && `${b.changes} changed file${b.changes === 1 ? "" : "s"}`,
+                        b.ahead > 0 && `${b.ahead} to push`,
+                        b.behind > 0 && `${b.behind} to pull`,
+                      ]
+                        .filter(Boolean)
+                        .join(" · ");
                 return (
                   <div key={svc.name} className="nav-workspace">
                     <button
                       className={`nav-item nav-ws ${activeTab === id ? "active" : ""}`}
                       onClick={() => openRepoTab(svc.name)}
-                      title={svc.name}
+                      onMouseEnter={(e) => tooltip.show(tip, e)}
+                      onMouseLeave={() => tooltip.hide()}
                     >
                       <span className="nav-icon"><RepoIcon size={15} /></span>
                       <span className="nav-item-label">{svc.name}</span>
-                      {unread && <span className="nav-unread" />}
+                      <span className="nav-repo-badges">
+                        {ralphRunning.has(`@${svc.name}`) && <span className="nav-ralph" title="Ralph is running" />}
+                        {b?.cloned && (b.ahead > 0 || b.behind > 0) && (
+                          <span className="nav-repo-sync">
+                            {b.ahead > 0 && `↑${b.ahead}`}
+                            {b.behind > 0 && `↓${b.behind}`}
+                          </span>
+                        )}
+                        {b?.cloned && b.changes > 0 && <span className="nav-repo-dirty" />}
+                        {b && !b.cloned && <span className="nav-repo-uncloned">not cloned</span>}
+                        {unread && <span className="nav-unread" />}
+                      </span>
                     </button>
                     {sessions.map(renderSessionItem)}
                   </div>
@@ -1006,7 +1040,7 @@ function App() {
                         : t.kind === "commit"
                           ? `${t.commit.message.slice(0, 24)}…`
                           : t.kind === "ralph"
-                            ? `Ralph · ${t.workspace}`
+                            ? `Ralph · ${t.workspace.replace(/^@/, "")}`
                             : t.kind === "pr"
                             ? t.prs.length > 0
                               ? `#${t.prs[0].number}` + (t.prs.length > 1 ? ` (+${t.prs.length - 1})` : "")
@@ -1214,6 +1248,16 @@ function App() {
       {focusWorkspace && <UsageBar workspace={focusWorkspace.name} />}
 
       {/* App-owned tooltip (replaces native title hints) */}
+      {createWsFor && (
+        <WorkspaceCreateModal
+          config={config}
+          initialRepos={[createWsFor]}
+          onCreated={loadWorkspaces}
+          onClose={() => setCreateWsFor(null)}
+          onError={setError}
+        />
+      )}
+
       <TooltipHost />
       <ToastHost />
     </div>
