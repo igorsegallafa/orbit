@@ -438,9 +438,8 @@ pub async fn set_plan_task(name: String, index: usize, done: bool) -> Result<(),
 
 // ---------- Git review (dock Git tab) ----------
 
-fn worktree_of(workspace: &str, repo: &str) -> Result<PathBuf, String> {
-    let dir = crate::workspace::ws_dir(workspace)?
-        .join(repo);
+pub(crate) fn worktree_of(workspace: &str, repo: &str) -> Result<PathBuf, String> {
+    let dir = crate::workspace::repo_path(workspace, repo)?;
     if !dir.exists() {
         return Err(format!("worktree for '{repo}' not found in '{workspace}'"));
     }
@@ -583,8 +582,7 @@ pub async fn refresh_repo(name: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn open_in_editor(workspace: String, repo: String) -> Result<(), String> {
     blocking(move || {
-        let wt = crate::workspace::ws_dir(&workspace)?
-            .join(&repo);
+        let wt = crate::workspace::repo_path(&workspace, &repo)?;
         if !wt.exists() {
             return Err(format!("worktree for '{repo}' not found"));
         }
@@ -634,7 +632,7 @@ pub async fn open_workspace_in_editor(name: String) -> Result<(), String> {
 }
 
 fn workspace_dir(name: &str) -> Result<PathBuf, String> {
-    let dir = crate::workspace::ws_dir(name)?;
+    let dir = crate::workspace::scope_dir(name)?;
     if !dir.exists() {
         return Err(format!("workspace '{name}' folder not found"));
     }
@@ -645,11 +643,15 @@ fn workspace_dir(name: &str) -> Result<PathBuf, String> {
 #[tauri::command]
 pub async fn workspace_ai_usage(name: String) -> Result<AiUsage, String> {
     blocking(move || {
-        let ws_dir = crate::workspace::ws_dir(&name)?;
+        let ws_dir = crate::workspace::scope_dir(&name)?;
         if !ws_dir.exists() {
             return Err(format!("workspace '{name}' not found"));
         }
-        let repos = workspace::load_meta(&ws_dir).map(|m| m.repos).unwrap_or_default();
+        // A repo scope's sessions all run in the clone itself: no sub-repos.
+        let repos = match workspace::repo_scope(&name) {
+            Some(_) => vec![],
+            None => workspace::load_meta(&ws_dir).map(|m| m.repos).unwrap_or_default(),
+        };
         Ok(usage::workspace_usage(&ws_dir, &repos))
     })
     .await
@@ -910,8 +912,9 @@ pub async fn ws_create_prs(
             }
         }
 
-        // The workspace now knows its own PRs — persist them.
-        if !ok_refs.is_empty() {
+        // The workspace now knows its own PRs — persist them (a repo view
+        // has no meta: it finds its PRs by the clone's current branch).
+        if !ok_refs.is_empty() && workspace::repo_scope(&workspace).is_none() {
             workspace::save_pr_refs(&workspace, &ok_refs)?;
         }
 
@@ -926,23 +929,32 @@ pub async fn ws_create_prs(
 }
 
 fn ws_prs_list(workspace: &str) -> Result<Vec<github::PullRequest>, String> {
-    let ws_dir = crate::workspace::ws_dir(workspace)?;
-    let meta = workspace::load_meta(&ws_dir)?;
+    // (repo, folder, branch) to look up; a repo view uses the clone's branch.
+    let targets: Vec<(String, PathBuf, String)> = match workspace::repo_scope(workspace) {
+        Some(repo) => {
+            let dir = workspace::clone_dir_of(repo)?;
+            let branch = git::current_branch(&dir).unwrap_or_default();
+            vec![(repo.to_string(), dir, branch)]
+        }
+        None => {
+            let ws_dir = crate::workspace::ws_dir(workspace)?;
+            let meta = workspace::load_meta(&ws_dir)?;
+            meta.repos.iter().map(|r| (r.clone(), ws_dir.join(r), meta.branch.clone())).collect()
+        }
+    };
     // Repos in parallel — 5 repos sequential is ~10s of dead air.
     let prs: Vec<github::PullRequest> = std::thread::scope(|scope| {
-        let handles: Vec<_> = meta
-            .repos
+        let handles: Vec<_> = targets
             .iter()
-            .map(|repo| {
-                let (branch, dir) = (meta.branch.clone(), ws_dir.join(repo));
+            .map(|(repo, dir, branch)| {
                 scope.spawn(move || {
                     if !dir.exists() {
                         return vec![];
                     }
-                    let Some(owner_repo) = remote_of(&dir) else {
+                    let Some(owner_repo) = remote_of(dir) else {
                         return vec![];
                     };
-                    github::prs_for_branch(repo, &owner_repo, &branch).unwrap_or_default()
+                    github::prs_for_branch(repo, &owner_repo, branch).unwrap_or_default()
                 })
             })
             .collect();

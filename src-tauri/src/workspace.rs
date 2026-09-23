@@ -113,6 +113,41 @@ pub fn ws_dir(name: &str) -> Result<PathBuf, String> {
     Ok(workspaces_dir()?.join(name))
 }
 
+// ---------- Repo scope: a repo's base clone addressed like a workspace ----------
+
+/// The repo a scope name addresses ("@repo" → "repo"). A repo scope is a
+/// workspace name for a repo's base clone: the dock, editor, search,
+/// terminals and git commands, all keyed by (workspace, repo), then work on
+/// the clone itself, outside any workspace.
+pub fn repo_scope(workspace: &str) -> Option<&str> {
+    workspace.strip_prefix('@')
+}
+
+/// Folder of `repo` in `workspace`: its worktree, or the base clone for a repo scope.
+pub fn repo_path(workspace: &str, repo: &str) -> Result<PathBuf, String> {
+    match repo_scope(workspace) {
+        Some(r) if r == repo => clone_dir_of(repo),
+        Some(r) => Err(format!("'{repo}' is not part of the '{r}' repository view")),
+        None => Ok(ws_dir(workspace)?.join(repo)),
+    }
+}
+
+/// Root folder of a workspace, or the base clone for a repo scope.
+pub fn scope_dir(workspace: &str) -> Result<PathBuf, String> {
+    match repo_scope(workspace) {
+        Some(repo) => clone_dir_of(repo),
+        None => ws_dir(workspace),
+    }
+}
+
+/// Repos of a workspace; just the one for a repo scope.
+pub fn scope_repos(workspace: &str) -> Result<Vec<String>, String> {
+    match repo_scope(workspace) {
+        Some(repo) => Ok(vec![repo.to_string()]),
+        None => Ok(load_meta(&ws_dir(workspace)?)?.repos),
+    }
+}
+
 fn meta_path(ws_dir: &Path) -> PathBuf {
     ws_dir.join(".workspace.yaml")
 }
@@ -172,6 +207,9 @@ fn create_at(
 ) -> Result<Workspace, String> {
     if name.trim().is_empty() {
         return Err("workspace name is required".into());
+    }
+    if repo_scope(name).is_some() {
+        return Err("workspace names can't start with '@' (reserved for repository views)".into());
     }
     if repos.is_empty() {
         return Err("select at least one repository".into());
@@ -585,11 +623,11 @@ pub fn status(name: &str) -> Result<Vec<RepoStatus>, String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Tests that point ORBIT_* env vars at a temp root must not overlap.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn git(dir: &Path, args: &[&str]) {
         let mut full = vec!["-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main"];
