@@ -582,8 +582,17 @@ mod porcelain_tests {
 
 /// Recent commits on the current branch.
 pub fn commits(dir: &Path, limit: usize) -> Result<Vec<CommitEntry>, String> {
+    commits_in(dir, &[], limit)
+}
+
+/// Commits `revs` selects (e.g. ["main..HEAD"]; empty = the current branch),
+/// newest first.
+pub fn commits_in(dir: &Path, revs: &[&str], limit: usize) -> Result<Vec<CommitEntry>, String> {
     let fmt = "--pretty=format:%H%x1f%s%x1f%an%x1f%cr";
-    let raw = git_out(dir, &["log", &format!("-{limit}"), fmt])?;
+    let n = format!("-{limit}");
+    let mut args = vec!["log", &n, fmt];
+    args.extend_from_slice(revs);
+    let raw = git_out(dir, &args)?;
     let mut out = Vec::new();
     for line in raw.lines() {
         let mut parts = line.split('\x1f');
@@ -605,16 +614,33 @@ pub fn commits(dir: &Path, limit: usize) -> Result<Vec<CommitEntry>, String> {
     Ok(out)
 }
 
+/// The (before, after) revisions to diff for `sha`: its parent and itself,
+/// or for a range "base...head" the fork point and head.
+pub fn diff_sides(dir: &Path, sha: &str) -> (String, String) {
+    match sha.split_once("...") {
+        Some((base, head)) => {
+            let mb = git_out(dir, &["merge-base", base, head]).map(|s| s.trim().to_string()).unwrap_or_else(|_| base.to_string());
+            (mb, head.to_string())
+        }
+        None => (format!("{sha}^"), sha.to_string()),
+    }
+}
+
 /// Full content of a file at a revision (HEAD by default).
 pub fn rev_content(dir: &Path, path: &str, rev: &str) -> Result<String, String> {
     git_out(dir, &["show", &format!("{rev}:{path}")])
 }
 
 /// Files touched by a commit (paths + change letter + stats).
+/// `sha` may also be a range "base...head": the files the head side changed
+/// since it forked from base (what a PR of it would show).
 pub fn commit_files(dir: &Path, sha: &str) -> Result<Vec<ChangeEntry>, String> {
     // --name-status gives the letter (A/M/D); --numstat gives +/-. Parse both.
-    let names = git_out(dir, &["show", "--name-status", "--format=", sha])?;
-    let nums = git_out(dir, &["show", "--numstat", "--format=", sha])?;
+    let (names, nums) = if sha.contains("...") {
+        (git_out(dir, &["diff", "--name-status", sha])?, git_out(dir, &["diff", "--numstat", sha])?)
+    } else {
+        (git_out(dir, &["show", "--name-status", "--format=", sha])?, git_out(dir, &["show", "--numstat", "--format=", sha])?)
+    };
     let mut stats: std::collections::HashMap<String, (u32, u32)> = std::collections::HashMap::new();
     for line in nums.lines() {
         let mut parts = line.split('\t');

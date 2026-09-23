@@ -21,6 +21,9 @@ import { UsageBar } from "./components/UsageBar";
 import { TooltipHost, tooltip } from "./components/Tooltip";
 import { WindowControls, isMac } from "./components/WindowControls";
 import { RalphView } from "./components/RalphView";
+import { RepoPage } from "./pages/RepoPage";
+import { WorkspaceCreateModal } from "./components/WorkspaceCreateModal";
+import { useRepoBriefs } from "./lib/useRepoBriefs";
 import { ToastHost, toast } from "./components/Toast";
 import { useRalphRunning } from "./lib/useRalphRunning";
 import { startUpdateChecks } from "./lib/updater";
@@ -29,7 +32,7 @@ import { reasonLabel, StopReason } from "./types/ralph";
 import {
   HomeIcon, SettingsIcon, SatelliteIcon, DocIcon, TerminalIcon, PlusIcon,
   ChevronRightIcon, PlugIcon, DiffIcon, GitIcon, PanelLeftIcon, PanelLeftExpandIcon,
-  PanelRightIcon, PanelRightExpandIcon, SparkIcon,
+  PanelRightIcon, PanelRightExpandIcon, SparkIcon, RepoIcon,
 } from "./components/Icons";
 import { SkeletonCards, SkeletonTable } from "./components/Skeleton";
 import { randomSessionName } from "./lib/names";
@@ -51,7 +54,23 @@ type Tab =
   | { kind: "commit"; workspace: string; repo: string; commit: GitCommit }
   | { kind: "pr"; prs: PullRequest[] }
   | { kind: "ralph"; workspace: string }
+  | { kind: "repo"; repo: string }
   | { kind: "terminal"; terminal: TerminalTab };
+
+/** A repo's base clone addressed like a workspace ("@repo"): the dock,
+ *  editor, search and terminals then work on the clone. Cached so the dock
+ *  sees a stable object across renders. */
+const scopeCache = new Map<string, Workspace>();
+function repoScope(name: string): Workspace {
+  const scope = name.startsWith("@") ? name : `@${name}`;
+  let ws = scopeCache.get(scope);
+  if (!ws) {
+    ws = { name: scope, repos: [scope.slice(1)], branch: "", base: "" };
+    scopeCache.set(scope, ws);
+  }
+  return ws;
+}
+const isScope = (workspace: string) => workspace.startsWith("@");
 
 const SIDEBAR_KEY = "orbit.sidebar-width";
 const DOCK_KEY = "orbit.dock-width";
@@ -71,6 +90,7 @@ function tabId(tab: Tab): string {
   if (t.kind === "commit") return `cm:${t.workspace}/${t.repo}/${t.commit.sha}`;
   if (t.kind === "pr") return `pr:${t.prs.map((p) => `${p.ownerRepo}/${p.number}`).join("+")}`;
   if (t.kind === "ralph") return `ralph:${t.workspace}`;
+  if (t.kind === "repo") return `repo:${t.repo}`;
   // Stable id: must NOT embed the display name, or renaming re-keys the pane
   // and remounts the terminal (killing the PTY session).
   return t.terminal.id;
@@ -128,11 +148,17 @@ function App() {
       // Tabs of workspaces that no longer exist (removed elsewhere) can't come back.
       const names = new Set(list.map((w) => w.name));
       const owner = (t: Tab) =>
-        t.kind === "workspace" ? t.workspace.name : t.kind === "terminal" ? t.terminal.workspace : t.kind === "pr" ? null : t.workspace;
+        t.kind === "workspace"
+          ? t.workspace.name
+          : t.kind === "terminal"
+            ? t.terminal.workspace
+            : t.kind === "pr" || t.kind === "repo"
+              ? null
+              : t.workspace;
       setTabs((ts) => {
         const kept = ts.filter((t) => {
           const ws = owner(t);
-          return ws === null || names.has(ws);
+          return ws === null || isScope(ws) || names.has(ws);
         });
         return kept.length === ts.length ? ts : kept;
       });
@@ -267,7 +293,8 @@ function App() {
         const [ws, repo] = e.payload.key.split("/");
         const ok = ev.reason?.kind === "complete";
         const opts = {
-          description: `${ws} · ${repo} · ${ev.iterations ?? 0} iteration(s)`,
+          // A repo view's run ("@repo/repo") reads as just the repo.
+          description: `${isScope(ws) ? repo : `${ws} · ${repo}`} · ${ev.iterations ?? 0} iteration(s)`,
           action: { label: "Open", onClick: () => openTab({ kind: "ralph", workspace: ws }) },
         };
         if (ok) toast.success("Ralph finished every story", opts);
@@ -281,6 +308,9 @@ function App() {
   }, []);
 
   const ralphRunning = useRalphRunning();
+  const { briefs: repoBriefs, refresh: refreshRepoBriefs } = useRepoBriefs(config.services.length);
+  // New-workspace wizard opened from a repo view, with that repo preselected.
+  const [createWsFor, setCreateWsFor] = useState<string | null>(null);
 
   // ---------- notifications ----------
   // Unread unless the user is looking at that tab right now; the OS
@@ -325,7 +355,9 @@ function App() {
   // Workspace folders can't be deleted on Windows while a session runs in
   // them: close their tabs (killing the processes) before a removal.
   const closeWorkspaceSessions = (names: string[]) => {
-    const doomed = tabs.filter((t) => t.kind !== "pr" && t.kind !== "workspace" && names.includes(t.kind === "terminal" ? t.terminal.workspace : t.workspace));
+    const doomed = tabs.filter(
+      (t) => t.kind !== "pr" && t.kind !== "workspace" && t.kind !== "repo" && names.includes(t.kind === "terminal" ? t.terminal.workspace : t.workspace),
+    );
     if (!doomed.length) return;
     doomed.forEach(forgetTerminal);
     const ids = new Set(doomed.map(tabId));
@@ -402,6 +434,11 @@ function App() {
   const openWorkspaceTab = (ws: Workspace) => {
     setNavPage({ kind: "dashboard" });
     openTab({ kind: "workspace", workspace: ws });
+  };
+
+  const openRepoTab = (repo: string) => {
+    setNavPage({ kind: "dashboard" });
+    openTab({ kind: "repo", repo });
   };
 
   const openFileTab = (wsName: string, repo: string, path: string) => {
@@ -524,20 +561,64 @@ function App() {
 
   const active = tabs.find((t) => tabId(t) === activeTab) ?? null;
 
+  type SessionTab = Extract<Tab, { kind: "terminal" } | { kind: "editor" }>;
+  /** Terminals and editors opened in a workspace (or a "@repo" clone scope). */
+  const sessionsOf = (wsName: string) =>
+    tabs.filter(
+      (t): t is SessionTab =>
+        (t.kind === "terminal" && t.terminal.workspace === wsName) || (t.kind === "editor" && t.workspace === wsName),
+    );
+
+  /** Sidebar row of one open session under its workspace or repo. */
+  const renderSessionItem = (t: SessionTab) => {
+    const id = tabId(t);
+    const label =
+      t.kind === "terminal"
+        ? t.terminal.sessionName
+        : t.repo
+          ? `${t.repo}/${t.path.split("/").pop()}`
+          : t.path.split("/").pop()!;
+    return (
+      <button
+        key={id}
+        className={`nav-item nav-sub ${activeTab === id ? "active" : ""}`}
+        onClick={() => setActiveTab(id)}
+        title={label}
+      >
+        {t.kind === "terminal" ? (
+          <StatusIndicator status={sessionStatuses[id] ?? "idle"} />
+        ) : (
+          <span className="nav-icon"><DocIcon size={13} /></span>
+        )}
+        <span className="nav-item-label">{label}</span>
+        {unreadByTab.has(id) && (
+          <span className={`nav-unread ${unreadByTab.get(id) === "waiting" ? "nav-unread-waiting" : ""}`} />
+        )}
+      </button>
+    );
+  };
+
   // The right dock shows for whichever workspace is "in focus": the active
   // workspace tab, else a workspace owning the active editor/review/terminal tab.
   // PR tabs are not tied to a workspace; only terminal/editor/review/
   // commit tabs carry one.
+  // Repo tabs (and editors/terminals opened from one) focus the repo's clone.
+  const focusName =
+    !active || active.kind === "pr" || active.kind === "workspace"
+      ? null
+      : active.kind === "repo"
+        ? `@${active.repo}`
+        : active.kind === "terminal"
+          ? active.terminal.workspace
+          : active.workspace;
   const focusWorkspace: Workspace | null =
     active?.kind === "workspace"
       ? active.workspace
-      : active && active.kind !== "pr"
-        ? (workspaces.find(
-            (w) =>
-              w.name ===
-              (active.kind === "terminal" ? active.terminal.workspace : active.workspace)
-          ) ?? null)
-        : null;
+      : focusName === null
+        ? null
+        : isScope(focusName)
+          ? repoScope(focusName)
+          : (workspaces.find((w) => w.name === focusName) ?? null);
 
   const openMatch =
     (wsName: string): OpenMatch =>
@@ -591,8 +672,27 @@ function App() {
       );
     }
     if (tab.kind === "ralph") {
-      const ws = workspaces.find((w) => w.name === tab.workspace);
+      const ws = isScope(tab.workspace) ? repoScope(tab.workspace) : workspaces.find((w) => w.name === tab.workspace);
       return ws ? <RalphView workspace={ws} onError={setError} /> : null;
+    }
+    if (tab.kind === "repo") {
+      const scope = `@${tab.repo}`;
+      return (
+        <RepoPage
+          repo={tab.repo}
+          config={config}
+          workspaces={workspaces}
+          onOpenWorkspace={openWorkspaceTab}
+          onReviewFile={(path) => openTab({ kind: "review", workspace: scope, repo: tab.repo, path })}
+          onReviewCommit={(commit) => openTab({ kind: "commit", workspace: scope, repo: tab.repo, commit })}
+          onOpenPrList={(prs) => openTab({ kind: "pr", prs })}
+          onNewSession={(label, cmd) => newTerminal(scope, label, cmd)}
+          onOpenRalph={() => openTab({ kind: "ralph", workspace: scope })}
+          onNewWorkspace={() => setCreateWsFor(tab.repo)}
+          onChanged={refreshRepoBriefs}
+          onError={setError}
+        />
+      );
     }
     if (tab.kind === "review") {
       return (
@@ -769,11 +869,7 @@ function App() {
               .map((ws) => {
               const wsId = `ws:${ws.name}`;
               // Sessions under this workspace: terminals (agents/shells) and editors
-              const wsSessions = tabs.filter(
-                (t): t is Extract<Tab, { kind: "terminal" } | { kind: "editor" }> =>
-                  (t.kind === "terminal" && t.terminal.workspace === ws.name) ||
-                  (t.kind === "editor" && t.workspace === ws.name)
-              );
+              const wsSessions = sessionsOf(ws.name);
               return (
                 <div key={ws.name} className={`nav-workspace ${ws.variant_of ? "nav-variant" : ""}`}>
                   <button
@@ -818,37 +914,59 @@ function App() {
                       </span>
                     )}
                   </button>
-                  {(wsExpanded[ws.name] ?? true) &&
-                    wsSessions.map((t) => {
-                      const id = tabId(t);
-                      const label =
-                        t.kind === "terminal"
-                          ? t.terminal.sessionName
-                          : t.repo
-                            ? `${t.repo}/${t.path.split("/").pop()}`
-                            : t.path.split("/").pop()!;
-                      return (
-                        <button
-                          key={id}
-                          className={`nav-item nav-sub ${activeTab === id ? "active" : ""}`}
-                          onClick={() => setActiveTab(id)}
-                          title={label}
-                        >
-                          {t.kind === "terminal" ? (
-                            <StatusIndicator status={sessionStatuses[id] ?? "idle"} />
-                          ) : (
-                            <span className="nav-icon"><DocIcon size={13} /></span>
-                          )}
-                          <span className="nav-item-label">{label}</span>
-                          {unreadByTab.has(id) && (
-                            <span className={`nav-unread ${unreadByTab.get(id) === "waiting" ? "nav-unread-waiting" : ""}`} />
-                          )}
-                        </button>
-                      );
-                    })}
+                  {(wsExpanded[ws.name] ?? true) && wsSessions.map(renderSessionItem)}
                 </div>
               );
             })}
+
+          {!collapsed && config.services.length > 0 && <div className="nav-section">Repos</div>}
+          {!collapsed &&
+            [...config.services]
+              .sort((a, b) => a.name.localeCompare(b.name))
+              .map((svc) => {
+                const id = `repo:${svc.name}`;
+                const sessions = sessionsOf(`@${svc.name}`);
+                const unread = sessions.some((t) => unreadByTab.has(tabId(t)));
+                const b = repoBriefs[svc.name];
+                const tip = !b
+                  ? svc.name
+                  : !b.cloned
+                    ? `${svc.name} · not cloned`
+                    : [
+                        `${svc.name} on ${b.branch ?? "detached HEAD"}`,
+                        b.changes > 0 && `${b.changes} changed file${b.changes === 1 ? "" : "s"}`,
+                        b.ahead > 0 && `${b.ahead} to push`,
+                        b.behind > 0 && `${b.behind} to pull`,
+                      ]
+                        .filter(Boolean)
+                        .join(" · ");
+                return (
+                  <div key={svc.name} className="nav-workspace">
+                    <button
+                      className={`nav-item nav-ws ${activeTab === id ? "active" : ""}`}
+                      onClick={() => openRepoTab(svc.name)}
+                      onMouseEnter={(e) => tooltip.show(tip, e)}
+                      onMouseLeave={() => tooltip.hide()}
+                    >
+                      <span className="nav-icon"><RepoIcon size={15} /></span>
+                      <span className="nav-item-label">{svc.name}</span>
+                      <span className="nav-repo-badges">
+                        {ralphRunning.has(`@${svc.name}`) && <span className="nav-ralph" title="Ralph is running" />}
+                        {b?.cloned && (b.ahead > 0 || b.behind > 0) && (
+                          <span className="nav-repo-sync">
+                            {b.ahead > 0 && `↑${b.ahead}`}
+                            {b.behind > 0 && `↓${b.behind}`}
+                          </span>
+                        )}
+                        {b?.cloned && b.changes > 0 && <span className="nav-repo-dirty" />}
+                        {b && !b.cloned && <span className="nav-repo-uncloned">not cloned</span>}
+                        {unread && <span className="nav-unread" />}
+                      </span>
+                    </button>
+                    {sessions.map(renderSessionItem)}
+                  </div>
+                );
+              })}
 
           {!collapsed && <div className="nav-section">General</div>}
           <button
@@ -922,15 +1040,19 @@ function App() {
                         : t.kind === "commit"
                           ? `${t.commit.message.slice(0, 24)}…`
                           : t.kind === "ralph"
-                            ? `Ralph · ${t.workspace}`
+                            ? `Ralph · ${t.workspace.replace(/^@/, "")}`
                             : t.kind === "pr"
                             ? t.prs.length > 0
                               ? `#${t.prs[0].number}` + (t.prs.length > 1 ? ` (+${t.prs.length - 1})` : "")
                               : "PRs"
-                            : t.terminal.sessionName;
+                            : t.kind === "repo"
+                              ? t.repo
+                              : t.terminal.sessionName;
                 const icon =
                   t.kind === "workspace" ? (
                     <SatelliteIcon size={13} />
+                  ) : t.kind === "repo" ? (
+                    <RepoIcon size={13} />
                   ) : t.kind === "editor" ? (
                     <DocIcon size={13} />
                   ) : t.kind === "review" || t.kind === "commit" || t.kind === "pr" ? (
@@ -1126,6 +1248,16 @@ function App() {
       {focusWorkspace && <UsageBar workspace={focusWorkspace.name} />}
 
       {/* App-owned tooltip (replaces native title hints) */}
+      {createWsFor && (
+        <WorkspaceCreateModal
+          config={config}
+          initialRepos={[createWsFor]}
+          onCreated={loadWorkspaces}
+          onClose={() => setCreateWsFor(null)}
+          onError={setError}
+        />
+      )}
+
       <TooltipHost />
       <ToastHost />
     </div>

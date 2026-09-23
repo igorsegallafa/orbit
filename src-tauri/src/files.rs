@@ -10,18 +10,26 @@ pub struct FileNode {
     pub is_dir: bool,
 }
 
-use crate::workspace::workspace_root;
+/// Folder file paths are relative to: the repo's worktree (or base clone for
+/// a repo scope), or the workspace root itself when `repo` is empty.
+fn base_dir(workspace: &str, repo: &str) -> Result<PathBuf, String> {
+    if repo.is_empty() {
+        crate::workspace::scope_dir(workspace)
+    } else {
+        crate::workspace::repo_path(workspace, repo)
+    }
+}
 
-/// Resolves `workspace/repo/rel` and refuses paths escaping the workspace.
+/// Resolves `rel` inside the repo folder and refuses paths escaping it.
 fn resolve(workspace: &str, repo: &str, rel: &str) -> Result<PathBuf, String> {
-    let base = crate::workspace::ws_dir(workspace)?.join(repo);
+    let base = normalize(&base_dir(workspace, repo)?)?;
     let joined = if rel.is_empty() {
         base.clone()
     } else {
         base.join(rel)
     };
     let normalized = normalize(&joined)?;
-    if !normalized.starts_with(&workspace_root()?) {
+    if !normalized.starts_with(&base) {
         return Err("path escapes the workspace".into());
     }
     Ok(normalized)
@@ -42,6 +50,7 @@ fn normalize(p: &Path) -> Result<PathBuf, String> {
 #[tauri::command]
 pub async fn list_files(workspace: String, repo: String, path: String) -> Result<Vec<FileNode>, String> {
     let dir = resolve(&workspace, &repo, &path)?;
+    let base = resolve(&workspace, &repo, "")?;
     let entries = std::fs::read_dir(&dir).map_err(|e| e.to_string())?;
     let mut nodes: Vec<FileNode> = entries
         .flatten()
@@ -50,7 +59,7 @@ pub async fn list_files(workspace: String, repo: String, path: String) -> Result
             FileNode {
                 name: e.file_name().to_string_lossy().to_string(),
                 path: p
-                    .strip_prefix(workspace_root().unwrap_or_default().join("workspaces").join(&workspace).join(&repo))
+                    .strip_prefix(&base)
                     .unwrap_or(&p)
                     .to_string_lossy()
                     .to_string(),
@@ -241,14 +250,13 @@ const MAX_FILES: usize = 20_000;
 /// The frontend fuzzy-filters this list locally for instant-as-you-type.
 #[tauri::command]
 pub async fn list_workspace_files(workspace: String) -> Result<Vec<FileSearchEntry>, String> {
-    let ws_dir = crate::workspace::ws_dir(&workspace)?;
-    if !ws_dir.exists() {
+    if !crate::workspace::scope_dir(&workspace)?.exists() {
         return Err(format!("workspace '{workspace}' not found"));
     }
-    let repos = crate::workspace::load_meta(&ws_dir)?.repos;
+    let repos = crate::workspace::scope_repos(&workspace)?;
     let mut out: Vec<FileSearchEntry> = Vec::new();
     for repo in repos {
-        let repo_dir = ws_dir.join(&repo);
+        let repo_dir = crate::workspace::repo_path(&workspace, &repo)?;
         if repo_dir.exists() {
             collect_files(&repo_dir, "", &repo, &mut out, 0);
         }

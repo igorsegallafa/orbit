@@ -12,6 +12,7 @@ mod links;
 mod proc;
 mod pty;
 mod ralph;
+mod repo;
 mod review;
 mod search;
 mod usage;
@@ -134,6 +135,25 @@ pub fn run() {
             commands::ws_prs_flat,
             commands::ws_pr_status,
             commands::ws_pr_merge,
+            repo::repo_overview,
+            repo::repo_switch,
+            repo::repo_create_branch,
+            repo::repo_delete_branch,
+            repo::repo_pull,
+            repo::repo_commit,
+            repo::repo_discard,
+            repo::repo_stash,
+            repo::repo_stash_pop,
+            repo::repo_stash_drop,
+            repo::repo_undo_commit,
+            repo::repo_history,
+            repo::repo_branch_prs,
+            repo::repo_prune_worktrees,
+            repo::repo_briefs,
+            repo::repo_compare,
+            repo::repo_cherry_pick,
+            repo::repo_revert,
+            repo::repo_operation,
             commands::ws_checks,
             commands::check_rerun,
             commands::check_logs,

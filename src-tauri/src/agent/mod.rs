@@ -777,8 +777,7 @@ pub struct CommitMsg {
 /// agent sees the numstat diff (bounded) and answers with the message
 /// only — no JSON to parse, the message IS the reply.
 pub fn commit_message(ws_name: &str, repo: &str) -> Result<CommitMsg, String> {
-    let dir = crate::workspace::ws_dir(ws_name)?
-        .join(repo);
+    let dir = crate::workspace::repo_path(ws_name, repo)?;
     if !dir.exists() {
         return Err(format!("worktree for '{repo}' not found"));
     }
@@ -842,8 +841,7 @@ fn clean_commit_message(raw: &str) -> String {
 /// `git rebase --continue` stays with us so a failed agent never lands
 /// half of a resolution. Returns the agent's summary.
 pub fn resolve_conflicts(ws_name: &str, repo: &str) -> Result<String, String> {
-    let dir = crate::workspace::ws_dir(ws_name)?
-        .join(repo);
+    let dir = crate::workspace::repo_path(ws_name, repo)?;
     if !dir.exists() {
         return Err(format!("worktree for '{repo}' not found"));
     }
@@ -853,11 +851,11 @@ pub fn resolve_conflicts(ws_name: &str, repo: &str) -> Result<String, String> {
     }
     let list = conflicts.iter().map(|f| format!("- {f}")).collect::<Vec<_>>().join("\n");
     let prompt = format!(
-        r#"A `git rebase` is paused in this worktree with the following conflicts:
+        r#"A git operation (rebase, merge, cherry-pick or revert) is paused in this worktree with the following conflicts:
 
 {list}
 
-Resolve every conflict preserving the intent of the feature branch (this worktree), then `git add` each resolved file. Do NOT run `git rebase --continue` or `git commit` — staging is enough. Do not touch anything else.
+Resolve every conflict keeping the intent of both sides (the branch checked out here and the changes being applied), then `git add` each resolved file. Do NOT continue the operation (no `--continue`) or `git commit` — staging is enough. Do not touch anything else.
 
 Reply with a short summary of how you resolved each file."#
     );
@@ -936,14 +934,16 @@ fn pr_template(dir: &Path) -> Option<String> {
 /// why/how, filling the template when there is one. Reply format is plain
 /// "TITLE:" + "---" + body (no JSON escaping issues with multiline markdown).
 pub fn pr_draft(ws_name: &str, repo: &str) -> Result<PrDraft, String> {
-    let ws_dir = crate::workspace::ws_dir(ws_name)?;
-    let meta = crate::workspace::load_meta(&ws_dir)?;
-    let dir = ws_dir.join(repo);
+    let dir = crate::workspace::repo_path(ws_name, repo)?;
     if !dir.exists() {
         return Err(format!("worktree for '{repo}' not found"));
     }
     let branch = crate::git::current_branch(&dir).unwrap_or_default();
-    let base = meta.base;
+    // A repo view has no workspace base: PRs target the repo's default branch.
+    let base = match crate::workspace::repo_scope(ws_name) {
+        Some(_) => crate::git::default_branch(&dir).unwrap_or_else(|| "main".into()),
+        None => crate::workspace::load_meta(&crate::workspace::ws_dir(ws_name)?)?.base,
+    };
     let commits = git_out(&dir, &["log", "--oneline", "--no-decorate", &format!("origin/{base}..HEAD")]);
     let range = format!("origin/{base}...HEAD");
     let stat = git_out(&dir, &["diff", "--stat", &range]);
@@ -1075,7 +1075,7 @@ pub fn investigate_check(
     check_name: &str,
     failed_log: &str,
 ) -> Result<CheckAnalysis, String> {
-    let dir = crate::workspace::ws_dir(ws_name)?.join(repo);
+    let dir = crate::workspace::repo_path(ws_name, repo)?;
     if !dir.exists() {
         return Err(format!("worktree for '{repo}' not found"));
     }
@@ -1164,7 +1164,7 @@ mod check_analysis_tests {
 /// permissions (acceptEdits/--auto), instructed to implement exactly the
 /// given fix. Staging/commit stay with the normal app flow.
 pub fn apply_check_fix(ws_name: &str, repo: &str, fix: &str) -> Result<(), String> {
-    let dir = crate::workspace::ws_dir(ws_name)?.join(repo);
+    let dir = crate::workspace::repo_path(ws_name, repo)?;
     if !dir.exists() {
         return Err(format!("worktree for '{repo}' not found"));
     }
@@ -1247,7 +1247,7 @@ pub fn parse_thread_replies(raw: &str) -> Option<Vec<ThreadReply>> {
 /// Runs the agent in the repo's worktree on the selected unresolved threads
 /// of a PR; it edits files (no commit) and drafts one reply per thread.
 pub fn address_review(workspace: &str, repo: &str, owner_repo: &str, number: u64, thread_ids: &[String]) -> Result<Vec<ThreadReply>, String> {
-    let dir = crate::workspace::ws_dir(workspace)?.join(repo);
+    let dir = crate::workspace::repo_path(workspace, repo)?;
     if !dir.exists() {
         return Err(format!("worktree for '{repo}' not found"));
     }
