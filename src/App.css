@@ -3746,7 +3746,12 @@ button .spinner {
   font-weight: 600;
   color: var(--accent);
   text-decoration: none;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
+.pr-header-top .rv-decision { flex-shrink: 0; white-space: nowrap; }
 
 .pr-header-link:hover {
   text-decoration: underline;
