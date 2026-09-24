@@ -1196,6 +1196,43 @@ pub async fn ws_checks(workspace: String) -> Result<Vec<WsCheck>, String> {
     .await
 }
 
+/// A PR addressed on GitHub alone (no local worktree): a Code Review
+/// feature that wasn't checked out yet.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemotePr {
+    pub repo: String,
+    pub owner_repo: String,
+    pub number: u64,
+}
+
+/// CI checks for a list of PRs straight from GitHub, in parallel.
+#[tauri::command]
+pub async fn pr_group_checks(prs: Vec<RemotePr>) -> Result<Vec<WsCheck>, String> {
+    blocking(move || {
+        let rows: Vec<WsCheck> = std::thread::scope(|scope| {
+            let handles: Vec<_> = prs
+                .into_iter()
+                .map(|pr| {
+                    scope.spawn(move || {
+                        let checks = github::pr_checks(&pr.owner_repo, pr.number).unwrap_or_default();
+                        let status = aggregate(&checks);
+                        WsCheck {
+                            repo: pr.repo,
+                            pr_number: pr.number,
+                            checks,
+                            status,
+                        }
+                    })
+                })
+                .collect();
+            handles.into_iter().filter_map(|h| h.join().ok()).collect()
+        });
+        Ok(rows)
+    })
+    .await
+}
+
 /// Re-runs a failed workflow run (failed jobs only). `link` is the check's
 /// job URL — owner/repo and run id are both extracted from it.
 #[tauri::command]
