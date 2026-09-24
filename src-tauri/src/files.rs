@@ -58,11 +58,13 @@ pub async fn list_files(workspace: String, repo: String, path: String) -> Result
             let p = e.path();
             FileNode {
                 name: e.file_name().to_string_lossy().to_string(),
+                // Forward slashes on every OS, like git and the language
+                // servers: the same file must map to the same tab.
                 path: p
                     .strip_prefix(&base)
                     .unwrap_or(&p)
                     .to_string_lossy()
-                    .to_string(),
+                    .replace('\\', "/"),
                 is_dir: p.is_dir(),
             }
         })

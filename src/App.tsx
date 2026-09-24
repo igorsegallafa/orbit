@@ -24,6 +24,7 @@ import { RalphView } from "./components/RalphView";
 import { RepoPage } from "./pages/RepoPage";
 import { WorkspaceCreateModal } from "./components/WorkspaceCreateModal";
 import { useRepoBriefs } from "./lib/useRepoBriefs";
+import * as lsp from "./lib/lsp/manager";
 import { ToastHost, toast } from "./components/Toast";
 import { useRalphRunning } from "./lib/useRalphRunning";
 import { startUpdateChecks } from "./lib/updater";
@@ -467,6 +468,33 @@ function App() {
 
    const openShellTerminal = (wsName: string) => newTerminal(wsName, "shell", null);
 
+  /** A one-off command (e.g. cmake) in a terminal tab, in a repo's folder. */
+  const runInTerminal = (wsName: string, label: string, cmd: string, args: string[], repo: string) => {
+    const taken = tabs
+      .filter((t): t is Extract<Tab, { kind: "terminal" }> => t.kind === "terminal")
+      .map((t) => t.terminal.sessionName);
+    openTab({
+      kind: "terminal",
+      terminal: {
+        id: `tm:${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        workspace: wsName,
+        label,
+        sessionName: taken.includes(label) ? randomSessionName(taken) : label,
+        cmd,
+        args,
+        repo,
+      },
+    });
+  };
+
+  // Definitions in other files (language servers) open as editor tabs.
+  const openFileAtRef = useRef<(ctx: lsp.DocContext, line: number, column: number) => void>(() => undefined);
+  openFileAtRef.current = (ctx, line, column) => {
+    openFileTab(ctx.workspace, ctx.repo, ctx.path);
+    revealInEditor({ workspace: ctx.workspace, repo: ctx.repo, path: ctx.path, line, col: column, length: 0 });
+  };
+  useEffect(() => lsp.setFileOpener((ctx, line, column) => openFileAtRef.current(ctx, line, column)), []);
+
   // Opens an interactive agent session seeded with a prompt (grill-me
   // interviews, plan application). claude takes the prompt as argv; the
   // opencode TUI types it in after boot.
@@ -724,6 +752,7 @@ function App() {
           repo={tab.repo}
           path={tab.path}
           onError={setError}
+          onRunInTerminal={(label, cmd, args, repo) => runInTerminal(tab.workspace, label, cmd, args, repo)}
           onApplyPlan={(agent, model) => {
             const prompt = `Read PLAN.md in this directory and implement it: work through the "- [ ]" tasks in order, marking each done (change to "- [x]") as you finish it. Commit nothing unless asked.`;
             openPromptedSession(tab.workspace, agent, model, prompt);

@@ -124,6 +124,21 @@ pub struct Config {
     /// Folder for workspaces and their worktrees (default <root>/workspaces).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspaces_dir: Option<String>,
+    /// Per-language server settings, keyed by language id ("cpp", "rust"…);
+    /// languages without an entry use the first server found on PATH.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub language_servers: HashMap<String, LanguageServerSetting>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguageServerSetting {
+    /// Command line replacing the detected server ("clangd --log=error").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// No server for this language (plain highlighting only).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disabled: bool,
 }
 
 fn non_empty(p: &Option<String>) -> Option<PathBuf> {

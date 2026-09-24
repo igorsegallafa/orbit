@@ -4,7 +4,22 @@ import type * as Monaco from "monaco-editor";
 import { invoke } from "@tauri-apps/api/core";
 import { MarkdownPreview } from "./MarkdownPreview";
 import { Select } from "./Select";
-import { CodeViewIcon, EyeIcon } from "./Icons";
+import { CodeViewIcon, EyeIcon, RefreshIcon } from "./Icons";
+import { SymbolSearch } from "./SymbolSearch";
+import { tooltip } from "./Tooltip";
+import * as lsp from "../lib/lsp/manager";
+
+interface CppSetup {
+  compileCommands: string | null;
+  cmake: boolean;
+  cmakeInstalled: boolean;
+  ninjaInstalled: boolean;
+  presets: string[];
+}
+
+// Per repo folder: clangd's build setup, and banners the user dismissed.
+const cppSetups = new Map<string, CppSetup>();
+const cppDismissed = new Set<string>();
 
 /**
  * "orbit-dark": Monaco theme matching the app's palette (bg #0d0f13,
@@ -24,6 +39,21 @@ function defineOrbitTheme(monaco: typeof Monaco): void {
       { token: "function", foreground: "82aaff" },
       { token: "variable", foreground: "e6e8ec" },
       { token: "delimiter", foreground: "9aa1ad" },
+      // Semantic tokens from language servers (what a name *is*, not how it looks).
+      { token: "namespace", foreground: "7fdbca" },
+      { token: "class", foreground: "7aa7ff" },
+      { token: "struct", foreground: "7aa7ff" },
+      { token: "interface", foreground: "7aa7ff" },
+      { token: "enum", foreground: "7aa7ff" },
+      { token: "typeParameter", foreground: "7aa7ff", fontStyle: "italic" },
+      { token: "concept", foreground: "c792ea" },
+      { token: "method", foreground: "82aaff" },
+      { token: "macro", foreground: "f78c6c" },
+      { token: "parameter", foreground: "e6c07b" },
+      { token: "property", foreground: "b4c5e4" },
+      { token: "enumMember", foreground: "f7b267" },
+      { token: "variable.readonly", foreground: "f7b267" },
+      { token: "label", foreground: "9aa1ad" },
     ],
     colors: {
       "editor.background": "#0d0f13",
@@ -86,6 +116,8 @@ interface Props {
   onError: (msg: string) => void;
   /** Opens an agent terminal to execute this plan (PLAN.md only). */
   onApplyPlan?: (agent: string, model: string) => void;
+  /** Runs a command in a terminal tab in this repo's folder (e.g. cmake). */
+  onRunInTerminal?: (label: string, cmd: string, args: string[], repo: string) => void;
 }
 
 /**
@@ -95,7 +127,7 @@ interface Props {
  * + model and launch a terminal session that executes the plan.
  * The file tree lives in the fixed right dock (FileTreePanel).
  */
-export function EditorPane({ workspace, repo, path, onError, onApplyPlan }: Props) {
+export function EditorPane({ workspace, repo, path, onError, onApplyPlan, onRunInTerminal }: Props) {
   const [content, setContent] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
   const [mode, setMode] = useState<"editor" | "preview">("editor");
@@ -103,6 +135,15 @@ export function EditorPane({ workspace, repo, path, onError, onApplyPlan }: Prop
   const [models, setModels] = useState<string[]>([]);
   const saveRef = useRef<(() => void) | null>(null);
   const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null);
+  // The file's real location: language servers speak in file URIs.
+  const [absPath, setAbsPath] = useState<string | null>(null);
+  const [lspStatus, setLspStatus] = useState<lsp.LspStatus>({ state: "off", language: null, server: null, progress: null, error: null });
+  const [symbolsOpen, setSymbolsOpen] = useState(false);
+  const [cppSetup, setCppSetup] = useState<CppSetup | null>(null);
+  const [cppPreset, setCppPreset] = useState<string>("");
+  const [cppGenerating, setCppGenerating] = useState(false);
+  const lspOff = useRef<(() => void)[]>([]);
+  const setupKey = `${workspace}|${repo}`;
 
   const applyReveal = () => {
     const key = revealKey({ workspace, repo, path });
@@ -175,19 +216,67 @@ export function EditorPane({ workspace, repo, path, onError, onApplyPlan }: Prop
         setContent(null);
         onError(String(e));
       });
+    invoke<string>("node_abs_path", { workspace, repo, path })
+      .then(setAbsPath)
+      .catch(() => setAbsPath(null));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspace, repo, path]);
+
+  // Leaving the tab: the language server stops tracking the file.
+  useEffect(() => () => lspOff.current.forEach((off) => off()), []);
+
+  // clangd without a compilation database guesses includes and flags:
+  // check once per repo folder, offer to generate one.
+  const cppReady = lspStatus.language === "cpp" && lspStatus.state === "ready";
+  useEffect(() => {
+    if (!cppReady || !repo) return;
+    const apply = (s: CppSetup) => {
+      setCppSetup(s);
+      setCppPreset(s.presets.find((p) => /debug/i.test(p)) ?? s.presets[0] ?? "");
+    };
+    const cached = cppSetups.get(setupKey);
+    if (cached) {
+      apply(cached);
+      return;
+    }
+    invoke<CppSetup>("lsp_cpp_setup", { workspace, repo })
+      .then((s) => {
+        cppSetups.set(setupKey, s);
+        apply(s);
+      })
+      .catch(() => null);
+  }, [cppReady, workspace, repo, setupKey]);
 
   const save = async () => {
     if (content === null) return;
     try {
       await invoke("write_file", { workspace, repo, path, content });
       setDirty(false);
+      const model = editorRef.current?.getModel();
+      if (model) lsp.saved(model);
     } catch (e) {
       onError(String(e));
     }
   };
   saveRef.current = save;
+
+  const restartServer = () => {
+    const model = editorRef.current?.getModel();
+    if (!model) return;
+    cppSetups.delete(setupKey);
+    setCppSetup(null);
+    setCppGenerating(false);
+    void lsp.restart(model);
+  };
+
+  const generateCompileCommands = () => {
+    if (!cppSetup || !onRunInTerminal) return;
+    const args = cppPreset
+      ? ["--preset", cppPreset, "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"]
+      : ["-S", ".", "-B", "build", ...(cppSetup.ninjaInstalled ? ["-G", "Ninja"] : []), "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"];
+    onRunInTerminal("cmake", "cmake", args, repo);
+    setCppGenerating(true);
+  };
 
   const onMount: OnMount = (editor, monaco) => {
     // Belt & suspenders: ensure the theme is applied even if beforeMount
@@ -200,7 +289,26 @@ export function EditorPane({ workspace, repo, path, onError, onApplyPlan }: Prop
       setContent(editor.getValue());
       setDirty(true);
     });
+    editor.addAction({
+      id: "orbit.workspaceSymbols",
+      label: "Go to Symbol in Project…",
+      keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyT],
+      run: () => setSymbolsOpen(true),
+    });
+    const model = editor.getModel();
+    if (model && path) {
+      const refresh = () => setLspStatus(lsp.status(model));
+      lspOff.current.push(lsp.attach(model, { workspace, repo, path }), lsp.onStatus(model, refresh));
+      refresh();
+    }
   };
+
+  const hint = (text: string) => ({
+    onMouseEnter: (e: React.MouseEvent) => tooltip.show(text, e),
+    onMouseLeave: () => tooltip.hide(),
+  });
+  const showCppBanner =
+    cppReady && !!cppSetup && !cppSetup.compileCommands && !cppDismissed.has(setupKey) && !!onRunInTerminal;
 
   return (
     <div className="editor-pane">
@@ -259,21 +367,78 @@ export function EditorPane({ workspace, repo, path, onError, onApplyPlan }: Prop
               </button>
             </span>
           )}
+          <LspChip status={lspStatus} onRestart={restartServer} hint={hint} />
           <button className="btn-mini" onClick={save} disabled={!dirty}>
             Save
           </button>
         </span>
       </div>
+      {showCppBanner && (
+        <div className="editor-banner">
+          <span>
+            <strong>clangd has no compile_commands.json</strong> for {repo}, so it guesses include paths and flags: some
+            navigation and errors will be off.
+          </span>
+          {cppGenerating ? (
+            <>
+              <span className="editor-banner-note">When CMake finishes in the terminal:</span>
+              <button className="btn-mini" onClick={restartServer}>
+                Restart clangd
+              </button>
+            </>
+          ) : cppSetup!.cmake && cppSetup!.cmakeInstalled ? (
+            <>
+              {cppSetup!.presets.length > 0 && (
+                <Select
+                  className="editor-banner-select"
+                  value={cppPreset}
+                  options={cppSetup!.presets.map((p) => ({ value: p, label: p }))}
+                  onChange={setCppPreset}
+                />
+              )}
+              <button
+                className="btn-mini"
+                onClick={generateCompileCommands}
+                {...hint(
+                  cppPreset
+                    ? `cmake --preset ${cppPreset} -DCMAKE_EXPORT_COMPILE_COMMANDS=ON`
+                    : "cmake -S . -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON (needs the Ninja or Makefile generator)",
+                )}
+              >
+                Generate with CMake
+              </button>
+            </>
+          ) : (
+            <span className="editor-banner-note">
+              {cppSetup!.cmake ? "Install CMake to generate it." : "Generate it with your build system (CMake, or bear -- make)."}
+            </span>
+          )}
+          <button
+            className="icon-button editor-banner-close"
+            aria-label="Dismiss"
+            onClick={() => {
+              cppDismissed.add(setupKey);
+              setCppSetup({ ...cppSetup! });
+            }}
+          >
+            ×
+          </button>
+        </div>
+      )}
+      {symbolsOpen && editorRef.current?.getModel() && (
+        <SymbolSearch model={editorRef.current.getModel()!} onClose={() => setSymbolsOpen(false)} />
+      )}
       {content !== null ? (
         mode === "preview" && isMarkdown ? (
           <MarkdownPreview content={content} />
         ) : (
           <div className="editor-host">
+            {absPath && (
             <Editor
               height="100%"
               theme="orbit-dark"
               beforeMount={beforeMount}
-              path={`${workspace}/${repo}/${path}`}
+              path={lsp.fileUri(absPath)}
               value={content}
               onMount={onMount}
               options={{
@@ -281,9 +446,11 @@ export function EditorPane({ workspace, repo, path, onError, onApplyPlan }: Prop
                 minimap: { enabled: false },
                 scrollBeyondLastLine: false,
                 automaticLayout: true,
+                "semanticHighlighting.enabled": true,
               }}
               loading={<div className="table-loading"><span className="spinner" /> Loading…</div>}
             />
+            )}
           </div>
         )
       ) : (
@@ -295,4 +462,48 @@ export function EditorPane({ workspace, repo, path, onError, onApplyPlan }: Prop
       )}
     </div>
   );
+}
+
+/** Language server state for the open file, in the file bar. */
+function LspChip({
+  status,
+  onRestart,
+  hint,
+}: {
+  status: lsp.LspStatus;
+  onRestart: () => void;
+  hint: (text: string) => { onMouseEnter: (e: React.MouseEvent) => void; onMouseLeave: () => void };
+}) {
+  switch (status.state) {
+    case "off":
+      return null;
+    case "starting":
+      return (
+        <span className="lsp-chip">
+          <span className="spinner" /> Starting language server
+        </span>
+      );
+    case "missing":
+      return (
+        <span className="lsp-chip lsp-chip-missing" {...hint(`${status.error ?? ""}\n\nSettings → Languages lets you point Orbit at a server.`)}>
+          No language server
+        </span>
+      );
+    case "exited":
+      return (
+        <button className="btn-plain lsp-chip lsp-chip-exited" onClick={onRestart} {...hint(status.error ?? "")}>
+          {status.server} stopped · Restart
+        </button>
+      );
+    case "ready":
+      return (
+        <span className="lsp-chip lsp-chip-ready" {...hint(status.progress ?? `${status.server}: go to definition (F12), references (Shift+F12), symbols (Ctrl+Shift+O, Ctrl+T)`)}>
+          {status.progress ? <span className="spinner" /> : <span className="lsp-dot" />}
+          <span className="lsp-chip-text">{status.progress ? `${status.server} · ${status.progress}` : status.server}</span>
+          <button className="btn-plain lsp-chip-restart" aria-label="Restart language server" onClick={onRestart}>
+            <RefreshIcon size={11} />
+          </button>
+        </span>
+      );
+  }
 }

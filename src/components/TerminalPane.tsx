@@ -14,6 +14,8 @@ export interface TerminalTab {
   sessionName: string; // display name (renamable)
   cmd: string | null; // null = interactive shell
   args?: string[]; // extra argv (claude initial prompt)
+  /** Run in this repo's folder instead of the workspace root (e.g. cmake). */
+  repo?: string;
   /**
    * Text typed into the PTY right after launch (opencode TUI takes no
    * initial prompt as argv, so we inject it as keystrokes).
@@ -149,7 +151,7 @@ export function TerminalPane({ tab, onError, onStatusChange, onSignal }: Props) 
       .then(({ args, initialInput }) =>
         disposed
           ? null
-          : invoke<number>("pty_spawn", { workspace: tab.workspace, cmd: tab.cmd, args, cols: term.cols, rows: term.rows, key: tab.id }).then((id) => ({ id, initialInput })),
+          : invoke<number>("pty_spawn", { workspace: tab.workspace, repo: tab.repo ?? null, cmd: tab.cmd, args, cols: term.cols, rows: term.rows, key: tab.id }).then((id) => ({ id, initialInput })),
       )
       .then((spawned) => {
         if (!spawned) return;

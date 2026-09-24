@@ -9,6 +9,7 @@ mod github;
 mod health;
 mod integrations;
 mod links;
+mod lsp;
 mod proc;
 mod pty;
 mod ralph;
@@ -179,6 +180,15 @@ pub fn run() {
             files::reveal_node,
             files::node_abs_path,
             files::import_files,
+            lsp::lsp_start,
+            lsp::lsp_send,
+            lsp::lsp_stop,
+            lsp::lsp_status,
+            lsp::lsp_available,
+            lsp::lsp_log,
+            lsp::lsp_configure,
+            lsp::lsp_read_file,
+            lsp::lsp_cpp_setup,
             pty::pty_spawn,
             pty::pty_write,
             pty::pty_resize,
@@ -189,6 +199,12 @@ pub fn run() {
             pty::claude_session_exists,
             agent_hooks::claude_rate_limits,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_, event| {
+            // Language servers are Orbit's children: don't leave them running.
+            if let tauri::RunEvent::Exit = event {
+                lsp::shutdown_all();
+            }
+        });
 }
