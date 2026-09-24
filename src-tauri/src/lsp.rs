@@ -262,6 +262,9 @@ pub struct StartInfo {
     /// Absolute folder the server works in (the repo's worktree or clone).
     pub root: String,
     pub command: String,
+    /// The binary's name ("clangd"), for display: `command` may be a path
+    /// with spaces ("C:\Program Files\LLVM\bin\clangd.exe …").
+    pub server: String,
 }
 
 /// Reads LSP frames ("Content-Length: N\r\n\r\n<json>") until EOF.
@@ -376,7 +379,8 @@ pub fn start(app: &AppHandle, workspace: &str, repo: &str, language_id: &str) ->
         id,
         Running { language: lang.id.to_string(), root: root.clone(), command: command.clone(), started: now(), child, stdin, log },
     );
-    Ok(StartInfo { id, root: root.to_string_lossy().to_string(), command })
+    let server = Path::new(&bin).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or(bin);
+    Ok(StartInfo { id, root: root.to_string_lossy().to_string(), command, server })
 }
 
 pub fn send(id: u32, message: &str) -> Result<(), String> {

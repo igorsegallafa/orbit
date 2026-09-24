@@ -230,16 +230,19 @@ export function EditorPane({ workspace, repo, path, onError, onApplyPlan, onRunI
   const cppReady = lspStatus.language === "cpp" && lspStatus.state === "ready";
   useEffect(() => {
     if (!cppReady || !repo) return;
+    const apply = (s: CppSetup) => {
+      setCppSetup(s);
+      setCppPreset(s.presets.find((p) => /debug/i.test(p)) ?? s.presets[0] ?? "");
+    };
     const cached = cppSetups.get(setupKey);
     if (cached) {
-      setCppSetup(cached);
+      apply(cached);
       return;
     }
     invoke<CppSetup>("lsp_cpp_setup", { workspace, repo })
       .then((s) => {
         cppSetups.set(setupKey, s);
-        setCppSetup(s);
-        setCppPreset(s.presets.find((p) => /debug/i.test(p)) ?? s.presets[0] ?? "");
+        apply(s);
       })
       .catch(() => null);
   }, [cppReady, workspace, repo, setupKey]);

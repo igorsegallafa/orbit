@@ -10,6 +10,8 @@ interface StartInfo {
   id: number;
   root: string;
   command: string;
+  /** Binary name ("clangd"), even when `command` is a path with spaces. */
+  server: string;
 }
 
 interface Pending {
@@ -100,6 +102,7 @@ export class LspClient {
   readonly root: string;
   readonly rootUri: string;
   readonly command: string;
+  private readonly bin: string;
   readonly language: string;
   capabilities: any = {};
   state: ClientState = "starting";
@@ -118,6 +121,7 @@ export class LspClient {
     this.root = info.root;
     this.rootUri = monaco.Uri.file(info.root).toString();
     this.command = info.command;
+    this.bin = info.server;
     this.language = language;
   }
 
@@ -141,14 +145,13 @@ export class LspClient {
   /** "clangd", or for launcher commands ("npx --yes typescript-language-server@4
    *  --stdio") the server they launch. */
   get serverName(): string {
-    const words = this.command.split(" ").filter(Boolean);
-    const base = (w: string) => w.split(/[\\/]/).pop()!.replace(/\.(exe|cmd|bat)$/i, "");
     const launchers = ["npx", "node", "bunx", "pnpm", "yarn", "uvx", "pipx", "python", "python3", "py", "dotnet", "cmd"];
-    if (launchers.includes(base(words[0] ?? "").toLowerCase())) {
-      const target = words.slice(1).find((w) => !w.startsWith("-") && w.toLowerCase() !== "exec" && w.toLowerCase() !== "run");
-      if (target) return base(target).replace(/(.)@[^@]*$/, "$1");
-    }
-    return base(words[0] ?? "");
+    if (!launchers.includes(this.bin.toLowerCase())) return this.bin;
+    // The launcher's first plain argument is the server it runs.
+    const words = this.command.split(" ").filter(Boolean);
+    const at = words.findIndex((w) => w.split(/[\\/]/).pop()!.replace(/\.(exe|cmd|bat)$/i, "").toLowerCase() === this.bin.toLowerCase());
+    const target = words.slice(at + 1).find((w) => !w.startsWith("-") && !["exec", "run", "-m"].includes(w.toLowerCase()));
+    return target ? target.split(/[\\/]/).pop()!.replace(/(.)@[^@]*$/, "$1") : this.bin;
   }
 
   /** Changes to state or progress (status chips re-render). */
