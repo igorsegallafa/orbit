@@ -106,6 +106,12 @@ fn read_event(stream: TcpStream, token: &str) -> Option<AgentEvent> {
     reader.read_exact(&mut body).ok()?;
     let mut out = stream;
     let _ = out.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    // Close gracefully: send FIN, then wait for the client to hang up. A bare
+    // drop can make Windows reset the connection, and the client reading the
+    // response then fails with "connection forcibly closed" (10054).
+    let _ = out.shutdown(std::net::Shutdown::Write);
+    let _ = out.set_read_timeout(Some(Duration::from_secs(1)));
+    let _ = std::io::copy(&mut reader.take(64 * 1024), &mut std::io::sink());
     parse_event(route(&path, token)?, &body)
 }
 
