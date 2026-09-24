@@ -1,0 +1,39 @@
+name: Build cache
+
+# GitHub only lets a run restore caches from its own ref or the default
+# branch, so a release (a new tag each time) never sees the previous one's.
+# Building on main leaves a cache every release can start from.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: build-cache
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+          shared-key: tauri-release
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      # Same release build the Release workflow runs, minus installers and signing.
+      - name: Build
+        run: npm run tauri build -- --no-bundle
