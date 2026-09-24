@@ -189,6 +189,53 @@ pub fn checkout(repo_dir: &Path, branch: &str) -> Result<(), String> {
     git_in(repo_dir, &["checkout", branch])
 }
 
+/// The rebase / merge / cherry-pick / revert paused in the repo whose git
+/// dir is `git_dir`, if any.
+pub fn operation_in_progress(git_dir: &Path) -> Option<String> {
+    let op = if git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists() {
+        "rebase"
+    } else if git_dir.join("MERGE_HEAD").exists() {
+        "merge"
+    } else if git_dir.join("CHERRY_PICK_HEAD").exists() {
+        "cherry-pick"
+    } else if git_dir.join("REVERT_HEAD").exists() {
+        "revert"
+    } else {
+        return None;
+    };
+    Some(op.to_string())
+}
+
+/// `operation_in_progress` for the checkout at `dir` (worktrees have their
+/// own git dir).
+pub fn operation(dir: &Path) -> Option<String> {
+    let git_dir = git_out(dir, &["rev-parse", "--absolute-git-dir"]).ok()?;
+    operation_in_progress(Path::new(git_dir.trim()))
+}
+
+/// Stash message for work shelved when Orbit switches a checkout away from
+/// `branch`; it's re-applied when Orbit switches back.
+fn autostash_message(branch: &str) -> String {
+    format!("orbit autostash: {branch}")
+}
+
+/// Shelves uncommitted work (untracked files included) left on `branch`.
+pub fn autostash(dir: &Path, branch: &str) -> Result<(), String> {
+    git_in(dir, &["stash", "push", "--include-untracked", "-m", &autostash_message(branch)])
+}
+
+/// Re-applies the work `autostash` shelved on `branch`. Ok(false) when there
+/// is none. On conflict git keeps the stash entry, so nothing is lost.
+pub fn autostash_restore(dir: &Path, branch: &str) -> Result<bool, String> {
+    let msg = autostash_message(branch);
+    // %gs reads "On <branch>: <message>".
+    let list = git_out(dir, &["stash", "list", "--format=%gs"]).unwrap_or_default();
+    let Some(index) = list.lines().position(|l| l.ends_with(&format!(": {msg}"))) else {
+        return Ok(false);
+    };
+    git_in(dir, &["stash", "pop", &format!("stash@{{{index}}}")]).map(|_| true)
+}
+
 /// Removes the worktree at `path` from the repo cloned at `repo_dir`,
 /// pruning stale worktree metadata. Falls back to deleting the directory
 /// when git refuses (e.g. ignored files like node_modules inside).

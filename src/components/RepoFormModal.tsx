@@ -17,6 +17,7 @@ const emptyForm = {
   buildOutput: "",
   shared: "",
   branchOnly: false,
+  autoSwitch: false,
   path: "",
 };
 type Form = typeof emptyForm;
@@ -40,6 +41,7 @@ function toForm(s: Service): Form {
     buildOutput: s.buildOutput ?? "",
     shared: (s.buildOutputShared ?? []).join(", "),
     branchOnly: s.worktree === false,
+    autoSwitch: !!s.autoSwitch,
     path: s.path ?? "",
   };
 }
@@ -56,6 +58,7 @@ function toService(f: Form): Service {
     buildOutput: f.buildOutput.trim() || undefined,
     buildOutputShared: shared.length ? shared : undefined,
     worktree: !f.branchOnly,
+    autoSwitch: f.branchOnly && f.autoSwitch ? true : undefined,
     path: f.path.trim() || undefined,
   };
 }
@@ -229,6 +232,22 @@ export function RepoFormModal({ service, cloned, folders, onSaved, onClose, onEr
                     </span>
                   </div>
                 </div>
+                {form.branchOnly && (
+                  <>
+                    <label className="check-item">
+                      <CheckBox
+                        label="Switch branches automatically"
+                        checked={form.autoSwitch}
+                        onChange={(v) => setForm({ ...form, autoSwitch: v })}
+                      />
+                      Switch branches automatically
+                    </label>
+                    <span className="field-hint">
+                      Workspaces share this clone. Opening one puts the clone back on its branch without asking, unless there are
+                      uncommitted changes. Off: Orbit only warns.
+                    </span>
+                  </>
+                )}
               </div>
             </div>
           )}
