@@ -147,6 +147,21 @@ export function WorkspaceDetailPage({
     [workspace.name, workspace.repos, loadPrs, loadChecks, onError]
   );
 
+  // New commits on the remote branch (e.g. a checked-out PR got updated).
+  const [pulling, setPulling] = useState<string | null>(null);
+  const pull = async (repo: string) => {
+    setPulling(repo);
+    try {
+      await invoke("ws_pull", { workspace: workspace.name, repo });
+      toast.success(`Pulled ${repo}`);
+      await load(false);
+    } catch (e) {
+      toast.error(`Pull failed in ${repo}`, { description: String(e) });
+    } finally {
+      setPulling(null);
+    }
+  };
+
   useEffect(() => {
     setStatuses(null);
     load(false);
@@ -455,11 +470,24 @@ export function WorkspaceDetailPage({
                         </span>
                       )
                     )}
-                    {st.behind > 0 && (
-                      <span className="ws-badge ws-badge-warn" {...hint(`${st.behind} commit(s) behind the remote`)}>
-                        ↓ {st.behind}
-                      </span>
-                    )}
+                    {st.behind > 0 &&
+                      (st.ahead === 0 ? (
+                        <button
+                          className="ws-badge ws-badge-warn"
+                          disabled={pulling === st.repo}
+                          {...hint(`${st.behind} new commit(s) on the remote — click to pull them`)}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            pull(st.repo);
+                          }}
+                        >
+                          {pulling === st.repo ? "Pulling…" : `↓ ${st.behind} Pull`}
+                        </button>
+                      ) : (
+                        <span className="ws-badge ws-badge-warn" {...hint(`${st.behind} commit(s) behind the remote`)}>
+                          ↓ {st.behind}
+                        </span>
+                      ))}
                   </div>
                   <span className="ws-repo-open">Browse files →</span>
                 </div>

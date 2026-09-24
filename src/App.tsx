@@ -16,6 +16,7 @@ import { FileTreePanel } from "./components/FileTreePanel";
 import { ReviewPane } from "./components/ReviewPane";
 import { CommitReviewPane } from "./components/CommitReviewPane";
 import { PrReviewPane } from "./components/PrReviewPane";
+import { PrCheckoutModal, workspaceForPrs } from "./components/PrCheckoutModal";
 import { SearchEverywhereModal } from "./components/SearchEverywhereModal";
 import { UsageBar } from "./components/UsageBar";
 import { TooltipHost, tooltip } from "./components/Tooltip";
@@ -142,6 +143,7 @@ function App() {
   const { menu, setMenu, openFromEvent } = useContextMenu<Workspace>();
   const tabStripRef = useRef<HTMLDivElement>(null);
   const tabMenu = useContextMenu<Tab>();
+  const [checkoutPrs, setCheckoutPrs] = useState<PullRequest[] | null>(null);
 
   const loadWorkspaces = useCallback(async () => {
     try {
@@ -816,7 +818,15 @@ function App() {
       );
     }
     if (tab.kind === "pr") {
-      return <PrReviewPane prs={tab.prs} onError={setError} />;
+      return (
+        <PrReviewPane
+          prs={tab.prs}
+          workspace={workspaceForPrs(tab.prs, workspaces)}
+          onCheckout={() => setCheckoutPrs(tab.prs)}
+          onOpenWorkspace={openWorkspaceTab}
+          onError={setError}
+        />
+      );
     }
     if (tab.kind === "editor") {
       return (
@@ -853,6 +863,9 @@ function App() {
             setNavPage({ kind: "dashboard" });
             openTab({ kind: "pr", prs });
           }}
+          workspaces={workspaces}
+          onCheckout={setCheckoutPrs}
+          onOpenWorkspace={openWorkspaceTab}
           onError={setError}
         />
       );
@@ -1299,6 +1312,17 @@ function App() {
             onClose={() => setMenu(null)}
           />
         )}
+      {checkoutPrs && (
+        <PrCheckoutModal
+          prs={checkoutPrs}
+          workspaces={workspaces}
+          onCheckedOut={(ws) => {
+            loadWorkspaces();
+            openWorkspaceTab(ws);
+          }}
+          onClose={() => setCheckoutPrs(null)}
+        />
+      )}
       {tabMenu.menu && (
         <ContextMenu
           x={tabMenu.menu.x}

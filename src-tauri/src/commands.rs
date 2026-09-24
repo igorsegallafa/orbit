@@ -308,6 +308,27 @@ pub async fn create_workspace_from_branch(name: String, branch: String) -> Resul
     .await
 }
 
+/// What checking out these PRs would do per repo (clone first, fork, dirty clone).
+#[tauri::command]
+pub async fn pr_checkout_plan(prs: Vec<workspace::PrCheckout>) -> Result<Vec<workspace::PrCheckoutPlan>, String> {
+    blocking(move || workspace::plan_pr_checkout(&prs)).await
+}
+
+/// Creates a workspace from pull requests (Code Review → Check out).
+#[tauri::command]
+pub async fn pr_checkout(name: String, base: String, prs: Vec<workspace::PrCheckout>) -> Result<CheckoutResult, String> {
+    blocking(move || {
+        workspace::create_from_prs(&name, &base, &prs).map(|(workspace, failures)| CheckoutResult { workspace, failures })
+    })
+    .await
+}
+
+/// Fast-forwards a workspace repo to its upstream (new commits on the PR).
+#[tauri::command]
+pub async fn ws_pull(workspace: String, repo: String) -> Result<(), String> {
+    blocking(move || git::pull_ff(&worktree_of(&workspace, &repo)?)).await
+}
+
 /// Builds a repo inside a workspace (or its base clone), streaming
 /// `build-output {key, line}` events.
 #[tauri::command]

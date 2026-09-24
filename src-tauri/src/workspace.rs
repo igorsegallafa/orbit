@@ -361,6 +361,148 @@ pub fn create_from_branch(name: &str, branch: &str) -> Result<(Workspace, Vec<St
     Ok((ws, failures))
 }
 
+// ---------- Workspace from pull requests (Code Review → Check out) ----------
+
+/// One PR to check out: a feature can span repos, one PR each.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PrCheckout {
+    pub repo: String,
+    pub number: u64,
+    pub branch: String,
+    pub url: String,
+}
+
+/// What checking out a PR will do in its repo, shown before confirming.
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PrCheckoutPlan {
+    pub repo: String,
+    /// The repo is configured in Orbit.
+    pub known: bool,
+    /// Already cloned (otherwise it's cloned first).
+    pub cloned: bool,
+    /// The branch is on origin; false = a fork's PR (read-only `pr-<n>` branch).
+    pub on_origin: bool,
+    /// Branch-only repo: checked out in the clone itself, which must be clean.
+    pub branch_only: bool,
+    pub dirty: bool,
+}
+
+pub fn plan_pr_checkout(prs: &[PrCheckout]) -> Result<Vec<PrCheckoutPlan>, String> {
+    let cfg = Config::load()?;
+    Ok(std::thread::scope(|scope| {
+        let handles: Vec<_> = prs
+            .iter()
+            .map(|pr| {
+                let svc = cfg.services.iter().find(|s| s.name == pr.repo);
+                scope.spawn(move || {
+                    let dir = svc.and_then(|s| clone_dir(s).ok());
+                    let cloned = dir.as_deref().is_some_and(is_cloned);
+                    PrCheckoutPlan {
+                        repo: pr.repo.clone(),
+                        known: svc.is_some(),
+                        cloned,
+                        // Uncloned repos can't be asked yet; forks are rare.
+                        on_origin: !cloned || git::remote_has_branch(dir.as_deref().unwrap(), &pr.branch),
+                        branch_only: svc.is_some_and(|s| !s.worktree),
+                        dirty: cloned && svc.is_some_and(|s| !s.worktree) && git::is_dirty(dir.as_deref().unwrap()),
+                    }
+                })
+            })
+            .collect();
+        handles.into_iter().filter_map(|h| h.join().ok()).collect()
+    }))
+}
+
+/// Creates a workspace on the branches of `prs` (one per repo): tracking
+/// origin's branch, so fixes can be pushed to the PR, or on a read-only
+/// `pr-<n>` branch for a fork's PR. Clones missing repos. Per-repo problems
+/// are returned without aborting the others; the workspace remembers the PRs.
+pub fn create_from_prs(name: &str, base: &str, prs: &[PrCheckout]) -> Result<(Workspace, Vec<String>), String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("workspace name is required".into());
+    }
+    if repo_scope(name).is_some() {
+        return Err("workspace names can't start with '@' (reserved for repository views)".into());
+    }
+    if prs.is_empty() {
+        return Err("no pull request to check out".into());
+    }
+    let ws_dir = ws_dir(name)?;
+    if ws_dir.exists() {
+        return Err(format!("workspace '{name}' already exists"));
+    }
+    let cfg = Config::load()?;
+
+    type Outcome = Result<(String, String, Option<String>), String>; // (repo, local branch, note)
+    let results: Vec<Outcome> = std::thread::scope(|scope| {
+        let handles: Vec<_> = prs
+            .iter()
+            .map(|pr| {
+                let svc = cfg.services.iter().find(|s| s.name == pr.repo);
+                let wt = ws_dir.join(&pr.repo);
+                scope.spawn(move || -> Outcome {
+                    let svc = svc.ok_or_else(|| format!("{}: not a repository in Orbit", pr.repo))?;
+                    let clone = clone_dir(svc)?;
+                    if !is_cloned(&clone) {
+                        git::clone(&svc.repo, &clone)?;
+                    }
+                    git::fetch(&clone)?;
+                    let on_origin = git::remote_has_branch(&clone, &pr.branch);
+                    let target = if svc.worktree { Some(wt.as_path()) } else { None };
+                    if !svc.worktree && git::is_dirty(&clone) {
+                        return Err(format!("{} has uncommitted changes in {}", svc.name, clone.display()));
+                    }
+                    let (local, note) = if on_origin {
+                        let kept = git::checkout_tracking(&clone, &pr.branch, target)?;
+                        (pr.branch.clone(), kept.map(|k| format!("{}: {k}", svc.name)))
+                    } else {
+                        let local = git::checkout_pr_head(&clone, pr.number, target)?;
+                        let note = format!("{}: #{} comes from a fork, checked out as {local} (no branch to push to)", svc.name, pr.number);
+                        (local, Some(note))
+                    };
+                    if svc.worktree {
+                        links::link_shared(svc, &clone, &wt)?;
+                        links::copy_worktreeinclude(&clone, &wt);
+                    } else {
+                        links::link_dir(&clone, &wt)?;
+                    }
+                    Ok((svc.name.clone(), local, note))
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err("checkout thread panicked".into()))).collect()
+    });
+
+    let mut ready: Vec<(String, String)> = Vec::new();
+    let mut notes = Vec::new();
+    for (pr, r) in prs.iter().zip(results) {
+        match r {
+            Ok((repo, local, note)) => {
+                ready.push((repo, local));
+                notes.extend(note);
+            }
+            Err(e) => notes.push(if e.starts_with(&pr.repo) { e } else { format!("{}: {e}", pr.repo) }),
+        }
+    }
+    if ready.is_empty() {
+        let _ = std::fs::remove_dir_all(&ws_dir);
+        return Err(notes.join("\n"));
+    }
+    let branch = ready[0].1.clone();
+    let repos = ready.iter().map(|(r, _)| r.clone()).collect();
+    finish_create(name, &branch, base, repos, None)?;
+    let refs: Vec<PrRef> = prs
+        .iter()
+        .filter(|p| ready.iter().any(|(r, _)| r == &p.repo))
+        .map(|p| PrRef { repo: p.repo.clone(), number: p.number, url: p.url.clone() })
+        .collect();
+    save_pr_refs(name, &refs)?;
+    Ok((load_meta(&ws_dir)?, notes))
+}
+
 /// Writes the meta file and copies the agent entrypoints into the folder.
 fn finish_create(
     name: &str,
@@ -674,6 +816,60 @@ dist
         git(&seed, &["push", "origin", "main:feat/existing"]);
         git(&bare, &["symbolic-ref", "HEAD", "refs/heads/main"]);
         bare
+    }
+
+    #[test]
+    fn checks_out_prs_from_origin_and_forks() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = std::env::temp_dir().join(format!("orbit-pr-checkout-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::env::set_var("ORBIT_WORKSPACE_ROOT", root.join("ws-root"));
+        std::env::set_var("ORBIT_CONFIG_DIR", root.join("cfg"));
+        for (k, v) in [("GIT_AUTHOR_NAME", "t"), ("GIT_AUTHOR_EMAIL", "t@t"), ("GIT_COMMITTER_NAME", "t"), ("GIT_COMMITTER_EMAIL", "t@t")] {
+            std::env::set_var(k, v);
+        }
+        let bare = origin(&root);
+        // A fork's PR: its commit is only reachable from GitHub's pull ref.
+        let seed = root.join("seed");
+        git(&seed, &["checkout", "-b", "fork-work"]);
+        std::fs::write(seed.join("fork.txt"), "from a fork").unwrap();
+        git(&seed, &["add", "fork.txt"]);
+        git(&seed, &["commit", "-m", "fork change"]);
+        git(&seed, &["push", "origin", "fork-work:refs/pull/7/head"]);
+        let svc = crate::config::Service::new("web".into(), bare.to_string_lossy().into());
+        Config { services: vec![svc], ..Default::default() }.save().unwrap();
+
+        let same_repo = PrCheckout { repo: "web".into(), number: 3, branch: "feat/existing".into(), url: "u3".into() };
+        let fork = PrCheckout { repo: "web".into(), number: 7, branch: "fork-work".into(), url: "u7".into() };
+
+        // Not cloned yet: the plan can't tell a fork, the checkout clones.
+        assert!(!plan_pr_checkout(std::slice::from_ref(&same_repo)).unwrap()[0].cloned);
+        let (ws, notes) = create_from_prs("review-3", "main", std::slice::from_ref(&same_repo)).unwrap();
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!((ws.branch.as_str(), ws.pr_refs.len()), ("feat/existing", 1));
+        let wt = ws_dir("review-3").unwrap().join("web");
+        assert_eq!(git::current_branch(&wt).as_deref(), Some("feat/existing"));
+        let upstream = crate::proc::run("git", &["rev-parse", "--abbrev-ref", "@{u}"], Some(&wt)).unwrap();
+        assert_eq!(upstream.trim(), "origin/feat/existing", "pushes go to the PR");
+
+        let plan = plan_pr_checkout(&[same_repo.clone(), fork.clone()]).unwrap();
+        assert_eq!(plan.iter().map(|p| p.on_origin).collect::<Vec<_>>(), [true, false]);
+
+        let (ws7, notes7) = create_from_prs("review-7", "main", std::slice::from_ref(&fork)).unwrap();
+        assert_eq!(ws7.branch, "pr-7");
+        assert!(ws_dir("review-7").unwrap().join("web/fork.txt").exists());
+        assert!(notes7[0].contains("fork"), "{notes7:?}");
+
+        // A local commit on the PR branch survives removing and checking out again.
+        std::fs::write(wt.join("mine.txt"), "x").unwrap();
+        git(&wt, &["add", "mine.txt"]);
+        git(&wt, &["commit", "-m", "local fix"]);
+        remove("review-3", false).unwrap();
+        let (_, again) = create_from_prs("review-3b", "main", &[same_repo]).unwrap();
+        assert!(again.iter().any(|n| n.contains("kept 1 local commit")), "{again:?}");
+        assert!(ws_dir("review-3b").unwrap().join("web/mine.txt").exists());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

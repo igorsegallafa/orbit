@@ -207,6 +207,60 @@ pub struct CppSetup {
     /// (the Visual Studio generator doesn't).
     pub ninja_installed: bool,
     pub presets: Vec<String>,
+    /// Windows: Visual Studio's `vcvars64.bat`. CMake runs after it, like in a
+    /// Developer Command Prompt, so Ninja and cl.exe (VS ships both) are found.
+    pub vcvars: Option<String>,
+}
+
+/// The newest Visual Studio with the C++ tools, via vswhere.
+#[cfg(windows)]
+fn find_vcvars() -> Option<PathBuf> {
+    let pf = std::env::var_os("ProgramFiles(x86)").or_else(|| std::env::var_os("ProgramFiles"))?;
+    let vswhere = PathBuf::from(pf).join(r"Microsoft Visual Studio\Installer\vswhere.exe");
+    if !vswhere.is_file() {
+        return None;
+    }
+    let out = crate::proc::run(
+        &vswhere.to_string_lossy(),
+        &[
+            "-latest",
+            "-products",
+            "*",
+            "-requires",
+            "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+            "-property",
+            "installationPath",
+        ],
+        None,
+    )
+    .ok()?;
+    let bat = PathBuf::from(out.lines().next()?.trim()).join(r"VC\Auxiliary\Build\vcvars64.bat");
+    bat.is_file().then_some(bat)
+}
+
+#[cfg(not(windows))]
+fn find_vcvars() -> Option<PathBuf> {
+    None
+}
+
+/// A batch file that loads the VS developer environment, then runs
+/// `cmake args` in the directory it was started from.
+fn vcvars_script(vcvars: &str, args: &[String]) -> String {
+    let quoted: Vec<String> = args
+        .iter()
+        .map(|a| {
+            let a = a.replace('%', "%%");
+            if a.contains([' ', '&', '|', '<', '>', '^']) {
+                format!("\"{a}\"")
+            } else {
+                a
+            }
+        })
+        .collect();
+    format!(
+        "@echo off\r\nset \"ORBIT_CWD=%CD%\"\r\necho Loading the Visual Studio environment ({vcvars})\r\ncall \"{vcvars}\" >nul 2>nul\r\nif errorlevel 1 exit /b 1\r\ncd /d \"%ORBIT_CWD%\"\r\ncmake {}\r\n",
+        quoted.join(" ")
+    )
 }
 
 // ---------- running servers ----------
@@ -431,6 +485,8 @@ pub struct LanguageStatus {
     pub command: Option<String>,
     pub custom_command: Option<String>,
     pub disabled: bool,
+    pub hidden_diagnostics: Vec<String>,
+    pub errors_only: bool,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -470,6 +526,8 @@ pub fn status() -> Result<LspStatus, String> {
                 command: resolve(l, setting).map(|(bin, args)| std::iter::once(bin).chain(args).collect::<Vec<_>>().join(" ")),
                 custom_command: setting.and_then(|s| s.command.clone()).filter(|c| !c.trim().is_empty()),
                 disabled: setting.is_some_and(|s| s.disabled),
+                hidden_diagnostics: setting.map(|s| s.hidden_diagnostics.clone()).unwrap_or_default(),
+                errors_only: setting.is_some_and(|s| s.errors_only),
             }
         })
         .collect();
@@ -533,18 +591,40 @@ pub fn lsp_log(id: u32) -> Vec<String> {
     servers().lock().unwrap().get(&id).map(|r| r.log.lock().unwrap().iter().cloned().collect()).unwrap_or_default()
 }
 
+/// Changes a language's saved setting (dropped once back to defaults).
+fn update_setting(language: &str, change: impl FnOnce(&mut LanguageServerSetting)) -> Result<(), String> {
+    self::language(language).ok_or_else(|| format!("unknown language '{language}'"))?;
+    let mut cfg = Config::load()?;
+    let mut setting = cfg.language_servers.remove(language).unwrap_or_default();
+    change(&mut setting);
+    if setting != LanguageServerSetting::default() {
+        cfg.language_servers.insert(language.to_string(), setting);
+    }
+    cfg.save()
+}
+
 #[tauri::command]
 pub async fn lsp_configure(language: String, command: Option<String>, disabled: bool) -> Result<(), String> {
     blocking(move || {
-        self::language(&language).ok_or_else(|| format!("unknown language '{language}'"))?;
-        let mut cfg = Config::load()?;
-        let setting = LanguageServerSetting { command: command.filter(|c| !c.trim().is_empty()), disabled };
-        if setting == LanguageServerSetting::default() {
-            cfg.language_servers.remove(&language);
-        } else {
-            cfg.language_servers.insert(language, setting);
-        }
-        cfg.save()
+        update_setting(&language, |s| {
+            s.command = command.filter(|c| !c.trim().is_empty());
+            s.disabled = disabled;
+        })
+    })
+    .await
+}
+
+/// Which diagnostics the editor shows for a language.
+#[tauri::command]
+pub async fn lsp_diagnostics_filter(language: String, errors_only: bool, hidden: Vec<String>) -> Result<(), String> {
+    blocking(move || {
+        update_setting(&language, |s| {
+            s.errors_only = errors_only;
+            let mut codes: Vec<String> = hidden.into_iter().map(|c| c.trim().to_string()).filter(|c| !c.is_empty()).collect();
+            codes.sort();
+            codes.dedup();
+            s.hidden_diagnostics = codes;
+        })
     })
     .await
 }
@@ -574,14 +654,32 @@ pub async fn lsp_cpp_setup(workspace: String, repo: String) -> Result<CppSetup, 
             cmake_installed: crate::proc::exists("cmake"),
             ninja_installed: crate::proc::exists("ninja"),
             presets: cmake_presets(&root),
+            vcvars: find_vcvars().map(|p| p.to_string_lossy().to_string()),
         })
     })
     .await
 }
 
+/// Writes the script that runs `cmake args` inside the VS developer
+/// environment (see `CppSetup::vcvars`); the terminal runs it with cmd.
+#[tauri::command]
+pub async fn lsp_cmake_script(vcvars: String, args: Vec<String>) -> Result<String, String> {
+    let path = std::env::temp_dir().join("orbit-cmake.cmd");
+    std::fs::write(&path, vcvars_script(&vcvars, &args)).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(path.to_string_lossy().to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cmake_script_loads_vs_then_runs_in_the_repo() {
+        let s = vcvars_script(r"C:\VS\vcvars64.bat", &["--preset".into(), "win debug".into(), "-DX=50%".into()]);
+        assert!(s.contains("call \"C:\\VS\\vcvars64.bat\" >nul 2>nul\r\n"));
+        assert!(s.contains("cd /d \"%ORBIT_CWD%\"\r\n"));
+        assert!(s.ends_with("cmake --preset \"win debug\" -DX=50%%\r\n"));
+    }
 
     #[test]
     fn reads_framed_messages() {
@@ -594,9 +692,9 @@ mod tests {
     #[test]
     fn overrides_win_and_disabled_means_none() {
         let cpp = language("cpp").unwrap();
-        let custom = LanguageServerSetting { command: Some("\"C:/tools/clangd.exe\" --log=error".into()), disabled: false };
+        let custom = LanguageServerSetting { command: Some("\"C:/tools/clangd.exe\" --log=error".into()), ..Default::default() };
         assert_eq!(resolve(cpp, Some(&custom)), Some(("C:/tools/clangd.exe".into(), vec!["--log=error".into()])));
-        let off = LanguageServerSetting { command: Some("clangd".into()), disabled: true };
+        let off = LanguageServerSetting { command: Some("clangd".into()), disabled: true, ..Default::default() };
         assert_eq!(resolve(cpp, Some(&off)), None);
     }
 
