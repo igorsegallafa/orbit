@@ -22,11 +22,12 @@ import { PlanProgress } from "../components/PlanProgress";
 import { CommitModal } from "../components/CommitModal";
 import { RebaseModal } from "../components/RebaseModal";
 import { PushModal } from "../components/PushModal";
+import { BranchDriftBanner } from "../components/BranchDriftBanner";
 import { MergeModal } from "../components/MergeModal";
 import { PrsModal } from "../components/PrsModal";
 import { BuildModal } from "../components/BuildModal";
 import { tooltip } from "../components/Tooltip";
-import { RebaseIcon, CommitIcon, PushIcon, PullRequestIcon, ChevronRightIcon, SparkIcon, CheckIcon, XIcon, CircleIcon, SpinnerIcon, GitIcon, DocIcon, TrashIcon, RefreshIcon, PlayIcon, RaceIcon } from "../components/Icons";
+import { RebaseIcon, CommitIcon, PushIcon, PullRequestIcon, ChevronRightIcon, SparkIcon, CheckIcon, XIcon, CircleIcon, SpinnerIcon, GitIcon, DocIcon, TrashIcon, RefreshIcon, PlayIcon, RaceIcon, BranchIcon } from "../components/Icons";
 import { GitHubIcon } from "../components/BrandIcons";
 
 interface Props {
@@ -364,6 +365,8 @@ export function WorkspaceDetailPage({
         </div>
       </header>
 
+      <BranchDriftBanner workspace={workspace.name} statuses={statuses} onSynced={() => load(false)} />
+
       {featureDone && (
         <div className="done-banner">
           <CheckIcon size={13} />
@@ -450,6 +453,14 @@ export function WorkspaceDetailPage({
                     <span className="repo-sub">{st.branch ?? "no branch"}</span>
                   </div>
                   <div className="ws-repo-badges">
+                    {st.offBranch && (
+                      <span
+                        className="ws-badge ws-badge-warn"
+                        {...hint(`Expected ${st.expectedBranch}${st.heldBy ? `; the clone is on workspace ${st.heldBy}'s branch` : ""}`)}
+                      >
+                        <BranchIcon size={11} /> Off branch
+                      </span>
+                    )}
                     {st.dirty ? (
                       <span className="ws-badge ws-badge-warn">
                         <span className="dash-repo-dot" /> Uncommitted changes

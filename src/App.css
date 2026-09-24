@@ -5832,6 +5832,25 @@ button.ws-badge:hover:not(:disabled) { border-color: currentColor; }
 .done-banner strong { color: var(--text); }
 .done-banner button { margin-left: auto; flex-shrink: 0; }
 .race-banner .btn-link { margin-left: auto; }
+.drift-banner {
+  margin-bottom: 14px; padding: 8px 12px;
+  border: 1px solid rgba(227, 179, 65, 0.35); border-radius: 8px; background: rgba(227, 179, 65, 0.07);
+  font-size: 12.5px; color: var(--text-dim);
+}
+.drift-head { display: flex; align-items: center; gap: 10px; }
+.drift-head > svg { color: var(--warn, #e3b341); flex-shrink: 0; }
+.drift-head button { margin-left: auto; flex-shrink: 0; }
+.drift-rows { margin: 6px 0 0; padding-left: 23px; list-style: none; }
+.drift-rows li + li { margin-top: 2px; }
+.drift-banner strong { color: var(--text); }
+.drift-banner code { font-family: var(--mono, ui-monospace, monospace); font-size: 11.5px; color: var(--text); }
+.drift-blocked { color: var(--danger); }
+.drift-confirm {
+  display: flex; align-items: center; gap: 8px; margin-top: 8px; padding-top: 8px; padding-left: 23px;
+  border-top: 1px solid rgba(227, 179, 65, 0.2);
+}
+.drift-confirm span { flex: 1; min-width: 0; }
+.drift-confirm button { flex-shrink: 0; }
 .nav-variant .nav-item.nav-ws { padding-left: 26px; font-size: 12px; }
 .nav-variant .nav-item.nav-ws .nav-icon { opacity: 0.6; }
 

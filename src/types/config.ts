@@ -11,6 +11,8 @@ export interface Service {
   buildOutputShared?: string[];
   /** false = branch-only: checked out in the base clone, no worktree. */
   worktree?: boolean;
+  /** Branch-only repos: opening a workspace switches the clone to its branch without asking. */
+  autoSwitch?: boolean;
   /** Custom clone location (existing checkout or chosen clone folder). */
   path?: string;
 }
@@ -266,4 +268,29 @@ export interface RepoStatus {
   prCommits: number;
   /** The branch's work is already in the base (e.g. squash-merged): `ahead` needs no push. */
   integrated: boolean;
+  /** The branch this workspace expects the repo on. */
+  expectedBranch: string;
+  /** On another branch than `expectedBranch` (a branch-only clone is shared by workspaces). */
+  offBranch: boolean;
+  /** Branch-only repo: the folder is the base clone itself. */
+  branchOnly: boolean;
+  /** Switch it back without asking (repo setting). */
+  autoSwitch: boolean;
+  /** Another workspace whose branch the repo is on. */
+  heldBy?: string;
+  /** Paused rebase / merge / cherry-pick / revert, which blocks a switch. */
+  operation?: string;
+}
+
+/** Result of `ws_sync_branch`. */
+export interface BranchSync {
+  /** The branch the repo is on now. */
+  branch: string;
+  /** Nothing done: uncommitted work is in the way (retry with stash). */
+  dirty: boolean;
+  /** Uncommitted work was shelved under the branch it was left on. */
+  stashed: boolean;
+  /** Work shelved when this branch was last left came back. */
+  restored: boolean;
+  note?: string;
 }

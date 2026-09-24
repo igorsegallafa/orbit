@@ -23,6 +23,11 @@ pub struct Service {
     /// clone itself (repos too heavy for a second checkout).
     #[serde(default = "yes", skip_serializing_if = "is_true")]
     pub worktree: bool,
+    /// Branch-only repos: opening a workspace switches the clone to that
+    /// workspace's branch by itself (when nothing blocks it) instead of
+    /// only warning.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto_switch: bool,
     /// Where the base clone lives when not in the clones folder (an
     /// existing checkout or a folder picked at clone time). Orbit never
     /// deletes a clone at a custom path.
@@ -46,6 +51,7 @@ impl Service {
             build_output: None,
             build_output_shared: Vec::new(),
             worktree: true,
+            auto_switch: false,
             path: None,
         }
     }

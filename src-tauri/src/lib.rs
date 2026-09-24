@@ -128,6 +128,7 @@ pub fn run() {
             commands::ws_commit_message,
             commands::ws_commit,
             commands::ws_push,
+            commands::ws_sync_branch,
             commands::ws_rebase,
             commands::ws_resolve_conflicts,
             commands::ws_rebase_continue,
