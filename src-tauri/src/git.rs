@@ -301,8 +301,16 @@ pub fn diff_since(dir: &Path, start: &str) -> (usize, usize, usize, usize) {
 }
 
 /// Pushes `branch` to origin, creating the upstream on first push.
-pub fn push(dir: &Path, branch: &str) -> Result<(), String> {
-    git_in(dir, &["push", "-u", "origin", branch])
+/// `force` pushes with `--force-with-lease` (a branch rewritten by a
+/// rebase): it still refuses if origin moved since the last fetch, so
+/// nobody else's commits get overwritten.
+pub fn push(dir: &Path, branch: &str, force: bool) -> Result<(), String> {
+    let mut args = vec!["push", "-u"];
+    if force {
+        args.push("--force-with-lease");
+    }
+    args.extend(["origin", branch]);
+    git_in(dir, &args)
 }
 
 /// Outcome of a rebase attempt.
