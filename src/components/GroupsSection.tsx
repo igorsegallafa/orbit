@@ -66,10 +66,6 @@ export function GroupsSection({ config, onChange, onError }: Props) {
 
   return (
     <div className="section">
-      <div className="section-header">
-        <h3>Groups</h3>
-      </div>
-
       <form
         className="card form-row"
         onSubmit={(e) => {
