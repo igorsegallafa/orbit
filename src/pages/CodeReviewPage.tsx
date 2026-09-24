@@ -1,14 +1,21 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { PrGroup, PullRequest } from "../types/config";
+import { PrGroup, PullRequest, Workspace } from "../types/config";
+import { ContextMenu, MenuItem, useContextMenu } from "../components/ContextMenu";
+import { workspaceForPrs } from "../components/PrCheckoutModal";
 import { Skeleton } from "../components/Skeleton";
+import { toast } from "../components/Toast";
 import { tooltip } from "../components/Tooltip";
 
 interface Props {
   /** Opens a PR review tab. When a group has several PRs (multi-repo
    *  feature), the tab opens on the first PR and offers a chip selector. */
   onOpenPr: (prs: PullRequest[]) => void;
+  workspaces: Workspace[];
+  /** Check the PRs out as a local workspace (opens the checkout modal). */
+  onCheckout: (prs: PullRequest[]) => void;
+  onOpenWorkspace: (ws: Workspace) => void;
   onError: (msg: string) => void;
 }
 
@@ -24,8 +31,9 @@ function relTime(iso: string): string {
  * grouped by identical branch name — multi-repo features surface as one
  * card. Search covers all PRs regardless of age or state.
  */
-export function CodeReviewPage({ onOpenPr, onError }: Props) {
+export function CodeReviewPage({ onOpenPr, workspaces, onCheckout, onOpenWorkspace, onError }: Props) {
   const [groups, setGroups] = useState<PrGroup[] | null>(null);
+  const { menu, setMenu, openFromEvent } = useContextMenu<PrGroup>();
   const [refreshing, setRefreshing] = useState(false);
   const [query, setQuery] = useState("");
   const [searching, setSearching] = useState(false);
@@ -72,6 +80,25 @@ export function CodeReviewPage({ onOpenPr, onError }: Props) {
   }, [query, onError]);
 
   const display = query.trim() ? searchResults : groups;
+
+  const menuItems = (g: PrGroup): MenuItem[] => {
+    const ws = workspaceForPrs(g.prs, workspaces);
+    return [
+      { label: "Review", onSelect: () => onOpenPr(g.prs) },
+      ws
+        ? { label: `Open workspace ${ws.name}`, onSelect: () => onOpenWorkspace(ws) }
+        : { label: "Check out as workspace…", onSelect: () => onCheckout(g.prs) },
+      { label: "Open on GitHub ↗", onSelect: () => openUrl(g.prs[0].url).catch(() => null) },
+      {
+        label: "Copy branch name",
+        onSelect: () =>
+          navigator.clipboard
+            .writeText(g.branch)
+            .then(() => toast.success("Branch name copied", { description: g.branch }))
+            .catch(() => null),
+      },
+    ];
+  };
 
   return (
     <div className="page">
@@ -132,11 +159,18 @@ export function CodeReviewPage({ onOpenPr, onError }: Props) {
           {display.map((g) => {
             const multi = g.prs.length > 1;
             const first = g.prs[0];
+            const ws = workspaceForPrs(g.prs, workspaces);
             return (
               <div
                 key={g.branch + first.repo + first.number}
                 className={`pr-card ${multi ? "pr-card-multi" : ""}`}
                 onClick={() => onOpenPr(g.prs)}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  tooltip.hide();
+                  setMenu({ x: e.clientX, y: e.clientY, payload: g });
+                }}
+                onMouseDown={(e) => openFromEvent(e, g)}
                 onMouseEnter={(e) =>
                   tooltip.show(
                     multi
@@ -176,6 +210,21 @@ export function CodeReviewPage({ onOpenPr, onError }: Props) {
                     className="link"
                     onClick={(e) => {
                       e.stopPropagation();
+                      tooltip.hide();
+                      if (ws) onOpenWorkspace(ws);
+                      else onCheckout(g.prs);
+                    }}
+                    onMouseEnter={(e) =>
+                      tooltip.show(ws ? `Already checked out in workspace ${ws.name}` : "Create a local workspace on this branch to run it", e)
+                    }
+                    onMouseLeave={() => tooltip.hide()}
+                  >
+                    {ws ? "open workspace" : "check out"}
+                  </button>
+                  <button
+                    className="link"
+                    onClick={(e) => {
+                      e.stopPropagation();
                       openUrl(first.url).catch(() => null);
                     }}
                     onMouseEnter={(e) => tooltip.show("Open on GitHub ↗", e)}
@@ -189,6 +238,7 @@ export function CodeReviewPage({ onOpenPr, onError }: Props) {
           })}
         </div>
       )}
+      {menu && <ContextMenu x={menu.x} y={menu.y} items={menuItems(menu.payload)} onClose={() => setMenu(null)} />}
     </div>
   );
 }
