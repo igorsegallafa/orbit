@@ -1016,6 +1016,12 @@ table.list tbody tr:hover .row-actions,
   color: var(--text-faint);
 }
 
+.tag-bad {
+  color: var(--danger);
+  border-color: rgba(255, 93, 93, 0.3);
+  background: rgba(255, 93, 93, 0.08);
+}
+
 /* ---------- Groups ---------- */
 
 .group-list {
@@ -3682,6 +3688,15 @@ button .spinner {
   align-items: center;
   justify-content: space-between;
 }
+
+.pr-card-status { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.pr-card-checks { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--text-dim); }
+.pr-card-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.pr-card-checks-pass .pr-card-dot { color: var(--ok); }
+.pr-card-checks-fail { color: var(--danger); }
+.pr-card-checks-pending .pr-card-dot { color: #fbbf24; animation: status-pulse 1.4s ease-in-out infinite; }
+.pr-filter-row { display: flex; flex-wrap: wrap; gap: 6px; margin: -8px 0 16px; }
+.pr-filter-count { margin-left: 4px; color: var(--text-faint); font-size: 11px; }
 
 /* PR review tab */
 .pr-review {

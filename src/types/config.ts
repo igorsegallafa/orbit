@@ -93,6 +93,23 @@ export interface PullRequest {
   isDraft: boolean;
   url: string;
   updatedAt: string; // ISO
+  /** Review/CI state: only on the open-PR list, not on search results. */
+  status?: PrReviewStatus;
+}
+
+/** Where an open PR stands, and the viewer's own review of it. */
+export interface PrReviewStatus {
+  reviewDecision: "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED" | null;
+  /** Aggregate of the head commit's checks; null without checks. */
+  checks: "pass" | "fail" | "pending" | null;
+  /** Can't merge without resolving conflicts. */
+  conflicts: boolean;
+  /** Opened by the viewer. */
+  mine: boolean;
+  /** The viewer's latest review. */
+  myReview: "APPROVED" | "CHANGES_REQUESTED" | "COMMENTED" | "DISMISSED" | null;
+  /** Commits were pushed after the viewer's latest review. */
+  myReviewStale: boolean;
 }
 
 /** Workspace home PR tracker row (any state). */
