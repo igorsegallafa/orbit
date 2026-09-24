@@ -3,6 +3,7 @@
 // diffs, reviews, find previews) shares the one the language servers extend.
 import * as monaco from "monaco-editor";
 import { loader } from "@monaco-editor/react";
+import { invoke } from "@tauri-apps/api/core";
 // The package's `exports` map serves esm/vs/* at the root ("./*" → "./esm/vs/*.js").
 import EditorWorker from "monaco-editor/editor/editor.worker?worker";
 import JsonWorker from "monaco-editor/language/json/json.worker?worker";
@@ -40,4 +41,38 @@ loader.config({ monaco });
 // language server (Settings → Languages) brings the rest.
 for (const defaults of [monaco.typescript.typescriptDefaults, monaco.typescript.javascriptDefaults]) {
   defaults.setDiagnosticsOptions({ noSemanticValidation: true, noSuggestionDiagnostics: true, noSyntaxValidation: false });
+}
+
+/**
+ * With a TypeScript language server available, Monaco's own TS features
+ * step aside entirely: both would answer, doubling every definition (a
+ * peek list instead of a jump), hover and completion. Must run before the
+ * first TS/JS model exists: Monaco registers those providers once, then.
+ */
+export async function configureBuiltinTypeScript() {
+  let available: string[] = [];
+  try {
+    available = await invoke<string[]>("lsp_available");
+  } catch {
+    return;
+  }
+  if (!available.includes("typescript")) return;
+  for (const defaults of [monaco.typescript.typescriptDefaults, monaco.typescript.javascriptDefaults]) {
+    defaults.setModeConfiguration({
+      ...defaults.modeConfiguration,
+      completionItems: false,
+      hovers: false,
+      documentSymbols: false,
+      definitions: false,
+      references: false,
+      documentHighlights: false,
+      rename: false,
+      diagnostics: false,
+      documentRangeFormattingEdits: false,
+      signatureHelp: false,
+      onTypeFormattingEdits: false,
+      codeActions: false,
+      inlayHints: false,
+    });
+  }
 }

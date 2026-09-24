@@ -213,14 +213,12 @@ function wireClient(client: LspClient) {
     semanticRefresh.forEach((em) => em.fire());
     return null;
   });
-  // Monaco's own TS service knows nothing of the project (every import is
-  // "not found"): with a real server, it steps aside.
+  // Monaco's own TS features are set aside at startup when a TS server is
+  // available (configureBuiltinTypeScript). A server that turns up later
+  // (installed mid-session) still clears its syntax markers, which the
+  // diagnostics options (unlike the rest) apply live.
   if (client.language === "typescript") {
-    const off = { completionItems: false, hovers: false, documentSymbols: false, definitions: false, references: false, documentHighlights: false, rename: false, diagnostics: false, documentRangeFormattingEdits: false, signatureHelp: false, codeActions: false, inlayHints: false };
     for (const defaults of [monaco.typescript.typescriptDefaults, monaco.typescript.javascriptDefaults]) {
-      defaults.setModeConfiguration({ ...defaults.modeConfiguration, ...off });
-      // Turning validation off makes it re-validate to nothing, clearing the
-      // markers it set before the server was up.
       defaults.setDiagnosticsOptions({ noSemanticValidation: true, noSyntaxValidation: true, noSuggestionDiagnostics: true });
     }
   }

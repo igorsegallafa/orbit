@@ -512,6 +512,16 @@ pub fn lsp_stop(id: u32) {
     stop(id)
 }
 
+/// Languages that have a server to run (the editor sets itself up at startup).
+#[tauri::command]
+pub async fn lsp_available() -> Result<Vec<String>, String> {
+    blocking(|| {
+        let cfg = Config::load()?;
+        Ok(LANGUAGES.iter().filter(|l| resolve(l, cfg.language_servers.get(l.id)).is_some()).map(|l| l.id.to_string()).collect())
+    })
+    .await
+}
+
 #[tauri::command]
 pub async fn lsp_status() -> Result<LspStatus, String> {
     blocking(status).await

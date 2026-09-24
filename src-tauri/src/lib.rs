@@ -184,6 +184,7 @@ pub fn run() {
             lsp::lsp_send,
             lsp::lsp_stop,
             lsp::lsp_status,
+            lsp::lsp_available,
             lsp::lsp_log,
             lsp::lsp_configure,
             lsp::lsp_read_file,
