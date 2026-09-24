@@ -360,6 +360,25 @@ export function RefreshIcon({ size = 14 }: IconProps) {
   );
 }
 
+/** Navigation history: back / forward. */
+export function ArrowLeftIcon({ size = 15 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M19 12H5" />
+      <path d="m12 19-7-7 7-7" />
+    </svg>
+  );
+}
+
+export function ArrowRightIcon({ size = 15 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M5 12h14" />
+      <path d="m12 5 7 7-7 7" />
+    </svg>
+  );
+}
+
 /** Branch: fork of two lines (current branch, branch switcher). */
 export function BranchIcon({ size = 14 }: IconProps) {
   return (

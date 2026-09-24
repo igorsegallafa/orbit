@@ -118,7 +118,14 @@ interface Props {
   onApplyPlan?: (agent: string, model: string) => void;
   /** Runs a command in a terminal tab in this repo's folder (e.g. cmake). */
   onRunInTerminal?: (label: string, cmd: string, args: string[], repo: string) => void;
+  /** Cursor moved (navigation history remembers where you were). */
+  onCursor?: (line: number, column: number) => void;
+  /** The cursor jumped far (go to definition, a click elsewhere): a place to come back to. */
+  onJump?: (from: { line: number; column: number }, to: { line: number; column: number }) => void;
 }
+
+/** Cursor moves at least this far apart count as navigation (as in VS Code). */
+const JUMP_LINES = 10;
 
 /**
  * Single-file editor tab: Monaco + file bar (path, dirty dot, save).
@@ -127,7 +134,12 @@ interface Props {
  * + model and launch a terminal session that executes the plan.
  * The file tree lives in the fixed right dock (FileTreePanel).
  */
-export function EditorPane({ workspace, repo, path, onError, onApplyPlan, onRunInTerminal }: Props) {
+export function EditorPane({ workspace, repo, path, onError, onApplyPlan, onRunInTerminal, onCursor, onJump }: Props) {
+  // Latest callbacks for the editor's listeners (registered once on mount).
+  const navRef = useRef({ onCursor, onJump });
+  navRef.current = { onCursor, onJump };
+  // The next cursor move is a reveal (opening at a spot), not the user jumping.
+  const revealing = useRef(false);
   const [content, setContent] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
   const [mode, setMode] = useState<"editor" | "preview">("editor");
@@ -151,6 +163,9 @@ export function EditorPane({ workspace, repo, path, onError, onApplyPlan, onRunI
     const ed = editorRef.current;
     if (!t || !ed) return;
     pendingReveal.delete(key);
+    revealing.current = true;
+    // The cursor may already sit there (no move event): don't swallow a later jump.
+    window.setTimeout(() => (revealing.current = false), 600);
     // After the tab becomes visible, so the layout has a real size.
     requestAnimationFrame(() => {
       ed.revealLineInCenter(t.line);
@@ -288,6 +303,22 @@ export function EditorPane({ workspace, repo, path, onError, onApplyPlan, onRunI
     editor.onDidChangeModelContent(() => {
       setContent(editor.getValue());
       setDirty(true);
+    });
+    // Navigation history: every cursor move updates "where you are"; far
+    // moves (not edits) become places to go back to.
+    let last = editor.getPosition();
+    const R = monaco.editor.CursorChangeReason;
+    editor.onDidChangeCursorPosition((e) => {
+      const from = last;
+      last = e.position;
+      navRef.current.onCursor?.(e.position.lineNumber, e.position.column);
+      const byEdit = e.source === "modelChange" || [R.ContentFlush, R.RecoverFromMarkers, R.Paste, R.Undo, R.Redo].includes(e.reason);
+      if (revealing.current) {
+        revealing.current = false;
+        return;
+      }
+      if (!from || byEdit || Math.abs(e.position.lineNumber - from.lineNumber) < JUMP_LINES) return;
+      navRef.current.onJump?.({ line: from.lineNumber, column: from.column }, { line: e.position.lineNumber, column: e.position.column });
     });
     editor.addAction({
       id: "orbit.workspaceSymbols",

@@ -33,8 +33,9 @@ import { reasonLabel, StopReason } from "./types/ralph";
 import {
   HomeIcon, SettingsIcon, SatelliteIcon, DocIcon, TerminalIcon, PlusIcon,
   ChevronRightIcon, PlugIcon, DiffIcon, GitIcon, PanelLeftIcon, PanelLeftExpandIcon,
-  PanelRightIcon, PanelRightExpandIcon, SparkIcon, RepoIcon,
+  PanelRightIcon, PanelRightExpandIcon, SparkIcon, RepoIcon, ArrowLeftIcon, ArrowRightIcon,
 } from "./components/Icons";
+import { NavHistory } from "./lib/navHistory";
 import { SkeletonCards, SkeletonTable } from "./components/Skeleton";
 import { randomSessionName } from "./lib/names";
 import { AgentStatus } from "./lib/agentStatus";
@@ -487,6 +488,78 @@ function App() {
     });
   };
 
+  // ---------- navigation history (mouse side buttons, Alt+←/→, titlebar arrows) ----------
+  type NavTarget = { tab: Tab } | { page: NavPage };
+  const navHistory = useRef(new NavHistory<NavTarget>()).current;
+  const [, setNavTick] = useState(0);
+  useEffect(() => navHistory.subscribe(() => setNavTick((n) => n + 1)), [navHistory]);
+  // Set while back/forward switches what's shown, so the switch isn't recorded.
+  const applyingNav = useRef(false);
+
+  useEffect(() => {
+    if (applyingNav.current) {
+      applyingNav.current = false;
+      return;
+    }
+    const tab = tabs.find((t) => tabId(t) === activeTab);
+    navHistory.visit(tab ? { key: tabId(tab), target: { tab } } : { key: `page:${navPage.kind}`, target: { page: navPage } });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, navPage.kind]);
+
+  const goNav = (dir: "back" | "forward") => {
+    const open = new Set(tabs.map(tabId));
+    // Closed tabs reopen, except terminals: that would be a new session.
+    const e = navHistory.step(dir, (x) => "page" in x.target || open.has(x.key) || x.target.tab.kind !== "terminal");
+    if (!e) return;
+    navHistory.quiet();
+    if ("page" in e.target) {
+      if (activeTab !== null || navPage.kind !== e.target.page.kind) {
+        applyingNav.current = true;
+        setActiveTab(null);
+        setNavPage(e.target.page);
+      }
+      return;
+    }
+    const tab = e.target.tab;
+    if (e.key !== activeTab || navPage.kind !== "dashboard") {
+      applyingNav.current = true;
+      setNavPage({ kind: "dashboard" });
+      if (open.has(e.key)) setActiveTab(e.key);
+      else openTab(tab);
+    }
+    if (tab.kind === "editor" && e.line) {
+      revealInEditor({ workspace: tab.workspace, repo: tab.repo, path: tab.path, line: e.line, col: e.column ?? 1, length: 0 });
+    }
+  };
+  const goNavRef = useRef(goNav);
+  goNavRef.current = goNav;
+
+  useEffect(() => {
+    // Side buttons: act on release, and swallow both halves so the webview
+    // doesn't try its own history navigation.
+    const onMouse = (e: MouseEvent) => {
+      if (e.button !== 3 && e.button !== 4) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.type === "mouseup") goNavRef.current(e.button === 3 ? "back" : "forward");
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey || (e.key !== "ArrowLeft" && e.key !== "ArrowRight")) return;
+      // Shells move by word with Alt+←/→.
+      if ((e.target as HTMLElement | null)?.closest?.(".xterm")) return;
+      e.preventDefault();
+      goNavRef.current(e.key === "ArrowLeft" ? "back" : "forward");
+    };
+    window.addEventListener("mousedown", onMouse, true);
+    window.addEventListener("mouseup", onMouse, true);
+    window.addEventListener("keydown", onKey, true);
+    return () => {
+      window.removeEventListener("mousedown", onMouse, true);
+      window.removeEventListener("mouseup", onMouse, true);
+      window.removeEventListener("keydown", onKey, true);
+    };
+  }, []);
+
   // Definitions in other files (language servers) open as editor tabs.
   const openFileAtRef = useRef<(ctx: lsp.DocContext, line: number, column: number) => void>(() => undefined);
   openFileAtRef.current = (ctx, line, column) => {
@@ -600,18 +673,18 @@ function App() {
   /** Sidebar row of one open session under its workspace or repo. */
   const renderSessionItem = (t: SessionTab) => {
     const id = tabId(t);
+    const file = t.kind === "editor" ? t.path.split("/").pop()! : "";
+    // Under a repo the repo name is already the parent row; under a workspace
+    // it tells which of its repos the file belongs to.
     const label =
-      t.kind === "terminal"
-        ? t.terminal.sessionName
-        : t.repo
-          ? `${t.repo}/${t.path.split("/").pop()}`
-          : t.path.split("/").pop()!;
+      t.kind === "terminal" ? t.terminal.sessionName : t.repo && !isScope(t.workspace) ? `${t.repo}/${file}` : file;
+    const full = t.kind === "terminal" ? label : [t.repo, t.path].filter(Boolean).join("/");
     return (
       <button
         key={id}
         className={`nav-item nav-sub ${activeTab === id ? "active" : ""}`}
         onClick={() => setActiveTab(id)}
-        title={label}
+        title={full}
       >
         {t.kind === "terminal" ? (
           <StatusIndicator status={sessionStatuses[id] ?? "idle"} />
@@ -753,6 +826,8 @@ function App() {
           path={tab.path}
           onError={setError}
           onRunInTerminal={(label, cmd, args, repo) => runInTerminal(tab.workspace, label, cmd, args, repo)}
+          onCursor={(line, column) => navHistory.setPosition(tabId(tab), line, column)}
+          onJump={(from, to) => navHistory.jump(tabId(tab), { tab }, from, to)}
           onApplyPlan={(agent, model) => {
             const prompt = `Read PLAN.md in this directory and implement it: work through the "- [ ]" tasks in order, marking each done (change to "- [x]") as you finish it. Commit nothing unless asked.`;
             openPromptedSession(tab.workspace, agent, model, prompt);
@@ -828,6 +903,26 @@ function App() {
           onClick={toggleSidebar}
         >
           {sidebarHidden ? <PanelLeftExpandIcon /> : <PanelLeftIcon />}
+        </button>
+        <button
+          className="titlebar-btn"
+          aria-label="Back"
+          disabled={!navHistory.canGoBack}
+          onMouseEnter={(e) => tooltip.show("Back (Alt+← or the mouse back button)", e)}
+          onMouseLeave={() => tooltip.hide()}
+          onClick={() => goNav("back")}
+        >
+          <ArrowLeftIcon />
+        </button>
+        <button
+          className="titlebar-btn"
+          aria-label="Forward"
+          disabled={!navHistory.canGoForward}
+          onMouseEnter={(e) => tooltip.show("Forward (Alt+→ or the mouse forward button)", e)}
+          onMouseLeave={() => tooltip.hide()}
+          onClick={() => goNav("forward")}
+        >
+          <ArrowRightIcon />
         </button>
         <span className="titlebar-spacer" data-tauri-drag-region />
         <InboxButton
