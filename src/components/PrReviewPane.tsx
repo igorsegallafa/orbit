@@ -3,7 +3,7 @@ import { DiffEditor, type BeforeMount } from "@monaco-editor/react";
 import type { editor as Monaco } from "monaco-editor";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { PrDetail, PrFileDiff, PullRequest } from "../types/config";
+import { PrDetail, PrFileDiff, PullRequest, Workspace } from "../types/config";
 import { Draft, ReviewComment, ReviewData, ReviewEvent, ReviewThread, Side, timeAgo } from "../types/review";
 import { Skeleton } from "./Skeleton";
 import { tooltip } from "./Tooltip";
@@ -19,6 +19,10 @@ import { CheckIcon, ChevronIcon, DocIcon, EyeIcon } from "./Icons";
 interface Props {
   /** All PRs of the feature group (1 for single-repo PRs). */
   prs: PullRequest[];
+  /** The workspace these PRs are checked out in, if any. */
+  workspace: Workspace | null;
+  onCheckout: () => void;
+  onOpenWorkspace: (ws: Workspace) => void;
   onError: (msg: string) => void;
 }
 
@@ -109,7 +113,7 @@ const DECISION: Record<string, { label: string; cls: string }> = {
  * threads on the right. Comments can be posted right away or collected in
  * a pending review (kept locally until submitted) and sent with a verdict.
  */
-export function PrReviewPane({ prs, onError }: Props) {
+export function PrReviewPane({ prs, workspace, onCheckout, onOpenWorkspace, onError }: Props) {
   const [activeIdx, setActiveIdx] = useState(0);
   const [detail, setDetail] = useState<PrDetail | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -384,6 +388,21 @@ export function PrReviewPane({ prs, onError }: Props) {
                 <span className="git-stat-del">−{detail.deletions}</span>
                 {unresolved > 0 && <span className="rv-unresolved">{unresolved} unresolved</span>}
               </div>
+              <button
+                className="secondary pr-header-checkout"
+                onClick={() => (workspace ? onOpenWorkspace(workspace) : onCheckout())}
+                onMouseEnter={(e) =>
+                  tooltip.show(
+                    workspace
+                      ? `Checked out in workspace ${workspace.name}`
+                      : "Create a local workspace on this branch to run it",
+                    e,
+                  )
+                }
+                onMouseLeave={() => tooltip.hide()}
+              >
+                {workspace ? `Open workspace ${workspace.name}` : "Check out"}
+              </button>
             </div>
 
             <div className="pr-files">

@@ -11,6 +11,8 @@ interface LanguageStatus {
   command: string | null;
   customCommand: string | null;
   disabled: boolean;
+  hiddenDiagnostics: string[];
+  errorsOnly: boolean;
 }
 
 interface RunningServer {
@@ -57,6 +59,14 @@ export function LanguagesSection({ onError }: Props) {
   const configure = (l: LanguageStatus, command: string | null, disabled: boolean) =>
     invoke("lsp_configure", { language: l.id, command, disabled })
       .then(() => load(true))
+      .catch((e) => onError(String(e)));
+
+  const setFilter = (l: LanguageStatus, errorsOnly: boolean, hidden: string[]) =>
+    invoke("lsp_diagnostics_filter", { language: l.id, errorsOnly, hidden })
+      .then(() => {
+        load(false);
+        return lsp.loadDiagnosticFilters();
+      })
       .catch((e) => onError(String(e)));
 
   if (!status) {
@@ -110,6 +120,33 @@ export function LanguagesSection({ onError }: Props) {
                     clangd reads compile_commands.json for include paths and flags; the editor offers to generate it with CMake
                     when a repo has none.
                   </span>
+                )}
+                {!l.disabled && (
+                  <div className="lang-diagnostics">
+                    <label className="lang-enabled">
+                      <CheckBox
+                        checked={l.errorsOnly}
+                        label={`Show only errors for ${l.name}`}
+                        onChange={(on) => setFilter(l, on, l.hiddenDiagnostics)}
+                      />
+                      Errors only
+                    </label>
+                    {l.hiddenDiagnostics.map((code) => (
+                      <span key={code} className="lang-hidden-code">
+                        {code}
+                        <button
+                          aria-label={`Show '${code}' diagnostics again`}
+                          title="Show these diagnostics again"
+                          onClick={() => setFilter(l, l.errorsOnly, l.hiddenDiagnostics.filter((c) => c !== code))}
+                        >
+                          ×
+                        </button>
+                      </span>
+                    ))}
+                    {l.hiddenDiagnostics.length === 0 && !l.errorsOnly && (
+                      <span className="lang-note">Hide a kind of diagnostic from its quick fix menu in the editor (Ctrl+.).</span>
+                    )}
+                  </div>
                 )}
               </div>
               <div className="settings-row-control lang-controls">

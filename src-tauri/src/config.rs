@@ -139,6 +139,12 @@ pub struct LanguageServerSetting {
     /// No server for this language (plain highlighting only).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub disabled: bool,
+    /// Diagnostic codes the editor never shows ("unused-includes").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hidden_diagnostics: Vec<String>,
+    /// The editor shows errors only (no warnings, infos or hints).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub errors_only: bool,
 }
 
 fn non_empty(p: &Option<String>) -> Option<PathBuf> {

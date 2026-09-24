@@ -5,6 +5,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import * as monaco from "monaco-editor";
 import { LspClient } from "./client";
+import { toast } from "../../components/Toast";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -79,8 +80,49 @@ const docs = new Map<string, Doc>();
 const statusListeners = new Map<string, Set<() => void>>();
 const registeredLanguages = new Set<string>();
 const semanticRefresh = new Map<string, monaco.Emitter<void>>();
-/** Latest diagnostics per file, applied when its model appears. */
-const diagnostics = new Map<string, any[]>();
+/** Latest diagnostics per file (with the Orbit language that sent them),
+ *  applied when its model appears. */
+const diagnostics = new Map<string, { language: string; list: any[] }>();
+
+/** Settings → Languages: diagnostics the editor leaves out, per language. */
+interface DiagnosticFilter {
+  errorsOnly: boolean;
+  hidden: string[];
+}
+const diagnosticFilters = new Map<string, DiagnosticFilter>();
+let filtersLoaded = false;
+
+/** (Re)reads the filters from the config and re-applies every file's markers. */
+export async function loadDiagnosticFilters(): Promise<void> {
+  filtersLoaded = true;
+  try {
+    const s = await invoke<{ languages: { id: string; errorsOnly: boolean; hiddenDiagnostics: string[] }[] }>("lsp_status");
+    diagnosticFilters.clear();
+    for (const l of s.languages) diagnosticFilters.set(l.id, { errorsOnly: l.errorsOnly, hidden: l.hiddenDiagnostics });
+  } catch {
+    return;
+  }
+  for (const uri of diagnostics.keys()) applyDiagnostics(monaco.Uri.parse(uri));
+}
+
+/** Never show diagnostics with this code again for the language. */
+async function hideDiagnostic(language: string, code: string) {
+  const f = diagnosticFilters.get(language) ?? { errorsOnly: false, hidden: [] };
+  try {
+    await invoke("lsp_diagnostics_filter", { language, errorsOnly: f.errorsOnly, hidden: [...f.hidden, code] });
+    await loadDiagnosticFilters();
+    toast.success(`Hiding '${code}' diagnostics`, { description: "Show them again in Settings → Languages" });
+  } catch (e) {
+    toast.error("Couldn't save the setting", { description: String(e) });
+  }
+}
+
+const HIDE_DIAGNOSTIC_COMMAND = "orbit.hideDiagnostic";
+let hideCommandRegistered = false;
+
+function diagnosticCode(d: any): string | undefined {
+  return typeof d.code === "object" ? String(d.code?.value ?? "") || undefined : d.code !== undefined ? String(d.code) : undefined;
+}
 
 /** How Orbit opens a repo file in a tab (set by App). */
 type Opener = (ctx: DocContext, line: number, column: number) => void;
@@ -182,6 +224,7 @@ function getEntry(workspace: string, repo: string, language: string): ClientEntr
     entry = undefined;
   }
   if (!entry) {
+    if (!filtersLoaded) void loadDiagnosticFilters();
     const e: ClientEntry = { key, workspace, repo, language, client: null, error: null, docs: new Set(), idleTimer: null, promise: null! };
     e.promise = LspClient.start(workspace, repo, language).then(
       (client) => {
@@ -206,7 +249,7 @@ function getEntry(workspace: string, repo: string, language: string): ClientEntr
 
 function wireClient(client: LspClient) {
   client.on("textDocument/publishDiagnostics", (p) => {
-    diagnostics.set(monaco.Uri.parse(p.uri).toString(), p.diagnostics ?? []);
+    diagnostics.set(monaco.Uri.parse(p.uri).toString(), { language: client.language, list: p.diagnostics ?? [] });
     applyDiagnostics(monaco.Uri.parse(p.uri));
   });
   client.onRequest("workspace/semanticTokens/refresh", () => {
@@ -234,16 +277,22 @@ const SEVERITY: Record<number, monaco.MarkerSeverity> = {
 function applyDiagnostics(uri: monaco.Uri) {
   const model = monaco.editor.getModel(uri);
   if (!model) return;
-  const list = diagnostics.get(uri.toString()) ?? [];
+  const { language, list } = diagnostics.get(uri.toString()) ?? { language: "", list: [] };
+  const filter = diagnosticFilters.get(language);
+  const shown = list.filter((d) => {
+    if (filter?.errorsOnly && (d.severity ?? 1) > 1) return false;
+    const code = diagnosticCode(d);
+    return !(code && filter?.hidden.includes(code));
+  });
   monaco.editor.setModelMarkers(
     model,
     "lsp",
-    list.map((d) => ({
+    shown.map((d) => ({
       ...toRange(d.range),
       severity: SEVERITY[d.severity ?? 1] ?? monaco.MarkerSeverity.Error,
       message: d.message,
       source: d.source,
-      code: typeof d.code === "object" ? String(d.code?.value ?? "") : d.code !== undefined ? String(d.code) : undefined,
+      code: diagnosticCode(d),
       tags: (d.tags ?? []).map((t: number) => (t === 1 ? monaco.MarkerTag.Unnecessary : monaco.MarkerTag.Deprecated)),
     })),
   );
@@ -474,6 +523,32 @@ function registerProviders(monacoLang: string, client: LspClient) {
   const L = monaco.languages;
   const uriOf = (model: monaco.editor.ITextModel) => ({ uri: model.uri.toString() });
   const at = (model: monaco.editor.ITextModel, pos: monaco.Position) => ({ textDocument: uriOf(model), position: toPosition(pos) });
+
+  // Quick fix on a server's diagnostic: stop showing that kind of diagnostic.
+  if (!hideCommandRegistered) {
+    hideCommandRegistered = true;
+    monaco.editor.registerCommand(HIDE_DIAGNOSTIC_COMMAND, (_accessor, language: string, code: string) => void hideDiagnostic(language, code));
+  }
+  L.registerCodeActionProvider(monacoLang, {
+    provideCodeActions(model, _range, context) {
+      const language = diagnostics.get(model.uri.toString())?.language;
+      if (!language) return { actions: [], dispose: () => {} };
+      const seen = new Set<string>();
+      const actions: monaco.languages.CodeAction[] = [];
+      for (const m of context.markers) {
+        const code = typeof m.code === "object" ? m.code?.value : m.code;
+        if (!code || seen.has(code)) continue;
+        seen.add(code);
+        actions.push({
+          title: `Hide '${code}' diagnostics`,
+          kind: "quickfix",
+          diagnostics: [m],
+          command: { id: HIDE_DIAGNOSTIC_COMMAND, title: `Hide '${code}' diagnostics`, arguments: [language, code] },
+        });
+      }
+      return { actions, dispose: () => {} };
+    },
+  });
 
   L.registerHoverProvider(monacoLang, {
     async provideHover(model, pos, token) {

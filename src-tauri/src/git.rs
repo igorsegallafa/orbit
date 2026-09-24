@@ -117,6 +117,62 @@ pub fn checkout_remote_branch(repo_dir: &Path, branch: &str, path: Option<&Path>
     }
 }
 
+// ---------- Checking out someone's pull request ----------
+
+/// Checks out origin's `branch`, tracking it (push and pull go to the PR):
+/// as a worktree at `path`, or in the clone itself when `path` is None. A
+/// leftover local branch is brought to origin's tip unless it holds commits
+/// origin lacks; those are kept, and reported, rather than reset away.
+pub fn checkout_tracking(repo_dir: &Path, branch: &str, path: Option<&Path>) -> Result<Option<String>, String> {
+    git_in(repo_dir, &["fetch", "origin", branch])?;
+    let remote = format!("origin/{branch}");
+    let mut note = None;
+    if branch_exists(repo_dir, branch) {
+        let local_only: usize = git_out(repo_dir, &["rev-list", "--count", branch, "--not", &remote])
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0);
+        let checked_out_here = current_branch(repo_dir).as_deref() == Some(branch);
+        if local_only > 0 {
+            note = Some(format!("kept {local_only} local commit(s) on {branch} that origin doesn't have"));
+        } else if !checked_out_here {
+            git_in(repo_dir, &["branch", "--force", branch, &remote])?;
+        }
+        match path {
+            Some(p) => git_in(repo_dir, &["worktree", "add", &p.to_string_lossy(), branch])?,
+            None => git_in(repo_dir, &["checkout", branch])?,
+        }
+        if local_only == 0 && checked_out_here {
+            git_in(repo_dir, &["merge", "--ff-only", &remote])?;
+        }
+    } else {
+        match path {
+            Some(p) => git_in(repo_dir, &["worktree", "add", "--track", "-b", branch, &p.to_string_lossy(), &remote])?,
+            None => git_in(repo_dir, &["checkout", "--track", "-b", branch, &remote])?,
+        }
+    }
+    let _ = git_in(repo_dir, &["branch", "--set-upstream-to", &remote, branch]);
+    Ok(note)
+}
+
+/// A PR from a fork (its branch isn't on origin): GitHub keeps its head at
+/// `pull/<n>/head`, fetched into a local `pr-<n>` branch. It has no upstream:
+/// there's nowhere to push. Returns the local branch name.
+pub fn checkout_pr_head(repo_dir: &Path, number: u64, path: Option<&Path>) -> Result<String, String> {
+    let local = format!("pr-{number}");
+    git_in(repo_dir, &["fetch", "origin", &format!("+pull/{number}/head:{local}")])?;
+    match path {
+        Some(p) => git_in(repo_dir, &["worktree", "add", &p.to_string_lossy(), &local])?,
+        None => git_in(repo_dir, &["checkout", &local])?,
+    }
+    Ok(local)
+}
+
+/// Brings a checked-out branch up to its upstream (fast-forward only).
+pub fn pull_ff(dir: &Path) -> Result<(), String> {
+    git_in(dir, &["pull", "--ff-only"])
+}
+
 /// Checks out `branch` in the clone itself (branch-only repos), creating it
 /// from origin/<base> when missing.
 pub fn checkout_branch_in_place(repo_dir: &Path, branch: &str, base: &str) -> Result<(), String> {

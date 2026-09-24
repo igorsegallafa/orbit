@@ -7,6 +7,7 @@ import { Select } from "./Select";
 import { CodeViewIcon, EyeIcon, RefreshIcon } from "./Icons";
 import { SymbolSearch } from "./SymbolSearch";
 import { tooltip } from "./Tooltip";
+import { toast } from "./Toast";
 import * as lsp from "../lib/lsp/manager";
 
 interface CppSetup {
@@ -15,11 +16,17 @@ interface CppSetup {
   cmakeInstalled: boolean;
   ninjaInstalled: boolean;
   presets: string[];
+  /** Windows: Visual Studio's vcvars64.bat, loaded before running CMake. */
+  vcvars: string | null;
 }
 
-// Per repo folder: clangd's build setup, and banners the user dismissed.
+// Per repo folder: clangd's build setup, banners the user dismissed, CMake
+// runs started from the banner, and folders seen without a database (clangd
+// started there needs a restart once one shows up).
 const cppSetups = new Map<string, CppSetup>();
 const cppDismissed = new Set<string>();
+const cppGeneratingKeys = new Set<string>();
+const cppMissing = new Set<string>();
 
 /**
  * "orbit-dark": Monaco theme matching the app's palette (bg #0d0f13,
@@ -153,9 +160,9 @@ export function EditorPane({ workspace, repo, path, onError, onApplyPlan, onRunI
   const [symbolsOpen, setSymbolsOpen] = useState(false);
   const [cppSetup, setCppSetup] = useState<CppSetup | null>(null);
   const [cppPreset, setCppPreset] = useState<string>("");
-  const [cppGenerating, setCppGenerating] = useState(false);
-  const lspOff = useRef<(() => void)[]>([]);
   const setupKey = `${workspace}|${repo}`;
+  const [cppGenerating, setCppGenerating] = useState(() => cppGeneratingKeys.has(setupKey));
+  const lspOff = useRef<(() => void)[]>([]);
 
   const applyReveal = () => {
     const key = revealKey({ workspace, repo, path });
@@ -256,11 +263,36 @@ export function EditorPane({ workspace, repo, path, onError, onApplyPlan, onRunI
     }
     invoke<CppSetup>("lsp_cpp_setup", { workspace, repo })
       .then((s) => {
-        cppSetups.set(setupKey, s);
-        apply(s);
+        // A missing database is checked again next time: it may get generated.
+        if (!s.compileCommands) {
+          cppMissing.add(setupKey);
+          apply(s);
+        } else if (cppMissing.has(setupKey)) {
+          // Generated since clangd started (outside the banner, or while
+          // this editor was closed): clangd only reads it on start.
+          restartServer();
+        } else {
+          cppSetups.set(setupKey, s);
+          apply(s);
+        }
       })
       .catch(() => null);
   }, [cppReady, workspace, repo, setupKey]);
+
+  // While CMake runs in the terminal, watch for its compile_commands.json
+  // and restart clangd with it once it's there.
+  useEffect(() => {
+    if (!cppGenerating || !repo) return;
+    const timer = window.setInterval(async () => {
+      const s = await invoke<CppSetup>("lsp_cpp_setup", { workspace, repo }).catch(() => null);
+      if (!s?.compileCommands) return;
+      window.clearInterval(timer);
+      toast.success("compile_commands.json generated", { description: "Restarting clangd with it" });
+      restartServer();
+    }, 3000);
+    return () => window.clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cppGenerating, workspace, repo]);
 
   const save = async () => {
     if (content === null) return;
@@ -279,17 +311,32 @@ export function EditorPane({ workspace, repo, path, onError, onApplyPlan, onRunI
     const model = editorRef.current?.getModel();
     if (!model) return;
     cppSetups.delete(setupKey);
+    cppGeneratingKeys.delete(setupKey);
+    cppMissing.delete(setupKey);
     setCppSetup(null);
     setCppGenerating(false);
     void lsp.restart(model);
   };
 
-  const generateCompileCommands = () => {
+  const generateCompileCommands = async () => {
     if (!cppSetup || !onRunInTerminal) return;
+    // Visual Studio's Ninja is only on PATH inside its developer environment.
+    const ninja = cppSetup.ninjaInstalled || !!cppSetup.vcvars;
     const args = cppPreset
       ? ["--preset", cppPreset, "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"]
-      : ["-S", ".", "-B", "build", ...(cppSetup.ninjaInstalled ? ["-G", "Ninja"] : []), "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"];
-    onRunInTerminal("cmake", "cmake", args, repo);
+      : ["-S", ".", "-B", "build", ...(ninja ? ["-G", "Ninja"] : []), "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"];
+    if (cppSetup.vcvars) {
+      try {
+        const script = await invoke<string>("lsp_cmake_script", { vcvars: cppSetup.vcvars, args });
+        onRunInTerminal("cmake", "cmd", ["/d", "/c", script], repo);
+      } catch (e) {
+        onError(String(e));
+        return;
+      }
+    } else {
+      onRunInTerminal("cmake", "cmake", args, repo);
+    }
+    cppGeneratingKeys.add(setupKey);
     setCppGenerating(true);
   };
 
@@ -417,7 +464,7 @@ export function EditorPane({ workspace, repo, path, onError, onApplyPlan, onRunI
                 Restart clangd
               </button>
             </>
-          ) : cppSetup!.cmake && cppSetup!.cmakeInstalled ? (
+          ) : cppSetup!.cmake && (cppSetup!.cmakeInstalled || cppSetup!.vcvars) ? (
             <>
               {cppSetup!.presets.length > 0 && (
                 <Select
@@ -431,9 +478,10 @@ export function EditorPane({ workspace, repo, path, onError, onApplyPlan, onRunI
                 className="btn-mini"
                 onClick={generateCompileCommands}
                 {...hint(
-                  cppPreset
+                  (cppPreset
                     ? `cmake --preset ${cppPreset} -DCMAKE_EXPORT_COMPILE_COMMANDS=ON`
-                    : "cmake -S . -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON (needs the Ninja or Makefile generator)",
+                    : "cmake -S . -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON (needs the Ninja or Makefile generator)") +
+                    (cppSetup!.vcvars ? ", in the Visual Studio developer environment" : ""),
                 )}
               >
                 Generate with CMake
