@@ -133,7 +133,7 @@ pub fn overview(name: &str) -> Result<RepoOverview, String> {
         behind: current.map_or(0, |b| b.behind),
         changes: git_out(&dir, &["status", "--porcelain", "-uall"]).unwrap_or_default().lines().filter(|l| !l.trim().is_empty()).count(),
         owner_repo: git_out(&dir, &["remote", "get-url", "origin"]).ok().and_then(|u| github::parse_owner_repo(u.trim()).ok()),
-        operation: git_dir.as_deref().and_then(operation_in_progress),
+        operation: git_dir.as_deref().and_then(git::operation_in_progress),
         conflicts: git::conflicted_files(&dir),
         stashes: stashes(&dir),
         last_fetch: git_dir.and_then(|g| std::fs::metadata(g.join("FETCH_HEAD")).ok()?.modified().ok())
@@ -143,21 +143,6 @@ pub fn overview(name: &str) -> Result<RepoOverview, String> {
         branch,
         branches,
     })
-}
-
-fn operation_in_progress(git_dir: &Path) -> Option<String> {
-    let op = if git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists() {
-        "rebase"
-    } else if git_dir.join("MERGE_HEAD").exists() {
-        "merge"
-    } else if git_dir.join("CHERRY_PICK_HEAD").exists() {
-        "cherry-pick"
-    } else if git_dir.join("REVERT_HEAD").exists() {
-        "revert"
-    } else {
-        return None;
-    };
-    Some(op.to_string())
 }
 
 /// Local branches plus origin branches with no local counterpart, most
@@ -507,7 +492,7 @@ pub fn revert(name: &str, sha: &str) -> Result<(), String> {
 pub fn operation(name: &str, action: &str) -> Result<(), String> {
     let dir = clone_of(name)?;
     let git_dir = PathBuf::from(git_out(&dir, &["rev-parse", "--absolute-git-dir"])?.trim());
-    let op = operation_in_progress(&git_dir).ok_or("nothing is in progress")?;
+    let op = git::operation_in_progress(&git_dir).ok_or("nothing is in progress")?;
     let flag = match action {
         "continue" => "--continue",
         "abort" => "--abort",

@@ -326,7 +326,15 @@ pub async fn pr_checkout(name: String, base: String, prs: Vec<workspace::PrCheck
 /// Fast-forwards a workspace repo to its upstream (new commits on the PR).
 #[tauri::command]
 pub async fn ws_pull(workspace: String, repo: String) -> Result<(), String> {
-    blocking(move || git::pull_ff(&worktree_of(&workspace, &repo)?)).await
+    blocking(move || git::pull_ff(&worktree_on_branch(&workspace, &repo)?)).await
+}
+
+/// Switches a workspace repo back to the workspace's branch (a branch-only
+/// repo's clone is shared, so another workspace may have switched it).
+/// `stash` shelves uncommitted work that would otherwise block it.
+#[tauri::command]
+pub async fn ws_sync_branch(workspace: String, repo: String, stash: bool) -> Result<workspace::BranchSync, String> {
+    blocking(move || workspace::sync_branch(&workspace, &repo, stash)).await
 }
 
 /// Builds a repo inside a workspace (or its base clone), streaming
@@ -464,6 +472,14 @@ pub(crate) fn worktree_of(workspace: &str, repo: &str) -> Result<PathBuf, String
     if !dir.exists() {
         return Err(format!("worktree for '{repo}' not found in '{workspace}'"));
     }
+    Ok(dir)
+}
+
+/// `worktree_of`, for actions that write to the branch (commit, push,
+/// pull, rebase, PR): refuses a repo that isn't on the workspace's branch.
+fn worktree_on_branch(workspace: &str, repo: &str) -> Result<PathBuf, String> {
+    let dir = worktree_of(workspace, repo)?;
+    workspace::ensure_on_branch(workspace, repo)?;
     Ok(dir)
 }
 
@@ -754,7 +770,7 @@ pub async fn ws_commit_message(
 /// Stage + commit one repo with the given message.
 #[tauri::command]
 pub async fn ws_commit(workspace: String, repo: String, message: String) -> Result<(), String> {
-    blocking(move || git::commit_all(&worktree_of(&workspace, &repo)?, &message)).await
+    blocking(move || git::commit_all(&worktree_on_branch(&workspace, &repo)?, &message)).await
 }
 
 /// Push one repo's branch to origin. `force` pushes with
@@ -762,7 +778,7 @@ pub async fn ws_commit(workspace: String, repo: String, message: String) -> Resu
 #[tauri::command]
 pub async fn ws_push(workspace: String, repo: String, force: Option<bool>) -> Result<(), String> {
     blocking(move || {
-        let dir = worktree_of(&workspace, &repo)?;
+        let dir = worktree_on_branch(&workspace, &repo)?;
         let branch = git::current_branch(&dir)
             .ok_or_else(|| format!("{repo}: detached HEAD, nothing to push"))?;
         git::push(&dir, &branch, force.unwrap_or(false))
@@ -778,7 +794,7 @@ pub async fn ws_rebase(
     repo: String,
     base: String,
 ) -> Result<git::RebaseStatus, String> {
-    blocking(move || git::rebase_onto(&worktree_of(&workspace, &repo)?, &base)).await
+    blocking(move || git::rebase_onto(&worktree_on_branch(&workspace, &repo)?, &base)).await
 }
 
 /// Let the configured AI agent resolve a paused rebase's conflicts and
@@ -836,7 +852,7 @@ fn create_pr_for_repo(
     title: &str,
     body: &str,
 ) -> Result<workspace::PrRef, String> {
-    let dir = worktree_of(workspace, repo)?;
+    let dir = worktree_on_branch(workspace, repo)?;
     let owner_repo = remote_of(&dir).ok_or_else(|| format!("{repo}: cannot resolve origin remote"))?;
     let branch = git::current_branch(&dir)
         .ok_or_else(|| format!("{repo}: detached HEAD"))?;

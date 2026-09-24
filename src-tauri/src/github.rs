@@ -124,7 +124,7 @@ pub fn parse_owner_repo(url: &str) -> Result<String, String> {
     Err(format!("cannot derive owner/repo from '{url}'"))
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct PullRequest {
     pub repo: String,      // Orbit service name
@@ -137,6 +137,28 @@ pub struct PullRequest {
     pub is_draft: bool,
     pub url: String,
     pub updated_at: String, // ISO date from gh
+    /// Review and CI state, filled for the open-PR list only (search and
+    /// lookups leave it empty).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<PrReviewStatus>,
+}
+
+/// Where an open PR stands: reviews, CI, conflicts, and the viewer's own review.
+#[derive(Debug, Serialize, Clone, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PrReviewStatus {
+    /// APPROVED | CHANGES_REQUESTED | REVIEW_REQUIRED, None when no review is required.
+    pub review_decision: Option<String>,
+    /// "pass" | "fail" | "pending"; None without checks.
+    pub checks: Option<String>,
+    /// The base can't take it without resolving conflicts.
+    pub conflicts: bool,
+    /// Opened by the viewer.
+    pub mine: bool,
+    /// The viewer's latest review: APPROVED | CHANGES_REQUESTED | COMMENTED | DISMISSED.
+    pub my_review: Option<String>,
+    /// Commits were pushed after the viewer's latest review.
+    pub my_review_stale: bool,
 }
 
 /// A feature: 1+ PRs sharing the same branch name across repos.
@@ -342,6 +364,7 @@ fn parse_pr_list(service_name: &str, owner_repo: &str, out: &[u8]) -> Result<Vec
             is_draft: p.is_draft,
             url: p.url,
             updated_at: p.updated_at,
+            ..Default::default()
         })
         .collect())
 }
@@ -400,7 +423,10 @@ pub fn list_prs(force_refresh: bool) -> Result<Vec<PrGroup>, String> {
     let prs: Vec<PullRequest> = std::thread::scope(|scope| {
         let handles: Vec<_> = services
             .iter()
-            .map(|(name, or)| scope.spawn(move || prs_for_repo(name, or, "open", 50)))
+            // Without review/CI state rather than not at all.
+            .map(|(name, or)| {
+                scope.spawn(move || open_prs_with_status(name, or).or_else(|_| prs_for_repo(name, or, "open", 50)))
+            })
             .collect();
         handles
             .into_iter()
@@ -415,6 +441,149 @@ pub fn list_prs(force_refresh: bool) -> Result<Vec<PrGroup>, String> {
     *pr_cache().lock().unwrap() = Some((Instant::now(), groups.clone()));
     warm_pr_index();
     Ok(groups)
+}
+
+/// Open PRs of one repo with their review and CI state, and the viewer's
+/// own latest review, in one GraphQL round trip (`gh pr list --json` can't
+/// tell which commit a review was on, and asking it for commits overflows
+/// GitHub's node limit).
+const OPEN_PRS_QUERY: &str = "query($owner: String!, $name: String!) {
+  viewer { login }
+  repository(owner: $owner, name: $name) {
+    pullRequests(states: OPEN, first: 50, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      nodes {
+        number title headRefName baseRefName isDraft url updatedAt headRefOid
+        author { login }
+        reviewDecision mergeable
+        commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+        latestReviews(first: 30) { nodes { author { login } state commit { oid } } }
+      }
+    }
+  }
+}";
+
+#[derive(Deserialize)]
+struct GqlOpenPrs {
+    data: GqlOpenPrsData,
+}
+#[derive(Deserialize)]
+struct GqlOpenPrsData {
+    viewer: GhPrAuthor,
+    repository: GqlRepo,
+}
+#[derive(Deserialize)]
+struct GqlRepo {
+    #[serde(rename = "pullRequests")]
+    pull_requests: GqlNodes<GqlPr>,
+}
+#[derive(Deserialize)]
+struct GqlNodes<T> {
+    nodes: Vec<T>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GqlPr {
+    number: u64,
+    title: String,
+    head_ref_name: String,
+    base_ref_name: String,
+    is_draft: bool,
+    url: String,
+    updated_at: String,
+    head_ref_oid: String,
+    author: Option<GhPrAuthor>,
+    review_decision: Option<String>,
+    mergeable: Option<String>,
+    commits: GqlNodes<GqlCommitNode>,
+    latest_reviews: GqlNodes<GqlReview>,
+}
+#[derive(Deserialize)]
+struct GqlCommitNode {
+    commit: GqlCommit,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GqlCommit {
+    status_check_rollup: Option<GqlRollup>,
+}
+#[derive(Deserialize)]
+struct GqlRollup {
+    state: String,
+}
+#[derive(Deserialize)]
+struct GqlReview {
+    author: Option<GhPrAuthor>,
+    state: String,
+    commit: Option<GqlOid>,
+}
+#[derive(Deserialize)]
+struct GqlOid {
+    oid: String,
+}
+
+fn open_prs_with_status(service_name: &str, owner_repo: &str) -> Result<Vec<PullRequest>, String> {
+    let (owner, name) = owner_repo.split_once('/').ok_or_else(|| format!("bad owner/repo '{owner_repo}'"))?;
+    let out = run_gh(&[
+        "api",
+        "graphql",
+        "-f",
+        &format!("owner={owner}"),
+        "-f",
+        &format!("name={name}"),
+        "-f",
+        &format!("query={OPEN_PRS_QUERY}"),
+    ])?;
+    let data: GqlOpenPrs = serde_json::from_slice(&out).map_err(|e| format!("failed to parse open PRs: {e}"))?;
+    Ok(parse_open_prs(service_name, owner_repo, data.data))
+}
+
+fn parse_open_prs(service_name: &str, owner_repo: &str, data: GqlOpenPrsData) -> Vec<PullRequest> {
+    let me = data.viewer.login;
+    data.repository
+        .pull_requests
+        .nodes
+        .into_iter()
+        .map(|p| {
+            let author = p.author.map(|a| a.login).unwrap_or_default();
+            let mine = review_of(&p.latest_reviews.nodes, &me);
+            let checks = p.commits.nodes.into_iter().next().and_then(|c| c.commit.status_check_rollup).and_then(|r| {
+                match r.state.as_str() {
+                    "SUCCESS" => Some("pass"),
+                    "FAILURE" | "ERROR" => Some("fail"),
+                    "PENDING" | "EXPECTED" => Some("pending"),
+                    _ => None,
+                }
+            });
+            let status = PrReviewStatus {
+                review_decision: p.review_decision.filter(|d| !d.is_empty()),
+                checks: checks.map(str::to_string),
+                conflicts: p.mergeable.as_deref() == Some("CONFLICTING"),
+                mine: !me.is_empty() && author == me,
+                my_review_stale: mine.is_some_and(|r| r.commit.as_ref().is_some_and(|c| c.oid != p.head_ref_oid)),
+                my_review: mine.map(|r| r.state.clone()),
+            };
+            PullRequest {
+                repo: service_name.to_string(),
+                owner_repo: owner_repo.to_string(),
+                number: p.number,
+                title: p.title,
+                branch: p.head_ref_name,
+                base: p.base_ref_name,
+                author,
+                is_draft: p.is_draft,
+                url: p.url,
+                updated_at: p.updated_at,
+                status: Some(status),
+            }
+        })
+        .collect()
+}
+
+/// `login`'s latest review among a PR's latest reviews (one per reviewer).
+fn review_of<'a>(reviews: &'a [GqlReview], login: &str) -> Option<&'a GqlReview> {
+    reviews
+        .iter()
+        .find(|r| !login.is_empty() && r.author.as_ref().is_some_and(|a| a.login == login))
 }
 
 /// Current UTC time minus `days`, as an ISO-8601 string for comparisons.
@@ -616,6 +785,7 @@ fn pr_by_number(service_name: &str, owner_repo: &str, number: u64) -> Result<Vec
         is_draft: p.is_draft,
         url: p.url,
         updated_at: p.updated_at,
+        ..Default::default()
     }])
 }
 
@@ -824,6 +994,7 @@ mod tests {
             is_draft: false,
             url: String::new(),
             updated_at: "2026-09-10T00:00:00Z".into(),
+            ..Default::default()
         };
         let groups = group_prs(vec![mk("a", 1, "feat/x"), mk("b", 2, "feat/x"), mk("c", 3, "other")]);
         assert_eq!(groups[0].branch, "feat/x");
@@ -886,6 +1057,7 @@ mod pr_wire_tests {
             is_draft: false,
             url: "u".into(),
             updated_at: "2026-09-16T00:00:00Z".into(),
+            ..Default::default()
         };
         let v = serde_json::to_value(&pr).unwrap();
         assert!(v.get("ownerRepo").is_some(), "must be ownerRepo, got: {v}");
@@ -903,6 +1075,31 @@ mod pr_wire_tests {
         assert!(v.get("baseSha").is_some());
     }
 
+    #[test]
+    fn open_prs_carry_review_ci_and_the_viewers_review() {
+        let raw = r#"{"data":{"viewer":{"login":"me"},"repository":{"pullRequests":{"nodes":[
+          {"number":1,"title":"reviewed, then pushed to","headRefName":"a","baseRefName":"main","isDraft":false,"url":"u","updatedAt":"t","headRefOid":"new",
+           "author":{"login":"ana"},"reviewDecision":"CHANGES_REQUESTED","mergeable":"CONFLICTING",
+           "commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"FAILURE"}}}]},
+           "latestReviews":{"nodes":[{"author":{"login":"bob"},"state":"APPROVED","commit":{"oid":"new"}},{"author":{"login":"me"},"state":"CHANGES_REQUESTED","commit":{"oid":"old"}}]}},
+          {"number":2,"title":"mine, no checks","headRefName":"b","baseRefName":"main","isDraft":true,"url":"u","updatedAt":"t","headRefOid":"x",
+           "author":{"login":"me"},"reviewDecision":"","mergeable":"MERGEABLE",
+           "commits":{"nodes":[{"commit":{"statusCheckRollup":null}}]},"latestReviews":{"nodes":[]}}
+        ]}}}}"#;
+        let data: GqlOpenPrs = serde_json::from_str(raw).unwrap();
+        let prs = parse_open_prs("svc", "o/svc", data.data);
+        let s1 = prs[0].status.clone().unwrap();
+        assert_eq!(s1.review_decision.as_deref(), Some("CHANGES_REQUESTED"));
+        assert_eq!(s1.checks.as_deref(), Some("fail"));
+        assert!(s1.conflicts && !s1.mine);
+        assert_eq!(s1.my_review.as_deref(), Some("CHANGES_REQUESTED"));
+        assert!(s1.my_review_stale, "the head moved past my review");
+        let s2 = prs[1].status.clone().unwrap();
+        assert_eq!(s2, PrReviewStatus { mine: true, ..Default::default() });
+        let v = serde_json::to_value(&prs[0]).unwrap();
+        assert!(v["status"].get("myReviewStale").is_some(), "camelCase: {v}");
+    }
+
     fn pr(title: &str, branch: &str, author: &str) -> PullRequest {
         PullRequest {
             repo: "svc".into(),
@@ -915,6 +1112,7 @@ mod pr_wire_tests {
             is_draft: false,
             url: "u".into(),
             updated_at: "2026-09-16T00:00:00Z".into(),
+            ..Default::default()
         }
     }
 

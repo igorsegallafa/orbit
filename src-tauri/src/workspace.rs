@@ -6,6 +6,7 @@ use crate::config::Config;
 use crate::git;
 use crate::links;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -27,6 +28,17 @@ pub struct Workspace {
     /// Agent racing in this variant, e.g. "claude · claude-opus-5".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
+    /// Repos whose branch isn't `branch`: a workspace checked out from PRs
+    /// with different branches, or a fork's read-only `pr-<n>`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub repo_branches: BTreeMap<String, String>,
+}
+
+impl Workspace {
+    /// The branch `repo` belongs on in this workspace.
+    pub fn branch_of(&self, repo: &str) -> &str {
+        self.repo_branches.get(repo).map(String::as_str).unwrap_or(&self.branch)
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -44,7 +56,7 @@ pub struct CardRef {
     pub url: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct RepoStatus {
     pub repo: String,
@@ -61,6 +73,25 @@ pub struct RepoStatus {
     /// squash-merged), so its `ahead` commits need no push.
     #[serde(default)]
     pub integrated: bool,
+    /// The branch this workspace expects the repo on.
+    #[serde(default)]
+    pub expected_branch: String,
+    /// Checked out on another branch than `expected_branch`: a branch-only
+    /// repo's clone is shared, so another workspace may have switched it.
+    #[serde(default)]
+    pub off_branch: bool,
+    /// Branch-only repo: the folder is the base clone itself.
+    #[serde(default)]
+    pub branch_only: bool,
+    /// Switch branch-only repos back without asking (repo setting).
+    #[serde(default)]
+    pub auto_switch: bool,
+    /// Another workspace whose branch the repo is on, when `off_branch`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_by: Option<String>,
+    /// A paused rebase / merge / cherry-pick / revert, which blocks a switch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
 }
 
 /// Default home of the clones and workspaces folders (each can be moved
@@ -493,7 +524,11 @@ pub fn create_from_prs(name: &str, base: &str, prs: &[PrCheckout]) -> Result<(Wo
     }
     let branch = ready[0].1.clone();
     let repos = ready.iter().map(|(r, _)| r.clone()).collect();
-    finish_create(name, &branch, base, repos, None)?;
+    let mut ws = finish_create(name, &branch, base, repos, None)?;
+    ws.repo_branches = ready.iter().filter(|(_, b)| *b != branch).cloned().collect();
+    if !ws.repo_branches.is_empty() {
+        save_meta(&ws_dir, &ws)?;
+    }
     let refs: Vec<PrRef> = prs
         .iter()
         .filter(|p| ready.iter().any(|(r, _)| r == &p.repo))
@@ -522,6 +557,7 @@ fn finish_create(
         pr_refs: Vec::new(),
         variant_of: None,
         agent: None,
+        repo_branches: BTreeMap::new(),
     };
     let raw = serde_yaml::to_string(&ws).map_err(|e| e.to_string())?;
     std::fs::write(meta_path(&ws_dir), raw).map_err(|e| e.to_string())?;
@@ -750,37 +786,130 @@ fn remove_dir_retrying(dir: &Path) -> Result<(), String> {
 pub fn status(name: &str) -> Result<Vec<RepoStatus>, String> {
     let ws_dir = ws_dir(name)?;
     let ws = load_meta(&ws_dir)?;
+    let cfg = Config::load().ok();
+    // Read only when some repo is off its branch: who holds it.
+    let mut others: Option<Vec<Workspace>> = None;
 
     let statuses: Vec<RepoStatus> = ws
         .repos
         .iter()
         .map(|repo| {
             let wt = ws_dir.join(repo);
+            let expected_branch = ws.branch_of(repo).to_string();
             if !wt.exists() {
-                return RepoStatus {
-                    repo: repo.clone(),
-                    branch: None,
-                    dirty: false,
-                    ahead: 0,
-                    behind: 0,
-                    pr_commits: 0,
-                    integrated: false,
-                };
+                return RepoStatus { repo: repo.clone(), expected_branch, ..Default::default() };
             }
             let (ahead, behind) = git::ahead_behind(&wt, &ws.base);
             let pr_commits = git::remote_branch_feature_commits(&wt, &ws.base);
+            let branch = git::current_branch(&wt);
+            let operation = git::operation(&wt);
+            // A paused rebase detaches HEAD; that's not being off-branch.
+            let off_branch = operation.is_none() && branch.as_deref() != Some(expected_branch.as_str());
+            let branch_only = links::is_link(&wt);
+            let held_by = match (&branch, off_branch && branch_only) {
+                (Some(b), true) => others
+                    .get_or_insert_with(|| list().unwrap_or_default())
+                    .iter()
+                    .find(|o| o.name != ws.name && o.repos.contains(repo) && o.branch_of(repo) == b)
+                    .map(|o| o.name.clone()),
+                _ => None,
+            };
             RepoStatus {
                 repo: repo.clone(),
-                branch: git::current_branch(&wt),
                 dirty: git::is_dirty(&wt),
                 ahead,
                 behind,
                 pr_commits,
                 integrated: ahead > 0 && git::is_integrated(&wt, "HEAD", &ws.base),
+                off_branch,
+                branch_only,
+                auto_switch: branch_only
+                    && cfg.as_ref().is_some_and(|c| c.services.iter().any(|s| &s.name == repo && s.auto_switch)),
+                held_by,
+                operation,
+                branch,
+                expected_branch,
             }
         })
         .collect();
     Ok(statuses)
+}
+
+/// Result of putting a repo back on its workspace branch.
+#[derive(Debug, Serialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchSync {
+    /// The branch the repo is on now.
+    pub branch: String,
+    /// Nothing done: uncommitted work is in the way and `stash` wasn't set.
+    pub dirty: bool,
+    /// Uncommitted work was shelved under the branch it was left on.
+    pub stashed: bool,
+    /// Work shelved when this branch was last left came back.
+    pub restored: bool,
+    /// Something to tell the user (e.g. shelved work that didn't re-apply).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// Switches `repo` back to the workspace's branch. Uncommitted work blocks
+/// it unless `stash`: then it is shelved under the branch it was on, and
+/// whatever Orbit shelved when last leaving the target branch comes back.
+pub fn sync_branch(workspace: &str, repo: &str, stash: bool) -> Result<BranchSync, String> {
+    let ws = load_meta(&ws_dir(workspace)?)?;
+    if !ws.repos.iter().any(|r| r == repo) {
+        return Err(format!("'{repo}' is not part of '{workspace}'"));
+    }
+    let expected = ws.branch_of(repo).to_string();
+    let dir = repo_path(workspace, repo)?;
+    if !dir.exists() {
+        return Err(format!("{repo} is missing from '{workspace}'"));
+    }
+    if let Some(op) = git::operation(&dir) {
+        return Err(format!("{repo} has a {op} in progress; finish or abort it before switching branches"));
+    }
+    let current = git::current_branch(&dir);
+    let mut out = BranchSync { branch: expected.clone(), ..Default::default() };
+    if current.as_deref() == Some(expected.as_str()) {
+        return Ok(out);
+    }
+    if git::is_dirty(&dir) {
+        if !stash {
+            out.branch = current.unwrap_or_default();
+            out.dirty = true;
+            return Ok(out);
+        }
+        let left = current.clone().unwrap_or_else(|| "detached HEAD".into());
+        git::autostash(&dir, &left)?;
+        out.stashed = true;
+    }
+    // Recreates the branch from the base if it was deleted meanwhile.
+    git::checkout_branch_in_place(&dir, &expected, &ws.base)?;
+    match git::autostash_restore(&dir, &expected) {
+        Ok(restored) => out.restored = restored,
+        Err(e) => {
+            out.note = Some(format!("{repo}: the work shelved on {expected} didn't re-apply cleanly ({e}); it's still in the stash"))
+        }
+    }
+    Ok(out)
+}
+
+/// Errors when `repo` isn't on its workspace branch, so commit, push,
+/// rebase and PR never act on another workspace's branch. Repository views
+/// (`@repo`) have no workspace branch and pass.
+pub fn ensure_on_branch(workspace: &str, repo: &str) -> Result<(), String> {
+    if repo_scope(workspace).is_some() {
+        return Ok(());
+    }
+    let ws = load_meta(&ws_dir(workspace)?)?;
+    let expected = ws.branch_of(repo);
+    match git::current_branch(&repo_path(workspace, repo)?) {
+        Some(b) if b == expected => Ok(()),
+        current => Err(format!(
+            "{repo} is on {}, not this workspace's branch '{expected}'. Switch it back from the workspace page first.",
+            current.map(|b| format!("'{b}'")).unwrap_or_else(|| "a detached HEAD".into())
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -869,6 +998,52 @@ dist
         let (_, again) = create_from_prs("review-3b", "main", &[same_repo]).unwrap();
         assert!(again.iter().any(|n| n.contains("kept 1 local commit")), "{again:?}");
         assert!(ws_dir("review-3b").unwrap().join("web/mine.txt").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn branch_only_repo_is_flagged_off_branch_and_syncs_back() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = std::env::temp_dir().join(format!("orbit-branch-sync-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::env::set_var("ORBIT_WORKSPACE_ROOT", root.join("ws-root"));
+        std::env::set_var("ORBIT_CONFIG_DIR", root.join("cfg"));
+        for (k, v) in [("GIT_AUTHOR_NAME", "t"), ("GIT_AUTHOR_EMAIL", "t@t"), ("GIT_COMMITTER_NAME", "t"), ("GIT_COMMITTER_EMAIL", "t@t")] {
+            std::env::set_var(k, v);
+        }
+        let bare = origin(&root);
+        let mut svc = crate::config::Service::new("web".into(), bare.to_string_lossy().into());
+        svc.worktree = false;
+        Config { services: vec![svc], ..Default::default() }.save().unwrap();
+
+        // Both workspaces share the clone; the last one created holds it.
+        create("a", "feat/a", "main", &["web".into()], None).unwrap();
+        create("b", "feat/b", "main", &["web".into()], None).unwrap();
+        let st = &status("a").unwrap()[0];
+        assert!(st.off_branch && st.branch_only, "{st:?}");
+        assert_eq!((st.branch.as_deref(), st.expected_branch.as_str()), (Some("feat/b"), "feat/a"));
+        assert_eq!(st.held_by.as_deref(), Some("b"));
+        assert!(!status("b").unwrap()[0].off_branch);
+        assert!(ensure_on_branch("a", "web").unwrap_err().contains("feat/b"));
+        assert!(ensure_on_branch("b", "web").is_ok());
+
+        // b's uncommitted work blocks the switch unless it's shelved.
+        let clone = clone_dir_of("web").unwrap();
+        std::fs::write(clone.join("wip.txt"), "b's work").unwrap();
+        let r = sync_branch("a", "web", false).unwrap();
+        assert!(r.dirty && !r.stashed, "{r:?}");
+        assert_eq!(git::current_branch(&clone).as_deref(), Some("feat/b"));
+        let r = sync_branch("a", "web", true).unwrap();
+        assert!(r.stashed && !r.restored, "{r:?}");
+        assert_eq!(git::current_branch(&clone).as_deref(), Some("feat/a"));
+        assert!(!clone.join("wip.txt").exists());
+        assert!(!status("a").unwrap()[0].off_branch);
+
+        // Back on b, its shelved work returns.
+        let r = sync_branch("b", "web", false).unwrap();
+        assert!(!r.dirty && r.restored, "{r:?}");
+        assert_eq!(std::fs::read_to_string(clone.join("wip.txt")).unwrap(), "b's work");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1017,10 +1192,12 @@ mod wire_tests {
             ahead: 2,
             behind: 0,
             pr_commits: 1,
-            integrated: false,
+            off_branch: true,
+            ..Default::default()
         };
         let v = serde_json::to_value(&st).unwrap();
         assert!(v.get("prCommits").is_some(), "must serialize prCommits: {v}");
+        assert!(v.get("offBranch").is_some(), "must serialize offBranch: {v}");
         // round-trip must also accept camelCase on the way back (if ever)
         let back: RepoStatus = serde_json::from_value(v).unwrap();
         assert_eq!(back.pr_commits, 1);

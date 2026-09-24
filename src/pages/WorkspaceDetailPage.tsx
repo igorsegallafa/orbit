@@ -22,11 +22,12 @@ import { PlanProgress } from "../components/PlanProgress";
 import { CommitModal } from "../components/CommitModal";
 import { RebaseModal } from "../components/RebaseModal";
 import { PushModal } from "../components/PushModal";
+import { BranchDriftBanner } from "../components/BranchDriftBanner";
 import { MergeModal } from "../components/MergeModal";
 import { PrsModal } from "../components/PrsModal";
 import { BuildModal } from "../components/BuildModal";
 import { tooltip } from "../components/Tooltip";
-import { RebaseIcon, CommitIcon, PushIcon, PullRequestIcon, ChevronRightIcon, SparkIcon, CheckIcon, XIcon, CircleIcon, SpinnerIcon, GitIcon, DocIcon, TrashIcon, RefreshIcon, PlayIcon, RaceIcon } from "../components/Icons";
+import { RebaseIcon, CommitIcon, PushIcon, PullRequestIcon, ChevronRightIcon, SparkIcon, CheckIcon, XIcon, CircleIcon, SpinnerIcon, GitIcon, DocIcon, TrashIcon, RefreshIcon, PlayIcon, RaceIcon, BranchIcon, DiffIcon } from "../components/Icons";
 import { GitHubIcon } from "../components/BrandIcons";
 
 interface Props {
@@ -166,6 +167,30 @@ export function WorkspaceDetailPage({
     setStatuses(null);
     load(false);
   }, [load]);
+
+  // A tracked PR in the code review tab (diff, threads, verdict).
+  const openReview = async (pr: WsPrStatus) => {
+    try {
+      const ownerRepo = await invoke<string>("ws_owner_repo", { workspace: workspace.name, repo: pr.repo });
+      const branch = statuses?.find((s) => s.repo === pr.repo)?.expectedBranch ?? workspace.branch;
+      onOpenPrList([
+        {
+          repo: pr.repo,
+          ownerRepo,
+          number: pr.number,
+          title: pr.title,
+          branch,
+          base: workspace.base,
+          author: pr.author,
+          isDraft: pr.isDraft,
+          url: pr.url,
+          updatedAt: pr.updatedAt,
+        },
+      ]);
+    } catch (e) {
+      onError(String(e));
+    }
+  };
 
   const dirtyCount = (statuses ?? []).filter((s) => s.dirty).length;
   // Squash-merged repos keep local commits no remote has; they need no push
@@ -364,6 +389,8 @@ export function WorkspaceDetailPage({
         </div>
       </header>
 
+      <BranchDriftBanner workspace={workspace.name} statuses={statuses} onSynced={() => load(false)} />
+
       {featureDone && (
         <div className="done-banner">
           <CheckIcon size={13} />
@@ -450,6 +477,14 @@ export function WorkspaceDetailPage({
                     <span className="repo-sub">{st.branch ?? "no branch"}</span>
                   </div>
                   <div className="ws-repo-badges">
+                    {st.offBranch && (
+                      <span
+                        className="ws-badge ws-badge-warn"
+                        {...hint(`Expected ${st.expectedBranch}${st.heldBy ? `; the clone is on workspace ${st.heldBy}'s branch` : ""}`)}
+                      >
+                        <BranchIcon size={11} /> Off branch
+                      </span>
+                    )}
                     {st.dirty ? (
                       <span className="ws-badge ws-badge-warn">
                         <span className="dash-repo-dot" /> Uncommitted changes
@@ -596,6 +631,17 @@ export function WorkspaceDetailPage({
                         Squash and merge
                       </button>
                     )}
+                    <button
+                      className="icon-button"
+                      aria-label="Open in code review"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        openReview(pr);
+                      }}
+                      {...hint("Open in code review")}
+                    >
+                      <DiffIcon size={14} />
+                    </button>
                     <button
                       className="icon-button"
                       aria-label="Open on GitHub"
