@@ -673,18 +673,18 @@ function App() {
   /** Sidebar row of one open session under its workspace or repo. */
   const renderSessionItem = (t: SessionTab) => {
     const id = tabId(t);
+    const file = t.kind === "editor" ? t.path.split("/").pop()! : "";
+    // Under a repo the repo name is already the parent row; under a workspace
+    // it tells which of its repos the file belongs to.
     const label =
-      t.kind === "terminal"
-        ? t.terminal.sessionName
-        : t.repo
-          ? `${t.repo}/${t.path.split("/").pop()}`
-          : t.path.split("/").pop()!;
+      t.kind === "terminal" ? t.terminal.sessionName : t.repo && !isScope(t.workspace) ? `${t.repo}/${file}` : file;
+    const full = t.kind === "terminal" ? label : [t.repo, t.path].filter(Boolean).join("/");
     return (
       <button
         key={id}
         className={`nav-item nav-sub ${activeTab === id ? "active" : ""}`}
         onClick={() => setActiveTab(id)}
-        title={label}
+        title={full}
       >
         {t.kind === "terminal" ? (
           <StatusIndicator status={sessionStatuses[id] ?? "idle"} />
