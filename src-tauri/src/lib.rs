@@ -160,6 +160,7 @@ pub fn run() {
             repo::repo_revert,
             repo::repo_operation,
             commands::ws_checks,
+            commands::pr_group_checks,
             commands::check_rerun,
             commands::check_logs,
             commands::investigate_check,

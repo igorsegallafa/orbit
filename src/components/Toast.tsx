@@ -92,6 +92,10 @@ class ToastRegistry {
     window.clearTimeout(this.timers.get(id));
     this.timers.delete(id);
     this.items = this.items.filter((t) => t.id !== id);
+    // The stack unmounts with the pointer still on it (closing the last
+    // toast with ×), so no mouseleave ever comes: without this reset every
+    // later toast would stay up until closed by hand.
+    if (this.items.length === 0) this.hovered = false;
     this.emit();
   }
 

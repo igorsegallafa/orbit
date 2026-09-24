@@ -73,7 +73,10 @@ pub fn run_streaming(
     id: Option<&str>,
     mut on_line: impl FnMut(Line),
 ) -> Result<Outcome, String> {
+    // PWD too: opencode takes its project directory from it, and the one
+    // inherited from wherever Orbit was launched would win over current_dir.
     cmd.current_dir(dir)
+        .env("PWD", dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

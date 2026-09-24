@@ -975,16 +975,25 @@ TITLE: <the title>
 ---
 <the description>"#,
     );
-    // Models occasionally drift from the format; one more try usually lands.
-    let out = draft_answer(&dir, &prompt)?;
-    if let Some(d) = parse_title_body(&out) {
-        return Ok(d);
+    // Two attempts in total, whatever went wrong (CLI failure or a reply that
+    // drifted from the format): stacking the transient-failure retry on top
+    // of the format retry let a slow model keep the modal spinning for 8 min.
+    let mut ai = crate::config::Config::load()?.ai;
+    ai.model = ai.draft_model();
+    let mut last = String::new();
+    for _ in 0..2 {
+        match answer_once(&ai, &dir, &prompt, Access::Answer) {
+            Ok(out) => match parse_title_body(&out) {
+                Some(d) => return Ok(d),
+                None => {
+                    let preview: String = out.trim().chars().take(160).collect();
+                    last = format!("agent reply had no TITLE line: {preview}");
+                }
+            },
+            Err(e) => last = e,
+        }
     }
-    let out = draft_answer(&dir, &prompt)?;
-    parse_title_body(&out).ok_or_else(|| {
-        let preview: String = out.trim().chars().take(160).collect();
-        format!("agent reply had no TITLE line: {preview}")
-    })
+    Err(last)
 }
 
 /// "TITLE: ...", "---", body -> PrDraft. Tolerates code fences, markdown
