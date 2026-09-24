@@ -6,6 +6,7 @@ import { SettingsNav, SettingsPage, SettingsSectionId } from "./pages/SettingsPa
 import { IntegrationsPage } from "./pages/IntegrationsPage";
 import { CodeReviewPage } from "./pages/CodeReviewPage";
 import { WorkspaceDetailPage } from "./pages/WorkspaceDetailPage";
+import { FeaturePage } from "./pages/FeaturePage";
 import { SidebarResizer } from "./components/SidebarResizer";
 import { ContextMenu, MenuItem, useContextMenu } from "./components/ContextMenu";
 import { EditorPane, revealInEditor } from "./components/EditorPane";
@@ -34,7 +35,7 @@ import { reasonLabel, StopReason } from "./types/ralph";
 import {
   HomeIcon, SettingsIcon, SatelliteIcon, DocIcon, TerminalIcon, PlusIcon,
   ChevronRightIcon, PlugIcon, DiffIcon, GitIcon, PanelLeftIcon, PanelLeftExpandIcon,
-  PanelRightIcon, PanelRightExpandIcon, SparkIcon, RepoIcon, ArrowLeftIcon, ArrowRightIcon,
+  PanelRightIcon, PanelRightExpandIcon, SparkIcon, RepoIcon, ArrowLeftIcon, ArrowRightIcon, PullRequestIcon,
 } from "./components/Icons";
 import { NavHistory } from "./lib/navHistory";
 import { SkeletonCards, SkeletonTable } from "./components/Skeleton";
@@ -56,6 +57,8 @@ type Tab =
   | { kind: "review"; workspace: string; repo: string; path: string }
   | { kind: "commit"; workspace: string; repo: string; commit: GitCommit }
   | { kind: "pr"; prs: PullRequest[] }
+  /** A Code Review feature (PRs sharing a branch) before it is checked out. */
+  | { kind: "feature"; prs: PullRequest[] }
   | { kind: "ralph"; workspace: string }
   | { kind: "repo"; repo: string }
   | { kind: "terminal"; terminal: TerminalTab };
@@ -92,6 +95,7 @@ function tabId(tab: Tab): string {
   if (t.kind === "review") return `rv:${t.workspace}/${t.repo}/${t.path}`;
   if (t.kind === "commit") return `cm:${t.workspace}/${t.repo}/${t.commit.sha}`;
   if (t.kind === "pr") return `pr:${t.prs.map((p) => `${p.ownerRepo}/${p.number}`).join("+")}`;
+  if (t.kind === "feature") return `ft:${t.prs.map((p) => `${p.ownerRepo}/${p.number}`).join("+")}`;
   if (t.kind === "ralph") return `ralph:${t.workspace}`;
   if (t.kind === "repo") return `repo:${t.repo}`;
   // Stable id: must NOT embed the display name, or renaming re-keys the pane
@@ -163,7 +167,7 @@ function App() {
           ? t.workspace.name
           : t.kind === "terminal"
             ? t.terminal.workspace
-            : t.kind === "pr" || t.kind === "repo"
+            : t.kind === "pr" || t.kind === "feature" || t.kind === "repo"
               ? null
               : t.workspace;
       setTabs((ts) => {
@@ -367,7 +371,7 @@ function App() {
   // them: close their tabs (killing the processes) before a removal.
   const closeWorkspaceSessions = (names: string[]) => {
     const doomed = tabs.filter(
-      (t) => t.kind !== "pr" && t.kind !== "workspace" && t.kind !== "repo" && names.includes(t.kind === "terminal" ? t.terminal.workspace : t.workspace),
+      (t) => t.kind !== "pr" && t.kind !== "feature" && t.kind !== "workspace" && t.kind !== "repo" && names.includes(t.kind === "terminal" ? t.terminal.workspace : t.workspace),
     );
     if (!doomed.length) return;
     doomed.forEach(forgetTerminal);
@@ -714,7 +718,7 @@ function App() {
   // commit tabs carry one.
   // Repo tabs (and editors/terminals opened from one) focus the repo's clone.
   const focusName =
-    !active || active.kind === "pr" || active.kind === "workspace"
+    !active || active.kind === "pr" || active.kind === "feature" || active.kind === "workspace"
       ? null
       : active.kind === "repo"
         ? `@${active.repo}`
@@ -826,9 +830,15 @@ function App() {
     }
     if (tab.kind === "pr") {
       return (
-        <PrReviewPane
+        <PrReviewPane prs={tab.prs} onError={setError} />
+      );
+    }
+    if (tab.kind === "feature") {
+      return (
+        <FeaturePage
           prs={tab.prs}
           workspace={workspaceForPrs(tab.prs, workspaces)}
+          onOpenReview={() => openTab({ kind: "pr", prs: tab.prs })}
           onCheckout={() => setCheckoutPrs(tab.prs)}
           onOpenWorkspace={openWorkspaceTab}
           onError={setError}
@@ -873,8 +883,11 @@ function App() {
       return (
         <CodeReviewPage
           onOpenPr={(prs) => {
+            // Already checked out: its workspace is that feature's page.
+            const ws = workspaceForPrs(prs, workspaces);
+            if (ws) return openWorkspaceTab(ws);
             setNavPage({ kind: "dashboard" });
-            openTab({ kind: "pr", prs });
+            openTab({ kind: "feature", prs });
           }}
           workspaces={workspaces}
           onCheckout={setCheckoutPrs}
@@ -1207,6 +1220,10 @@ function App() {
                           ? `${t.commit.message.slice(0, 24)}…`
                           : t.kind === "ralph"
                             ? `Ralph · ${t.workspace.replace(/^@/, "")}`
+                            : t.kind === "feature"
+                            ? t.prs.length > 1
+                              ? t.prs[0].branch
+                              : `#${t.prs[0]?.number ?? ""} ${t.prs[0]?.repo ?? ""}`
                             : t.kind === "pr"
                             ? t.prs.length > 0
                               ? `#${t.prs[0].number}` + (t.prs.length > 1 ? ` (+${t.prs.length - 1})` : "")
@@ -1221,6 +1238,8 @@ function App() {
                     <RepoIcon size={13} />
                   ) : t.kind === "editor" ? (
                     <DocIcon size={13} />
+                  ) : t.kind === "feature" ? (
+                    <PullRequestIcon size={13} />
                   ) : t.kind === "review" || t.kind === "commit" || t.kind === "pr" ? (
                     <DiffIcon size={13} />
                   ) : t.kind === "ralph" ? (

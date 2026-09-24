@@ -15,6 +15,7 @@ import {
   CheckAnalysis,
 } from "../types/config";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { CheckBox } from "../components/CheckBox";
 import { Skeleton } from "../components/Skeleton";
 import { PlanModal } from "../components/PlanModal";
 import { GrillModal } from "../components/GrillModal";
@@ -68,6 +69,7 @@ export function WorkspaceDetailPage({
   const [statuses, setStatuses] = useState<RepoStatus[] | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState<null | "normal" | "force">(null);
+  const [removing, setRemoving] = useState(false);
   const [planOpen, setPlanOpen] = useState(false);
   const [grillOpen, setGrillOpen] = useState(false);
   const [planExists, setPlanExists] = useState<boolean | null>(null);
@@ -80,6 +82,7 @@ export function WorkspaceDetailPage({
   const [prStatuses, setPrStatuses] = useState<WsPrStatus[] | null>(null);
   const [wsChecks, setWsChecks] = useState<WsCheck[] | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null); // "repo/number"
+  const [investigatingAll, setInvestigatingAll] = useState(false);
   const [investigation, setInvestigation] = useState<null | {
     repo: string;
     check: PrCheck;
@@ -99,12 +102,11 @@ export function WorkspaceDetailPage({
       .catch(() => setPrStatuses([]));
   }, [workspace.name]);
 
-  // PRs and their checks are part of the page, loaded with it.
+  // PRs and their checks are part of the page, loaded with it (by the
+  // fetch-on-enter below).
   useEffect(() => {
     setPrStatuses(null);
     setWsChecks(null);
-    loadPrs();
-    loadChecks();
   }, [loadPrs, loadChecks]);
 
   // Keep checks fresh while any is running.
@@ -116,15 +118,16 @@ export function WorkspaceDetailPage({
   }, [wsChecks, loadChecks]);
 
   // Does a PLAN.md already exist for this workspace?
-  useEffect(() => {
-    let cancelled = false;
+  const checkPlan = useCallback(() => {
     invoke<boolean>("workspace_plan_exists", { name: workspace.name })
-      .then((v) => !cancelled && setPlanExists(v))
-      .catch(() => !cancelled && setPlanExists(false));
-    return () => {
-      cancelled = true;
-    };
+      .then((v) => setPlanExists(v))
+      .catch(() => setPlanExists(false));
   }, [workspace.name]);
+
+  useEffect(() => {
+    setPlanExists(null);
+    checkPlan();
+  }, [checkPlan]);
 
   const load = useCallback(
     async (fetch: boolean) => {
@@ -163,30 +166,44 @@ export function WorkspaceDetailPage({
     }
   };
 
+  // Entering the page: local status right away, then fetch the remotes so
+  // ahead/behind, PRs and checks are current. While the page stays open
+  // (and the window is visible), refresh the same way every minute.
   useEffect(() => {
     setStatuses(null);
-    load(false);
-  }, [load]);
+    load(false).then(() => load(true));
+    const t = window.setInterval(() => {
+      if (document.visibilityState !== "visible") return;
+      load(true);
+      checkPlan();
+    }, 60_000);
+    return () => window.clearInterval(t);
+  }, [load, checkPlan]);
 
-  // A tracked PR in the code review tab (diff, threads, verdict).
-  const openReview = async (pr: WsPrStatus) => {
+  // The feature's PRs in one code review tab (repo chips on top): open ones
+  // first, merged/closed only when nothing is open anymore.
+  const reviewPrs = (() => {
+    const all = prStatuses ?? [];
+    const open = all.filter((p) => p.state === "OPEN");
+    return open.length ? open : all;
+  })();
+  const openCodeReview = async () => {
     try {
-      const ownerRepo = await invoke<string>("ws_owner_repo", { workspace: workspace.name, repo: pr.repo });
-      const branch = statuses?.find((s) => s.repo === pr.repo)?.expectedBranch ?? workspace.branch;
-      onOpenPrList([
-        {
+      const prs = await Promise.all(
+        reviewPrs.map(async (pr): Promise<PullRequest> => ({
           repo: pr.repo,
-          ownerRepo,
+          ownerRepo: await invoke<string>("ws_owner_repo", { workspace: workspace.name, repo: pr.repo }),
           number: pr.number,
           title: pr.title,
-          branch,
+          branch: statuses?.find((s) => s.repo === pr.repo)?.expectedBranch ?? workspace.branch,
           base: workspace.base,
           author: pr.author,
           isDraft: pr.isDraft,
           url: pr.url,
           updatedAt: pr.updatedAt,
-        },
-      ]);
+        }))
+      );
+      onOpenPrList(prs);
     } catch (e) {
       onError(String(e));
     }
@@ -218,6 +235,10 @@ export function WorkspaceDetailPage({
   });
 
   const remove = async (force: boolean) => {
+    // Removing a big worktree takes a while; a second click would start
+    // another `git worktree remove` fighting over the same folder.
+    if (removing) return;
+    setRemoving(true);
     try {
       onBeforeRemove([workspace.name]);
       const kept = await invoke<string[]>("remove_workspace", { name: workspace.name, force });
@@ -233,6 +254,8 @@ export function WorkspaceDetailPage({
         onError(msg);
         setConfirmRemove(null);
       }
+    } finally {
+      setRemoving(false);
     }
   };
 
@@ -320,7 +343,8 @@ export function WorkspaceDetailPage({
               : checksPassing
                 ? "All checks passed"
                 : "No checks yet",
-      action: checksFailing ? { label: "Review", onClick: reviewFailingChecks } : undefined,
+      action: checksFailing ? { label: "Investigate all", onClick: () => setInvestigatingAll(true) } : undefined,
+      extra: checksFailing ? { label: "Review", onClick: reviewFailingChecks } : undefined,
     },
   ];
 
@@ -362,6 +386,14 @@ export function WorkspaceDetailPage({
           </div>
         </div>
         <div className="ws-head-tools">
+          <button
+            className="secondary ws-tool"
+            disabled={reviewPrs.length === 0}
+            {...hint(reviewPrs.length ? "Review the feature's PRs: diffs, threads and verdict, one tab" : "No pull requests yet")}
+            onClick={openCodeReview}
+          >
+            <DiffIcon size={14} /> Code Review
+          </button>
           {workspace.card && (
             <button
               className="secondary ws-tool"
@@ -428,9 +460,16 @@ export function WorkspaceDetailPage({
             </div>
             <div className="flow-detail">{s.detail}</div>
             {s.action && (
-              <button className={`flow-btn ${s.action.secondary || i !== nextStep ? "secondary" : ""}`} onClick={s.action.onClick}>
-                {s.action.label}
-              </button>
+              <div className="flow-actions">
+                <button className={`flow-btn ${s.action.secondary || i !== nextStep ? "secondary" : ""}`} onClick={s.action.onClick}>
+                  {s.action.label}
+                </button>
+                {s.extra && (
+                  <button className="flow-btn secondary" onClick={s.extra.onClick}>
+                    {s.extra.label}
+                  </button>
+                )}
+              </div>
             )}
           </div>
         ))}
@@ -645,17 +684,6 @@ export function WorkspaceDetailPage({
                     )}
                     <button
                       className="icon-button"
-                      aria-label="Open in code review"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        openReview(pr);
-                      }}
-                      {...hint("Open in code review")}
-                    >
-                      <DiffIcon size={14} />
-                    </button>
-                    <button
-                      className="icon-button"
                       aria-label="Open on GitHub"
                       onClick={(e) => {
                         e.stopPropagation();
@@ -775,6 +803,8 @@ export function WorkspaceDetailPage({
           }
           confirmLabel={confirmRemove === "force" ? "Force remove" : "Remove"}
           danger
+          busy={removing}
+          busyLabel="Removing…"
           onConfirm={() => remove(confirmRemove === "force")}
           onClose={() => setConfirmRemove(null)}
         />
@@ -801,7 +831,8 @@ export function WorkspaceDetailPage({
           onStartInterview={() => setGrillOpen(true)}
           onClose={() => {
             setPlanOpen(false);
-            setPlanExists(true);
+            // Closed after a cancel or a failure too: ask the disk, don't assume.
+            checkPlan();
           }}
           onError={onError}
         />
@@ -822,6 +853,22 @@ export function WorkspaceDetailPage({
           onError={onError}
         />
       )}
+
+      {investigatingAll && (
+        <InvestigateAllModal
+          workspace={workspace.name}
+          failed={(wsChecks ?? []).flatMap((w) =>
+            w.checks.filter((c) => c.bucket === "fail").map((check) => ({ repo: w.repo, prNumber: w.prNumber, check }))
+          )}
+          onApplied={() => {
+            setInvestigatingAll(false);
+            loadChecks();
+            load(false);
+          }}
+          onClose={() => setInvestigatingAll(false)}
+          onError={onError}
+        />
+      )}
     </div>
   );
 }
@@ -833,10 +880,12 @@ interface FlowStep {
   state: "loading" | "idle" | "action" | "done" | "running" | "fail";
   detail: string;
   action?: { label: string; onClick: () => void; secondary?: boolean };
+  /** A second, always-secondary button beside the action. */
+  extra?: { label: string; onClick: () => void };
 }
 
 /** Aggregate CI dot for a PR row. */
-function CheckDot({ status }: { status: string }) {
+export function CheckDot({ status }: { status: string }) {
   const cls = `ws-check-dot ws-check-${status}`;
   return (
     <span
@@ -862,7 +911,7 @@ function CheckDot({ status }: { status: string }) {
 
 /** Expanded checks of one PR: state icon, duration, Re-run / Investigate
  *  on failures, link on the name. */
-function ChecksList({
+export function ChecksList({
   wsCheck,
   repo,
   onRerun,
@@ -871,7 +920,7 @@ function ChecksList({
   wsCheck: WsCheck | undefined;
   repo: string;
   onRerun: (link: string) => void;
-  onInvestigate: (repo: string, check: PrCheck) => void;
+  onInvestigate?: (repo: string, check: PrCheck) => void;
 }) {
   const [rerunning, setRerunning] = useState<string | null>(null);
   if (!wsCheck || wsCheck.checks.length === 0) {
@@ -930,14 +979,16 @@ function ChecksList({
                   >
                     ↻ Re-run
                   </button>
-                  <button
-                    className="btn-mini"
-                    onClick={() => onInvestigate(repo, c)}
-                    onMouseEnter={(e) => tooltip.show("AI reads the failure log and proposes a fix", e)}
-                    onMouseLeave={() => tooltip.hide()}
-                  >
-                    <SparkIcon size={11} /> Investigate
-                  </button>
+                  {onInvestigate && (
+                    <button
+                      className="btn-mini"
+                      onClick={() => onInvestigate(repo, c)}
+                      onMouseEnter={(e) => tooltip.show("AI reads the failure log and proposes a fix", e)}
+                      onMouseLeave={() => tooltip.hide()}
+                    >
+                      <SparkIcon size={11} /> Investigate
+                    </button>
+                  )}
                 </>
               )}
               {rerunning === c.link && <span className="ws-check-meta">re-running…</span>}
@@ -1078,6 +1129,183 @@ function InvestigateModal({
               Apply fix
             </button>
           )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+interface FailedCheck {
+  repo: string;
+  prNumber: number;
+  check: PrCheck;
+}
+
+type Finding =
+  | { state: "analyzing" }
+  | { state: "done"; analysis: CheckAnalysis; selected: boolean }
+  | { state: "error"; error: string };
+
+/** How many checks are analyzed at once: each one is an agent run. */
+const INVESTIGATE_CONCURRENCY = 3;
+
+/** Investigates every failed check of the workspace at once, then applies
+ *  the selected fixes: one edit agent per repository carrying all of that
+ *  repo's fixes, so two agents never edit the same worktree together. */
+function InvestigateAllModal({
+  workspace,
+  failed,
+  onApplied,
+  onClose,
+  onError,
+}: {
+  workspace: string;
+  failed: FailedCheck[];
+  onApplied: () => void;
+  onClose: () => void;
+  onError: (msg: string) => void;
+}) {
+  // Snapshot: the page keeps polling checks while this is open.
+  const [items] = useState(failed);
+  const [findings, setFindings] = useState<Finding[]>(() => failed.map(() => ({ state: "analyzing" })));
+  const [applying, setApplying] = useState(false);
+  const [startedAt] = useState(Date.now());
+  const [now, setNow] = useState(Date.now());
+
+  useEffect(() => {
+    let cancelled = false;
+    const set = (i: number, f: Finding) => !cancelled && setFindings((all) => all.map((x, j) => (j === i ? f : x)));
+    const investigate = async (i: number) => {
+      const { repo, check } = items[i];
+      try {
+        const log = await invoke<string>("check_logs", { link: check.link });
+        const analysis = await invoke<CheckAnalysis>("investigate_check", {
+          workspace,
+          repo,
+          checkName: check.name,
+          failedLog: log,
+        });
+        set(i, { state: "done", analysis, selected: analysis.actionable && !!analysis.fix });
+      } catch (e) {
+        set(i, { state: "error", error: String(e) });
+      }
+    };
+    let next = 0;
+    const worker = async () => {
+      while (!cancelled && next < items.length) await investigate(next++);
+    };
+    Promise.all(Array.from({ length: Math.min(INVESTIGATE_CONCURRENCY, items.length) }, worker));
+    const t = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(t);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const analyzing = findings.filter((f) => f.state === "analyzing").length;
+  const selected = findings.flatMap((f, i) => (f.state === "done" && f.selected ? [i] : []));
+  const toggle = (i: number, on: boolean) =>
+    setFindings((all) => all.map((f, j) => (j === i && f.state === "done" ? { ...f, selected: on } : f)));
+
+  const applyAll = async () => {
+    setApplying(true);
+    const byRepo = new Map<string, string[]>();
+    for (const i of selected) {
+      const f = findings[i];
+      if (f.state !== "done") continue;
+      const { repo, check } = items[i];
+      byRepo.set(repo, [...(byRepo.get(repo) ?? []), `Failed check "${check.name}":\n${f.analysis.fix}`]);
+    }
+    const results = await Promise.allSettled(
+      [...byRepo].map(([repo, fixes]) =>
+        invoke("apply_check_fix", {
+          workspace,
+          repo,
+          instruction: fixes.map((fx, n) => `${n + 1}. ${fx}`).join("\n\n"),
+        }).catch((e) => Promise.reject(`${repo}: ${e}`))
+      )
+    );
+    setApplying(false);
+    const failures = results.flatMap((r) => (r.status === "rejected" ? [String(r.reason)] : []));
+    if (failures.length) {
+      onError(failures.join("\n"));
+      return;
+    }
+    toast.success(`Applied ${selected.length} fix${selected.length === 1 ? "" : "es"}`, {
+      description: "Review the changes, then commit and push.",
+    });
+    onApplied();
+  };
+
+  const elapsed = Math.floor((now - startedAt) / 1000);
+  const busy = applying;
+
+  return (
+    <div className="modal-overlay" onMouseDown={busy ? undefined : onClose}>
+      <div className="modal ws-action-modal ws-invest-all" onMouseDown={(e) => e.stopPropagation()}>
+        <div className="modal-body">
+          <h3>Investigate failed checks</h3>
+          <p className="ws-commit-placeholder">
+            {applying ? (
+              <>
+                <span className="spinner" /> Applying {selected.length} fix{selected.length === 1 ? "" : "es"}…
+              </>
+            ) : analyzing > 0 ? (
+              <>
+                <span className="spinner" /> {elapsed}s — analyzing {items.length - analyzing}/{items.length} done…
+              </>
+            ) : (
+              `${items.length} failed check${items.length === 1 ? "" : "s"} analyzed. Pick the fixes to apply.`
+            )}
+          </p>
+          <div className="ws-invest-list">
+            {items.map(({ repo, prNumber, check }, i) => {
+              const f = findings[i];
+              return (
+                <div className="ws-invest-block" key={`${repo}/${prNumber}/${check.name}`}>
+                  <div className="ws-invest-head">
+                    {f.state === "done" && f.analysis.actionable && f.analysis.fix ? (
+                      <CheckBox label="Apply this fix" checked={f.selected} disabled={busy} onChange={(v) => toggle(i, v)} />
+                    ) : f.state === "analyzing" ? (
+                      <span className="spinner" />
+                    ) : (
+                      <XIcon size={12} />
+                    )}
+                    <span className="ws-invest-title">{check.name}</span>
+                    <span className="ws-invest-repo">
+                      {repo} #{prNumber}
+                    </span>
+                  </div>
+                  {f.state === "analyzing" && <Skeleton w="80%" h={11} />}
+                  {f.state === "error" && <div className="ws-invest-text">{f.error}</div>}
+                  {f.state === "done" && (
+                    <>
+                      <div className="ws-invest-label">Problem</div>
+                      <div className="ws-invest-text">{f.analysis.problem}</div>
+                      {f.analysis.fix ? (
+                        <>
+                          <div className="ws-invest-label">Proposed fix</div>
+                          <div className="ws-invest-text mono">{f.analysis.fix}</div>
+                        </>
+                      ) : null}
+                      {!f.analysis.actionable && (
+                        <div className="ws-invest-note">Not a code fix in this repository (flaky or infrastructure) — nothing to apply.</div>
+                      )}
+                    </>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+        <div className="modal-footer">
+          <button type="button" className="secondary" onClick={onClose} disabled={busy}>
+            Close
+          </button>
+          <button type="button" onClick={applyAll} disabled={busy || selected.length === 0}>
+            {selected.length ? `Apply ${selected.length} fix${selected.length === 1 ? "" : "es"}` : "Apply fixes"}
+          </button>
         </div>
       </div>
     </div>
