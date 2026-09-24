@@ -99,6 +99,31 @@ pub fn run() -> Vec<Check> {
         c.used_by = used_by;
         checks.push(c);
     }
+
+    // Language servers for the languages the cloned repos use.
+    let mut langs: Vec<(&'static str, Vec<String>)> = Vec::new();
+    for svc in &cfg.services {
+        let Ok(dir) = crate::workspace::clone_dir(svc) else { continue };
+        for lang in crate::lsp::languages_in(&dir) {
+            match langs.iter_mut().find(|(l, _)| *l == lang) {
+                Some((_, repos)) => repos.push(svc.name.clone()),
+                None => langs.push((lang, vec![svc.name.clone()])),
+            }
+        }
+    }
+    for (id, used_by) in langs {
+        let Some(lang) = crate::lsp::language(id) else { continue };
+        let setting = cfg.language_servers.get(id);
+        let result = match crate::lsp::resolve(lang, setting) {
+            Some((bin, _)) => Ok(format!("{} · {bin}", lang.name)),
+            None if setting.is_some_and(|s| s.disabled) => Ok(format!("{} · disabled in Settings → Languages", lang.name)),
+            None => Err("missing".to_string()),
+        };
+        let hint = format!("{}: no language server, so no code navigation. {}", lang.name, lang.servers[0].install);
+        let mut c = check(lang.servers[0].bin, "language", false, result, &hint);
+        c.used_by = used_by;
+        checks.push(c);
+    }
     checks
 }
 

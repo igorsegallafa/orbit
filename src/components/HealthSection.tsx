@@ -4,7 +4,7 @@ import { SkeletonTable } from "./Skeleton";
 
 interface Check {
   name: string;
-  group: "orbit" | "agent" | "build";
+  group: "orbit" | "agent" | "build" | "language";
   required: boolean;
   ok: boolean;
   detail: string;
@@ -18,6 +18,11 @@ const GROUPS: { id: Check["group"]; title: string; empty?: string }[] = [
     id: "build",
     title: "Build tools",
     empty: "Detected from your repositories' build commands. None configured yet.",
+  },
+  {
+    id: "language",
+    title: "Language servers",
+    empty: "Detected from the languages your cloned repositories use. None found yet.",
   },
 ];
 

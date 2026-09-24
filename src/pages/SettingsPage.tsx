@@ -5,6 +5,7 @@ import { GroupsSection } from "../components/GroupsSection";
 import { AiSection } from "../components/AiSection";
 import { HealthSection } from "../components/HealthSection";
 import { UpdatesSection } from "../components/UpdatesSection";
+import { LanguagesSection } from "../components/LanguagesSection";
 
 interface Props {
   config: Config;
@@ -12,7 +13,7 @@ interface Props {
   onError: (msg: string) => void;
 }
 
-type Tab = "repos" | "groups" | "ai" | "health" | "updates";
+type Tab = "repos" | "groups" | "ai" | "languages" | "health" | "updates";
 
 export function SettingsPage({ config, onChange, onError }: Props) {
   const [tab, setTab] = useState<Tab>("repos");
@@ -43,6 +44,12 @@ export function SettingsPage({ config, onChange, onError }: Props) {
           AI
         </button>
         <button
+          className={`tab ${tab === "languages" ? "tab-active" : ""}`}
+          onClick={() => setTab("languages")}
+        >
+          Languages
+        </button>
+        <button
           className={`tab ${tab === "health" ? "tab-active" : ""}`}
           onClick={() => setTab("health")}
         >
@@ -59,6 +66,7 @@ export function SettingsPage({ config, onChange, onError }: Props) {
       {tab === "repos" && <ReposSection config={config} onChange={onChange} onError={onError} />}
       {tab === "groups" && <GroupsSection config={config} onChange={onChange} onError={onError} />}
       {tab === "ai" && <AiSection onError={onError} />}
+      {tab === "languages" && <LanguagesSection onError={onError} />}
       {tab === "health" && <HealthSection onError={onError} />}
       {tab === "updates" && <UpdatesSection />}
     </div>
