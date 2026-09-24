@@ -30,9 +30,13 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # Tag runs can't see each other's caches, only main's: cache.yml keeps
+      # one there under this key, and releases only read it.
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: "./src-tauri -> target"
+          shared-key: tauri-release
+          save-if: false
 
       - name: Install frontend dependencies
         run: npm ci
