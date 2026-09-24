@@ -33,9 +33,11 @@ fn next_id() -> u32 {
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // one per invoke field
 pub async fn pty_spawn(
     app: AppHandle,
     workspace: String,
+    repo: Option<String>,
     cmd: Option<String>,
     args: Option<Vec<String>>,
     cols: u16,
@@ -44,7 +46,12 @@ pub async fn pty_spawn(
 ) -> Result<u32, String> {
     let id = next_id();
     let app_for_reader = app.clone();
-    let cwd = crate::workspace::scope_dir(&workspace)?.to_string_lossy().to_string();
+    let cwd = match repo.filter(|r| !r.is_empty()) {
+        Some(r) => crate::workspace::repo_path(&workspace, &r)?,
+        None => crate::workspace::scope_dir(&workspace)?,
+    }
+    .to_string_lossy()
+    .to_string();
     if !std::path::Path::new(&cwd).exists() {
         return Err(format!("directory does not exist: {cwd}"));
     }

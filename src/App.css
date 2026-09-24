@@ -5907,6 +5907,64 @@ button .spinner {
 .find-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 14px; border-top: 1px solid var(--border); font-size: 11px; color: var(--text-faint); }
 .find-foot-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 
+/* ---------- Language servers ---------- */
+/* File bar chip: which server backs the file, and what it's doing */
+.lsp-chip {
+  display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 8px !important; max-width: 320px;
+  border: 1px solid var(--border-strong); border-radius: 11px; font-size: 11px; color: var(--text-dim); white-space: nowrap;
+}
+.lsp-chip .spinner { width: 10px; height: 10px; margin: 0; }
+.lsp-chip-text { overflow: hidden; text-overflow: ellipsis; }
+.lsp-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); flex-shrink: 0; }
+.lsp-chip-ready { color: var(--text-dim); }
+.lsp-chip-missing { color: var(--text-faint); border-style: dashed; }
+.lsp-chip-exited { color: var(--danger); border-color: rgba(255, 93, 93, 0.4); cursor: pointer; }
+.lsp-chip-restart { display: none; align-items: center; color: var(--text-faint); cursor: pointer; }
+.lsp-chip-ready:hover .lsp-chip-restart { display: inline-flex; }
+button.lsp-chip-restart:hover:not(:disabled) { color: var(--text); }
+
+/* Banner under the file bar (clangd without compile_commands.json) */
+.editor-banner {
+  display: flex; align-items: center; gap: 10px; padding: 8px 14px; flex-shrink: 0;
+  border-bottom: 1px solid var(--border); background: rgba(227, 179, 65, 0.07); font-size: 12px; color: var(--text-dim);
+}
+.editor-banner strong { color: var(--text); font-weight: 600; }
+.editor-banner > span:first-child { flex: 1; min-width: 0; }
+.editor-banner-note { color: var(--text-faint); white-space: nowrap; }
+.editor-banner-select .select-trigger { height: 24px; min-width: 190px; font-size: 11.5px; }
+.editor-banner-close { width: 22px !important; height: 22px !important; font-size: 15px; }
+
+/* Ctrl+T: project symbols */
+.symbol-search {
+  width: 680px; max-width: calc(100vw - 32px); max-height: min(520px, 70vh); display: flex; flex-direction: column;
+  border: 1px solid var(--border-strong); border-radius: 12px; background: var(--panel);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55); overflow: hidden;
+}
+.symbol-search > input { height: 44px; border: none; border-bottom: 1px solid var(--border); border-radius: 0; background: transparent; font-size: 14px; padding: 0 16px; box-shadow: none !important; }
+.symbol-list { overflow-y: auto; padding: 4px; }
+.symbol-hit { width: 100%; display: flex; align-items: baseline; gap: 10px; padding: 7px 12px !important; border-radius: 6px; font-size: 12.5px; color: var(--text-dim); }
+.symbol-hit.active { background: var(--accent-soft); color: var(--text); }
+.symbol-kind { width: 70px; flex-shrink: 0; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-faint); }
+.symbol-name { color: var(--text); font-weight: 600; white-space: nowrap; }
+.symbol-container { color: var(--text-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.symbol-file { margin-left: auto; font-family: var(--mono, ui-monospace, monospace); font-size: 11px; color: var(--text-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 45%; direction: rtl; }
+.symbol-empty { padding: 18px; text-align: center; font-size: 12.5px; color: var(--text-faint); }
+
+/* Settings → Languages */
+.settings-subtitle { margin: 22px 0 10px; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-dim); }
+.lang-row .settings-row-text strong { display: flex; align-items: center; gap: 8px; }
+.lang-state { font-size: 10.5px !important; font-weight: 600; padding: 1px 7px; border-radius: 9px; border: 1px solid var(--border-strong); }
+.lang-state-ok { color: var(--ok) !important; border-color: rgba(74, 222, 128, 0.35); }
+.lang-state-missing { color: var(--warn, #e3b341) !important; border-color: rgba(227, 179, 65, 0.35); }
+.lang-state-off { color: var(--text-faint) !important; }
+.lang-command { font-size: 11.5px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lang-note { font-style: italic; }
+.lang-controls { display: flex; align-items: center; gap: 10px; }
+.lang-controls input { flex: 1; min-width: 0; height: 30px; font-size: 12px; }
+.lang-enabled { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-dim); white-space: nowrap; }
+.lang-root { font-weight: 400; font-size: 11.5px; color: var(--text-faint); font-family: var(--mono, ui-monospace, monospace); }
+.lang-log { margin: 6px 0 0; max-height: 220px; overflow: auto; padding: 8px 10px; border-radius: 6px; background: var(--bg); border: 1px solid var(--border); font-size: 11px; color: var(--text-dim); white-space: pre-wrap; }
+
 /* Sidebar repo rows: sync counts, dirty dot, Ralph and unread indicators */
 .nav-repo-badges { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; }
 .nav-repo-badges > * { margin-left: 0 !important; }
