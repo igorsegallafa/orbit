@@ -757,14 +757,15 @@ pub async fn ws_commit(workspace: String, repo: String, message: String) -> Resu
     blocking(move || git::commit_all(&worktree_of(&workspace, &repo)?, &message)).await
 }
 
-/// Push one repo's branch to origin.
+/// Push one repo's branch to origin. `force` pushes with
+/// `--force-with-lease`, for a branch a rebase rewrote.
 #[tauri::command]
-pub async fn ws_push(workspace: String, repo: String) -> Result<(), String> {
+pub async fn ws_push(workspace: String, repo: String, force: Option<bool>) -> Result<(), String> {
     blocking(move || {
         let dir = worktree_of(&workspace, &repo)?;
         let branch = git::current_branch(&dir)
             .ok_or_else(|| format!("{repo}: detached HEAD, nothing to push"))?;
-        git::push(&dir, &branch)
+        git::push(&dir, &branch, force.unwrap_or(false))
     })
     .await
 }
