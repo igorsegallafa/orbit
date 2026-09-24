@@ -237,6 +237,18 @@ export function WorkspaceDetailPage({
   };
 
   const scrollToPrs = () => document.getElementById(`prs-${workspace.name}`)?.scrollIntoView({ behavior: "smooth" });
+  // Open the first failing PR's checks (Re-run / Investigate live there) and
+  // bring it into view: the list is often already on screen, so a scroll alone
+  // looks like nothing happened.
+  const reviewFailingChecks = () => {
+    const failing = (wsChecks ?? []).find((c) => c.status === "fail");
+    if (!failing) return scrollToPrs();
+    const key = `${failing.repo}/${failing.prNumber}`;
+    setExpanded(key);
+    requestAnimationFrame(() =>
+      document.getElementById(`pr-${workspace.name}-${key}`)?.scrollIntoView({ behavior: "smooth", block: "nearest" })
+    );
+  };
 
   // Delivery flow: each step shows its state and, when it is the next thing
   // to do, the action that moves it forward.
@@ -308,7 +320,7 @@ export function WorkspaceDetailPage({
               : checksPassing
                 ? "All checks passed"
                 : "No checks yet",
-      action: checksFailing ? { label: "Review", onClick: scrollToPrs } : undefined,
+      action: checksFailing ? { label: "Review", onClick: reviewFailingChecks } : undefined,
     },
   ];
 
@@ -581,7 +593,7 @@ export function WorkspaceDetailPage({
               const total = wsCheck?.checks.length ?? 0;
               const passed = wsCheck?.checks.filter((c) => c.bucket === "pass").length ?? 0;
               return (
-                <div key={key} className={`pr-item ${open ? "open" : ""}`}>
+                <div key={key} id={`pr-${workspace.name}-${key}`} className={`pr-item ${open ? "open" : ""}`}>
                   <div className="pr-row" role="button" tabIndex={0} onClick={() => setExpanded(open ? null : key)}>
                     <span className={`pr-state pr-state-${state}`}>
                       <PullRequestIcon size={13} />
@@ -1070,4 +1082,4 @@ function InvestigateModal({
       </div>
     </div>
   );
-}
+}

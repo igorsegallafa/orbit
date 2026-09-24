@@ -234,7 +234,7 @@ export function RepoFormModal({ service, cloned, folders, onSaved, onClose, onEr
                 </div>
                 {form.branchOnly && (
                   <>
-                    <label className="check-item">
+                    <label className="check-item" style={{ marginTop: 10 }}>
                       <CheckBox
                         label="Switch branches automatically"
                         checked={form.autoSwitch}

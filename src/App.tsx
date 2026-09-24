@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useConfig } from "./hooks/useConfig";
 import { DashboardPage } from "./pages/DashboardPage";
-import { SettingsPage } from "./pages/SettingsPage";
+import { SettingsNav, SettingsPage, SettingsSectionId } from "./pages/SettingsPage";
 import { IntegrationsPage } from "./pages/IntegrationsPage";
 import { CodeReviewPage } from "./pages/CodeReviewPage";
 import { WorkspaceDetailPage } from "./pages/WorkspaceDetailPage";
@@ -117,6 +117,13 @@ function loadSession(): { tabs: Tab[]; active: string | null } {
 function App() {
   const { config, setConfig, loading, error, setError } = useConfig();
   const [navPage, setNavPage] = useState<NavPage>({ kind: "dashboard" });
+  const [settingsSection, setSettingsSection] = useState<SettingsSectionId>(
+    () => (localStorage.getItem("orbit.settings-section") as SettingsSectionId | null) ?? "repos"
+  );
+  const selectSettingsSection = (id: SettingsSectionId) => {
+    setSettingsSection(id);
+    localStorage.setItem("orbit.settings-section", id);
+  };
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [initialSession] = useState(loadSession);
   const [tabs, setTabs] = useState<Tab[]>(initialSession.tabs);
@@ -855,6 +862,12 @@ function App() {
     );
   };
 
+  // "Back to app": wherever the user was before Settings, else the dashboard.
+  const leaveSettings = () => {
+    if (navHistory.canGoBack) goNav("back");
+    else setNavPage({ kind: "dashboard" });
+  };
+
   const renderMain = () => {
     if (navPage.kind === "reviews") {
       return (
@@ -871,7 +884,17 @@ function App() {
       );
     }
     if (navPage.kind === "settings") {
-      return <SettingsPage config={config} onChange={setConfig} onError={setError} />;
+      const page = <SettingsPage config={config} onChange={setConfig} onError={setError} section={settingsSection} />;
+      // The sidebar normally carries the settings nav; hidden, the page does.
+      if (!sidebarHidden) return page;
+      return (
+        <div className="settings-split">
+          <aside className="settings-inline-nav">
+            <SettingsNav section={settingsSection} onSelect={selectSettingsSection} onBack={leaveSettings} />
+          </aside>
+          {page}
+        </div>
+      );
     }
     if (navPage.kind === "integrations") {
       return <IntegrationsPage onError={setError} />;
@@ -973,6 +996,10 @@ function App() {
         onTransitionEnd={() => setSidebarAnimating(false)}
         style={{ width: sidebarHidden ? 0 : sidebarWidth }}
       >
+        {navPage.kind === "settings" && !active ? (
+          <SettingsNav section={settingsSection} onSelect={selectSettingsSection} onBack={leaveSettings} collapsed={collapsed} />
+        ) : (
+        <>
           <div className="brand">
             <span className="brand-logo"><SatelliteIcon size={18} /></span> {collapsed ? "" : "Orbit"}
             {!collapsed && <span className="brand-sub">multi-repo workspace</span>}
@@ -1137,6 +1164,8 @@ function App() {
               <span className="sidebar-stat-value">{groupCount}</span> groups
             </div>
           </div>
+        )}
+        </>
         )}
       </aside>
 
@@ -1412,4 +1441,4 @@ function App() {
   );
 }
 
-export default App;
+export default App;

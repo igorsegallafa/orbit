@@ -7,6 +7,7 @@ import { workspaceForPrs } from "../components/PrCheckoutModal";
 import { Skeleton } from "../components/Skeleton";
 import { toast } from "../components/Toast";
 import { tooltip } from "../components/Tooltip";
+import { CheckIcon, PullRequestIcon, RefreshIcon, SearchIcon, XIcon } from "../components/Icons";
 
 interface Props {
   /** Opens a PR review tab. When a group has several PRs (multi-repo
@@ -96,63 +97,55 @@ function matches(f: Filter, s: GroupStatus | null): boolean {
 }
 
 const MY_REVIEW: Record<string, [string, string]> = {
-  APPROVED: ["You approved", "tag-ok"],
-  CHANGES_REQUESTED: ["You requested changes", "tag-bad"],
-  COMMENTED: ["You commented", "tag-muted"],
+  APPROVED: ["You approved", "ok"],
+  CHANGES_REQUESTED: ["You requested changes", "bad"],
+  COMMENTED: ["You commented", "muted"],
 };
 
-/** Review and CI badges of a card: the viewer's own review first. */
-function StatusBadges({ s }: { s: GroupStatus }) {
+/** The one state worth a pill on a row, most urgent first; what it hides
+ *  goes in its tooltip. null when there's nothing to say yet. */
+function primaryState(s: GroupStatus): { label: string; tone: string; tip: string } | null {
   const ready = s.decision === "APPROVED" && s.checks !== "fail" && s.checks !== "pending" && !s.conflicts && !s.draft;
+  const partial = s.total > 1 && s.reviewed < s.total ? ` (${s.reviewed} of ${s.total} PRs)` : "";
   const mine = s.myReview ? MY_REVIEW[s.myReview] : null;
-  const tip = (text: string) => ({
-    onMouseEnter: (e: React.MouseEvent) => tooltip.show(text, e),
-    onMouseLeave: () => tooltip.hide(),
-  });
+  if (s.conflicts) return { label: "Conflicts", tone: "bad", tip: "Conflicts with the base branch" };
+  if (s.stale)
+    return { label: "New commits", tone: "warn", tip: `${mine?.[0] ?? "You reviewed"}${partial}; commits were pushed since` };
+  if (ready) return { label: "Ready to merge", tone: "ok", tip: "Approved, checks passing, no conflicts" };
+  if (s.mine) {
+    if (s.decision === "CHANGES_REQUESTED") return { label: "Changes requested", tone: "bad", tip: "A reviewer asked for changes on your PR" };
+    if (s.decision === "APPROVED") return { label: "Approved", tone: "ok", tip: "Your PR is approved" };
+    return { label: "Your PR", tone: "info", tip: "You opened this PR" };
+  }
+  if (mine) return { label: mine[0], tone: mine[1], tip: `Your latest review${partial}` };
+  if (s.decision === "CHANGES_REQUESTED") return { label: "Changes requested", tone: "bad", tip: "Another reviewer asked for changes" };
+  if (s.decision === "APPROVED") return { label: "Approved", tone: "ok", tip: "Approved by another reviewer" };
+  return null;
+}
+
+const tip = (text: string) => ({
+  onMouseEnter: (e: React.MouseEvent) => {
+    e.stopPropagation();
+    tooltip.show(text, e);
+  },
+  onMouseLeave: () => tooltip.hide(),
+});
+
+/** CI as a single glyph: check, cross, or a pulsing dot while running. */
+function ChecksGlyph({ checks }: { checks: GroupStatus["checks"] }) {
+  if (!checks) return <span className="cr-row-checks" />;
+  const text = checks === "pass" ? "Checks passing" : checks === "fail" ? "Checks failing" : "Checks running";
   return (
-    <div className="pr-card-status">
-      {s.mine ? (
-        <span className="tag tag-info">Your PR</span>
-      ) : mine ? (
-        <span className={`tag ${mine[1]}`} {...tip(s.total > 1 ? `You reviewed ${s.reviewed} of ${s.total} PRs` : "Your latest review")}>
-          {mine[0]}
-          {s.total > 1 && s.reviewed < s.total ? ` · ${s.reviewed}/${s.total}` : ""}
-        </span>
-      ) : null}
-      {s.stale && (
-        <span className="tag tag-warn" {...tip("Commits were pushed after your review")}>
-          New commits
-        </span>
-      )}
-      {s.conflicts && <span className="tag tag-bad">Conflicts</span>}
-      {ready ? (
-        <span className="tag tag-ok" {...tip("Approved, checks passing, no conflicts")}>
-          Ready to merge
-        </span>
-      ) : (
-        // Your own verdict already shows; this is everyone's.
-        s.decision &&
-        s.decision !== "REVIEW_REQUIRED" &&
-        s.decision !== s.myReview && (
-          <span className={`tag ${s.decision === "APPROVED" ? "tag-ok" : "tag-bad"}`}>
-            {s.decision === "APPROVED" ? "Approved" : "Changes requested"}
-          </span>
-        )
-      )}
-      {s.checks && !(ready && s.checks === "pass") && (
-        <span className={`pr-card-checks pr-card-checks-${s.checks}`}>
-          <span className="pr-card-dot" />
-          {s.checks === "pass" ? "Checks passing" : s.checks === "fail" ? "Checks failing" : "Checks running"}
-        </span>
-      )}
-    </div>
+    <span className={`cr-row-checks cr-row-checks-${checks}`} {...tip(text)}>
+      {checks === "pass" ? <CheckIcon size={13} /> : checks === "fail" ? <XIcon size={13} /> : <span className="cr-row-pending" />}
+    </span>
   );
 }
 
 /**
  * Code Review home: open PRs from every configured repo (last 7 days),
  * grouped by identical branch name — multi-repo features surface as one
- * card. Search covers all PRs regardless of age or state.
+ * row. Search covers all PRs regardless of age or state.
  */
 export function CodeReviewPage({ onOpenPr, workspaces, onCheckout, onOpenWorkspace, onError }: Props) {
   const [groups, setGroups] = useState<PrGroup[] | null>(null);
@@ -232,58 +225,68 @@ export function CodeReviewPage({ onOpenPr, workspaces, onCheckout, onOpenWorkspa
   return (
     <div className="page">
       <div className="page-header">
-        <h2>Code Review</h2>
+        <div className="page-title">
+          <h2>Code Review</h2>
+          <span className="page-sub">Open PRs across your repositories from the last 7 days</span>
+        </div>
         <button
-          className="secondary"
+          className="icon-button"
+          aria-label="Refresh"
           disabled={refreshing}
-          onMouseEnter={(e) => tooltip.show("Reload open PRs from the last 7 days", e)}
-          onMouseLeave={() => tooltip.hide()}
+          {...tip("Reload open PRs from the last 7 days")}
           onClick={() => load(true)}
         >
-          {refreshing ? "Refreshing…" : "↻ Refresh"}
+          <span className={refreshing ? "spin" : ""} style={{ display: "inline-flex" }}>
+            <RefreshIcon size={14} />
+          </span>
         </button>
       </div>
 
-      <div className="pr-search-row">
-        <input
-          value={query}
-          placeholder="Search PRs by title, branch or author… (any age, any state)"
-          onChange={(e) => setQuery(e.target.value)}
-          autoComplete="off"
-          autoCorrect="off"
-          autoCapitalize="off"
-          spellCheck={false}
-        />
-        {query.trim() && (
-          <span className="tag tag-muted">
-            {searching ? "searching…" : `${display?.length ?? 0} groups`}
-          </span>
+      <div className="cr-toolbar">
+        {!searchingNow && groups && groups.length > 0 && (
+          <div className="cr-segments" role="tablist">
+            {FILTERS.map((f) => (
+              <button
+                key={f.key}
+                role="tab"
+                aria-selected={filter === f.key}
+                className={`btn-plain cr-segment ${filter === f.key ? "on" : ""}`}
+                onClick={() => setFilter(f.key)}
+                {...tip(f.hint)}
+              >
+                {f.label}
+                <span className="cr-segment-count">{counts[f.key]}</span>
+              </button>
+            ))}
+          </div>
         )}
+        <label className="cr-search">
+          <SearchIcon size={14} />
+          <input
+            value={query}
+            placeholder="Search any PR by title, branch or author"
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => e.key === "Escape" && setQuery("")}
+            autoComplete="off"
+            autoCorrect="off"
+            autoCapitalize="off"
+            spellCheck={false}
+          />
+          {searchingNow && (
+            <span className="cr-search-count">{searching ? "searching…" : `${display?.length ?? 0} found`}</span>
+          )}
+        </label>
       </div>
 
-      {!searchingNow && groups && groups.length > 0 && (
-        <div className="pr-filter-row">
-          {FILTERS.map((f) => (
-            <button
-              key={f.key}
-              className={`find-chip ${filter === f.key ? "on" : ""}`}
-              onClick={() => setFilter(f.key)}
-              onMouseEnter={(e) => tooltip.show(f.hint, e)}
-              onMouseLeave={() => tooltip.hide()}
-            >
-              {f.label} <span className="pr-filter-count">{counts[f.key]}</span>
-            </button>
-          ))}
-        </div>
-      )}
-
       {display === null ? (
-        <div className="workspace-grid">
-          {Array.from({ length: 3 }).map((_, i) => (
-            <div className="skeleton-card" key={i}>
-              <Skeleton w="55%" h={14} />
-              <Skeleton w="75%" h={10} />
-              <Skeleton w="35%" h={10} />
+        <div className="cr-rows">
+          {Array.from({ length: 5 }).map((_, i) => (
+            <div className="cr-row cr-row-skeleton" key={i}>
+              <Skeleton w={16} h={16} />
+              <div className="cr-row-main">
+                <Skeleton w="45%" h={12} />
+                <Skeleton w="30%" h={10} />
+              </div>
             </div>
           ))}
         </div>
@@ -306,85 +309,90 @@ export function CodeReviewPage({ onOpenPr, workspaces, onCheckout, onOpenWorkspa
           </p>
         </div>
       ) : (
-        <div className="pr-grid">
-          {display.map((g) => {
+        <div className="cr-rows">
+          {display.map((g, i) => {
             const multi = g.prs.length > 1;
             const first = g.prs[0];
             const ws = workspaceForPrs(g.prs, workspaces);
             const status = groupStatus(g.prs);
+            const state = status && primaryState(status);
+            const draft = g.prs.every((p) => p.isDraft);
             return (
               <div
                 key={g.branch + first.repo + first.number}
-                className={`pr-card ${multi ? "pr-card-multi" : ""}`}
+                className={`cr-row ${draft ? "cr-row-draft" : ""}`}
+                style={{ animationDelay: `${Math.min(i, 12) * 18}ms` }}
+                role="button"
+                tabIndex={0}
                 onClick={() => onOpenPr(g.prs)}
+                onKeyDown={(e) => e.key === "Enter" && onOpenPr(g.prs)}
                 onContextMenu={(e) => {
                   e.preventDefault();
                   tooltip.hide();
                   setMenu({ x: e.clientX, y: e.clientY, payload: g });
                 }}
                 onMouseDown={(e) => openFromEvent(e, g)}
-                onMouseEnter={(e) =>
-                  tooltip.show(
-                    multi
-                      ? `Feature across ${g.prs.length} repos — click to review`
-                      : `Review ${first.title}`,
-                    e
-                  )
-                }
-                onMouseLeave={() => tooltip.hide()}
               >
-                <div className="pr-card-head">
-                  <span className="pr-card-title">{multi ? g.branch : first.title}</span>
-                  {multi && <span className="tag tag-info">{g.prs.length} repos</span>}
-                </div>
-                <div className="pr-card-body">
-                  {multi ? (
-                    <div className="pr-card-repos">
-                      {g.prs.map((pr) => (
-                        <span key={pr.repo} className="pr-repo-chip">
-                          <span className="pr-repo-name">{pr.repo}</span>
-                          <span className="pr-repo-num">#{pr.number}</span>
+                <span className="cr-row-icon" {...tip(draft ? "Draft" : multi ? `Feature across ${g.prs.length} repos` : "Open")}>
+                  <PullRequestIcon size={15} />
+                  {multi && <span className="cr-row-multi">{g.prs.length}</span>}
+                </span>
+                <div className="cr-row-main">
+                  <div className="cr-row-title">
+                    <span className="cr-row-title-text">{multi ? g.branch : first.title}</span>
+                    {draft && <span className="cr-row-draft-tag">Draft</span>}
+                  </div>
+                  <div className="cr-row-meta">
+                    {multi ? (
+                      g.prs.map((pr) => (
+                        <span key={pr.repo} className="cr-row-repo">
+                          {pr.repo} <span className="cr-row-num">#{pr.number}</span>
                         </span>
-                      ))}
-                    </div>
-                  ) : (
-                    <>
-                      <span className="mono pr-card-branch">{first.branch}</span>
-                      <span className="pr-card-meta">
-                        {first.repo} #{first.number} · {first.author} · {relTime(first.updatedAt)}
-                      </span>
-                    </>
-                  )}
+                      ))
+                    ) : (
+                      <>
+                        <span className="cr-row-repo">
+                          {first.repo} <span className="cr-row-num">#{first.number}</span>
+                        </span>
+                        <span>{first.author}</span>
+                        <span className="mono cr-row-branch">{first.branch}</span>
+                      </>
+                    )}
+                  </div>
                 </div>
-                {status && <StatusBadges s={status} />}
-                <div className="pr-card-foot">
-                  {first.isDraft && <span className="tag tag-warn">draft</span>}
-                  <button
-                    className="link"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      tooltip.hide();
-                      if (ws) onOpenWorkspace(ws);
-                      else onCheckout(g.prs);
-                    }}
-                    onMouseEnter={(e) =>
-                      tooltip.show(ws ? `Already checked out in workspace ${ws.name}` : "Create a local workspace on this branch to run it", e)
-                    }
-                    onMouseLeave={() => tooltip.hide()}
-                  >
-                    {ws ? "open workspace" : "check out"}
-                  </button>
-                  <button
-                    className="link"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      openUrl(first.url).catch(() => null);
-                    }}
-                    onMouseEnter={(e) => tooltip.show("Open on GitHub ↗", e)}
-                    onMouseLeave={() => tooltip.hide()}
-                  >
-                    open ↗
-                  </button>
+                <div className="cr-row-side">
+                  {state && (
+                    <span className={`cr-status cr-status-${state.tone}`} {...tip(state.tip)}>
+                      {state.label}
+                    </span>
+                  )}
+                  <ChecksGlyph checks={status?.checks ?? null} />
+                  <span className="cr-row-time">{relTime(first.updatedAt)}</span>
+                  <div className="cr-row-actions">
+                    <button
+                      className="btn-mini secondary"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        tooltip.hide();
+                        if (ws) onOpenWorkspace(ws);
+                        else onCheckout(g.prs);
+                      }}
+                      {...tip(ws ? `Already checked out in workspace ${ws.name}` : "Create a local workspace on this branch to run it")}
+                    >
+                      {ws ? "Workspace" : "Check out"}
+                    </button>
+                    <button
+                      className="btn-mini secondary"
+                      aria-label="Open on GitHub"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        openUrl(first.url).catch(() => null);
+                      }}
+                      {...tip("Open on GitHub")}
+                    >
+                      ↗
+                    </button>
+                  </div>
                 </div>
               </div>
             );
