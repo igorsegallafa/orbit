@@ -280,6 +280,11 @@ function mix(a: string, b: string, t: number): string {
   return "#" + x.map((v, i) => Math.round(v * t + y[i] * (1 - t)).toString(16).padStart(2, "0")).join("");
 }
 
+/** `hex` at opacity `a` (0..1), as #rrggbbaa. */
+function alpha(hex: string, a: number): string {
+  return hex + Math.round(a * 255).toString(16).padStart(2, "0");
+}
+
 const bare = (hex: string) => hex.slice(1);
 
 export const monacoThemeName = (theme: Theme) => `orbit-${theme.id}`;
@@ -322,7 +327,10 @@ export function defineMonacoThemes(monaco: typeof Monaco) {
         "editor.foreground": ui.text,
         "editorLineNumber.foreground": mix(ui.textFaint, ui.bg, 0.6),
         "editorLineNumber.activeForeground": ui.textDim,
-        "editor.selectionBackground": mix(ui.accent, ui.bg, 0.28),
+        // Translucent, like the diff backgrounds below: Monaco paints those
+        // over the selection, so opaque ones hid what's selected.
+        "editor.selectionBackground": alpha(ui.accent, 0.35),
+        "editor.inactiveSelectionBackground": alpha(ui.accent, 0.2),
         "editor.lineHighlightBackground": ui.panel,
         "editorCursor.foreground": ui.accent,
         "editorIndentGuide.background1": ui.panelRaised,
@@ -335,10 +343,10 @@ export function defineMonacoThemes(monaco: typeof Monaco) {
         "scrollbarSlider.activeBackground": mix(ui.textFaint, ui.bg, 0.6),
         "editorBracketMatch.background": mix(ui.accent, ui.bg, 0.28),
         "editorBracketMatch.border": ui.accent,
-        "diffEditor.insertedTextBackground": mix(ui.ok, ui.bg, t.dark ? 0.16 : 0.22),
-        "diffEditor.removedTextBackground": mix(ui.danger, ui.bg, t.dark ? 0.16 : 0.2),
-        "diffEditor.insertedLineBackground": mix(ui.ok, ui.bg, t.dark ? 0.09 : 0.11),
-        "diffEditor.removedLineBackground": mix(ui.danger, ui.bg, t.dark ? 0.09 : 0.1),
+        "diffEditor.insertedTextBackground": alpha(ui.ok, t.dark ? 0.16 : 0.22),
+        "diffEditor.removedTextBackground": alpha(ui.danger, t.dark ? 0.16 : 0.2),
+        "diffEditor.insertedLineBackground": alpha(ui.ok, t.dark ? 0.09 : 0.11),
+        "diffEditor.removedLineBackground": alpha(ui.danger, t.dark ? 0.09 : 0.1),
       },
     });
   }
