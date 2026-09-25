@@ -6,6 +6,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { AgentStatus, AgentStatusTracker, HookState } from "../lib/agentStatus";
 import { StatusIndicator } from "./StatusIndicator";
+import { currentTheme, onThemeChange, terminalTheme } from "../lib/theme";
 
 export interface TerminalTab {
   id: string; // stable session id — display name may change, this must not
@@ -111,10 +112,10 @@ export function TerminalPane({ tab, onError, onStatusChange, onSignal }: Props) 
       fontSize: 12.5,
       fontFamily: 'ui-monospace, "SF Mono", Menlo, monospace',
       cursorBlink: true,
-      theme: {
-        background: "#0d0f13",
-        foreground: "#e6e8ec",
-      },
+      theme: terminalTheme(currentTheme()),
+    });
+    const offTheme = onThemeChange((t) => {
+      term.options.theme = terminalTheme(t);
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
@@ -259,6 +260,7 @@ export function TerminalPane({ tab, onError, onStatusChange, onSignal }: Props) 
       offHook.then((f) => f());
       window.clearInterval(statusPoll);
       resizeObserver.disconnect();
+      offTheme();
       term.dispose();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

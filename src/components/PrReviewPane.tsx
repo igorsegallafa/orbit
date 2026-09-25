@@ -15,6 +15,7 @@ import { SubmitReview } from "./SubmitReview";
 import { SafeMarkdown } from "./SafeMarkdown";
 import { CheckBox } from "./CheckBox";
 import { CheckIcon, ChevronIcon, DocIcon, EyeIcon, RepoIcon } from "./Icons";
+import { defineMonacoThemes, useMonacoTheme } from "../lib/theme";
 
 interface Props {
   /** All PRs of the feature group (1 for single-repo PRs). */
@@ -22,33 +23,7 @@ interface Props {
   onError: (msg: string) => void;
 }
 
-let themeDefined = false;
-const beforeMount: BeforeMount = (monaco) => {
-  if (themeDefined) return;
-  themeDefined = true;
-  monaco.editor.defineTheme("orbit-dark", {
-    base: "vs-dark",
-    inherit: true,
-    rules: [
-      { token: "comment", foreground: "6b7280", fontStyle: "italic" },
-      { token: "keyword", foreground: "c792ea" },
-      { token: "string", foreground: "a5d6a7" },
-      { token: "number", foreground: "f78c6c" },
-      { token: "type", foreground: "7aa7ff" },
-      { token: "function", foreground: "82aaff" },
-    ],
-    colors: {
-      "editor.background": "#0d0f13",
-      "editor.foreground": "#e6e8ec",
-      "editorLineNumber.foreground": "#4a5060",
-      "editorLineNumber.activeForeground": "#9aa1ad",
-      "diffEditor.insertedTextBackground": "#12281a",
-      "diffEditor.removedTextBackground": "#2d1416",
-      "diffEditor.insertedLineBackground": "#0e2016",
-      "diffEditor.removedLineBackground": "#241012",
-    },
-  });
-};
+const beforeMount: BeforeMount = (monaco) => defineMonacoThemes(monaco);
 
 function langOf(path: string): string | undefined {
   const ext = path.split(".").pop()?.toLowerCase() ?? "";
@@ -110,6 +85,7 @@ const DECISION: Record<string, { label: string; cls: string }> = {
  * a pending review (kept locally until submitted) and sent with a verdict.
  */
 export function PrReviewPane({ prs, onError }: Props) {
+  const monacoTheme = useMonacoTheme();
   const [activeIdx, setActiveIdx] = useState(0);
   const [detail, setDetail] = useState<PrDetail | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -557,7 +533,7 @@ export function PrReviewPane({ prs, onError }: Props) {
               <DiffEditor
                 key={`${prKey}:${selected}`}
                 height="100%"
-                theme="orbit-dark"
+                theme={monacoTheme}
                 beforeMount={beforeMount}
                 onMount={onMount}
                 language={langOf(selected)}
