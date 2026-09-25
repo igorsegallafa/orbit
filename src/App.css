@@ -51,6 +51,19 @@ textarea {
   -webkit-user-select: text;
 }
 
+/* Deleted lines in an inline diff are plain DOM (Monaco draws no selection
+   of its own there): Monaco opts the zone and its lines into native
+   selection, but the rule above turns it off again on every span inside. */
+.monaco-editor .line-delete-selectable,
+.monaco-editor .line-delete-selectable * {
+  user-select: text !important;
+  -webkit-user-select: text !important;
+}
+
+.monaco-editor .line-delete-selectable ::selection {
+  background: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
 /* Kill the blue tap/click highlight on macOS webviews */
 * {
   -webkit-tap-highlight-color: transparent;
