@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { GitChange, GitFileDiff } from "../types/config";
 import { tooltip } from "./Tooltip";
 import { useDiffNav } from "./useDiffNav";
+import { defineMonacoThemes, useMonacoTheme } from "../lib/theme";
 
 interface Props {
   workspace: string;
@@ -17,34 +18,7 @@ interface Props {
   onError: (msg: string) => void;
 }
 
-let themeDefined = false;
-
-const beforeMount: BeforeMount = (monaco) => {
-  if (themeDefined) return;
-  themeDefined = true;
-  monaco.editor.defineTheme("orbit-dark", {
-    base: "vs-dark",
-    inherit: true,
-    rules: [
-      { token: "comment", foreground: "6b7280", fontStyle: "italic" },
-      { token: "keyword", foreground: "c792ea" },
-      { token: "string", foreground: "a5d6a7" },
-      { token: "number", foreground: "f78c6c" },
-      { token: "type", foreground: "7aa7ff" },
-      { token: "function", foreground: "82aaff" },
-    ],
-    colors: {
-      "editor.background": "#0d0f13",
-      "editor.foreground": "#e6e8ec",
-      "editorLineNumber.foreground": "#4a5060",
-      "editorLineNumber.activeForeground": "#9aa1ad",
-      "diffEditor.insertedTextBackground": "#12281a",
-      "diffEditor.removedTextBackground": "#2d1416",
-      "diffEditor.insertedLineBackground": "#0e2016",
-      "diffEditor.removedLineBackground": "#241012",
-    },
-  });
-};
+const beforeMount: BeforeMount = (monaco) => defineMonacoThemes(monaco);
 
 function langOf(path: string): string | undefined {
   const ext = path.split(".").pop()?.toLowerCase() ?? "";
@@ -63,6 +37,7 @@ function langOf(path: string): string | undefined {
  * file) or a commit (sha^ vs sha). Split/unified toggle like GitHub.
  */
 export function ReviewPane({ workspace, repo, path, sha, shaLabel, onError }: Props) {
+  const monacoTheme = useMonacoTheme();
   const [diff, setDiff] = useState<GitFileDiff | null>(null);
   const [split, setSplit] = useState(false); // unified by default (GitHub-style)
   const nav = useDiffNav();
@@ -136,7 +111,7 @@ export function ReviewPane({ workspace, repo, path, sha, shaLabel, onError }: Pr
         <div className="editor-host">
           <DiffEditor
             height="100%"
-            theme="orbit-dark"
+            theme={monacoTheme}
             beforeMount={beforeMount}
             onMount={nav.onMount}
             language={langOf(path)}

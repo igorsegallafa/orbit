@@ -6,6 +6,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { Workspace } from "../types/config";
 import { SearchIcon } from "./Icons";
 import { tooltip } from "./Tooltip";
+import { defineMonacoThemes, useMonacoTheme } from "../lib/theme";
 
 export interface SearchMatch {
   repo: string;
@@ -337,6 +338,7 @@ function FindPreview({
   hitsOf: (m: SearchMatch) => [number, number][];
   onOpen: () => void;
 }) {
+  const monacoTheme = useMonacoTheme();
   const [content, setContent] = useState<{ key: string; text: string } | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
   const cache = useRef(new Map<string, string>());
@@ -402,7 +404,8 @@ function FindPreview({
       ) : content?.key === key ? (
         <Editor
           height="100%"
-          theme="orbit-dark"
+          theme={monacoTheme}
+          beforeMount={defineMonacoThemes}
           path={`find-preview/${key}`}
           value={content.text}
           onMount={onMount}

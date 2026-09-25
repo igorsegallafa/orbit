@@ -3,6 +3,10 @@ import ReactDOM from "react-dom/client";
 import { configureBuiltinTypeScript } from "./lib/monacoSetup";
 import App from "./App";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { initTheme } from "./lib/theme";
+
+// Before the first paint: the saved theme's palette on :root.
+initTheme();
 
 // Suppress the native webview context menu everywhere; we provide our own.
 document.addEventListener("contextmenu", (e) => e.preventDefault());

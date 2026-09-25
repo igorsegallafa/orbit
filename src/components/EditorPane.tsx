@@ -9,6 +9,7 @@ import { SymbolSearch } from "./SymbolSearch";
 import { tooltip } from "./Tooltip";
 import { toast } from "./Toast";
 import * as lsp from "../lib/lsp/manager";
+import { currentTheme, defineMonacoThemes, monacoThemeName, onThemeChange, useMonacoTheme } from "../lib/theme";
 
 interface CppSetup {
   compileCommands: string | null;
@@ -28,64 +29,8 @@ const cppDismissed = new Set<string>();
 const cppGeneratingKeys = new Set<string>();
 const cppMissing = new Set<string>();
 
-/**
- * "orbit-dark": Monaco theme matching the app's palette (bg #0d0f13,
- * panels #14171d) so the editor blends with the rest of the UI instead of
- * the stock vs-dark #1e1e1e grey-blue.
- */
-function defineOrbitTheme(monaco: typeof Monaco): void {
-  monaco.editor.defineTheme("orbit-dark", {
-    base: "vs-dark",
-    inherit: true,
-    rules: [
-      { token: "comment", foreground: "6b7280", fontStyle: "italic" },
-      { token: "keyword", foreground: "c792ea" },
-      { token: "string", foreground: "a5d6a7" },
-      { token: "number", foreground: "f78c6c" },
-      { token: "type", foreground: "7aa7ff" },
-      { token: "function", foreground: "82aaff" },
-      { token: "variable", foreground: "e6e8ec" },
-      { token: "delimiter", foreground: "9aa1ad" },
-      // Semantic tokens from language servers (what a name *is*, not how it looks).
-      { token: "namespace", foreground: "7fdbca" },
-      { token: "class", foreground: "7aa7ff" },
-      { token: "struct", foreground: "7aa7ff" },
-      { token: "interface", foreground: "7aa7ff" },
-      { token: "enum", foreground: "7aa7ff" },
-      { token: "typeParameter", foreground: "7aa7ff", fontStyle: "italic" },
-      { token: "concept", foreground: "c792ea" },
-      { token: "method", foreground: "82aaff" },
-      { token: "macro", foreground: "f78c6c" },
-      { token: "parameter", foreground: "e6c07b" },
-      { token: "property", foreground: "b4c5e4" },
-      { token: "enumMember", foreground: "f7b267" },
-      { token: "variable.readonly", foreground: "f7b267" },
-      { token: "label", foreground: "9aa1ad" },
-    ],
-    colors: {
-      "editor.background": "#0d0f13",
-      "editor.foreground": "#e6e8ec",
-      "editorLineNumber.foreground": "#4a5060",
-      "editorLineNumber.activeForeground": "#9aa1ad",
-      "editor.selectionBackground": "#1c2c52",
-      "editor.lineHighlightBackground": "#14171d",
-      "editorCursor.foreground": "#4f7cf7",
-      "editorIndentGuide.background1": "#1a1e26",
-      "editorIndentGuide.activeBackground1": "#2e3440",
-      "editorWidget.background": "#15181e",
-      "editorWidget.border": "#232833",
-      "editorGutter.background": "#0d0f13",
-      "scrollbarSlider.background": "#2b303a80",
-      "scrollbarSlider.hoverBackground": "#3a404d",
-      "scrollbarSlider.activeBackground": "#4a5060",
-      "editorBracketMatch.background": "#1c2c52",
-      "editorBracketMatch.border": "#4f7cf7",
-    },
-  });
-}
-
 const beforeMount: BeforeMount = (monaco) => {
-  defineOrbitTheme(monaco);
+  defineMonacoThemes(monaco);
 };
 
 /** A spot to show once the file is open (Find in Files results). */
@@ -108,12 +53,16 @@ export function revealInEditor(t: RevealTarget) {
   window.dispatchEvent(new CustomEvent("orbit-reveal", { detail: t }));
 }
 
-// Define the theme as soon as the monaco loader resolves (module scope, runs
-// once for the whole app) — the component prop "theme" then always finds it
-// registered, regardless of mount order or HMR state.
+// Define the themes as soon as the monaco loader resolves (module scope, runs
+// once for the whole app) — the component prop "theme" then always finds
+// them registered, regardless of mount order or HMR state. Monaco's theme
+// is global: follow the app theme for every open editor.
 loader
   .init()
-  .then((monaco) => defineOrbitTheme(monaco as unknown as typeof Monaco))
+  .then((monaco) => {
+    defineMonacoThemes(monaco as unknown as typeof Monaco);
+    onThemeChange((t) => monaco.editor.setTheme(monacoThemeName(t)));
+  })
   .catch(() => null);
 
 interface Props {
@@ -142,6 +91,7 @@ const JUMP_LINES = 10;
  * The file tree lives in the fixed right dock (FileTreePanel).
  */
 export function EditorPane({ workspace, repo, path, onError, onApplyPlan, onRunInTerminal, onCursor, onJump }: Props) {
+  const monacoTheme = useMonacoTheme();
   // Latest callbacks for the editor's listeners (registered once on mount).
   const navRef = useRef({ onCursor, onJump });
   navRef.current = { onCursor, onJump };
@@ -343,8 +293,8 @@ export function EditorPane({ workspace, repo, path, onError, onApplyPlan, onRunI
   const onMount: OnMount = (editor, monaco) => {
     // Belt & suspenders: ensure the theme is applied even if beforeMount
     // raced with the monaco loader.
-    defineOrbitTheme(monaco);
-    monaco.editor.setTheme("orbit-dark");
+    defineMonacoThemes(monaco);
+    monaco.editor.setTheme(monacoThemeName(currentTheme()));
     editorRef.current = editor;
     applyReveal();
     editor.onDidChangeModelContent(() => {
@@ -515,7 +465,7 @@ export function EditorPane({ workspace, repo, path, onError, onApplyPlan, onRunI
             {absPath && (
             <Editor
               height="100%"
-              theme="orbit-dark"
+              theme={monacoTheme}
               beforeMount={beforeMount}
               path={lsp.fileUri(absPath)}
               value={content}

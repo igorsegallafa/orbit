@@ -6,18 +6,20 @@ import { AiSection } from "../components/AiSection";
 import { HealthSection } from "../components/HealthSection";
 import { UpdatesSection } from "../components/UpdatesSection";
 import { LanguagesSection } from "../components/LanguagesSection";
+import { AppearanceSection } from "../components/AppearanceSection";
 import {
   ArrowLeftIcon,
   CodeViewIcon,
   DownloadIcon,
   LayersIcon,
+  PaletteIcon,
   PulseIcon,
   RepoIcon,
   SearchIcon,
   SparkIcon,
 } from "../components/Icons";
 
-export type SettingsSectionId = "repos" | "groups" | "ai" | "languages" | "health" | "updates";
+export type SettingsSectionId = "repos" | "groups" | "ai" | "languages" | "appearance" | "health" | "updates";
 
 interface SectionDef {
   id: SettingsSectionId;
@@ -70,6 +72,13 @@ const NAV: { title: string; sections: SectionDef[] }[] = [
   {
     title: "System",
     sections: [
+      {
+        id: "appearance",
+        title: "Appearance",
+        description: "The app's theme: interface, editor, diffs and terminals.",
+        icon: <PaletteIcon size={15} />,
+        keywords: "theme dark light color dracula nord tokyo catppuccin solarized",
+      },
       {
         id: "health",
         title: "Health",
@@ -173,6 +182,7 @@ export function SettingsPage({ config, onChange, onError, section }: Props) {
       {def.id === "groups" && <GroupsSection config={config} onChange={onChange} onError={onError} />}
       {def.id === "ai" && <AiSection onError={onError} />}
       {def.id === "languages" && <LanguagesSection onError={onError} />}
+      {def.id === "appearance" && <AppearanceSection />}
       {def.id === "health" && <HealthSection onError={onError} />}
       {def.id === "updates" && <UpdatesSection />}
     </div>
