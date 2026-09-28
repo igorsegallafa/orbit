@@ -13,6 +13,7 @@ import { RangeMark, ZoneItem, useReviewZones } from "./useReviewZones";
 import { Composer, DraftCard, ThreadActions, ThreadCard } from "./ReviewThreads";
 import { SubmitReview } from "./SubmitReview";
 import { SafeMarkdown } from "./SafeMarkdown";
+import { usePaneWidth } from "./PaneResizer";
 import { CheckBox } from "./CheckBox";
 import { CheckIcon, ChevronIcon, DocIcon, EyeIcon, RepoIcon } from "./Icons";
 import { defineMonacoThemes, useMonacoTheme } from "../lib/theme";
@@ -86,6 +87,7 @@ const DECISION: Record<string, { label: string; cls: string }> = {
  */
 export function PrReviewPane({ prs, onError }: Props) {
   const monacoTheme = useMonacoTheme();
+  const side = usePaneWidth("orbit.pr-review-side", 260, 200, 640);
   const [activeIdx, setActiveIdx] = useState(0);
   const [detail, setDetail] = useState<PrDetail | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -313,7 +315,7 @@ export function PrReviewPane({ prs, onError }: Props) {
 
   return (
     <div className="commit-review pr-review">
-      <div className="pr-review-side">
+      <div className="pr-review-side" style={{ width: side.width }}>
         {prs.length > 1 && (
           <div className="pr-selector">
             <div className="pr-selector-label">
@@ -437,6 +439,7 @@ export function PrReviewPane({ prs, onError }: Props) {
           </>
         )}
       </div>
+      {side.handle}
 
       <div className="pr-diff-col">
         <div className="editor-filebar rv-filebar">

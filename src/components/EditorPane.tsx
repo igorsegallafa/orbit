@@ -104,6 +104,15 @@ export function EditorPane({ workspace, repo, path, onError, onApplyPlan, onRunI
   const [models, setModels] = useState<string[]>([]);
   const saveRef = useRef<(() => void) | null>(null);
   const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null);
+  const paneRef = useRef<HTMLDivElement>(null);
+  // Edits made elsewhere (another IDE, an agent): what's on disk as of the
+  // last load/save/check, and whether an edit comes from there, not the user.
+  const diskRef = useRef<string | null>(null);
+  const fromDisk = useRef(false);
+  const dirtyRef = useRef(false);
+  dirtyRef.current = dirty;
+  /** The file changed on disk while there were unsaved edits here. */
+  const [diskChanged, setDiskChanged] = useState(false);
   // The file's real location: language servers speak in file URIs.
   const [absPath, setAbsPath] = useState<string | null>(null);
   const [lspStatus, setLspStatus] = useState<lsp.LspStatus>({ state: "off", language: null, server: null, progress: null, error: null });
@@ -182,8 +191,13 @@ export function EditorPane({ workspace, repo, path, onError, onApplyPlan, onRunI
       setContent(null);
       return;
     }
+    diskRef.current = null;
+    setDiskChanged(false);
     invoke<string>("read_file", { workspace, repo, path })
-      .then(setContent)
+      .then((text) => {
+        diskRef.current = text;
+        setContent(text);
+      })
       .catch((e) => {
         setContent(null);
         onError(String(e));
@@ -248,6 +262,8 @@ export function EditorPane({ workspace, repo, path, onError, onApplyPlan, onRunI
     if (content === null) return;
     try {
       await invoke("write_file", { workspace, repo, path, content });
+      diskRef.current = content;
+      setDiskChanged(false);
       setDirty(false);
       const model = editorRef.current?.getModel();
       if (model) lsp.saved(model);
@@ -256,6 +272,48 @@ export function EditorPane({ workspace, repo, path, onError, onApplyPlan, onRunI
     }
   };
   saveRef.current = save;
+
+  /** Puts the disk's version in the editor as an edit (undoable), keeping
+   *  the cursor and scroll; not counted as an unsaved change. */
+  const applyDisk = (text: string) => {
+    const ed = editorRef.current;
+    const model = ed?.getModel();
+    if (!ed || !model) {
+      setContent(text);
+      return;
+    }
+    const view = ed.saveViewState();
+    fromDisk.current = true;
+    model.pushEditOperations([], [{ range: model.getFullModelRange(), text }], () => null);
+    fromDisk.current = false;
+    if (view) ed.restoreViewState(view);
+    setDirty(false);
+  };
+  const applyDiskRef = useRef(applyDisk);
+  applyDiskRef.current = applyDisk;
+
+  // Follow the file on disk while this editor is on screen: every 1.5s and
+  // when the window regains focus (back from the other IDE).
+  useEffect(() => {
+    if (!path) return;
+    let stopped = false;
+    const check = async () => {
+      // Hidden tabs are display: none (no offsetParent): only the visible one polls.
+      if (document.visibilityState !== "visible" || !paneRef.current?.offsetParent) return;
+      const text = await invoke<string>("read_file", { workspace, repo, path }).catch(() => null);
+      if (stopped || text === null || diskRef.current === null || text === diskRef.current) return;
+      diskRef.current = text;
+      if (dirtyRef.current) setDiskChanged(true);
+      else applyDiskRef.current(text);
+    };
+    const t = window.setInterval(check, 1500);
+    window.addEventListener("focus", check);
+    return () => {
+      stopped = true;
+      window.clearInterval(t);
+      window.removeEventListener("focus", check);
+    };
+  }, [workspace, repo, path]);
 
   const restartServer = () => {
     const model = editorRef.current?.getModel();
@@ -299,7 +357,7 @@ export function EditorPane({ workspace, repo, path, onError, onApplyPlan, onRunI
     applyReveal();
     editor.onDidChangeModelContent(() => {
       setContent(editor.getValue());
-      setDirty(true);
+      if (!fromDisk.current) setDirty(true);
     });
     // Navigation history: every cursor move updates "where you are"; far
     // moves (not edits) become places to go back to.
@@ -339,7 +397,7 @@ export function EditorPane({ workspace, repo, path, onError, onApplyPlan, onRunI
     cppReady && !!cppSetup && !cppSetup.compileCommands && !cppDismissed.has(setupKey) && !!onRunInTerminal;
 
   return (
-    <div className="editor-pane">
+    <div className="editor-pane" ref={paneRef}>
       <div className="editor-filebar">
         <span className="mono">
           {path ? `${repo}/${path}` : repo}
@@ -401,6 +459,25 @@ export function EditorPane({ workspace, repo, path, onError, onApplyPlan, onRunI
           </button>
         </span>
       </div>
+      {diskChanged && (
+        <div className="editor-banner">
+          <span>
+            <strong>Changed on disk.</strong> This file was edited outside Orbit while you have unsaved changes here.
+          </span>
+          <button
+            className="btn-mini"
+            onClick={() => {
+              if (diskRef.current !== null) applyDisk(diskRef.current);
+              setDiskChanged(false);
+            }}
+          >
+            Reload
+          </button>
+          <button className="btn-mini secondary" onClick={() => setDiskChanged(false)}>
+            Keep mine
+          </button>
+        </div>
+      )}
       {showCppBanner && (
         <div className="editor-banner">
           <span>

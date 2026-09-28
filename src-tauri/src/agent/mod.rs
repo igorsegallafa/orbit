@@ -760,8 +760,14 @@ const DRAFT_DIFF_CHARS: usize = 24_000;
 // ponytail: stats only, no patch body, keeps the prompt small; send the
 // diff when messages come out too generic.
 fn change_summary(dir: &Path) -> Result<String, String> {
+    change_summary_of(dir, &[])
+}
+
+/// `change_summary` limited to `paths` (all when empty).
+fn change_summary_of(dir: &Path, paths: &[String]) -> Result<String, String> {
     Ok(crate::git::changes(dir)?
         .iter()
+        .filter(|c| paths.is_empty() || paths.contains(&c.path))
         .map(|c| format!("{} +{} -{} {}", c.status, c.added, c.deleted, c.path))
         .collect::<Vec<_>>()
         .join("\n"))
@@ -776,17 +782,24 @@ pub struct CommitMsg {
 /// AI-generated commit message for one dirty repo of a workspace. The
 /// agent sees the numstat diff (bounded) and answers with the message
 /// only — no JSON to parse, the message IS the reply.
-pub fn commit_message(ws_name: &str, repo: &str) -> Result<CommitMsg, String> {
+/// `paths`: only those files will be committed, so only they are described
+/// (all changes when empty).
+pub fn commit_message(ws_name: &str, repo: &str, paths: &[String]) -> Result<CommitMsg, String> {
     let dir = crate::workspace::repo_path(ws_name, repo)?;
     if !dir.exists() {
         return Err(format!("worktree for '{repo}' not found"));
     }
-    let numstat = change_summary(&dir)?;
+    let numstat = change_summary_of(&dir, paths)?;
     if numstat.is_empty() {
         return Err(format!("{repo}: nothing to commit"));
     }
     let branch = crate::git::current_branch(&dir).unwrap_or_default();
-    let diff = clip(&git_out(&dir, &["diff", "HEAD", "--no-color", "--no-ext-diff", "--unified=2"]), DRAFT_DIFF_CHARS);
+    let mut diff_args = vec!["diff", "HEAD", "--no-color", "--no-ext-diff", "--unified=2"];
+    if !paths.is_empty() {
+        diff_args.push("--");
+        diff_args.extend(paths.iter().map(String::as_str));
+    }
+    let diff = clip(&git_out(&dir, &diff_args), DRAFT_DIFF_CHARS);
     let prompt = format!(
         r#"You are writing a git commit message for the repository `{repo}` (branch `{branch}`). Everything you need is below: answer directly, do not read files or run commands.
 

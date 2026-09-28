@@ -292,9 +292,23 @@ pub fn fetch(repo_dir: &Path) -> Result<(), String> {
 /// Stages everything and commits with `message`. Errors when there is
 /// nothing to commit.
 pub fn commit_all(dir: &Path, message: &str) -> Result<(), String> {
-    git_in(dir, &["add", "-A"])?;
+    commit_paths(dir, message, &[])
+}
+
+/// Stages and commits only `paths` (new, modified or deleted); every
+/// change when `paths` is empty. Other changes stay in the working tree.
+pub fn commit_paths(dir: &Path, message: &str, paths: &[String]) -> Result<(), String> {
+    let mut add = vec!["add", "--all"];
+    let mut commit = vec!["commit", "-m", message];
+    if !paths.is_empty() {
+        add.push("--");
+        add.extend(paths.iter().map(String::as_str));
+        commit.push("--");
+        commit.extend(paths.iter().map(String::as_str));
+    }
+    git_in(dir, &add)?;
     let out = crate::proc::cmd("git")
-        .args(["commit", "-m", message])
+        .args(&commit)
         .current_dir(dir)
         .output()
         .map_err(|e| format!("failed to run git: {e}"))?;
