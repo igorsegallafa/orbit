@@ -3254,6 +3254,42 @@ button.plan-choice-main:hover:not(:disabled) { border-color: var(--accent); }
 .agent-feed-meta { flex-shrink: 0; font-size: 11.5px; color: var(--text-faint); font-variant-numeric: tabular-nums; }
 .agent-feed-list { height: 300px; overflow-y: auto; padding: 8px 12px; }
 .agent-feed-empty { font-size: 12px; color: var(--text-faint); padding: 6px 0; }
+
+/* Ralph over the plan */
+.rv-story-repo {
+  margin-left: auto;
+  flex-shrink: 0;
+  padding: 0 6px;
+  border-radius: 4px;
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 10.5px;
+  color: var(--text-dim);
+  background: var(--panel-raised);
+  border: 1px solid var(--border);
+}
+.rv-warnings {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0 20px 12px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--warn) 8%, transparent);
+  font-size: 12.5px;
+}
+.rv-warnings ul { margin: 0; padding-left: 18px; color: var(--text-dim); }
+.run-warning {
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--warn) 35%, transparent);
+  background: color-mix(in srgb, var(--warn) 7%, transparent);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.plan-progress-actions { display: inline-flex; align-items: center; gap: 10px; }
 .agent-feed-thinking { margin: 4px 0; font-size: 12px; font-style: italic; color: var(--text-faint); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 
 .plan-card-context {

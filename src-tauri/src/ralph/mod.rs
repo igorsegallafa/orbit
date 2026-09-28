@@ -409,7 +409,8 @@ fn default_config() -> RunConfig {
         limits: Limits::default(),
         agent: None,
         model: None,
-        push: true,
+        // Off until asked: a run pushing on its own surprises people.
+        push: false,
         iteration_timeout_min: default_iteration_timeout(),
         extra_instructions: String::new(),
     }

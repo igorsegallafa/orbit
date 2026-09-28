@@ -434,7 +434,7 @@ export function WorkspaceDetailPage({
               <RefreshIcon size={13} /> Replan
             </button>
           )}
-          <button className="secondary ws-tool" onClick={onOpenRalph} {...hint("Write a PRD and let the agent implement it story by story")}>
+          <button className="secondary ws-tool" onClick={onOpenRalph} {...hint("Ralph builds the plan: each task by a fresh agent, in its repo, with live activity")}>
             <SparkIcon size={14} /> Ralph
           </button>
           {!workspace.variant_of && (
@@ -506,7 +506,7 @@ export function WorkspaceDetailPage({
         ))}
       </div>
 
-      <PlanProgress workspace={workspace.name} refreshKey={statuses === null ? 0 : 1} onOpenPlan={onOpenPlan} onError={onError} />
+      <PlanProgress workspace={workspace.name} refreshKey={statuses === null ? 0 : 1} onOpenPlan={onOpenPlan} onRunRalph={onOpenRalph} onError={onError} />
 
       {!workspace.variant_of && (
         <RaceSection
