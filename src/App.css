@@ -376,23 +376,27 @@ body {
   color: color-mix(in srgb, var(--info) 40%, var(--text));
 }
 
-/* Workspace rows in the sidebar read as tree headers, not buttons: no hover
-   background — only a subtle text lift. The chevron is the affordance.
-   !important beats the global `button:hover` blue fill. */
+/* Workspace and repo rows in the sidebar: a soft fill on hover (never the
+   global accent fill: !important beats `button:hover`), and the open one
+   gets the accent tint with a bar on its left edge. */
 .nav-ws:hover {
-  background: transparent !important;
+  background: var(--panel-hover) !important;
   color: var(--text);
 }
 
 .nav-ws:hover:active {
-  background: transparent !important;
   transform: none !important;
 }
 
-/* Selected workspace: text color marks it, not a filled pill */
-.nav-ws.active {
-  background: transparent !important;
-  color: color-mix(in srgb, var(--info) 40%, var(--text));
+.nav-ws.active,
+.nav-ws.active:hover {
+  background: var(--accent-soft) !important;
+  color: var(--text);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.nav-ws.active .nav-icon {
+  color: var(--accent);
 }
 
 /* Chevron: the one clearly interactive element on the workspace row —
@@ -642,7 +646,7 @@ button {
 
 /* Buttons default to control height unless they opt out
    (cards, links, rows, nav items, tree rows set their own) */
-button:not(.workspace-card):not(.nav-item):not(.modal-row):not(.link):not(.back-link):not(.chip):not(.tree-item):not(.dock-icon):not(.tab-close):not(.icon-button):not(.context-menu-item):not(.tab-plus):not(.mode-btn):not(.integration-card-row):not(.wizard-source-pill):not(.select-trigger):not(.select-option):not(.git-commit-row):not(.btn-mini):not(.orbit-check):not(.btn-plain) {
+button:not(.workspace-card):not(.nav-item):not(.modal-row):not(.link):not(.back-link):not(.chip):not(.tree-item):not(.dock-icon):not(.tab-close):not(.icon-button):not(.context-menu-item):not(.tab-plus):not(.mode-btn):not(.integration-card-row):not(.wizard-source-pill):not(.select-trigger):not(.select-option):not(.git-commit-row):not(.btn-mini):not(.orbit-check):not(.btn-plain):not(.btn-link) {
   height: var(--control-height);
 }
 
@@ -5128,6 +5132,10 @@ button.commit-repo-toggle { display: inline-flex; padding: 2px; color: var(--tex
 .ralph-extra textarea { min-height: 64px; }
 .ralph-prompt-edit textarea { width: 100%; min-height: 260px; font-size: 11px; }
 .btn-link { background: none; border: none; padding: 0; color: var(--accent); cursor: pointer; font-size: 12px; }
+/* A link, not a button: no accent fill on hover (it hid the text, which is
+   accent-colored too), no press scale. */
+button.btn-link:hover:not(:disabled) { background: none; color: var(--accent-hover); text-decoration: underline; }
+button.btn-link:active:not(:disabled) { transform: none; }
 
 .muted { color: var(--text-faint); font-size: 12px; margin: 0 0 12px; }
 
