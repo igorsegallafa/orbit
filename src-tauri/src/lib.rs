@@ -205,6 +205,7 @@ pub fn run() {
             pty::pty_scrollback,
             pty::pty_forget,
             pty::claude_session_exists,
+            pty::opencode_session_id,
             agent_hooks::claude_rate_limits,
         ])
         .build(tauri::generate_context!())

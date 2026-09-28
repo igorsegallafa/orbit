@@ -26,6 +26,8 @@ export interface TerminalTab {
   agentSessionId?: string;
   /** Reopened from the saved session after an app restart. */
   restored?: boolean;
+  /** Agent session hidden from the tab strip, its process still running. */
+  minimized?: boolean;
 }
 
 /** Launch argv for a new claude session: a fixed id makes it resumable. */

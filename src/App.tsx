@@ -78,6 +78,25 @@ function repoScope(name: string): Workspace {
 }
 const isScope = (workspace: string) => workspace.startsWith("@");
 
+type TerminalTabOf = Extract<Tab, { kind: "terminal" }>;
+/** Terminal commands that are AI agents: their tabs minimize instead of closing. */
+const AGENT_CMDS = ["claude", "opencode", "omp"];
+
+/** An ended agent session that can be picked up again. */
+interface RecentSession {
+  /** claude conversation id / opencode session id. */
+  resumeId: string;
+  agent: "claude" | "opencode";
+  workspace: string;
+  repo?: string;
+  sessionName: string;
+  endedAt: number;
+}
+const RECENT_KEY = "orbit.recent-sessions";
+const RECENT_MAX = 30;
+/** Recent sessions listed under each workspace in the sidebar. */
+const RECENT_SHOWN = 5;
+
 const SIDEBAR_KEY = "orbit.sidebar-width";
 const DOCK_KEY = "orbit.dock-width";
 const DEFAULT_WIDTH = 220;
@@ -384,6 +403,94 @@ function App() {
     if (t?.kind === "terminal") invoke("pty_forget", { key: t.terminal.id }).catch(() => null);
   };
 
+  // ---- Agent sessions: the X minimizes (the agent keeps working, the
+  // sidebar still lists it); "End session" stops it and keeps it in Recent
+  // so the conversation can be resumed later.
+  const isAgentTab = (t: Tab | undefined): t is TerminalTabOf =>
+    t?.kind === "terminal" && AGENT_CMDS.includes(t.terminal.cmd ?? "");
+  const isShown = (t: Tab) => !(t.kind === "terminal" && t.terminal.minimized);
+
+  const minimizeTab = (id: string) => {
+    setTabs((ts) => {
+      const shown = ts.filter(isShown);
+      const next = ts.map((t) => (tabId(t) === id && t.kind === "terminal" ? { ...t, terminal: { ...t.terminal, minimized: true } } : t));
+      if (activeTab === id) {
+        const idx = shown.findIndex((t) => tabId(t) === id);
+        const rest = shown.filter((t) => tabId(t) !== id);
+        const nextTab = rest[Math.min(idx, rest.length - 1)];
+        setActiveTab(nextTab ? tabId(nextTab) : null);
+      }
+      return next;
+    });
+  };
+
+  /** The tab's X / middle-click: minimize agent sessions, close the rest. */
+  const dismissTab = (id: string) => (isAgentTab(tabs.find((t) => tabId(t) === id)) ? minimizeTab(id) : closeTab(id));
+
+  // Showing a minimized session (sidebar click, nav history) brings its tab back.
+  useEffect(() => {
+    const t = tabs.find((x) => tabId(x) === activeTab);
+    if (t?.kind === "terminal" && t.terminal.minimized) {
+      setTabs((ts) => ts.map((x) => (x === t ? { ...t, terminal: { ...t.terminal, minimized: false } } : x)));
+    }
+  }, [activeTab, tabs]);
+
+  const [recentSessions, setRecentSessions] = useState<RecentSession[]>(() => {
+    try {
+      return JSON.parse(localStorage.getItem(RECENT_KEY) ?? "[]");
+    } catch {
+      return [];
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem(RECENT_KEY, JSON.stringify(recentSessions));
+    } catch {
+      // Not remembered across restarts; still listed for now.
+    }
+  }, [recentSessions]);
+
+  /** Stops an agent session; claude/opencode ones go to Recent (resumable). */
+  const endSession = async (t: TerminalTabOf) => {
+    const { terminal: tm } = t;
+    closeTab(tabId(t));
+    let resumeId: string | null = tm.agentSessionId ?? null;
+    if (tm.cmd === "opencode") {
+      // The tab id carries its launch time: the session opencode made after it.
+      const since = Number(tm.id.match(/^tm:(\d+)/)?.[1] ?? 0);
+      resumeId = await invoke<string | null>("opencode_session_id", { workspace: tm.workspace, repo: tm.repo ?? null, sinceMs: since }).catch(() => null);
+    }
+    if (!resumeId || (tm.cmd !== "claude" && tm.cmd !== "opencode")) return;
+    const entry: RecentSession = {
+      resumeId,
+      agent: tm.cmd,
+      workspace: tm.workspace,
+      repo: tm.repo,
+      sessionName: tm.sessionName,
+      endedAt: Date.now(),
+    };
+    setRecentSessions((rs) => [entry, ...rs.filter((r) => r.resumeId !== resumeId)].slice(0, RECENT_MAX));
+  };
+
+  /** Reopens a recent session in a new tab, picking the conversation up. */
+  const resumeSession = (r: RecentSession) => {
+    setRecentSessions((rs) => rs.filter((x) => x.resumeId !== r.resumeId));
+    setNavPage({ kind: "dashboard" });
+    openTab({
+      kind: "terminal",
+      terminal: {
+        id: `tm:${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        workspace: r.workspace,
+        label: r.agent,
+        sessionName: r.sessionName,
+        cmd: r.agent,
+        args: r.agent === "claude" ? ["--resume", r.resumeId] : ["--session", r.resumeId],
+        agentSessionId: r.agent === "claude" ? r.resumeId : undefined,
+        repo: r.repo,
+      },
+    });
+  };
+
   const closeTab = (id: string) => {
     forgetTerminal(tabs.find((t) => tabId(t) === id));
     setTabs((ts) => {
@@ -405,12 +512,16 @@ function App() {
 
   // Batch closes for the tab context menu. All remount their panes, so PTY
   // sessions in closed tabs end naturally via cleanup.
+  // Agent sessions survive both: they're minimized, not killed.
   const closeOtherTabs = (keepId: string) => {
     const keep = tabs.find((t) => tabId(t) === keepId);
     if (!keep) return;
     setTabs((ts) => {
+      const next: Tab[] = [];
       for (const t of ts) {
-        if (tabId(t) !== keepId) {
+        if (tabId(t) === keepId) next.push(t);
+        else if (isAgentTab(t)) next.push({ ...t, terminal: { ...t.terminal, minimized: true } });
+        else {
           forgetTerminal(t);
           setSessionStatuses((s) => {
             const { [tabId(t)]: _drop, ...rest } = s;
@@ -418,23 +529,31 @@ function App() {
           });
         }
       }
-      return [keep];
+      return next;
     });
     setActiveTab(keepId);
   };
 
   const closeAllTabs = () => {
-    tabs.forEach(forgetTerminal);
-    setTabs([]);
+    const agents = tabs.filter(isAgentTab);
+    tabs.filter((t) => !isAgentTab(t)).forEach(forgetTerminal);
+    setTabs(agents.map((t) => ({ ...t, terminal: { ...t.terminal, minimized: true } })));
     setActiveTab(null);
-    setSessionStatuses({});
+    setSessionStatuses((s) => Object.fromEntries(Object.entries(s).filter(([id]) => agents.some((t) => tabId(t) === id))));
   };
 
   const tabMenuItems = (t: Tab): MenuItem[] => [
-    {
-      label: "Close",
-      onSelect: () => closeTab(tabId(t)),
-    },
+    ...(isAgentTab(t)
+      ? [
+          { label: "Minimize", onSelect: () => minimizeTab(tabId(t)) },
+          { label: "End session", danger: true, onSelect: () => void endSession(t) },
+        ]
+      : [
+          {
+            label: "Close",
+            onSelect: () => closeTab(tabId(t)),
+          },
+        ]),
     {
       label: "Close Other Tabs",
       onSelect: () => closeOtherTabs(tabId(t)),
@@ -683,6 +802,42 @@ function App() {
         (t.kind === "terminal" && t.terminal.workspace === wsName) || (t.kind === "editor" && t.workspace === wsName),
     );
 
+  const recentOf = (wsName: string) => recentSessions.filter((r) => r.workspace === wsName).slice(0, RECENT_SHOWN);
+
+  /** Ended agent sessions of a workspace: click to resume the conversation. */
+  const renderRecent = (wsName: string) => {
+    const list = recentOf(wsName);
+    if (!list.length || collapsed) return null;
+    return (
+      <div className="nav-recent">
+        <div className="nav-recent-label">Recent sessions</div>
+        {list.map((r) => (
+          <button
+            key={r.resumeId}
+            className="nav-item nav-sub nav-sub-recent"
+            onClick={() => resumeSession(r)}
+            title={`Resume ${r.sessionName} (${r.agent}) — ended ${new Date(r.endedAt).toLocaleString()}`}
+          >
+            <span className="nav-icon">↺</span>
+            <span className="nav-item-label">{r.sessionName}</span>
+            <span
+              role="button"
+              tabIndex={0}
+              className="nav-recent-forget"
+              title="Remove from recent"
+              onClick={(e) => {
+                e.stopPropagation();
+                setRecentSessions((rs) => rs.filter((x) => x.resumeId !== r.resumeId));
+              }}
+            >
+              ×
+            </span>
+          </button>
+        ))}
+      </div>
+    );
+  };
+
   /** Sidebar row of one open session under its workspace or repo. */
   const renderSessionItem = (t: SessionTab) => {
     const id = tabId(t);
@@ -695,9 +850,9 @@ function App() {
     return (
       <button
         key={id}
-        className={`nav-item nav-sub ${activeTab === id ? "active" : ""}`}
+        className={`nav-item nav-sub ${activeTab === id ? "active" : ""} ${t.kind === "terminal" && t.terminal.minimized ? "nav-sub-minimized" : ""}`}
         onClick={() => setActiveTab(id)}
-        title={full}
+        title={t.kind === "terminal" && t.terminal.minimized ? `${full} — minimized, still running` : full}
       >
         {t.kind === "terminal" ? (
           <StatusIndicator status={sessionStatuses[id] ?? "idle"} />
@@ -1071,7 +1226,7 @@ function App() {
                       if (!live.length) return null;
                       return <span className={`nav-unread ${live.includes("waiting") ? "nav-unread-waiting" : ""}`} />;
                     })()}
-                    {wsSessions.length > 0 && (
+                    {(wsSessions.length > 0 || recentOf(ws.name).length > 0) && (
                       <span
                         role="button"
                         tabIndex={0}
@@ -1092,7 +1247,12 @@ function App() {
                       </span>
                     )}
                   </button>
-                  {(wsExpanded[ws.name] ?? true) && wsSessions.map(renderSessionItem)}
+                  {(wsExpanded[ws.name] ?? true) && (
+                    <>
+                      {wsSessions.map(renderSessionItem)}
+                      {renderRecent(ws.name)}
+                    </>
+                  )}
                 </div>
               );
             })}
@@ -1142,6 +1302,7 @@ function App() {
                       </span>
                     </button>
                     {sessions.map(renderSessionItem)}
+                    {renderRecent(`@${svc.name}`)}
                   </div>
                 );
               })}
@@ -1206,7 +1367,7 @@ function App() {
                 }
               }}
             >
-              {tabs.map((t) => {
+              {tabs.filter(isShown).map((t) => {
                 const id = tabId(t);
                 const label =
                   t.kind === "workspace"
@@ -1264,7 +1425,7 @@ function App() {
                     onMouseDown={(e) => {
                       if (e.button === 1) {
                         e.preventDefault();
-                        closeTab(id);
+                        dismissTab(id);
                       } else {
                         tabMenu.openFromEvent(e, t);
                       }
@@ -1300,9 +1461,10 @@ function App() {
                     {status && <StatusIndicator status={status} />}
                     <button
                       className="tab-close"
+                      title={isAgentTab(t) ? "Minimize (the session keeps running) — End session from the tab's menu" : "Close"}
                       onClick={(e) => {
                         e.stopPropagation();
-                        closeTab(id);
+                        dismissTab(id);
                       }}
                     >
                       ×
