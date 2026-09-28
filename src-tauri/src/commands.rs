@@ -394,63 +394,47 @@ pub async fn workspace_plan_exists(name: String) -> Result<bool, String> {
     .await
 }
 
-/// Runs the configured agent to generate PLAN.md from the workspace card.
-/// Streams progress via the `plan-progress` event.
+/// Drafts PLAN.md with the configured agent from the linked card and/or
+/// `goal`, honoring interview `decisions`. Progress streams as `agent-feed`
+/// events tagged `run`; `agent_cancel(run)` stops it. Returns the path.
 #[tauri::command]
-pub async fn generate_plan(
+pub async fn plan_draft(app: tauri::AppHandle, run: String, name: String, goal: String, decisions: String) -> Result<String, String> {
+    blocking(move || agent::plan::draft(&app, &run, &name, &goal, &decisions)).await
+}
+
+/// One interview round (see agent::plan::interview): `answers` is the whole
+/// history, `new_answers` the ones since the last round.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn plan_interview(
     app: tauri::AppHandle,
+    run: String,
     name: String,
-    card: CardRef,
-) -> Result<agent::PlanResult, String> {
-    let ws_dir = crate::workspace::ws_dir(&name)?;
-    let meta = workspace::load_meta(&ws_dir)?;
-    let ai = Config::load()?.ai;
-    let app = app.clone();
-    spawn_blocking(move || {
-        agent::generate_plan(&app, &name, &card, &meta.repos, &meta.branch, &ai)
-    })
-    .await
-    .map_err(|e| format!("background task failed: {e}"))?
+    goal: String,
+    answers: Vec<agent::plan::Answer>,
+    new_answers: Vec<agent::plan::Answer>,
+    session: Option<String>,
+    finish: bool,
+) -> Result<agent::plan::InterviewTurn, String> {
+    blocking(move || agent::plan::interview(&app, &run, &name, &goal, &answers, &new_answers, session.as_deref(), finish)).await
 }
 
-/// Interactive grill-me interview step (UI stepper): one round at a time.
+/// Creates PLAN.md from the template (never overwrites); returns the path.
 #[tauri::command]
-pub async fn grill_step(
-    name: String,
-    card: CardRef,
-    answers: Vec<(String, String)>,
-    rounds_done: usize,
-    max_rounds: Option<usize>,
-) -> Result<agent::GrillRound, String> {
-    blocking(move || agent::grill_round(&name, &card, &answers, rounds_done, max_rounds)).await
+pub async fn plan_blank(name: String, goal: String) -> Result<String, String> {
+    blocking(move || agent::plan::blank(&name, &goal)).await
 }
 
-/// Headless plan generation seeded with the interview's decisions.
+/// Opening prompt for planning in an interactive agent session.
 #[tauri::command]
-pub async fn generate_plan_decisions(
-    app: tauri::AppHandle,
-    name: String,
-    card: CardRef,
-    decisions: String,
-) -> Result<agent::PlanResult, String> {
-    let app = app.clone();
-    spawn_blocking(move || {
-        agent::generate_plan_with_decisions(&app, &name, &card, &decisions)
-    })
-    .await
-    .map_err(|e| format!("background task failed: {e}"))?
+pub async fn plan_session_prompt(name: String, goal: String) -> Result<String, String> {
+    blocking(move || agent::plan::session_prompt(&name, &goal)).await
 }
 
-/// Cancels the running plan generation (kills the agent process).
+/// Stops a live agent run (plan draft, interview round).
 #[tauri::command]
-pub fn cancel_plan() -> Result<(), String> {
-    agent::cancel_plan()
-}
-
-/// Interactive grill-me prompt for the workspace card (interview flow).
-#[tauri::command]
-pub async fn grill_prompt(name: String, card: CardRef) -> Result<String, String> {
-    blocking(move || agent::grill_prompt(&name, &card)).await
+pub fn agent_cancel(run: String) -> bool {
+    agent::live::cancel(&run)
 }
 
 /// `- [ ]` tasks from the workspace's PLAN.md with their done state.

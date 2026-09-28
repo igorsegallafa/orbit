@@ -983,7 +983,20 @@ function App() {
     }
     if (tab.kind === "ralph") {
       const ws = isScope(tab.workspace) ? repoScope(tab.workspace) : workspaces.find((w) => w.name === tab.workspace);
-      return ws ? <RalphView workspace={ws} onError={setError} /> : null;
+      if (!ws) return null;
+      return (
+        <RalphView
+          workspace={ws}
+          onError={setError}
+          onRunFinished={loadWorkspaces}
+          onOpenPlan={isScope(tab.workspace) ? undefined : () => openFileTab(tab.workspace, "", "PLAN.md")}
+          onPlanInTerminal={(prompt) =>
+            invoke<{ agent: string; model: string }>("get_ai_settings")
+              .then((ai) => openPromptedSession(tab.workspace, ai.agent, ai.model, prompt, { name: "plan", autoEdit: true }))
+              .catch((e) => setError(String(e)))
+          }
+        />
+      );
     }
     if (tab.kind === "review") {
       return (

@@ -11,6 +11,8 @@ interface Props {
   /** Re-read tasks when this key changes (tab focus, plan regenerated). */
   refreshKey?: number;
   onOpenPlan: () => void;
+  /** Opens Ralph, which implements the open tasks one by one. */
+  onRunRalph?: () => void;
   onError: (msg: string) => void;
 }
 
@@ -19,7 +21,7 @@ interface Props {
  * reflecting `- [ ]` / `- [x]` lines. Checking a box writes back to the file,
  * so the agent and the user share the same source of truth.
  */
-export function PlanProgress({ workspace, refreshKey, onOpenPlan, onError }: Props) {
+export function PlanProgress({ workspace, refreshKey, onOpenPlan, onRunRalph, onError }: Props) {
   const [tasks, setTasks] = useState<PlanTask[] | null>(null);
 
   const load = useCallback(async () => {
@@ -62,9 +64,16 @@ export function PlanProgress({ workspace, refreshKey, onOpenPlan, onError }: Pro
     <div className="card plan-progress">
       <div className="plan-progress-head">
         <h3>Plan · progress</h3>
-        <button className="link" onClick={onOpenPlan}>
-          open PLAN.md
-        </button>
+        <span className="plan-progress-actions">
+          {onRunRalph && done < total && (
+            <button className="btn-mini" onClick={onRunRalph} title="Ralph implements the open tasks one by one, each by a fresh agent">
+              Run with Ralph
+            </button>
+          )}
+          <button className="link" onClick={onOpenPlan}>
+            open PLAN.md
+          </button>
+        </span>
       </div>
 
       <div className="plan-progress-bar-wrap">

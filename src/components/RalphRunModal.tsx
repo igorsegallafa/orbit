@@ -15,6 +15,8 @@ interface Props {
   onPromptSaved: () => void;
   onClose: () => void;
   onError: (msg: string) => void;
+  /** Ralph over the feature plan: tasks (with their repo), no PRD prompt. */
+  planMode?: boolean;
 }
 
 const storageKey = (ws: string) => `orbit.ralph.config.${ws}`;
@@ -29,7 +31,8 @@ export function rememberedConfig(ws: string, fallback: RunConfig): RunConfig {
   }
 }
 
-export function RalphRunModal({ workspace, repo, prd, initial, prompt, promptCustom, onStart, onPromptSaved, onClose, onError }: Props) {
+export function RalphRunModal({ workspace, repo, prd, initial, prompt, promptCustom, onStart, onPromptSaved, onClose, onError, planMode }: Props) {
+  const noun = planMode ? "task" : "story";
   const [c, setC] = useState<RunConfig>(initial);
   const [showPrompt, setShowPrompt] = useState(false);
   const [promptText, setPromptText] = useState(prompt);
@@ -62,13 +65,14 @@ export function RalphRunModal({ workspace, repo, prd, initial, prompt, promptCus
     <div className="modal-overlay" onMouseDown={onClose}>
       <div className="modal modal-run" onMouseDown={(e) => e.stopPropagation()}>
         <div className="modal-header">
-          <h3>Start Ralph · {repo}</h3>
+          <h3>{planMode ? "Start Ralph" : `Start Ralph · ${repo}`}</h3>
         </div>
         <div className="modal-body run-body">
           <div className="run-next">
             <span className="run-next-label">Next up</span>
             <span className="rv-story-id">{next?.id}</span>
             <span className="run-next-title">{next?.title}</span>
+            {planMode && typeof next?.repo === "string" && next.repo && <span className="rv-story-repo">{next.repo}</span>}
             <span className="run-next-count">
               {pending.length} of {prd.userStories.length} left
             </span>
@@ -81,13 +85,13 @@ export function RalphRunModal({ workspace, repo, prd, initial, prompt, promptCus
                 <CheckBox label="Fixed number of iterations" checked={!c.untilComplete} onChange={() => set("untilComplete", false)} />
                 <span>
                   <strong>Fixed iterations</strong>
-                  <small>Each iteration is one agent run, usually one story.</small>
+                  <small>Each iteration is one agent run on one {noun}.</small>
                 </span>
               </div>
               <div className={`choice ${c.untilComplete ? "choice-on" : ""}`} onClick={() => set("untilComplete", true)}>
-                <CheckBox label="Until every story passes" checked={c.untilComplete} onChange={() => set("untilComplete", true)} />
+                <CheckBox label={`Until every ${noun} is done`} checked={c.untilComplete} onChange={() => set("untilComplete", true)} />
                 <span>
-                  <strong>Until every story passes</strong>
+                  <strong>{planMode ? "Until every task is done" : "Until every story passes"}</strong>
                   <small>Still bounded by the safety limits below.</small>
                 </span>
               </div>
@@ -98,7 +102,7 @@ export function RalphRunModal({ workspace, repo, prd, initial, prompt, promptCus
                 <input type="number" min={1} value={c.maxIterations} disabled={c.untilComplete} onChange={(e) => set("maxIterations", num(e.target.value, 1))} />
               </div>
               <div className="field">
-                <span className="field-label">Stop after story</span>
+                <span className="field-label">Stop after {noun}</span>
                 <Select
                   value={c.stopAfterStory ?? ""}
                   options={[
@@ -141,10 +145,12 @@ export function RalphRunModal({ workspace, repo, prd, initial, prompt, promptCus
                 onChange={(e) => set("extraInstructions", e.target.value)}
               />
             </div>
-            <button type="button" className="btn-link" onClick={() => setShowPrompt((v) => !v)}>
-              {showPrompt ? "Hide" : "Customize"} the iteration prompt {promptCustom ? "· customized for this workspace" : ""}
-            </button>
-            {showPrompt && (
+            {!planMode && (
+              <button type="button" className="btn-link" onClick={() => setShowPrompt((v) => !v)}>
+                {showPrompt ? "Hide" : "Customize"} the iteration prompt {promptCustom ? "· customized for this workspace" : ""}
+              </button>
+            )}
+            {!planMode && showPrompt && (
               <div className="ralph-prompt-edit">
                 <textarea className="mono" rows={14} value={promptText} onChange={(e) => setPromptText(e.target.value)} />
                 <span className="field-hint">
@@ -164,6 +170,11 @@ export function RalphRunModal({ workspace, repo, prd, initial, prompt, promptCus
               </div>
             )}
           </section>
+
+          <p className="run-warning">
+            Each iteration runs the agent with every permission: it edits files, runs commands and commits without asking.
+            Review the {noun}s first, and keep an eye on the activity feed.
+          </p>
 
           <section className="run-section">
             <h4>Safety limits</h4>
