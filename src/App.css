@@ -1545,11 +1545,19 @@ table.list tbody tr:hover .row-actions,
   width: 28px;
   height: 28px;
   padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   background: transparent;
   color: var(--text-dim);
   border: 1px solid var(--border-strong);
   border-radius: 6px;
   font-size: 14px;
+}
+
+/* Alone in an icon button (refresh while loading): no gap for a label. */
+.icon-button .spinner {
+  margin: 0;
 }
 
 .icon-button:hover:not(:disabled) {
