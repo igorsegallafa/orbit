@@ -19,9 +19,12 @@ A feature in Orbit is a **workspace**: one branch across every repo it touches, 
 
 ## Install
 
-Download the Windows installer (`Orbit_x.y.z_x64-setup.exe`) from the [latest release](https://github.com/igorsegallafa/orbit/releases/latest). Later versions install through the in-app updater.
+Download from the [latest release](https://github.com/igorsegallafa/orbit/releases/latest). Later versions install through the in-app updater.
 
-On macOS and Linux, build from source (below).
+- **Windows**: `Orbit_x.y.z_x64-setup.exe`.
+- **macOS (Apple Silicon)**: `Orbit_x.y.z_aarch64.dmg`, then drag Orbit to Applications. The app isn't notarized by Apple yet, so the first launch is blocked: open **System Settings → Privacy & Security** and click **Open Anyway** next to the Orbit message (or run `xattr -dr com.apple.quarantine /Applications/Orbit.app`). Updates don't need this again.
+
+On Linux, and on Intel Macs, build from source (below).
 
 ### Requirements
 
@@ -54,6 +57,6 @@ npm run tauri build   # installers in src-tauri/target/release/bundle
 
 ## Releasing
 
-Publishing a GitHub release tagged `vX.Y.Z` builds the Windows installers and the updater manifest (`latest.json`) and attaches them to the release (`.github/workflows/release.yml`). The tag is the version; nothing needs bumping in the code.
+Publishing a GitHub release tagged `vX.Y.Z` builds the Windows installers and the macOS (Apple Silicon) app and dmg, plus the updater manifest (`latest.json`) covering both, and attaches them to the release (`.github/workflows/release.yml`). macOS builds are ad-hoc signed; to sign with a Developer ID and notarize, add the `APPLE_*` secrets Tauri documents and pass them to the `tauri-action` step. The tag is the version; nothing needs bumping in the code.
 
 Updates are signed: the workflow needs the `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` secrets, matching the public key in `src-tauri/tauri.conf.json`.
