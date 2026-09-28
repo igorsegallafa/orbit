@@ -300,6 +300,11 @@ function App() {
     });
   }, []);
 
+  /** Opens the dock if hidden (e.g. "Browse files" needs the file tree). */
+  const showDock = () => {
+    if (dockHidden) toggleDock();
+  };
+
   const onDockResize = useCallback(
     (w: number) => {
       setDockWidth(w);
@@ -939,7 +944,10 @@ function App() {
       return (
         <WorkspaceDetailPage
           workspace={tab.workspace}
-          onOpenEditor={(repo) => openFileTab(tab.workspace.name, repo, "")}
+          onOpenEditor={(repo) => {
+            showDock();
+            openFileTab(tab.workspace.name, repo, "");
+          }}
           onOpenPlan={() => openFileTab(tab.workspace.name, "", "PLAN.md")}
           onRemoved={() => {
             loadWorkspaces();
@@ -1624,6 +1632,8 @@ function App() {
                 openTab({ kind: "review", workspace: focusWorkspace.name, repo, path });
               }}
               onOpenFind={() => setFindOpen(true)}
+              activeRepo={active?.kind === "editor" && active.repo ? active.repo : undefined}
+              browsing={active?.kind === "editor" && !active.path}
               onReviewCommit={(repo, commit) => {
                 setNavPage({ kind: "dashboard" });
                 openTab({ kind: "commit", workspace: focusWorkspace.name, repo, commit });

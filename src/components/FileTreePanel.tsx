@@ -31,6 +31,10 @@ interface Props {
   /** Opens the Find in Files popup. */
   onOpenFind: () => void;
   onError: (msg: string) => void;
+  /** Repo of the active editor tab: the tree follows it. */
+  activeRepo?: string;
+  /** The active tab browses a repo (no file open): show its files. */
+  browsing?: boolean;
 }
 
 /**
@@ -43,7 +47,7 @@ interface Props {
  * move past a 4px threshold → hit-test folders with elementFromPoint →
  * move on mouseup, with a floating ghost and target highlight.
  */
-export function FileTreePanel({ workspace, onOpenFile, onReviewFile, onReviewCommit, onOpenFind, onError }: Props) {
+export function FileTreePanel({ workspace, onOpenFile, onReviewFile, onReviewCommit, onOpenFind, onError, activeRepo, browsing }: Props) {
   const [view, setView] = useState<DockView>("files");
   // The picked repo only counts while it belongs to the focused workspace:
   // switching focus must never pair the new workspace with the old repo.
@@ -90,6 +94,41 @@ export function FileTreePanel({ workspace, onOpenFile, onReviewFile, onReviewCom
     loadDir("");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspace.name, repo]);
+
+  // Opening a repo's files (Browse files) or switching editor tabs: the
+  // tree shows that repo.
+  useEffect(() => {
+    if (activeRepo && workspace.repos.includes(activeRepo)) setRepo(activeRepo);
+  }, [activeRepo, workspace.repos]);
+  useEffect(() => {
+    if (browsing) setView("files");
+  }, [browsing, activeRepo]);
+
+  // Files created or deleted elsewhere (another IDE, an agent): reload the
+  // open folders when the window regains focus, and every 5s while shown.
+  const expandedRef = useRef(expanded);
+  expandedRef.current = expanded;
+  const hostRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!repo || view !== "files") return;
+    const refresh = () => {
+      if (document.visibilityState !== "visible" || !hostRef.current?.offsetParent) return;
+      const dirs = Object.keys(expandedRef.current).filter((d) => expandedRef.current[d]);
+      for (const dir of dirs) {
+        invoke<FileNode[]>("list_files", { workspace: workspace.name, repo, path: dir })
+          .then((nodes) =>
+            setTree((t) => (JSON.stringify(t[dir]) === JSON.stringify(nodes) ? t : { ...t, [dir]: nodes }))
+          )
+          .catch(() => null); // gone (deleted folder) or transient: the next pass settles it
+      }
+    };
+    const t = window.setInterval(refresh, 5000);
+    window.addEventListener("focus", refresh);
+    return () => {
+      window.clearInterval(t);
+      window.removeEventListener("focus", refresh);
+    };
+  }, [workspace.name, repo, view]);
 
   const toggleDir = (dir: string) => {
     setExpanded((x) => {
@@ -421,7 +460,7 @@ export function FileTreePanel({ workspace, onOpenFile, onReviewFile, onReviewCom
   ];
 
   return (
-    <div className="dock-panel">
+    <div className="dock-panel" ref={hostRef}>
       <div className="dock-icons">
         {dockItems.map((item) => (
           <button
