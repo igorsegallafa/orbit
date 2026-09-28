@@ -13,7 +13,7 @@ interface Props {
   onError: (msg: string) => void;
 }
 
-const STATUS_LABEL: Record<string, { letter: string; cls: string }> = {
+export const STATUS_LABEL: Record<string, { letter: string; cls: string }> = {
   M: { letter: "M", cls: "git-status-modified" },
   A: { letter: "A", cls: "git-status-added" },
   D: { letter: "D", cls: "git-status-deleted" },
