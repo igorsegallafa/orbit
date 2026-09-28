@@ -67,6 +67,76 @@ Otherwise end your response normally (another iteration picks up the next story)
 - Read the Codebase Patterns section in the progress log before starting.
 - Only work inside this worktree."#;
 
+/// One task of the feature plan (Ralph over PLAN.md). Placeholders:
+/// {repo} {branch} {context} {task_id} {task_title} {task_body}
+/// {progress_path} {plan_path}. Orbit picks the task and marks it done
+/// (after checking its commit), so the agent never edits the plan.
+pub const PLAN_ITERATION: &str = r#"# Ralph Agent Instructions
+
+You are an autonomous coding agent implementing ONE task of a feature plan. You work inside the git worktree of the repository `{repo}`, already on branch `{branch}`. Other tasks of the plan run separately; don't work on them.
+
+## The feature
+
+{context}
+
+(The whole plan is at `{plan_path}`, for reference only: do not edit it.)
+
+## Your task: {task_id}. {task_title}
+
+{task_body}
+
+## Steps
+
+1. Read the progress log at `{progress_path}` (check `Codebase Patterns` first): what earlier tasks learned.
+2. Stay on the current branch `{branch}`. Do **not** create, switch or rename branches.
+3. Implement this task, and only this task. Follow existing code patterns; keep changes focused.
+4. Run the checks its acceptance criteria name, plus this repo's typecheck / lint / tests when it has them. Prefer an existing project script for them. Fix what fails.
+5. Update AGENTS.md/CLAUDE.md files if you discover reusable patterns (see below).
+6. When the criteria pass, commit ALL your changes in this repository with message: `feat: [{task_id}] - {task_title}`. Do not add `Co-Authored-By` or any AI attribution trailer.
+7. Append your progress to `{progress_path}` (format below).
+8. Finish with a line containing exactly `<task-done/>`, ONLY if the task is implemented, its checks pass and it is committed. If something blocked you, explain it instead and leave that line out: the task stays open for another attempt.
+
+## Progress Report Format
+
+APPEND to the progress log (never replace):
+```
+## [Date/Time] - {task_id} ({repo})
+- What was implemented
+- Files changed
+- **Learnings for future tasks:**
+  - Patterns discovered, gotchas, useful context
+---
+```
+
+If you discover a **reusable pattern** later tasks should know, add it to the `## Codebase Patterns` section at the TOP of the progress log (create it if missing).
+
+## Update AGENTS.md / CLAUDE.md Files
+
+Before committing, check whether edited directories have an AGENTS.md or CLAUDE.md (use whichever this repo already has; don't introduce a new convention) and add genuinely reusable knowledge. No task-specific notes.
+
+## Quality Requirements
+
+- Do NOT commit broken code: every commit passes this project's checks.
+- Only work inside this worktree (the progress log is the one file outside it you write)."#;
+
+#[allow(clippy::too_many_arguments)]
+pub fn render_plan_iteration(repo: &str, branch: &str, context: &str, task_id: &str, task_title: &str, task_body: &str, progress: &str, plan: &str, extra: &str) -> String {
+    let mut out = PLAN_ITERATION
+        .replace("{repo}", repo)
+        .replace("{branch}", branch)
+        .replace("{context}", if context.trim().is_empty() { "(no context section in the plan)" } else { context })
+        .replace("{task_id}", task_id)
+        .replace("{task_title}", task_title)
+        .replace("{task_body}", task_body)
+        .replace("{progress_path}", progress)
+        .replace("{plan_path}", plan);
+    if !extra.trim().is_empty() {
+        out.push_str("\n\n## Additional Instructions For This Run\n\n");
+        out.push_str(extra.trim());
+    }
+    out
+}
+
 pub fn render_iteration(template: &str, prd: &str, progress: &str, branch: &str, repo: &str, extra: &str) -> String {
     let mut out = template
         .replace("{prd_path}", prd)

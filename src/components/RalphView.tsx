@@ -8,19 +8,31 @@ import { RalphPrdModal } from "./RalphPrdModal";
 import { RalphRunModal, rememberedConfig } from "./RalphRunModal";
 import { CheckBox } from "./CheckBox";
 import { CheckIcon, CircleIcon, SparkIcon } from "./Icons";
+import { PlanModal } from "./PlanModal";
 
 interface Props {
   workspace: Workspace;
   /** A run finished: repo statuses (commits, ahead) changed. */
   onRunFinished?: () => void;
   onError: (msg: string) => void;
+  /** Workspaces: opens PLAN.md (Ralph runs its tasks). */
+  onOpenPlan?: () => void;
+  /** Workspaces: planning in a terminal session (Plan this feature). */
+  onPlanInTerminal?: (prompt: string) => void;
 }
 
 type PastRun = Omit<RunState, "events">;
 
-/** Full-height Ralph tab: PRD stories on the left, live activity on the right. */
-export function RalphView({ workspace, onRunFinished, onError }: Props) {
-  const [repo, setRepo] = useState(workspace.repos[0]);
+/**
+ * Full-height Ralph tab: tasks on the left, live activity on the right.
+ * In a workspace Ralph runs the feature plan (PLAN.md), one loop across its
+ * repos; in a repo view (@repo) it keeps its own PRD.
+ */
+export function RalphView({ workspace, onRunFinished, onError, onOpenPlan, onPlanInTerminal }: Props) {
+  const planMode = !workspace.name.startsWith("@");
+  const noun = planMode ? "task" : "story";
+  const [repo, setRepo] = useState(planMode ? "plan" : workspace.repos[0]);
+  const [planOpen, setPlanOpen] = useState(false);
   const [state, setState] = useState<RalphState | null>(null);
   const [run, setRun] = useState<RunState | null>(null);
   const [prdOpen, setPrdOpen] = useState(false);
@@ -36,7 +48,9 @@ export function RalphView({ workspace, onRunFinished, onError }: Props) {
 
   const load = useCallback(async () => {
     try {
-      const s = await invoke<RalphState>("ralph_state", { workspace: workspace.name, repo });
+      const s = planMode
+        ? await invoke<RalphState>("ralph_plan_state", { workspace: workspace.name })
+        : await invoke<RalphState>("ralph_state", { workspace: workspace.name, repo });
       setState(s);
       setRun(s.run);
       const runs = await invoke<PastRun[]>("ralph_runs", { workspace: workspace.name });
@@ -44,7 +58,7 @@ export function RalphView({ workspace, onRunFinished, onError }: Props) {
     } catch (e) {
       onError(String(e));
     }
-  }, [workspace.name, repo, onError]);
+  }, [workspace.name, repo, planMode, onError]);
 
   useEffect(() => {
     setState(null);
@@ -83,7 +97,8 @@ export function RalphView({ workspace, onRunFinished, onError }: Props) {
     setViewing(null);
     setAtBottom(true);
     try {
-      await invoke("ralph_start", { workspace: workspace.name, repo, config });
+      if (planMode) await invoke("ralph_plan_start", { workspace: workspace.name, config });
+      else await invoke("ralph_start", { workspace: workspace.name, repo, config });
       await load();
     } catch (e) {
       onError(String(e));
@@ -153,9 +168,11 @@ export function RalphView({ workspace, onRunFinished, onError }: Props) {
           </span>
           <div>
             <h2>Ralph</h2>
-            <span className="rv-sub">Autonomous loop · one story per agent run</span>
+            <span className="rv-sub">
+              {planMode ? "Builds the feature plan task by task · a fresh agent per task" : "Autonomous loop · one story per agent run"}
+            </span>
           </div>
-          {workspace.repos.length > 1 && (
+          {!planMode && workspace.repos.length > 1 && (
             <span className="mode-toggle seg rv-repos">
               {workspace.repos.map((r) => (
                 <button key={r} className={`mode-btn ${r === repo ? "mode-active" : ""}`} onClick={() => setRepo(r)}>
@@ -185,13 +202,28 @@ export function RalphView({ workspace, onRunFinished, onError }: Props) {
             </>
           ) : (
             <>
-              {state?.prd && (
+              {planMode && state?.planExists && onOpenPlan && (
+                <button className="secondary" onClick={onOpenPlan} title="Open PLAN.md: add, reorder or reword tasks">
+                  Edit plan
+                </button>
+              )}
+              {!planMode && state?.prd && (
                 <button className="secondary" onClick={() => setPrdOpen(true)}>
                   New PRD
                 </button>
               )}
               {state?.prd && (
-                <button disabled={passed === total || !!editing} onClick={() => setRunOpen(true)}>
+                <button
+                  disabled={passed === total || !!editing || (state.warnings?.length ?? 0) > 0}
+                  title={
+                    passed === total
+                      ? `Every ${noun} is done`
+                      : state.warnings?.length
+                        ? "Fix the plan first (see above the tasks)"
+                        : undefined
+                  }
+                  onClick={() => setRunOpen(true)}
+                >
                   ▶ {last ? "Run again" : "Start Ralph"}
                 </button>
               )}
@@ -200,7 +232,40 @@ export function RalphView({ workspace, onRunFinished, onError }: Props) {
         </div>
       </header>
 
-      {state && !state.prd ? (
+      {state && !state.prd && planMode ? (
+        <div className="rv-empty">
+          <div className="rv-empty-card">
+            <span className="rv-empty-logo">
+              <SparkIcon size={22} />
+            </span>
+            <h3>{state.planExists ? "The plan has no tasks yet" : "Plan it, then let Ralph build it"}</h3>
+            <p>
+              Ralph works through the feature plan one task at a time, across its repositories. Each task runs in a fresh
+              agent session that implements it, runs the checks and commits; Orbit ticks it off in the plan. You watch every
+              step here.
+            </p>
+            <ol className="rv-steps">
+              <li>
+                <strong>Plan the feature</strong>
+                <span>An interview, an AI draft or your own: small tasks, each in one repo, with checks.</span>
+              </li>
+              <li>
+                <strong>Review the tasks</strong>
+                <span>Edit PLAN.md freely: Ralph re-reads it before every task.</span>
+              </li>
+              <li>
+                <strong>Start Ralph</strong>
+                <span>Set limits, then follow tool calls, commits and cost live.</span>
+              </li>
+            </ol>
+            {state.planExists && onOpenPlan ? (
+              <button onClick={onOpenPlan}>Open PLAN.md</button>
+            ) : (
+              <button onClick={() => setPlanOpen(true)}>Plan this feature</button>
+            )}
+          </div>
+        </div>
+      ) : state && !state.prd ? (
         <div className="rv-empty">
           <div className="rv-empty-card">
             <span className="rv-empty-logo">
@@ -248,7 +313,7 @@ export function RalphView({ workspace, onRunFinished, onError }: Props) {
                   </span>
                 ) : last ? (
                   <span className={`rv-state ${last.reason?.kind === "complete" ? "rv-state-ok" : "rv-state-idle"}`}>
-                    <span className="rv-dot" /> {passed === total ? "All stories pass" : `Last run: ${reasonLabel(last.reason)}`}
+                    <span className="rv-dot" /> {passed === total ? `All ${noun === "task" ? "tasks are done" : "stories pass"}` : `Last run: ${reasonLabel(last.reason)}`}
                   </span>
                 ) : (
                   <span className="rv-state rv-state-idle">
@@ -257,7 +322,7 @@ export function RalphView({ workspace, onRunFinished, onError }: Props) {
                 )}
               </div>
               <div className="rv-stats">
-                <Stat value={`${passed}/${total}`} label="stories" />
+                <Stat value={`${passed}/${total}`} label={noun === "task" ? "tasks" : "stories"} />
                 {last && <Stat value={String(last.commits)} label={last.commits === 1 ? "commit" : "commits"} />}
                 {last && last.costUsd > 0 && <Stat value={`$${last.costUsd.toFixed(2)}`} label="cost" />}
                 {last && <Stat value={formatDuration(((last.finishedAt ?? now) - last.startedAt) * 1000)} label="time" />}
@@ -274,11 +339,27 @@ export function RalphView({ workspace, onRunFinished, onError }: Props) {
               ))}
             </div>
 
+            {planMode && (state?.warnings?.length ?? 0) > 0 && (
+              <div className="rv-warnings">
+                <strong>Fix the plan before starting:</strong>
+                <ul>
+                  {state!.warnings!.map((w, i) => (
+                    <li key={i}>{w}</li>
+                  ))}
+                </ul>
+                {onOpenPlan && (
+                  <button className="btn-mini" onClick={onOpenPlan}>
+                    Edit plan
+                  </button>
+                )}
+              </div>
+            )}
+
             <div className={`rv-body ${editing ? "editing" : ""}`}>
               <aside className="rv-stories">
                 <div className="rv-col-head">
-                  <span>Stories</span>
-                  {editing ? (
+                  <span>{planMode ? "Tasks" : "Stories"}</span>
+                  {planMode ? null : editing ? (
                     <span className="rv-col-actions">
                       <button className="btn-mini secondary" onClick={() => setEditing(null)}>
                         Discard
@@ -387,7 +468,8 @@ export function RalphView({ workspace, onRunFinished, onError }: Props) {
                               {current ? <span className="spinner" /> : s.passes ? <CheckIcon size={12} /> : <CircleIcon size={12} />}
                             </span>
                             <span className="rv-story-id">{s.id}</span>
-                            <span className="rv-story-title">{s.title || "Untitled story"}</span>
+                            <span className="rv-story-title">{s.title || `Untitled ${noun}`}</span>
+                            {typeof s.repo === "string" && s.repo && <span className="rv-story-repo">{s.repo}</span>}
                           </button>
                           {open && (
                             <div className="rv-story-detail">
@@ -497,6 +579,23 @@ export function RalphView({ workspace, onRunFinished, onError }: Props) {
           onPromptSaved={load}
           onClose={() => setRunOpen(false)}
           onError={onError}
+          planMode={planMode}
+        />
+      )}
+      {planOpen && (
+        <PlanModal
+          workspace={workspace.name}
+          card={workspace.card}
+          planExists={!!state?.planExists}
+          onPlanReady={() => {
+            load();
+            onOpenPlan?.();
+          }}
+          onPlanInTerminal={(prompt) => onPlanInTerminal?.(prompt)}
+          onClose={() => {
+            setPlanOpen(false);
+            load();
+          }}
         />
       )}
     </div>
@@ -512,7 +611,7 @@ function Stat({ value, label }: { value: string; label: string }) {
   );
 }
 
-const TOOL_KIND: Record<string, string> = {
+export const TOOL_KIND: Record<string, string> = {
   Read: "read",
   Grep: "search",
   Glob: "search",
@@ -523,6 +622,11 @@ const TOOL_KIND: Record<string, string> = {
   Write: "edit",
   NotebookEdit: "edit",
   Bash: "run",
+  // OpenCode's names (agent::stream capitalizes them).
+  List: "search",
+  Webfetch: "search",
+  Websearch: "search",
+  Patch: "edit",
 };
 
 function IterationBlock({ group, live }: { group: IterationGroup; live: boolean }) {
@@ -578,8 +682,14 @@ function FeedLine({ ev }: { ev: RalphEvent }) {
           </span>
         </div>
       );
+    case "thinking":
+      return (
+        <div className="rv-line agent-feed-thinking" title={String(ev.text)}>
+          {String(ev.text).replace(/\s+/g, " ")}
+        </div>
+      );
     case "text": {
-      const text = String(ev.text).replace("<promise>COMPLETE</promise>", "").trim();
+      const text = String(ev.text).replace("<promise>COMPLETE</promise>", "").replace("<task-done/>", "").trim();
       return text ? <div className="rv-line rv-text">{inlineMarkdown(text)}</div> : null;
     }
     case "log":
@@ -592,7 +702,9 @@ function FeedLine({ ev }: { ev: RalphEvent }) {
       );
     case "push":
       return (
-        <div className={`rv-line rv-event ${ev.ok ? "" : "rv-event-bad"}`}>{ev.ok ? "↑ Pushed to origin" : `Push failed: ${ev.message}`}</div>
+        <div className={`rv-line rv-event ${ev.ok ? "" : "rv-event-bad"}`}>
+          {ev.ok ? `↑ Pushed ${ev.repo ? `${ev.repo} ` : ""}to origin` : `Push failed${ev.repo ? ` in ${ev.repo}` : ""}: ${ev.message}`}
+        </div>
       );
     case "limit_wait":
       return (
@@ -619,7 +731,7 @@ function FeedLine({ ev }: { ev: RalphEvent }) {
 
 /** **bold** and `code` as React nodes. Agent output is untrusted, so it is
  *  never injected as HTML. */
-function inlineMarkdown(text: string) {
+export function inlineMarkdown(text: string) {
   return text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g).map((part, i) =>
     part.startsWith("**") && part.endsWith("**") ? (
       <strong key={i}>{part.slice(2, -2)}</strong>

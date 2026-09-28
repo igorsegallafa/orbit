@@ -44,6 +44,7 @@ export interface RalphEvent {
     | "iteration_start"
     | "text"
     | "tool"
+    | "thinking"
     | "log"
     | "story_passed"
     | "iteration_end"
@@ -79,6 +80,10 @@ export interface RalphState {
   prompt: string;
   promptCustom: boolean;
   defaultConfig: RunConfig;
+  /** Plan runs (workspaces): whether PLAN.md exists. */
+  planExists?: boolean;
+  /** Plan runs: what would stop a run (tasks naming unknown repos…). */
+  warnings?: string[];
 }
 
 export function reasonLabel(r: StopReason | null): string {

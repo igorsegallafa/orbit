@@ -19,7 +19,6 @@ import { CheckBox } from "../components/CheckBox";
 import { ArtifactSource, ArtifactsSection } from "../components/ArtifactsSection";
 import { Skeleton } from "../components/Skeleton";
 import { PlanModal } from "../components/PlanModal";
-import { GrillModal } from "../components/GrillModal";
 import { PlanProgress } from "../components/PlanProgress";
 import { CommitModal } from "../components/CommitModal";
 import { RebaseModal } from "../components/RebaseModal";
@@ -29,7 +28,7 @@ import { MergeModal } from "../components/MergeModal";
 import { PrsModal } from "../components/PrsModal";
 import { BuildModal } from "../components/BuildModal";
 import { tooltip } from "../components/Tooltip";
-import { RebaseIcon, CommitIcon, PushIcon, PullRequestIcon, ChevronRightIcon, SparkIcon, CheckIcon, XIcon, CircleIcon, SpinnerIcon, GitIcon, DocIcon, TrashIcon, RefreshIcon, PlayIcon, RaceIcon, BranchIcon, DiffIcon } from "../components/Icons";
+import { RebaseIcon, CommitIcon, PushIcon, PullRequestIcon, ChevronRightIcon, SparkIcon, CheckIcon, XIcon, CircleIcon, SpinnerIcon, GitIcon, DocIcon, TrashIcon, RefreshIcon, RaceIcon, BranchIcon, DiffIcon } from "../components/Icons";
 import { GitHubIcon } from "../components/BrandIcons";
 
 interface Props {
@@ -72,7 +71,6 @@ export function WorkspaceDetailPage({
   const [confirmRemove, setConfirmRemove] = useState<null | "normal" | "force">(null);
   const [removing, setRemoving] = useState(false);
   const [planOpen, setPlanOpen] = useState(false);
-  const [grillOpen, setGrillOpen] = useState(false);
   const [planExists, setPlanExists] = useState<boolean | null>(null);
   const [pushOpen, setPushOpen] = useState(false);
   const [commitOpen, setCommitOpen] = useState(false);
@@ -420,16 +418,23 @@ export function WorkspaceDetailPage({
           >
             <DiffIcon size={14} /> Code Review
           </button>
-          {workspace.card && (
+          <button
+            className="secondary ws-tool"
+            {...hint(planExists ? "Open PLAN.md" : "Plan the feature: an interview, an AI draft, or your own")}
+            onClick={() => (planExists ? onOpenPlan() : setPlanOpen(true))}
+          >
+            <DocIcon size={14} /> {planExists ? "Plan" : "Create plan"}
+          </button>
+          {planExists && (
             <button
               className="secondary ws-tool"
-              {...hint(planExists ? "Open the generated PLAN.md" : "Generate a PLAN.md from the linked card")}
-              onClick={() => (planExists ? onOpenPlan() : setPlanOpen(true))}
+              {...hint("Replan: interview or draft a new plan (the current one is kept in .orbit/plans)")}
+              onClick={() => setPlanOpen(true)}
             >
-              <DocIcon size={14} /> {planExists ? "Plan" : "Create plan"}
+              <RefreshIcon size={13} /> Replan
             </button>
           )}
-          <button className="secondary ws-tool" onClick={onOpenRalph} {...hint("Write a PRD and let the agent implement it story by story")}>
+          <button className="secondary ws-tool" onClick={onOpenRalph} {...hint("Ralph builds the plan: each task by a fresh agent, in its repo, with live activity")}>
             <SparkIcon size={14} /> Ralph
           </button>
           {!workspace.variant_of && (
@@ -437,9 +442,7 @@ export function WorkspaceDetailPage({
               <RaceIcon size={14} /> Race
             </button>
           )}
-          <button className="secondary ws-tool" onClick={() => setBuildOpen(true)} {...hint("Run each repo's build (skips unchanged ones)")}>
-            <PlayIcon size={13} /> Build
-          </button>
+          {/* Build is hidden for now (BuildModal stays wired below). */}
           <button className="secondary ws-tool" onClick={() => setRebaseOpen(true)} {...hint(`Rebase every repo onto origin/${workspace.base}`)}>
             <RebaseIcon size={14} /> Rebase
           </button>
@@ -501,7 +504,7 @@ export function WorkspaceDetailPage({
         ))}
       </div>
 
-      <PlanProgress workspace={workspace.name} refreshKey={statuses === null ? 0 : 1} onOpenPlan={onOpenPlan} onError={onError} />
+      <PlanProgress workspace={workspace.name} refreshKey={statuses === null ? 0 : 1} onOpenPlan={onOpenPlan} onRunRalph={onOpenRalph} onError={onError} />
 
       {!workspace.variant_of && (
         <RaceSection
@@ -848,31 +851,25 @@ export function WorkspaceDetailPage({
         />
       )}
 
-      {grillOpen && workspace.card && (
-        <GrillModal
-          workspace={workspace}
-          card={workspace.card}
-          onPlanReady={() => setPlanExists(true)}
-          onClose={() => setGrillOpen(false)}
-          onError={onError}
-        />
-      )}
-
-      {planOpen && workspace.card && (
+      {planOpen && (
         <PlanModal
-          workspace={workspace}
+          workspace={workspace.name}
           card={workspace.card}
-          onOpenPlan={() => {
-            setPlanOpen(false);
+          planExists={!!planExists}
+          onPlanReady={() => {
+            setPlanExists(true);
             onOpenPlan();
           }}
-          onStartInterview={() => setGrillOpen(true)}
+          onPlanInTerminal={(prompt) =>
+            invoke<{ agent: string; model: string }>("get_ai_settings")
+              .then((ai) => onStartSession(workspace.name, ai.agent, ai.model, prompt, "plan"))
+              .catch((e) => onError(String(e)))
+          }
           onClose={() => {
             setPlanOpen(false);
             // Closed after a cancel or a failure too: ask the disk, don't assume.
             checkPlan();
           }}
-          onError={onError}
         />
       )}
 
