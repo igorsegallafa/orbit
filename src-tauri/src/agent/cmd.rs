@@ -63,6 +63,31 @@ pub fn agent_args(ai: &AiSettings, prompt: &str, access: Access, stream_json: bo
     a
 }
 
+/// Argv for a headless run whose progress shows live: one JSON event per
+/// line from claude (stream-json) and opencode (--format json); omp prints
+/// text. `resume` continues an earlier conversation of the same agent.
+pub fn live_args(ai: &AiSettings, prompt: &str, access: Access, resume: Option<&str>) -> Vec<String> {
+    let bin = ai.agent_bin();
+    let mut a = agent_args(ai, prompt, access, bin == "claude");
+    let prompt_arg = a.pop().unwrap_or_default();
+    match (bin.as_str(), resume) {
+        ("claude", Some(id)) => a.extend(["--resume".into(), id.into()]),
+        ("opencode", Some(id)) => a.extend(["--session".into(), id.into()]),
+        _ => {}
+    }
+    if bin == "opencode" {
+        a.extend(["--format".into(), "json".into()]);
+    }
+    a.push(prompt_arg);
+    a
+}
+
+pub fn live_cmd(ai: &AiSettings, prompt: &str, access: Access, resume: Option<&str>) -> Command {
+    let mut c = crate::proc::cmd(&ai.agent_bin());
+    c.args(live_args(ai, prompt, access, resume));
+    c
+}
+
 /// Ready-to-spawn command for the configured agent (cwd/stdio set by the runner).
 pub fn agent_cmd(ai: &AiSettings, prompt: &str, access: Access, stream_json: bool) -> Command {
     let mut c = crate::proc::cmd(&ai.agent_bin());
@@ -109,6 +134,19 @@ mod tests {
         assert_eq!(agent_args(&ai("opencode"), "hi", Access::Edit, false), ["run", "--model", "m", "--auto", "hi"]);
         assert_eq!(agent_args(&ai("omp"), "hi", Access::ReadOnly, false), ["-p", "--model", "m", "hi"]);
         assert_eq!(agent_args(&ai("omp"), "hi", Access::Full, false), ["-p", "--auto-approve", "--model", "m", "hi"]);
+    }
+
+    #[test]
+    fn live_runs_stream_json_and_resume() {
+        assert_eq!(
+            live_args(&ai("claude"), "hi", Access::ReadOnly, Some("s1")),
+            ["-p", "--model", "m", READ_ONLY_TOOLS, "--output-format", "stream-json", "--verbose", "--resume", "s1", "hi"]
+        );
+        assert_eq!(
+            live_args(&ai("opencode"), "hi", Access::Edit, Some("ses_1")),
+            ["run", "--model", "m", "--auto", "--session", "ses_1", "--format", "json", "hi"]
+        );
+        assert_eq!(live_args(&ai("omp"), "hi", Access::ReadOnly, Some("x")), ["-p", "--model", "m", "hi"]);
     }
 
     #[test]

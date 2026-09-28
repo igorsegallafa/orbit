@@ -3,7 +3,6 @@
 // call is visible live instead of only when a story finishes.
 mod prd;
 mod prompts;
-mod stream;
 mod supervisor;
 
 use crate::agent::runner::{self, Line};
@@ -17,7 +16,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use stream::Event;
+use crate::agent::stream::{self, Event};
 use supervisor::{Iteration, Limits, RalphEnv, StopReason};
 use tauri::{AppHandle, Emitter};
 
@@ -276,6 +275,7 @@ impl RalphEnv for RealEnv {
                             let summary = relativize(summary, &root);
                             record(&app, &key, json!({"kind": "tool", "name": name, "summary": summary}), |_| {})
                         }
+                        Event::Session { .. } | Event::Cost { .. } => {}
                     }
                 }
             },
