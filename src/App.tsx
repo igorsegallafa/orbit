@@ -173,6 +173,8 @@ function App() {
   const { menu, setMenu, openFromEvent } = useContextMenu<Workspace>();
   const tabStripRef = useRef<HTMLDivElement>(null);
   const tabMenu = useContextMenu<Tab>();
+  /** Right-click on a session row in the sidebar. */
+  const sessionMenu = useContextMenu<Tab>();
   const [checkoutPrs, setCheckoutPrs] = useState<PullRequest[] | null>(null);
 
   const loadWorkspaces = useCallback(async () => {
@@ -546,6 +548,17 @@ function App() {
     setSessionStatuses((s) => Object.fromEntries(Object.entries(s).filter(([id]) => agents.some((t) => tabId(t) === id))));
   };
 
+  /** Sidebar session row: open it, or stop it without opening its tab. */
+  const sessionMenuItems = (t: Tab): MenuItem[] => [
+    { label: "Open", onSelect: () => setActiveTab(tabId(t)) },
+    ...(isAgentTab(t)
+      ? [
+          ...(t.terminal.minimized ? [] : [{ label: "Minimize", onSelect: () => minimizeTab(tabId(t)) }]),
+          { label: "End session", danger: true, onSelect: () => void endSession(t) },
+        ]
+      : [{ label: "Close", danger: true, onSelect: () => closeTab(tabId(t)) }]),
+  ];
+
   const tabMenuItems = (t: Tab): MenuItem[] => [
     ...(isAgentTab(t)
       ? [
@@ -857,6 +870,12 @@ function App() {
         key={id}
         className={`nav-item nav-sub ${activeTab === id ? "active" : ""} ${t.kind === "terminal" && t.terminal.minimized ? "nav-sub-minimized" : ""}`}
         onClick={() => setActiveTab(id)}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          sessionMenu.setMenu({ x: e.clientX, y: e.clientY, payload: t });
+        }}
+        onMouseDown={(e) => sessionMenu.openFromEvent(e, t)}
+        onPointerDown={(e) => sessionMenu.openFromEvent(e, t)}
         title={t.kind === "terminal" && t.terminal.minimized ? `${full} — minimized, still running` : full}
       >
         {t.kind === "terminal" ? (
@@ -1545,6 +1564,14 @@ function App() {
           y={tabMenu.menu.y}
           items={tabMenuItems(tabMenu.menu.payload)}
           onClose={() => tabMenu.setMenu(null)}
+        />
+      )}
+      {sessionMenu.menu && (
+        <ContextMenu
+          x={sessionMenu.menu.x}
+          y={sessionMenu.menu.y}
+          items={sessionMenuItems(sessionMenu.menu.payload)}
+          onClose={() => sessionMenu.setMenu(null)}
         />
       )}
       {plusMenu && focusWorkspace && (
