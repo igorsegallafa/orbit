@@ -275,7 +275,7 @@ impl RalphEnv for RealEnv {
                             let summary = relativize(summary, &root);
                             record(&app, &key, json!({"kind": "tool", "name": name, "summary": summary}), |_| {})
                         }
-                        Event::Session { .. } | Event::Cost { .. } => {}
+                        Event::Session { .. } | Event::Cost { .. } | Event::Thinking { .. } => {}
                     }
                 }
             },

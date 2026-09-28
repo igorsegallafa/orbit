@@ -512,7 +512,7 @@ function Stat({ value, label }: { value: string; label: string }) {
   );
 }
 
-const TOOL_KIND: Record<string, string> = {
+export const TOOL_KIND: Record<string, string> = {
   Read: "read",
   Grep: "search",
   Glob: "search",
@@ -523,6 +523,11 @@ const TOOL_KIND: Record<string, string> = {
   Write: "edit",
   NotebookEdit: "edit",
   Bash: "run",
+  // OpenCode's names (agent::stream capitalizes them).
+  List: "search",
+  Webfetch: "search",
+  Websearch: "search",
+  Patch: "edit",
 };
 
 function IterationBlock({ group, live }: { group: IterationGroup; live: boolean }) {
@@ -619,7 +624,7 @@ function FeedLine({ ev }: { ev: RalphEvent }) {
 
 /** **bold** and `code` as React nodes. Agent output is untrusted, so it is
  *  never injected as HTML. */
-function inlineMarkdown(text: string) {
+export function inlineMarkdown(text: string) {
   return text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g).map((part, i) =>
     part.startsWith("**") && part.endsWith("**") ? (
       <strong key={i}>{part.slice(2, -2)}</strong>

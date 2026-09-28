@@ -9,6 +9,9 @@ use serde_json::Value;
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum Event {
     Text { text: String },
+    /// The model reasoning before it acts (Claude thinking blocks, OpenCode
+    /// with --thinking): what fills the long pauses.
+    Thinking { text: String },
     Tool { name: String, summary: String },
     /// Claude only: its closing summary of the run.
     Result {
@@ -67,6 +70,12 @@ fn opencode(v: &Value) -> Vec<Event> {
                 out.push(Event::Text { text: text.to_string() });
             }
         }
+        Some("reasoning") => {
+            let text = part.get("text").and_then(Value::as_str).unwrap_or("").trim();
+            if !text.is_empty() {
+                out.push(Event::Thinking { text: text.to_string() });
+            }
+        }
         Some("tool_use") => {
             let raw = part.get("tool").and_then(Value::as_str).unwrap_or("tool");
             let name = tool_name(raw);
@@ -98,6 +107,10 @@ fn block(b: &Value) -> Option<Event> {
         "text" => {
             let text = b.get("text")?.as_str()?.trim();
             (!text.is_empty()).then(|| Event::Text { text: text.to_string() })
+        }
+        "thinking" => {
+            let text = b.get("thinking")?.as_str()?.trim();
+            (!text.is_empty()).then(|| Event::Thinking { text: text.to_string() })
         }
         "tool_use" => {
             let name = b.get("name")?.as_str()?.to_string();

@@ -66,17 +66,22 @@ pub fn agent_args(ai: &AiSettings, prompt: &str, access: Access, stream_json: bo
 /// Argv for a headless run whose progress shows live: one JSON event per
 /// line from claude (stream-json) and opencode (--format json); omp prints
 /// text. `resume` continues an earlier conversation of the same agent.
+/// No sub-agents: their steps never reach the stream, so a run delegating
+/// its exploration looked frozen for minutes.
 pub fn live_args(ai: &AiSettings, prompt: &str, access: Access, resume: Option<&str>) -> Vec<String> {
     let bin = ai.agent_bin();
     let mut a = agent_args(ai, prompt, access, bin == "claude");
     let prompt_arg = a.pop().unwrap_or_default();
+    if bin == "claude" {
+        a.push("--disallowedTools=Task".into());
+    }
     match (bin.as_str(), resume) {
         ("claude", Some(id)) => a.extend(["--resume".into(), id.into()]),
         ("opencode", Some(id)) => a.extend(["--session".into(), id.into()]),
         _ => {}
     }
     if bin == "opencode" {
-        a.extend(["--format".into(), "json".into()]);
+        a.extend(["--format".into(), "json".into(), "--thinking".into()]);
     }
     a.push(prompt_arg);
     a
@@ -85,13 +90,35 @@ pub fn live_args(ai: &AiSettings, prompt: &str, access: Access, resume: Option<&
 pub fn live_cmd(ai: &AiSettings, prompt: &str, access: Access, resume: Option<&str>) -> Command {
     let mut c = crate::proc::cmd(&ai.agent_bin());
     c.args(live_args(ai, prompt, access, resume));
+    if ai.agent_bin() == "opencode" {
+        c.env("OPENCODE_CONFIG_CONTENT", if access.writes() { OPENCODE_LIVE } else { OPENCODE_LIVE_READ_ONLY });
+    }
     c
+}
+
+/// Live runs: no sub-agents (see `live_args`).
+const OPENCODE_LIVE: &str = r#"{"tools":{"task":false}}"#;
+const OPENCODE_LIVE_READ_ONLY: &str =
+    r#"{"tools":{"task":false},"permission":{"external_directory":"allow","edit":"deny","bash":"deny"}}"#;
+
+/// OpenCode without --auto rejects every permission prompt, reads outside
+/// the working folder included, and a workspace's branch-only repos are
+/// links into their base clone: exploring them failed and the run ended
+/// with no answer. Read-only runs allow outside reads and deny writes —
+/// edits and the shell (which could write too).
+pub const OPENCODE_READ_ONLY: &str = r#"{"permission":{"external_directory":"allow","edit":"deny","bash":"deny"}}"#;
+
+fn read_only_env(ai: &AiSettings, access: Access, c: &mut Command) {
+    if ai.agent_bin() == "opencode" && !access.writes() {
+        c.env("OPENCODE_CONFIG_CONTENT", OPENCODE_READ_ONLY);
+    }
 }
 
 /// Ready-to-spawn command for the configured agent (cwd/stdio set by the runner).
 pub fn agent_cmd(ai: &AiSettings, prompt: &str, access: Access, stream_json: bool) -> Command {
     let mut c = crate::proc::cmd(&ai.agent_bin());
     c.args(agent_args(ai, prompt, access, stream_json));
+    read_only_env(ai, access, &mut c);
     c
 }
 
@@ -140,11 +167,11 @@ mod tests {
     fn live_runs_stream_json_and_resume() {
         assert_eq!(
             live_args(&ai("claude"), "hi", Access::ReadOnly, Some("s1")),
-            ["-p", "--model", "m", READ_ONLY_TOOLS, "--output-format", "stream-json", "--verbose", "--resume", "s1", "hi"]
+            ["-p", "--model", "m", READ_ONLY_TOOLS, "--output-format", "stream-json", "--verbose", "--disallowedTools=Task", "--resume", "s1", "hi"]
         );
         assert_eq!(
             live_args(&ai("opencode"), "hi", Access::Edit, Some("ses_1")),
-            ["run", "--model", "m", "--auto", "--session", "ses_1", "--format", "json", "hi"]
+            ["run", "--model", "m", "--auto", "--session", "ses_1", "--format", "json", "--thinking", "hi"]
         );
         assert_eq!(live_args(&ai("omp"), "hi", Access::ReadOnly, Some("x")), ["-p", "--model", "m", "hi"]);
     }

@@ -255,7 +255,7 @@ fn history(answers: &[Answer]) -> String {
 /// that can't continue a conversation) everything answered so far.
 fn interview_opening(ctx: &Context, answers: &[Answer], finish: bool) -> String {
     format!(
-        r#"You are interviewing a developer to plan a feature before anyone writes code. Explore the repositories first (one folder per repository in the current directory) so your questions are informed; never ask what the code can answer.
+        r#"You are interviewing a developer to plan a feature before anyone writes code. First look at the code the feature touches (one folder per repository in the current directory), so your questions are informed and never ask what the code can answer. Keep it short and targeted: open the relevant modules yourself, a couple of minutes at most, not the whole codebase (the plan is drafted later, with more exploration).
 
 # The feature
 {brief}

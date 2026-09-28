@@ -16,7 +16,7 @@ pub const FEED_EVENT: &str = "agent-feed";
 #[derive(Serialize, Clone)]
 struct Feed<'a> {
     run: &'a str,
-    /// "tool" | "text" | "log"
+    /// "tool" | "text" | "thinking" | "log"
     kind: &'a str,
     /// Tool name (kind "tool").
     #[serde(skip_serializing_if = "str::is_empty")]
@@ -94,6 +94,7 @@ pub fn run_live(
                         texts.push(text);
                     }
                     Event::Tool { name, summary } => emit("tool", &name, &relative(&summary, &root)),
+                    Event::Thinking { text } => emit("thinking", "", &text),
                     Event::Result { text, is_error, .. } => result = Some((text, is_error)),
                     Event::Session { id } => {
                         if session.is_none() {
