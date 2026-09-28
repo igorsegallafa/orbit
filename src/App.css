@@ -3202,6 +3202,9 @@ button.plan-choice {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  min-width: 0;
+  height: auto;
+  white-space: normal;
   padding: 12px 14px;
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -3222,7 +3225,7 @@ button.plan-choice-main:hover:not(:disabled) { border-color: var(--accent); }
   color: var(--accent);
   background: var(--accent-soft);
 }
-.plan-choice-text { font-size: 12px; line-height: 1.45; color: var(--text-dim); }
+.plan-choice-text { font-size: 12px; line-height: 1.45; color: var(--text-dim); overflow-wrap: anywhere; }
 
 .plan-summary { display: flex; flex-direction: column; gap: 8px; min-height: 0; }
 .plan-summary-text {
@@ -6514,9 +6517,10 @@ button.lsp-chip-restart:hover:not(:disabled) { color: var(--text); }
 .repo-panel-head h3 { margin: 0; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-dim); }
 .repo-panel-subhead { border-top: 1px solid var(--border); }
 .repo-panel-tools { margin-left: auto; display: flex; gap: 2px; }
-.rv-empty { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 16px 14px; font-size: 12.5px; color: var(--text-faint); }
-.rv-empty strong { color: var(--text-dim); font-size: 13px; }
-.rv-empty button { display: inline-flex; align-items: center; gap: 6px; margin-top: 4px; }
+/* Scoped: Ralph's view has its own (centered) .rv-empty. */
+.repo-page .rv-empty { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 16px 14px; font-size: 12.5px; color: var(--text-faint); }
+.repo-page .rv-empty strong { color: var(--text-dim); font-size: 13px; }
+.repo-page .rv-empty button { display: inline-flex; align-items: center; gap: 6px; margin-top: 4px; }
 
 /* Changes */
 .repo-files { flex: 1; min-height: 120px; max-height: 340px; overflow-y: auto; padding: 4px 0; }

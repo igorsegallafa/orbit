@@ -28,7 +28,7 @@ import { MergeModal } from "../components/MergeModal";
 import { PrsModal } from "../components/PrsModal";
 import { BuildModal } from "../components/BuildModal";
 import { tooltip } from "../components/Tooltip";
-import { RebaseIcon, CommitIcon, PushIcon, PullRequestIcon, ChevronRightIcon, SparkIcon, CheckIcon, XIcon, CircleIcon, SpinnerIcon, GitIcon, DocIcon, TrashIcon, RefreshIcon, PlayIcon, RaceIcon, BranchIcon, DiffIcon } from "../components/Icons";
+import { RebaseIcon, CommitIcon, PushIcon, PullRequestIcon, ChevronRightIcon, SparkIcon, CheckIcon, XIcon, CircleIcon, SpinnerIcon, GitIcon, DocIcon, TrashIcon, RefreshIcon, RaceIcon, BranchIcon, DiffIcon } from "../components/Icons";
 import { GitHubIcon } from "../components/BrandIcons";
 
 interface Props {
@@ -442,9 +442,7 @@ export function WorkspaceDetailPage({
               <RaceIcon size={14} /> Race
             </button>
           )}
-          <button className="secondary ws-tool" onClick={() => setBuildOpen(true)} {...hint("Run each repo's build (skips unchanged ones)")}>
-            <PlayIcon size={13} /> Build
-          </button>
+          {/* Build is hidden for now (BuildModal stays wired below). */}
           <button className="secondary ws-tool" onClick={() => setRebaseOpen(true)} {...hint(`Rebase every repo onto origin/${workspace.base}`)}>
             <RebaseIcon size={14} /> Rebase
           </button>
