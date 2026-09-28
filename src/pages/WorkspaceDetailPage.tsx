@@ -16,6 +16,7 @@ import {
 } from "../types/config";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { CheckBox } from "../components/CheckBox";
+import { ArtifactSource, ArtifactsSection } from "../components/ArtifactsSection";
 import { Skeleton } from "../components/Skeleton";
 import { PlanModal } from "../components/PlanModal";
 import { GrillModal } from "../components/GrillModal";
@@ -83,6 +84,8 @@ export function WorkspaceDetailPage({
   const [wsChecks, setWsChecks] = useState<WsCheck[] | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null); // "repo/number"
   const [investigatingAll, setInvestigatingAll] = useState(false);
+  // Where CI builds live: each repo's GitHub name + the branch it's on.
+  const [artifactSources, setArtifactSources] = useState<ArtifactSource[]>([]);
   const [investigation, setInvestigation] = useState<null | {
     repo: string;
     check: PrCheck;
@@ -165,6 +168,20 @@ export function WorkspaceDetailPage({
       setPulling(null);
     }
   };
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all(
+      workspace.repos.map((repo) =>
+        invoke<string>("ws_owner_repo", { workspace: workspace.name, repo })
+          .then((ownerRepo) => ({ repo, ownerRepo, branch: workspace.branch }))
+          .catch(() => null)
+      )
+    ).then((list) => !cancelled && setArtifactSources(list.filter((s): s is ArtifactSource => !!s)));
+    return () => {
+      cancelled = true;
+    };
+  }, [workspace.name, workspace.repos, workspace.branch]);
 
   // Entering the page: local status right away, then fetch the remotes so
   // ahead/behind, PRs and checks are current. While the page stays open
@@ -716,6 +733,8 @@ export function WorkspaceDetailPage({
           </div>
         )}
       </section>
+
+      <ArtifactsSection sources={artifactSources} folder={workspace.name} onError={onError} />
 
       {addressing && (
         <AddressReviewModal

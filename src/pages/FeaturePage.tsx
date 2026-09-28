@@ -8,6 +8,7 @@ import { tooltip } from "../components/Tooltip";
 import { CheckIcon, ChevronRightIcon, CommitIcon, DiffIcon, GitIcon, PullRequestIcon, PushIcon, RefreshIcon, XIcon } from "../components/Icons";
 import { Skeleton } from "../components/Skeleton";
 import { MergeItem, MergeModal } from "../components/MergeModal";
+import { ArtifactsSection } from "../components/ArtifactsSection";
 import { GitHubIcon } from "../components/BrandIcons";
 
 interface Props {
@@ -411,6 +412,12 @@ export function FeaturePage({ prs, workspace, onOpenReview, onCheckout, onOpenWo
           })}
         </div>
       </section>
+      <ArtifactsSection
+        sources={prs.map((p) => ({ repo: p.repo, ownerRepo: p.ownerRepo, branch: p.branch }))}
+        folder={first.branch}
+        onError={onError}
+      />
+
       {merging && (
         <MergeModal
           base={first.base}

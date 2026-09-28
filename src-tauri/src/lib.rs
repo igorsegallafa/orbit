@@ -1,6 +1,7 @@
 mod commands;
 mod agent;
 mod agent_hooks;
+mod artifacts;
 mod build;
 mod config;
 mod files;
@@ -206,6 +207,8 @@ pub fn run() {
             pty::pty_forget,
             pty::claude_session_exists,
             pty::opencode_session_id,
+            artifacts::branch_artifacts,
+            artifacts::artifact_download,
             agent_hooks::claude_rate_limits,
         ])
         .build(tauri::generate_context!())
