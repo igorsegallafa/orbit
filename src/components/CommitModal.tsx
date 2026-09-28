@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { GitChange } from "../types/config";
 import { CheckBox } from "./CheckBox";
+import { ConfirmDialog } from "./ConfirmDialog";
 import { STATUS_LABEL } from "./GitPanel";
 import { ChevronRightIcon, SparkIcon } from "./Icons";
 import { ReviewPane } from "./ReviewPane";
@@ -46,6 +47,9 @@ export function CommitModal({ workspace, repos, onClose, onSettled, onError }: P
   );
   const [focus, setFocus] = useState<{ repo: string; path: string } | null>(null);
   const [committing, setCommitting] = useState(false);
+  /** Discard waiting for confirmation: which repo, which files. */
+  const [discarding, setDiscarding] = useState<{ repo: string; paths: string[]; label: string } | null>(null);
+  const [discardBusy, setDiscardBusy] = useState(false);
 
   const update = (repo: string, fn: (r: RepoCommit) => RepoCommit) =>
     setItems((prev) => prev.map((r) => (r.repo === repo ? fn(r) : r)));
@@ -62,6 +66,31 @@ export function CommitModal({ workspace, repos, onClose, onSettled, onError }: P
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  /** Re-reads one repo's changes (after a discard), keeping the selection
+   *  of files that are still there. */
+  const reload = async (repo: string) => {
+    const files = await invoke<GitChange[]>("git_changes", { workspace, repo });
+    const paths = new Set(files.map((f) => f.path));
+    update(repo, (r) => ({ ...r, files, selected: new Set([...r.selected].filter((p) => paths.has(p))) }));
+    setFocus((f) => (f?.repo === repo && !paths.has(f.path) ? (files[0] ? { repo, path: files[0].path } : null) : f));
+  };
+
+  const discard = async () => {
+    if (!discarding) return;
+    setDiscardBusy(true);
+    try {
+      await invoke("ws_discard", { workspace, repo: discarding.repo, paths: discarding.paths });
+      toast.success(`Discarded ${discarding.label}`, { description: "New files went to the Trash." });
+      await reload(discarding.repo);
+      onSettled();
+    } catch (e) {
+      onError(String(e));
+    } finally {
+      setDiscardBusy(false);
+      setDiscarding(null);
+    }
+  };
 
   /** Only the selected paths, or undefined when everything is in (git add -A). */
   const pathsOf = (r: RepoCommit) =>
@@ -133,7 +162,8 @@ export function CommitModal({ workspace, repos, onClose, onSettled, onError }: P
         : `Commit ${ready.length} ${ready.length === 1 ? "repo" : "repos"}`;
 
   return (
-    <div className="modal-overlay" onMouseDown={anyRunning ? undefined : onClose}>
+    <>
+    <div className="modal-overlay" onMouseDown={anyRunning || discarding ? undefined : onClose}>
       <div className="modal commit-modal" onMouseDown={(e) => e.stopPropagation()}>
         <div className="commit-modal-head">
           <div>
@@ -189,6 +219,19 @@ export function CommitModal({ workspace, repos, onClose, onSettled, onError }: P
                         </>
                       )}
                     </span>
+                    {!locked && total > 0 && (
+                      <button
+                        type="button"
+                        className="btn-mini secondary danger-outline"
+                        onClick={() =>
+                          setDiscarding({ repo: r.repo, paths: (r.files ?? []).map((f) => f.path), label: `every change in ${r.repo}` })
+                        }
+                        onMouseEnter={(e) => tooltip.show("Discard every change in this repo", e)}
+                        onMouseLeave={() => tooltip.hide()}
+                      >
+                        Discard all
+                      </button>
+                    )}
                     {!locked && (
                       <button
                         type="button"
@@ -241,6 +284,21 @@ export function CommitModal({ workspace, repos, onClose, onSettled, onError }: P
                                   {f.added > 0 && <span className="git-stat-add">+{f.added}</span>}
                                   {f.deleted > 0 && <span className="git-stat-del">−{f.deleted}</span>}
                                 </span>
+                              )}
+                              {!locked && (
+                                <button
+                                  type="button"
+                                  className="icon-button commit-file-discard"
+                                  aria-label={`Discard changes to ${f.path}`}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setDiscarding({ repo: r.repo, paths: [f.path], label: f.path.split("/").pop() ?? f.path });
+                                  }}
+                                  onMouseEnter={(e) => tooltip.show("Discard this file's changes", e)}
+                                  onMouseLeave={() => tooltip.hide()}
+                                >
+                                  ↺
+                                </button>
                               )}
                             </div>
                           );
@@ -298,5 +356,18 @@ export function CommitModal({ workspace, repos, onClose, onSettled, onError }: P
         </div>
       </div>
     </div>
+        {discarding && (
+          <ConfirmDialog
+            title="Discard changes"
+            message={`Discard ${discarding.label}? Modified files go back to their last commit; new files move to the Trash.`}
+            confirmLabel="Discard"
+            danger
+            busy={discardBusy}
+            busyLabel="Discarding…"
+            onConfirm={discard}
+            onClose={() => setDiscarding(null)}
+          />
+        )}
+    </>
   );
 }

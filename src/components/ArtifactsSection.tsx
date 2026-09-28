@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "./Toast";
 import { tooltip } from "./Tooltip";
-import { DownloadIcon } from "./Icons";
+import { ChevronRightIcon, DownloadIcon } from "./Icons";
 
 export interface ArtifactSource {
   repo: string;
@@ -56,6 +56,24 @@ const hint = (text: string) => ({
 export function ArtifactsSection({ sources, folder, onError }: { sources: ArtifactSource[]; folder: string; onError: (msg: string) => void }) {
   const [rows, setRows] = useState<Row[] | null>(null);
   const [all, setAll] = useState(false);
+  // Collapsed by default: CI builds are a side trip, not the workspace's focus.
+  const openKey = `orbit.artifacts-open:${folder}`;
+  const [open, setOpen] = useState(() => {
+    try {
+      return localStorage.getItem(openKey) === "1";
+    } catch {
+      return false;
+    }
+  });
+  const toggle = () =>
+    setOpen((o) => {
+      try {
+        localStorage.setItem(openKey, o ? "0" : "1");
+      } catch {
+        // just not remembered
+      }
+      return !o;
+    });
   const [busy, setBusy] = useState<Record<number, "downloading" | "done">>({});
   const sourcesKey = sources.map((s) => `${s.ownerRepo}@${s.branch}`).join(",");
 
@@ -100,14 +118,23 @@ export function ArtifactsSection({ sources, folder, onError }: { sources: Artifa
   };
 
   const visible = all ? rows : rows.slice(0, SHOWN);
+  const builds = rows.filter((r) => BUILD_HINT.test(r.name)).length;
 
   return (
     <section className="ws-section">
-      <div className="ws-section-head">
+      <button type="button" className="btn-plain ws-section-head artifact-toggle" aria-expanded={open} onClick={toggle}>
         <h3>
+          <ChevronRightIcon size={11} className={open ? "ws-chevron ws-chevron-open" : "ws-chevron"} />
           Artifacts <span className="section-count">{rows.length}</span>
         </h3>
-      </div>
+        {!open && (
+          <span className="artifact-summary">
+            From CI{builds > 0 ? ` · ${builds} build${builds === 1 ? "" : "s"} to try without compiling` : ""}
+          </span>
+        )}
+      </button>
+      {open && (
+        <>
       <div className="repo-list ws-repos">
         {visible.map((a) => {
           const state = busy[a.id];
@@ -150,6 +177,8 @@ export function ArtifactsSection({ sources, folder, onError }: { sources: Artifa
         <button className="btn-link artifact-more" onClick={() => setAll(!all)}>
           {all ? "Show fewer" : `Show all ${rows.length}`}
         </button>
+      )}
+        </>
       )}
     </section>
   );

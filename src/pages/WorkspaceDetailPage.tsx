@@ -14,6 +14,7 @@ import {
   PrCheck,
   CheckAnalysis,
 } from "../types/config";
+import { ReviewData } from "../types/review";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { CheckBox } from "../components/CheckBox";
 import { ArtifactSource, ArtifactsSection } from "../components/ArtifactsSection";
@@ -65,7 +66,9 @@ export function WorkspaceDetailPage({
   onBeforeRemove,
 }: Props) {
   const [raceOpen, setRaceOpen] = useState(false);
-  const [addressing, setAddressing] = useState<WsPrStatus | null>(null);
+  const [reviewOpen, setReviewOpen] = useState(false);
+  /** Open review conversations across the feature's open PRs (null: counting). */
+  const [openFeedback, setOpenFeedback] = useState<number | null>(null);
   const [statuses, setStatuses] = useState<RepoStatus[] | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState<null | "normal" | "force">(null);
@@ -109,6 +112,28 @@ export function WorkspaceDetailPage({
     setPrStatuses(null);
     setWsChecks(null);
   }, [loadPrs, loadChecks]);
+
+  // How much review feedback waits, across the feature's open PRs.
+  const countFeedback = useCallback(async () => {
+    const open = (prStatuses ?? []).filter((p) => p.state === "OPEN");
+    if (!open.length) return setOpenFeedback(0);
+    const counts = await Promise.all(
+      open.map(async (p) => {
+        try {
+          const ownerRepo = await invoke<string>("ws_owner_repo", { workspace: workspace.name, repo: p.repo });
+          const data = await invoke<ReviewData>("pr_review_data", { ownerRepo, number: p.number, withLines: false });
+          return data.threads.filter((t) => !t.isResolved).length;
+        } catch {
+          return 0;
+        }
+      })
+    );
+    setOpenFeedback(counts.reduce((a, b) => a + b, 0));
+  }, [prStatuses, workspace.name]);
+
+  useEffect(() => {
+    countFeedback();
+  }, [countFeedback]);
 
   // Keep checks fresh while any is running.
   useEffect(() => {
@@ -624,6 +649,16 @@ export function WorkspaceDetailPage({
           <h3>
             Pull requests {prStatuses && prStatuses.length > 0 && <span className="section-count">{prStatuses.length}</span>}
           </h3>
+          {openPrs.length > 0 && (
+            <button
+              className="btn-mini secondary ws-feedback-btn"
+              onClick={() => setReviewOpen(true)}
+              {...hint("Every open conversation of the feature's PRs: apply with AI, reply and resolve")}
+            >
+              Review feedback
+              {openFeedback !== null && openFeedback > 0 && <span className="ws-feedback-count">{openFeedback}</span>}
+            </button>
+          )}
         </div>
         {prStatuses === null ? (
           <div className="pr-list">
@@ -689,18 +724,6 @@ export function WorkspaceDetailPage({
                       <CheckDot status={wsCheck?.status ?? "none"} />
                       {total > 0 ? `${passed}/${total} checks` : "No checks"}
                     </span>
-                    {state === "open" || state === "draft" ? (
-                      <button
-                        className="btn-mini secondary pr-feedback-btn"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setAddressing(pr);
-                        }}
-                        {...hint("Apply review comments with AI, reply and resolve")}
-                      >
-                        Review feedback
-                      </button>
-                    ) : null}
                     {state === "open" && (
                       <button
                         className="btn-mini secondary pr-feedback-btn"
@@ -757,15 +780,15 @@ export function WorkspaceDetailPage({
 
       <ArtifactsSection sources={artifactSources} folder={workspace.name} onError={onError} />
 
-      {addressing && (
+      {reviewOpen && (
         <AddressReviewModal
           workspace={workspace.name}
-          repo={addressing.repo}
-          number={addressing.number}
-          title={addressing.title}
-          url={addressing.url}
-          onClose={() => setAddressing(null)}
-          onSettled={() => load(false)}
+          prs={openPrs}
+          onClose={() => setReviewOpen(false)}
+          onSettled={() => {
+            load(true);
+            countFeedback();
+          }}
           onError={onError}
         />
       )}
