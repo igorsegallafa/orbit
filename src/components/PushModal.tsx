@@ -10,11 +10,15 @@ interface RepoState {
   repo: string;
   status: PushStatus;
   detail?: string;
+  /** Left out on purpose (its PR was closed): pushed only on request. */
+  dropped?: boolean;
 }
 
 interface Props {
   workspace: string;
   repos: string[];
+  /** Repos not pushed unless asked, with why (e.g. their PR was closed). */
+  skipped?: { repo: string; reason: string }[];
   /** After a successful push: continue to the PR-creation modal. */
   onCreatePrs: () => void;
   onClose: () => void;
@@ -26,17 +30,18 @@ interface Props {
  *  title + description and creates the PRs). A branch rewritten by a
  *  rebase is rejected as non-fast-forward; that row then offers a
  *  force push with lease — never done without the click. */
-export function PushModal({ workspace, repos, onCreatePrs, onClose, onSettled }: Props) {
-  const [states, setStates] = useState<RepoState[]>(() =>
-    repos.map((r) => ({ repo: r, status: "idle" }))
-  );
+export function PushModal({ workspace, repos, skipped = [], onCreatePrs, onClose, onSettled }: Props) {
+  const [states, setStates] = useState<RepoState[]>(() => [
+    ...repos.map((r): RepoState => ({ repo: r, status: "idle" })),
+    ...skipped.map((s): RepoState => ({ repo: s.repo, status: "skipped", detail: s.reason, dropped: true })),
+  ]);
   const [running, setRunning] = useState(false);
 
   const set = (repo: string, patch: Partial<RepoState>) =>
     setStates((prev) => prev.map((s) => (s.repo === repo ? { ...s, ...patch } : s)));
 
   const pushOne = async (repo: string, force: boolean): Promise<PushStatus> => {
-    set(repo, { status: "pushing" });
+    set(repo, { status: "pushing", dropped: false });
     try {
       await invoke("ws_push", { workspace, repo, force });
       set(repo, { status: "pushed", detail: force ? "Force-pushed" : "Pushed" });
@@ -69,6 +74,16 @@ export function PushModal({ workspace, repos, onCreatePrs, onClose, onSettled }:
     else if (pushed) toast.success(`Pushed ${pushed} repo${pushed === 1 ? "" : "s"}`);
   };
 
+  // A dropped repo, on explicit request: recreates its branch on origin.
+  const pushAnyway = async (repo: string) => {
+    tooltip.hide();
+    setRunning(true);
+    const r = await pushOne(repo, false);
+    setRunning(false);
+    onSettled();
+    if (r === "pushed") toast.success(`Pushed ${repo}`);
+  };
+
   const forcePush = async (repo: string) => {
     tooltip.hide();
     setRunning(true);
@@ -80,6 +95,7 @@ export function PushModal({ workspace, repos, onCreatePrs, onClose, onSettled }:
   };
 
   const done = !running && states.every((s) => s.status !== "idle" && s.status !== "pushing");
+  const toPush = states.filter((s) => s.status === "idle").length;
   const pushedAny = states.some((s) => s.status === "pushed");
 
   return (
@@ -96,6 +112,19 @@ export function PushModal({ workspace, repos, onCreatePrs, onClose, onSettled }:
                 <span className="status-row-detail">
                   {s.status === "pushing" ? "Pushing…" : s.status === "idle" ? "Ready to push" : s.detail}
                 </span>
+                {s.dropped && (
+                  <span className="status-row-actions">
+                    <button
+                      className="btn-mini"
+                      disabled={running}
+                      onClick={() => pushAnyway(s.repo)}
+                      onMouseEnter={(e) => tooltip.show("Pushes the branch again, recreating it on origin if it was deleted", e)}
+                      onMouseLeave={() => tooltip.hide()}
+                    >
+                      Push anyway
+                    </button>
+                  </span>
+                )}
                 {s.status === "rejected" && (
                   <span className="status-row-actions">
                     <button
@@ -121,8 +150,8 @@ export function PushModal({ workspace, repos, onCreatePrs, onClose, onSettled }:
               <button type="button" className="secondary" onClick={onClose} disabled={running}>
                 Cancel
               </button>
-              <button type="button" autoFocus onClick={push} disabled={running}>
-                {running ? "Pushing…" : `Push ${repos.length} ${repos.length === 1 ? "repo" : "repos"}`}
+              <button type="button" autoFocus onClick={push} disabled={running || toPush === 0}>
+                {running ? "Pushing…" : `Push ${toPush} ${toPush === 1 ? "repo" : "repos"}`}
               </button>
             </>
           ) : (
