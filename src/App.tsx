@@ -49,7 +49,12 @@ type NavPage =
   | { kind: "dashboard" }
   | { kind: "reviews" }
   | { kind: "settings" }
-  | { kind: "integrations" };
+  | { kind: "integrations" }
+  /** A repo's clone (commit, push, branches): a page, not a tab. */
+  | { kind: "repo"; repo: string };
+
+/** Identity of a page for history: repo pages differ by repo. */
+const pageKey = (p: NavPage) => (p.kind === "repo" ? `repo:${p.repo}` : p.kind);
 
 type Tab =
   | { kind: "workspace"; workspace: Workspace }
@@ -60,7 +65,6 @@ type Tab =
   /** A Code Review feature (PRs sharing a branch) before it is checked out. */
   | { kind: "feature"; prs: PullRequest[] }
   | { kind: "ralph"; workspace: string }
-  | { kind: "repo"; repo: string }
   | { kind: "terminal"; terminal: TerminalTab };
 
 /** A repo's base clone addressed like a workspace ("@repo"): the dock,
@@ -116,7 +120,6 @@ function tabId(tab: Tab): string {
   if (t.kind === "pr") return `pr:${t.prs.map((p) => `${p.ownerRepo}/${p.number}`).join("+")}`;
   if (t.kind === "feature") return `ft:${t.prs.map((p) => `${p.ownerRepo}/${p.number}`).join("+")}`;
   if (t.kind === "ralph") return `ralph:${t.workspace}`;
-  if (t.kind === "repo") return `repo:${t.repo}`;
   // Stable id: must NOT embed the display name, or renaming re-keys the pane
   // and remounts the terminal (killing the PTY session).
   return t.terminal.id;
@@ -129,7 +132,10 @@ function loadSession(): { tabs: Tab[]; active: string | null } {
   try {
     const raw = JSON.parse(localStorage.getItem(SESSION_KEY) ?? "null");
     if (!raw || !Array.isArray(raw.tabs)) return { tabs: [], active: null };
-    const tabs = (raw.tabs as Tab[]).map((t) => (t.kind === "terminal" ? { ...t, terminal: { ...t.terminal, restored: true } } : t));
+    const tabs = (raw.tabs as Tab[])
+      // Repo tabs from older versions: the repo view is a page now.
+      .filter((t) => (t as { kind: string }).kind !== "repo")
+      .map((t) => (t.kind === "terminal" ? { ...t, terminal: { ...t.terminal, restored: true } } : t));
     const active = tabs.some((t) => tabId(t) === raw.active) ? raw.active : (tabs[0] ? tabId(tabs[0]) : null);
     return { tabs, active };
   } catch {
@@ -188,7 +194,7 @@ function App() {
           ? t.workspace.name
           : t.kind === "terminal"
             ? t.terminal.workspace
-            : t.kind === "pr" || t.kind === "feature" || t.kind === "repo"
+            : t.kind === "pr" || t.kind === "feature"
               ? null
               : t.workspace;
       setTabs((ts) => {
@@ -397,7 +403,7 @@ function App() {
   // them: close their tabs (killing the processes) before a removal.
   const closeWorkspaceSessions = (names: string[]) => {
     const doomed = tabs.filter(
-      (t) => t.kind !== "pr" && t.kind !== "feature" && t.kind !== "workspace" && t.kind !== "repo" && names.includes(t.kind === "terminal" ? t.terminal.workspace : t.workspace),
+      (t) => t.kind !== "pr" && t.kind !== "feature" && t.kind !== "workspace" && names.includes(t.kind === "terminal" ? t.terminal.workspace : t.workspace),
     );
     if (!doomed.length) return;
     doomed.forEach(forgetTerminal);
@@ -592,9 +598,10 @@ function App() {
     openTab({ kind: "workspace", workspace: ws });
   };
 
-  const openRepoTab = (repo: string) => {
-    setNavPage({ kind: "dashboard" });
-    openTab({ kind: "repo", repo });
+  /** The repo view is a page (like Dashboard), not a tab. */
+  const openRepoPage = (repo: string) => {
+    setActiveTab(null);
+    setNavPage({ kind: "repo", repo });
   };
 
   const openFileTab = (wsName: string, repo: string, path: string) => {
@@ -656,9 +663,9 @@ function App() {
       return;
     }
     const tab = tabs.find((t) => tabId(t) === activeTab);
-    navHistory.visit(tab ? { key: tabId(tab), target: { tab } } : { key: `page:${navPage.kind}`, target: { page: navPage } });
+    navHistory.visit(tab ? { key: tabId(tab), target: { tab } } : { key: `page:${pageKey(navPage)}`, target: { page: navPage } });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab, navPage.kind]);
+  }, [activeTab, pageKey(navPage)]);
 
   const goNav = (dir: "back" | "forward") => {
     // Minimized sessions count as closed here too: back/forward skips them.
@@ -668,7 +675,7 @@ function App() {
     if (!e) return;
     navHistory.quiet();
     if ("page" in e.target) {
-      if (activeTab !== null || navPage.kind !== e.target.page.kind) {
+      if (activeTab !== null || pageKey(navPage) !== pageKey(e.target.page)) {
         applyingNav.current = true;
         setActiveTab(null);
         setNavPage(e.target.page);
@@ -902,10 +909,12 @@ function App() {
   // commit tabs carry one.
   // Repo tabs (and editors/terminals opened from one) focus the repo's clone.
   const focusName =
-    !active || active.kind === "pr" || active.kind === "feature" || active.kind === "workspace"
-      ? null
-      : active.kind === "repo"
-        ? `@${active.repo}`
+    !active
+      ? navPage.kind === "repo"
+        ? `@${navPage.repo}`
+        : null
+      : active.kind === "pr" || active.kind === "feature" || active.kind === "workspace"
+        ? null
         : active.kind === "terminal"
           ? active.terminal.workspace
           : active.workspace;
@@ -975,25 +984,6 @@ function App() {
     if (tab.kind === "ralph") {
       const ws = isScope(tab.workspace) ? repoScope(tab.workspace) : workspaces.find((w) => w.name === tab.workspace);
       return ws ? <RalphView workspace={ws} onError={setError} /> : null;
-    }
-    if (tab.kind === "repo") {
-      const scope = `@${tab.repo}`;
-      return (
-        <RepoPage
-          repo={tab.repo}
-          config={config}
-          workspaces={workspaces}
-          onOpenWorkspace={openWorkspaceTab}
-          onReviewFile={(path) => openTab({ kind: "review", workspace: scope, repo: tab.repo, path })}
-          onReviewCommit={(commit) => openTab({ kind: "commit", workspace: scope, repo: tab.repo, commit })}
-          onOpenPrList={(prs) => openTab({ kind: "pr", prs })}
-          onNewSession={(label, cmd) => newTerminal(scope, label, cmd)}
-          onOpenRalph={() => openTab({ kind: "ralph", workspace: scope })}
-          onNewWorkspace={() => setCreateWsFor(tab.repo)}
-          onChanged={refreshRepoBriefs}
-          onError={setError}
-        />
-      );
     }
     if (tab.kind === "review") {
       return (
@@ -1067,6 +1057,27 @@ function App() {
   };
 
   const renderMain = () => {
+    if (navPage.kind === "repo") {
+      const repo = navPage.repo;
+      const scope = `@${repo}`;
+      return (
+        <RepoPage
+          key={repo}
+          repo={repo}
+          config={config}
+          workspaces={workspaces}
+          onOpenWorkspace={openWorkspaceTab}
+          onReviewFile={(path) => openTab({ kind: "review", workspace: scope, repo, path })}
+          onReviewCommit={(commit) => openTab({ kind: "commit", workspace: scope, repo, commit })}
+          onOpenPrList={(prs) => openTab({ kind: "pr", prs })}
+          onNewSession={(label, cmd) => newTerminal(scope, label, cmd)}
+          onOpenRalph={() => openTab({ kind: "ralph", workspace: scope })}
+          onNewWorkspace={() => setCreateWsFor(repo)}
+          onChanged={refreshRepoBriefs}
+          onError={setError}
+        />
+      );
+    }
     if (navPage.kind === "reviews") {
       return (
         <CodeReviewPage
@@ -1294,7 +1305,7 @@ function App() {
             [...config.services]
               .sort((a, b) => a.name.localeCompare(b.name))
               .map((svc) => {
-                const id = `repo:${svc.name}`;
+                const onPage = !active && navPage.kind === "repo" && navPage.repo === svc.name;
                 const sessions = sessionsOf(`@${svc.name}`);
                 const unread = sessions.some((t) => unreadByTab.has(tabId(t)));
                 const b = repoBriefs[svc.name];
@@ -1313,8 +1324,8 @@ function App() {
                 return (
                   <div key={svc.name} className="nav-workspace">
                     <button
-                      className={`nav-item nav-ws ${activeTab === id ? "active" : ""}`}
-                      onClick={() => openRepoTab(svc.name)}
+                      className={`nav-item nav-ws ${onPage ? "active" : ""}`}
+                      onClick={() => openRepoPage(svc.name)}
                       onMouseEnter={(e) => tooltip.show(tip, e)}
                       onMouseLeave={() => tooltip.hide()}
                     >
@@ -1422,14 +1433,10 @@ function App() {
                             ? t.prs.length > 0
                               ? `#${t.prs[0].number}` + (t.prs.length > 1 ? ` (+${t.prs.length - 1})` : "")
                               : "PRs"
-                            : t.kind === "repo"
-                              ? t.repo
-                              : t.terminal.sessionName;
+                            : t.terminal.sessionName;
                 const icon =
                   t.kind === "workspace" ? (
                     <SatelliteIcon size={13} />
-                  ) : t.kind === "repo" ? (
-                    <RepoIcon size={13} />
                   ) : t.kind === "editor" ? (
                     <DocIcon size={13} />
                   ) : t.kind === "feature" ? (

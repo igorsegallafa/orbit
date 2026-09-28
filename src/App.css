@@ -6274,6 +6274,8 @@ button.lsp-chip-restart:hover:not(:disabled) { color: var(--text); }
 
 /* ---------- Repository view ---------- */
 .repo-page { padding: 24px 36px; }
+/* As a page (sidebar → repo) the page wrapper already pads it. */
+.nav-page > .repo-page { padding: 0; }
 .repo-title { display: flex; align-items: center; gap: 10px; }
 .repo-title svg { color: var(--text-dim); }
 .repo-gh-link { display: inline-flex; align-items: center; gap: 6px; }
