@@ -4372,7 +4372,7 @@ button.cr-segment.on, button.cr-segment.on:hover:not(:disabled) { background: va
 .commit-modal-head h3 { margin: 0 0 4px; }
 .commit-modal-body { flex: 1; min-height: 0; display: flex; }
 .commit-modal-list {
-  width: 380px;
+  width: 420px;
   flex-shrink: 0;
   overflow-y: auto;
   border-right: 1px solid var(--border);
