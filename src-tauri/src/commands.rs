@@ -759,6 +759,13 @@ pub async fn ws_commit(workspace: String, repo: String, message: String, paths: 
     blocking(move || git::commit_paths(&worktree_on_branch(&workspace, &repo)?, &message, &paths.unwrap_or_default())).await
 }
 
+/// Discards the working changes of `paths` in one workspace repo (new
+/// files go to the Trash).
+#[tauri::command]
+pub async fn ws_discard(workspace: String, repo: String, paths: Vec<String>) -> Result<(), String> {
+    blocking(move || crate::repo::discard_in(&worktree_of(&workspace, &repo)?, &paths)).await
+}
+
 /// Push one repo's branch to origin. `force` pushes with
 /// `--force-with-lease`, for a branch a rebase rewrote.
 #[tauri::command]

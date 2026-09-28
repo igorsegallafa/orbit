@@ -4400,6 +4400,9 @@ button.commit-repo-toggle { display: inline-flex; padding: 2px; color: var(--tex
 .commit-file:hover { background: var(--panel-hover); }
 .commit-file.on { background: var(--accent-soft); }
 .commit-file .orbit-check { flex-shrink: 0; }
+.commit-file .commit-file-discard { width: 22px; height: 22px; flex-shrink: 0; border-color: transparent; opacity: 0; font-size: 13px; }
+.commit-file:hover .commit-file-discard { opacity: 1; }
+.commit-file .commit-file-discard:hover:not(:disabled) { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 40%, transparent); }
 .commit-repo-msg { min-height: 52px; }
 .commit-repo-done-msg { font-size: 12px; color: var(--text-dim); padding: 0 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
