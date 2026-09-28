@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { WsPrStatus } from "../types/config";
 import { toast } from "./Toast";
 import { tooltip } from "./Tooltip";
 import { StatusIcon, StatusKind } from "./StatusIcon";
@@ -36,6 +37,19 @@ export function PushModal({ workspace, repos, skipped = [], onCreatePrs, onClose
     ...skipped.map((s): RepoState => ({ repo: s.repo, status: "skipped", detail: s.reason, dropped: true })),
   ]);
   const [running, setRunning] = useState(false);
+  /** Open PRs by repo (null while asking): pushing to those just updates them. */
+  const [openPrs, setOpenPrs] = useState<Map<string, number> | null>(null);
+
+  const checkPrs = () =>
+    invoke<WsPrStatus[]>("ws_pr_status", { workspace })
+      .then((rows) => setOpenPrs(new Map(rows.filter((r) => r.state === "OPEN").map((r) => [r.repo, r.number]))))
+      .catch(() => setOpenPrs(new Map()));
+
+  // Asked up front, so the answer is ready when the push ends.
+  useEffect(() => {
+    checkPrs();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const set = (repo: string, patch: Partial<RepoState>) =>
     setStates((prev) => prev.map((s) => (s.repo === repo ? { ...s, ...patch } : s)));
@@ -66,6 +80,7 @@ export function PushModal({ workspace, repos, skipped = [], onCreatePrs, onClose
     const results = await Promise.all(repos.map((repo) => pushOne(repo, false)));
     setRunning(false);
     onSettled();
+    checkPrs(); // a PR may have been opened meanwhile
     const pushed = results.filter((r) => r === "pushed").length;
     const failed = results.filter((r) => r === "error").length;
     const rejected = results.filter((r) => r === "rejected").length;
@@ -96,7 +111,10 @@ export function PushModal({ workspace, repos, skipped = [], onCreatePrs, onClose
 
   const done = !running && states.every((s) => s.status !== "idle" && s.status !== "pushing");
   const toPush = states.filter((s) => s.status === "idle").length;
-  const pushedAny = states.some((s) => s.status === "pushed");
+  const pushed = states.filter((s) => s.status === "pushed").map((s) => s.repo);
+  // Only repos without an open PR need one created.
+  const withoutPr = openPrs ? pushed.filter((r) => !openPrs.has(r)) : [];
+  const updatedPrs = openPrs ? pushed.filter((r) => openPrs.has(r)) : [];
 
   return (
     <div className="modal-overlay" onMouseDown={running ? undefined : onClose}>
@@ -143,6 +161,12 @@ export function PushModal({ workspace, repos, skipped = [], onCreatePrs, onClose
               </div>
             ))}
           </div>
+          {done && updatedPrs.length > 0 && (
+            <p className="ws-commit-hint push-prs-note">
+              {withoutPr.length === 0 ? "Pushed to the open pull requests" : "Updated the open pull requests"}:{" "}
+              {updatedPrs.map((r) => `${r} #${openPrs!.get(r)}`).join(", ")}.
+            </p>
+          )}
         </div>
         <div className="modal-footer">
           {!done ? (
@@ -156,12 +180,12 @@ export function PushModal({ workspace, repos, skipped = [], onCreatePrs, onClose
             </>
           ) : (
             <>
-              <button type="button" className="secondary" onClick={onClose}>
+              <button type="button" className="secondary" onClick={onClose} autoFocus={withoutPr.length === 0}>
                 Close
               </button>
-              {pushedAny && (
+              {withoutPr.length > 0 && (
                 <button type="button" autoFocus onClick={onCreatePrs}>
-                  Create pull requests →
+                  {withoutPr.length === pushed.length ? "Create pull requests →" : `Create PR for ${withoutPr.join(", ")} →`}
                 </button>
               )}
             </>
