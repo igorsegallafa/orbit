@@ -1021,10 +1021,19 @@ pub fn ws_owner_repo(workspace: String, repo: String) -> Result<String, String> 
 /// Applies the selected review threads of a PR with the agent (no commit)
 /// and drafts one short reply per thread.
 #[tauri::command]
-pub async fn ws_address_review(workspace: String, repo: String, number: u64, thread_ids: Vec<String>) -> Result<Vec<agent::ThreadReply>, String> {
+#[allow(clippy::too_many_arguments)]
+pub async fn ws_address_review(
+    app: tauri::AppHandle,
+    run: String,
+    workspace: String,
+    repo: String,
+    number: u64,
+    thread_ids: Vec<String>,
+    notes: Vec<String>,
+) -> Result<Vec<agent::ThreadReply>, String> {
     blocking(move || {
         let owner_repo = remote_of(&worktree_of(&workspace, &repo)?).ok_or_else(|| format!("{repo}: origin is not a GitHub repository"))?;
-        agent::address_review(&workspace, &repo, &owner_repo, number, &thread_ids)
+        agent::address_review(&app, &run, &workspace, &repo, &owner_repo, number, &thread_ids, &notes)
     })
     .await
 }
