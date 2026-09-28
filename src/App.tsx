@@ -868,6 +868,7 @@ function App() {
         onError={setError}
         onStatusChange={(s) => setSessionStatus(tabId(tab), s)}
         onSignal={(sig) => onAgentSignal(tab.terminal, sig)}
+        active={activeTab === tabId(tab)}
       />
     );
   };

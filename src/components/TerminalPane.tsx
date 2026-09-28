@@ -44,6 +44,8 @@ interface Props {
   onSignal?: (signal: AgentSignal) => void;
   /** Marks this pane as the drop target for external (window-level) drags. */
   isDropTarget?: boolean;
+  /** The visible tab: takes the keyboard whenever it becomes active. */
+  active?: boolean;
 }
 
 /** Live PTYs by session id — used to route external file drops. */
@@ -59,7 +61,7 @@ const WAITING_TYPES = new Set(["permission_prompt", "elicitation_dialog", "elici
 /** Agents without hooks: a stretch of activity this long ending in silence counts as "done". */
 const FALLBACK_DONE_MS = 10_000;
 
-export function TerminalPane({ tab, onError, onStatusChange, onSignal }: Props) {
+export function TerminalPane({ tab, onError, onStatusChange, onSignal, active }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const ptyIdRef = useRef<number | null>(null);
@@ -69,6 +71,20 @@ export function TerminalPane({ tab, onError, onStatusChange, onSignal }: Props) 
   const onSignalRef = useRef(onSignal);
   onSignalRef.current = onSignal;
   const [status, setStatus] = useState<AgentStatus>("idle");
+
+  // Becoming the visible tab (new or switched to): type right away. After a
+  // frame, and once more shortly after, since whatever opened the tab (the
+  // + menu, a sidebar click) can take the focus back on its way out.
+  useEffect(() => {
+    if (!active) return;
+    const focus = () => termRef.current?.focus();
+    const raf = requestAnimationFrame(focus);
+    const t = window.setTimeout(focus, 80);
+    return () => {
+      cancelAnimationFrame(raf);
+      window.clearTimeout(t);
+    };
+  }, [active]);
 
   // Types the text into the running agent's prompt (PTY keystrokes).
   const injectText = useCallback((text: string) => {
