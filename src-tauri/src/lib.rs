@@ -80,6 +80,8 @@ pub fn run() {
             review::pr_resolve_thread,
             review::pr_submit_review,
             ralph::ralph_state,
+            ralph::ralph_plan_state,
+            ralph::ralph_plan_start,
             ralph::ralph_save_prd,
             ralph::ralph_save_prompt,
             ralph::ralph_interview,

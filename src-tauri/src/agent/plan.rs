@@ -392,9 +392,126 @@ First explore the repositories to understand what exists. Then interview me: ask
     ))
 }
 
+/// A task of PLAN.md, as Ralph runs it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlanItem {
+    /// Position among the file's `- [ ]` / `- [x]` lines (what
+    /// `set_task_in_content` and PlanProgress count).
+    pub index: usize,
+    /// "T3" for "- [ ] 3. …", else T<index+1>.
+    pub id: String,
+    pub title: String,
+    /// As written after the dash; empty when the task names none.
+    pub repo: String,
+    pub description: String,
+    pub accept: Vec<String>,
+    pub done: bool,
+}
+
+fn checkbox(line: &str) -> Option<(bool, &str)> {
+    let t = line.trim_start();
+    t.strip_prefix("- [ ] ")
+        .map(|r| (false, r))
+        .or_else(|| t.strip_prefix("- [x] ").or_else(|| t.strip_prefix("- [X] ")).map(|r| (true, r)))
+}
+
+/// "3. Add the route — bet-app" → (Some(3), "Add the route", "bet-app").
+fn split_title(rest: &str) -> (Option<usize>, String, String) {
+    let rest = rest.trim();
+    let (number, rest) = match rest.split_once(". ") {
+        Some((n, r)) if n.chars().all(|c| c.is_ascii_digit()) && !n.is_empty() => (n.parse().ok(), r),
+        _ => (None, rest),
+    };
+    for sep in [" — ", " – ", " - "] {
+        if let Some((title, repo)) = rest.rsplit_once(sep) {
+            let repo = repo.trim().trim_matches('`').trim().to_string();
+            if !repo.is_empty() && !repo.contains(' ') {
+                return (number, title.trim().to_string(), repo);
+            }
+        }
+    }
+    (number, rest.to_string(), String::new())
+}
+
+/// The plan's "## Context" section (what every task's agent is told) and
+/// its tasks, each with the indented lines under it (description, Accept:).
+pub fn parse_plan(raw: &str) -> (String, Vec<PlanItem>) {
+    let lines: Vec<&str> = raw.lines().collect();
+    let mut context = String::new();
+    let mut in_context = false;
+    let mut items: Vec<PlanItem> = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        if line.starts_with("## ") {
+            in_context = line.trim_start_matches('#').trim().eq_ignore_ascii_case("context");
+        } else if in_context && checkbox(line).is_none() {
+            context.push_str(line);
+            context.push('\n');
+        }
+        if let Some((done, rest)) = checkbox(line) {
+            let index = items.len();
+            let (number, title, repo) = split_title(rest);
+            let mut description = Vec::new();
+            let mut accept = Vec::new();
+            // Detail lines: indented, until the next task or an unindented line.
+            while i + 1 < lines.len() {
+                let next = lines[i + 1];
+                if checkbox(next).is_some() || (!next.is_empty() && !next.starts_with([' ', '\t'])) {
+                    break;
+                }
+                i += 1;
+                let t = next.trim();
+                if t.is_empty() {
+                    continue;
+                }
+                match t.split_once(':') {
+                    Some((head, body)) if head.eq_ignore_ascii_case("accept") || head.eq_ignore_ascii_case("acceptance") => {
+                        accept.extend(body.split([';', '·']).map(str::trim).filter(|c| !c.is_empty()).map(String::from));
+                    }
+                    _ => description.push(t.to_string()),
+                }
+            }
+            items.push(PlanItem {
+                index,
+                id: format!("T{}", number.unwrap_or(index + 1)),
+                title,
+                repo,
+                description: description.join("\n"),
+                accept,
+                done,
+            });
+        }
+        i += 1;
+    }
+    (context.trim().to_string(), items)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_tasks_with_repo_details_and_criteria() {
+        let raw = "# T\n\n## Context\n\n- Why it matters\n\n## Tasks\n\n- [x] 1. Add the route — `bet-app`\n      Renders the card.\n      Accept: typecheck passes; GET /x returns 200\n- [ ] 2. Use the iframe - bonus-engine-admin\n- [ ] Loose task\n";
+        let (context, items) = parse_plan(raw);
+        assert_eq!(context, "- Why it matters");
+        assert_eq!(items.len(), 3);
+        assert_eq!(
+            items[0],
+            PlanItem {
+                index: 0,
+                id: "T1".into(),
+                title: "Add the route".into(),
+                repo: "bet-app".into(),
+                description: "Renders the card.".into(),
+                accept: vec!["typecheck passes".into(), "GET /x returns 200".into()],
+                done: true,
+            }
+        );
+        assert_eq!((items[1].id.as_str(), items[1].repo.as_str(), items[1].done), ("T2", "bonus-engine-admin", false));
+        assert_eq!((items[2].id.as_str(), items[2].title.as_str(), items[2].repo.as_str()), ("T3", "Loose task", ""));
+    }
 
     #[test]
     fn salvages_a_plan_from_a_reply() {

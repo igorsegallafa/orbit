@@ -1,6 +1,7 @@
 // Ralph: an autonomous loop that implements a PRD one user story per agent
 // iteration (snarktank/ralph pattern), run natively by Orbit so every tool
 // call is visible live instead of only when a story finishes.
+mod plan_run;
 mod prd;
 mod prompts;
 mod supervisor;
@@ -395,6 +396,12 @@ pub struct RalphState {
     prompt: String,
     prompt_custom: bool,
     default_config: RunConfig,
+    /// Plan runs: whether the workspace has a PLAN.md at all.
+    #[serde(default)]
+    plan_exists: bool,
+    /// Plan runs: what would stop a run (e.g. a task naming an unknown repo).
+    #[serde(default)]
+    warnings: Vec<String>,
 }
 
 fn default_config() -> RunConfig {
@@ -426,6 +433,8 @@ pub async fn ralph_state(workspace: String, repo: String) -> Result<RalphState, 
             prompt,
             prompt_custom,
             default_config: default_config(),
+            plan_exists: false,
+            warnings: vec![],
         })
     })
     .await
@@ -636,6 +645,19 @@ pub async fn ralph_start(app: AppHandle, workspace: String, repo: String, config
         save_summary(&key);
     });
     Ok(())
+}
+
+/// Ralph over the feature plan: the plan's tasks (as a PRD) and the run.
+#[tauri::command]
+pub async fn ralph_plan_state(workspace: String) -> Result<RalphState, String> {
+    blocking(move || plan_run::state(&workspace)).await
+}
+
+/// Starts Ralph on the plan's open tasks (key `<workspace>/plan`; stop,
+/// pause and history take repo "plan").
+#[tauri::command]
+pub async fn ralph_plan_start(app: AppHandle, workspace: String, config: RunConfig) -> Result<(), String> {
+    blocking(move || plan_run::start(app, workspace, config)).await
 }
 
 /// Keys (`workspace/repo`) of the runs in progress, for app-wide indicators.
