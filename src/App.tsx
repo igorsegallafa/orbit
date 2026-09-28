@@ -494,10 +494,14 @@ function App() {
   const closeTab = (id: string) => {
     forgetTerminal(tabs.find((t) => tabId(t) === id));
     setTabs((ts) => {
-      const idx = ts.findIndex((t) => tabId(t) === id);
       const next = ts.filter((t) => tabId(t) !== id);
       if (activeTab === id) {
-        const nextTab = next[Math.min(idx, next.length - 1)];
+        // The neighbour on the strip: minimized sessions aren't on it, and
+        // activating one would bring it back.
+        const shown = ts.filter(isShown);
+        const idx = shown.findIndex((t) => tabId(t) === id);
+        const rest = shown.filter((t) => tabId(t) !== id);
+        const nextTab = rest[Math.min(idx, rest.length - 1)];
         // Never leave a null active tab while tabs remain — the tab body
         // would render an empty viewport.
         setActiveTab(nextTab ? tabId(nextTab) : null);
@@ -639,7 +643,8 @@ function App() {
   }, [activeTab, navPage.kind]);
 
   const goNav = (dir: "back" | "forward") => {
-    const open = new Set(tabs.map(tabId));
+    // Minimized sessions count as closed here too: back/forward skips them.
+    const open = new Set(tabs.filter(isShown).map(tabId));
     // Closed tabs reopen, except terminals: that would be a new session.
     const e = navHistory.step(dir, (x) => "page" in x.target || open.has(x.key) || x.target.tab.kind !== "terminal");
     if (!e) return;
