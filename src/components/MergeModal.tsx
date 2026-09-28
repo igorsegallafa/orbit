@@ -2,16 +2,26 @@ import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "./Toast";
 import { StatusIcon, StatusKind } from "./StatusIcon";
-import { WsPrStatus } from "../types/config";
+
+/** A PR to merge: a workspace's (found through its worktree) or, with
+ *  `ownerRepo`, one addressed on GitHub directly (not checked out). */
+export interface MergeItem {
+  repo: string;
+  number: number;
+  title: string;
+  ownerRepo?: string;
+}
 
 type MergeStatus = "idle" | "merging" | "merged" | "error";
 
 interface Props {
-  workspace: string;
+  /** Omitted for PRs that aren't checked out (each carries `ownerRepo`). */
+  workspace?: string;
   base: string;
-  prs: WsPrStatus[];
+  prs: MergeItem[];
   onClose: () => void;
-  onSettled: () => void;
+  /** After the run, with the PRs that actually merged (it stops at the first failure). */
+  onSettled: (merged: MergeItem[]) => void;
 }
 
 /** Squash-and-merge confirmation: nothing runs until "Merge" is pressed.
@@ -20,19 +30,21 @@ interface Props {
 export function MergeModal({ workspace, base, prs, onClose, onSettled }: Props) {
   const [states, setStates] = useState<Record<string, { status: MergeStatus; detail?: string }>>({});
   const [running, setRunning] = useState(false);
-  const key = (pr: WsPrStatus) => `${pr.repo}/${pr.number}`;
-  const set = (pr: WsPrStatus, status: MergeStatus, detail?: string) =>
+  const key = (pr: MergeItem) => `${pr.repo}/${pr.number}`;
+  const set = (pr: MergeItem, status: MergeStatus, detail?: string) =>
     setStates((prev) => ({ ...prev, [key(pr)]: { status, detail } }));
 
   const merge = async () => {
     setRunning(true);
-    let merged = 0;
+    const landed: MergeItem[] = [];
     for (const pr of prs) {
       set(pr, "merging");
       try {
-        await invoke("ws_pr_merge", { workspace, repo: pr.repo, number: pr.number });
+        await (pr.ownerRepo
+          ? invoke("pr_merge_remote", { ownerRepo: pr.ownerRepo, number: pr.number })
+          : invoke("ws_pr_merge", { workspace, repo: pr.repo, number: pr.number }));
         set(pr, "merged", `Squashed into ${base}`);
-        merged++;
+        landed.push(pr);
       } catch (e) {
         set(pr, "error", String(e));
         toast.error(`Merge stopped at ${pr.repo} #${pr.number}`, { description: "See the details in the dialog." });
@@ -40,8 +52,8 @@ export function MergeModal({ workspace, base, prs, onClose, onSettled }: Props) 
       }
     }
     setRunning(false);
-    onSettled();
-    if (merged === prs.length) toast.success(`Merged ${merged} pull request${merged === 1 ? "" : "s"} into ${base}`);
+    onSettled(landed);
+    if (landed.length === prs.length) toast.success(`Merged ${landed.length} pull request${landed.length === 1 ? "" : "s"} into ${base}`);
   };
 
   const started = Object.keys(states).length > 0;
@@ -53,8 +65,8 @@ export function MergeModal({ workspace, base, prs, onClose, onSettled }: Props) 
         <div className="modal-body">
           <h3>Squash and merge</h3>
           <p className="ws-commit-hint">
-            Each PR lands in <strong>{base}</strong> as a single commit titled after the PR, and its branch is deleted on GitHub. The
-            workspace stays until you remove it.
+            Each PR lands in <strong>{base}</strong> as a single commit titled after the PR, and its branch is deleted on GitHub.
+            {workspace ? " The workspace stays until you remove it." : ""}
           </p>
           <div className="ws-action-list">
             {prs.map((pr) => {

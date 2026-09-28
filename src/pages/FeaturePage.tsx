@@ -7,6 +7,7 @@ import { toast } from "../components/Toast";
 import { tooltip } from "../components/Tooltip";
 import { CheckIcon, ChevronRightIcon, CommitIcon, DiffIcon, GitIcon, PullRequestIcon, PushIcon, RefreshIcon, XIcon } from "../components/Icons";
 import { Skeleton } from "../components/Skeleton";
+import { MergeItem, MergeModal } from "../components/MergeModal";
 import { GitHubIcon } from "../components/BrandIcons";
 
 interface Props {
@@ -50,6 +51,9 @@ export function FeaturePage({ prs, workspace, onOpenReview, onCheckout, onOpenWo
   const [checks, setChecks] = useState<WsCheck[] | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null); // "repo/number"
+  const [merging, setMerging] = useState<MergeItem[] | null>(null);
+  // PRs merged from this page (the list comes from Code Review, not refetched).
+  const [merged, setMerged] = useState<Set<string>>(new Set());
   const first = prs[0];
   const multi = prs.length > 1;
 
@@ -107,6 +111,21 @@ export function FeaturePage({ prs, workspace, onOpenReview, onCheckout, onOpenWo
     requestAnimationFrame(() => document.getElementById(`ft-pr-${key}`)?.scrollIntoView({ behavior: "smooth", block: "nearest" }));
   };
   const checkoutFirst = "Check out the feature first: this needs the code on your machine";
+  const prKey = (p: { repo: string; number: number }) => `${p.repo}/${p.number}`;
+  const checkOf = (p: PullRequest) => (checks ?? []).find((c) => c.repo === p.repo && c.prNumber === p.number);
+  // Why a PR can't be merged now; null when it can.
+  const mergeBlock = (p: PullRequest): string | null => {
+    if (merged.has(prKey(p))) return "Already merged";
+    if (p.isDraft) return "Draft: mark it ready for review on GitHub first";
+    if (checks === null) return "Checking CI…";
+    const st = checkOf(p)?.status;
+    if (st === "fail") return "Checks are failing";
+    if (st === "running") return "Checks are still running";
+    return null;
+  };
+  const toMerge = (list: PullRequest[]): MergeItem[] =>
+    list.map((p) => ({ repo: p.repo, number: p.number, title: p.title, ownerRepo: p.ownerRepo }));
+  const mergeable = prs.filter((p) => !mergeBlock(p));
   // The workspace page's delivery flow; the local steps wait for a checkout.
   const steps: Step[] = [
     {
@@ -133,6 +152,11 @@ export function FeaturePage({ prs, workspace, onOpenReview, onCheckout, onOpenWo
         label: "View",
         onClick: () => document.getElementById(`ft-prs-${first.branch}`)?.scrollIntoView({ behavior: "smooth" }),
       },
+      // Every PR ready: land the whole feature in one go.
+      extra:
+        prs.length > 1 && mergeable.length === prs.length
+          ? { label: "Merge all", onClick: () => setMerging(toMerge(prs)) }
+          : undefined,
     },
     {
       key: "checks",
@@ -340,6 +364,21 @@ export function FeaturePage({ prs, workspace, onOpenReview, onCheckout, onOpenWo
                     <CheckDot status={checks === null ? "running" : (wsCheck?.status ?? "none")} />
                     {checks === null ? "Loading checks…" : total > 0 ? `${passed}/${total} checks` : "No checks"}
                   </span>
+                  {!pr.isDraft && !merged.has(key) && (
+                    <span {...hint(mergeBlock(pr) ?? `Squash into ${pr.base} and delete the branch on GitHub`)}>
+                      <button
+                        className="btn-mini secondary pr-feedback-btn"
+                        disabled={!!mergeBlock(pr)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setMerging(toMerge([pr]));
+                        }}
+                      >
+                        Squash and merge
+                      </button>
+                    </span>
+                  )}
+                  {merged.has(key) && <span className="pr-pill pr-pill-merged">merged</span>}
                   <button
                     className="icon-button"
                     aria-label="Open on GitHub"
@@ -372,6 +411,17 @@ export function FeaturePage({ prs, workspace, onOpenReview, onCheckout, onOpenWo
           })}
         </div>
       </section>
+      {merging && (
+        <MergeModal
+          base={first.base}
+          prs={merging}
+          onClose={() => setMerging(null)}
+          onSettled={(done) => {
+            setMerged((m) => new Set([...m, ...done.map(prKey)]));
+            loadChecks();
+          }}
+        />
+      )}
     </div>
   );
 }

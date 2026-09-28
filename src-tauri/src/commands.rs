@@ -1047,6 +1047,13 @@ pub async fn ws_pr_merge(workspace: String, repo: String, number: u64) -> Result
     .await
 }
 
+/// Squash-merges a PR addressed on GitHub alone (a Code Review feature
+/// that was never checked out) and deletes its branch there.
+#[tauri::command]
+pub async fn pr_merge_remote(owner_repo: String, number: u64) -> Result<(), String> {
+    blocking(move || github::squash_merge(&owner_repo, number).map_err(|e| format!("{owner_repo} #{number}: {e}"))).await
+}
+
 fn remote_of(dir: &std::path::Path) -> Option<String> {
     let out = crate::proc::cmd("git")
         .args(["remote", "get-url", "origin"])
