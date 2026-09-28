@@ -553,6 +553,8 @@ export function WorkspaceDetailPage({
                     <span className="repo-name">{st.repo}</span>
                     <span className="repo-sub">{st.branch ?? "no branch"}</span>
                   </div>
+                  {/* Before the badges: they stay flush right, hover or not. */}
+                  <span className="ws-repo-open">Browse files →</span>
                   <div className="ws-repo-badges">
                     {droppedPrs.has(st.repo) && (
                       <span
@@ -609,7 +611,6 @@ export function WorkspaceDetailPage({
                         </span>
                       ))}
                   </div>
-                  <span className="ws-repo-open">Browse files →</span>
                 </div>
               ))}
         </div>
