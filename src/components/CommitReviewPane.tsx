@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { GitChange, GitCommit } from "../types/config";
 import { fetchCommitFiles, ReviewPane } from "./ReviewPane";
 import { Skeleton } from "./Skeleton";
+import { usePaneWidth } from "./PaneResizer";
 
 interface Props {
   workspace: string;
@@ -23,6 +24,7 @@ const STATUS_LABEL: Record<string, { letter: string; cls: string }> = {
  */
 export function CommitReviewPane({ workspace, repo, commit, onError }: Props) {
   const [files, setFiles] = useState<GitChange[] | null>(null);
+  const side = usePaneWidth("orbit.commit-review-side", 230, 180, 600);
   const [selected, setSelected] = useState<string | null>(null);
 
   useEffect(() => {
@@ -41,7 +43,7 @@ export function CommitReviewPane({ workspace, repo, commit, onError }: Props) {
 
   return (
     <div className="commit-review">
-      <div className="commit-review-files">
+      <div className="commit-review-files" style={{ width: side.width }}>
         <div className="git-section-label" style={{ paddingLeft: 4 }}>
           {commit.sha}
         </div>
@@ -76,6 +78,7 @@ export function CommitReviewPane({ workspace, repo, commit, onError }: Props) {
           })
         )}
       </div>
+      {side.handle}
       {selected !== null ? (
         <ReviewPane
           workspace={workspace}

@@ -269,6 +269,20 @@ body {
   background: var(--accent);
 }
 
+/* Drag handle on a side panel's edge (review file lists). */
+.pane-resizer {
+  width: 5px;
+  margin: 0 -3px 0 -2px;
+  flex-shrink: 0;
+  cursor: col-resize;
+  z-index: 5;
+  transition: background var(--transition);
+}
+
+.pane-resizer:hover {
+  background: var(--accent);
+}
+
 .brand {
   font-weight: 700;
   font-size: 15px;
