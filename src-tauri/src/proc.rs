@@ -111,6 +111,76 @@ pub fn refresh_path() {
     }
 }
 
+/// macOS/Linux: an app opened from Finder, the Dock or a launcher gets a
+/// bare PATH (/usr/bin:/bin:/usr/sbin:/sbin), so Homebrew's gh, opencode,
+/// claude and friends look missing. Adopts the login shell's PATH (what a
+/// terminal sees), keeping this process's entries, plus the usual install
+/// folders. Launched from a terminal (TERM set) PATH is already right.
+/// Call once at startup, before spawning threads.
+#[cfg(unix)]
+pub fn refresh_path() {
+    if std::env::var_os("TERM").is_some() {
+        return;
+    }
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let mut dirs: Vec<PathBuf> = login_shell_path().map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
+    if let Some(current) = std::env::var_os("PATH") {
+        dirs.extend(std::env::split_paths(&current));
+    }
+    // Where the tools usually live, should the shell say nothing.
+    dirs.extend(["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin"].map(PathBuf::from));
+    if let Some(h) = &home {
+        dirs.extend([".local/bin", ".opencode/bin", ".cargo/bin", ".bun/bin", ".npm-global/bin"].map(|d| h.join(d)));
+    }
+    let mut seen = std::collections::HashSet::new();
+    dirs.retain(|d| !d.as_os_str().is_empty() && seen.insert(d.clone()));
+    if let Ok(joined) = std::env::join_paths(dirs) {
+        std::env::set_var("PATH", joined);
+    }
+}
+
+/// PATH as the user's interactive login shell sets it (rc files included),
+/// or None when the shell fails or takes over 4s (a slow rc file must not
+/// hold the app's start).
+#[cfg(unix)]
+fn login_shell_path() -> Option<String> {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+    const MARK: &str = "__ORBIT_PATH__";
+    let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/zsh".into());
+    let mut child = Command::new(shell)
+        .args(["-ilc", &format!("printf '{MARK}%s{MARK}' \"$PATH\"")])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + Duration::from_secs(4);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(25)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+    let mut out = String::new();
+    std::io::Read::read_to_string(&mut child.stdout.take()?, &mut out).ok()?;
+    parse_marked_path(&out, MARK)
+}
+
+/// The PATH between the markers (rc files may print banners around it).
+#[cfg_attr(not(unix), allow(dead_code))]
+fn parse_marked_path(out: &str, mark: &str) -> Option<String> {
+    let start = out.find(mark)? + mark.len();
+    let end = out[start..].find(mark)? + start;
+    let path = out[start..end].trim();
+    (!path.is_empty()).then(|| path.to_string())
+}
+
 /// Expands `%NAME%` references (REG_EXPAND_SZ values like
 /// `%SystemRoot%\system32`); unknown names stay as written.
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -162,6 +232,14 @@ fn find_in(bin: &str, path: Option<std::ffi::OsString>, exts: &[String]) -> Opti
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn login_shell_path_survives_rc_noise() {
+        let out = "Welcome!\n__ORBIT_PATH__/opt/homebrew/bin:/usr/bin__ORBIT_PATH__\nbye";
+        assert_eq!(parse_marked_path(out, "__ORBIT_PATH__").as_deref(), Some("/opt/homebrew/bin:/usr/bin"));
+        assert_eq!(parse_marked_path("no markers", "__ORBIT_PATH__"), None);
+        assert_eq!(parse_marked_path("__ORBIT_PATH____ORBIT_PATH__", "__ORBIT_PATH__"), None);
+    }
 
     #[test]
     fn expands_known_env_vars_and_keeps_the_rest() {

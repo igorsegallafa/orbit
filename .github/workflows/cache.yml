@@ -14,7 +14,17 @@ concurrency:
 
 jobs:
   build:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            args: ""
+          - platform: macos-latest
+            args: "--target aarch64-apple-darwin"
+            rust-targets: aarch64-apple-darwin
+
+    runs-on: ${{ matrix.platform }}
 
     steps:
       - uses: actions/checkout@v5
@@ -25,6 +35,8 @@ jobs:
           cache: npm
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-targets }}
 
       - uses: swatinem/rust-cache@v2
         with:
@@ -36,4 +48,4 @@ jobs:
 
       # Same release build the Release workflow runs, minus installers and signing.
       - name: Build
-        run: npm run tauri build -- --no-bundle
+        run: npm run tauri build -- --no-bundle ${{ matrix.args }}
