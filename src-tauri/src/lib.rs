@@ -129,6 +129,7 @@ pub fn run() {
             commands::git_commit_diff,
             commands::ws_commit_message,
             commands::ws_commit,
+            commands::ws_discard,
             commands::ws_push,
             commands::ws_sync_branch,
             commands::ws_rebase,

@@ -344,7 +344,13 @@ pub fn commit(name: &str, message: &str, paths: &[String]) -> Result<(), String>
 /// Throws away the changes of `paths`: tracked files go back to HEAD; files
 /// HEAD doesn't have go to the Trash (recoverable) rather than being deleted.
 pub fn discard(name: &str, paths: &[String]) -> Result<(), String> {
-    let dir = clone_of(name)?;
+    discard_in(&clone_of(name)?, paths)
+}
+
+/// Drops the working changes of `paths` in `dir`: tracked files go back to
+/// HEAD, new ones move to the Trash (recoverable, never deleted outright).
+pub(crate) fn discard_in(dir: &std::path::Path, paths: &[String]) -> Result<(), String> {
+    let dir = dir.to_path_buf();
     for p in paths {
         if git_ok(&dir, &["cat-file", "-e", &format!("HEAD:{p}")]).is_ok() {
             git_ok(&dir, &["restore", "--source=HEAD", "--staged", "--worktree", "--", p])?;

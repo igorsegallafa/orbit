@@ -3258,6 +3258,21 @@ button.plan-choice-main:hover:not(:disabled) { border-color: var(--accent); }
 .agent-feed-list { height: 300px; overflow-y: auto; padding: 8px 12px; }
 .agent-feed-empty { font-size: 12px; color: var(--text-faint); padding: 6px 0; }
 
+/* Review feedback (workspace) */
+.ws-section-head .ws-feedback-btn { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; }
+.ws-feedback-count { min-width: 18px; padding: 0 5px; border-radius: 999px; background: var(--accent); color: var(--on-accent); font-size: 10.5px; font-weight: 700; text-align: center; }
+.ar-summary { font-size: 12px; color: var(--text-faint); }
+.ar-group { display: flex; flex-direction: column; gap: 8px; padding-bottom: 14px; margin-bottom: 14px; border-bottom: 1px solid var(--border); }
+.ar-group:last-child { border-bottom: none; margin-bottom: 0; }
+.ar-group-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.ar-group-repo { font-weight: 600; font-size: 12.5px; }
+.ar-group-head .ar-pr { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ar-changes { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); }
+.ar-changes-head { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-faint); margin-bottom: 2px; }
+.ar-changes-none, .ar-changes-note { font-size: 12px; color: var(--text-faint); }
+.ar-change { display: flex; align-items: center; gap: 7px; font-size: 12px; min-width: 0; }
+.ar-commit-msg { margin-top: 6px; height: 30px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--panel); color: var(--text); font-size: 12px; }
+
 /* Ralph over the plan */
 .rv-story-repo {
   margin-left: auto;
@@ -4357,7 +4372,7 @@ button.cr-segment.on, button.cr-segment.on:hover:not(:disabled) { background: va
 .commit-modal-head h3 { margin: 0 0 4px; }
 .commit-modal-body { flex: 1; min-height: 0; display: flex; }
 .commit-modal-list {
-  width: 380px;
+  width: 420px;
   flex-shrink: 0;
   overflow-y: auto;
   border-right: 1px solid var(--border);
@@ -4400,6 +4415,9 @@ button.commit-repo-toggle { display: inline-flex; padding: 2px; color: var(--tex
 .commit-file:hover { background: var(--panel-hover); }
 .commit-file.on { background: var(--accent-soft); }
 .commit-file .orbit-check { flex-shrink: 0; }
+.commit-file .commit-file-discard { width: 22px; height: 22px; flex-shrink: 0; border-color: transparent; opacity: 0; font-size: 13px; }
+.commit-file:hover .commit-file-discard { opacity: 1; }
+.commit-file .commit-file-discard:hover:not(:disabled) { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 40%, transparent); }
 .commit-repo-msg { min-height: 52px; }
 .commit-repo-done-msg { font-size: 12px; color: var(--text-dim); padding: 0 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
@@ -5722,6 +5740,10 @@ button.theme-card.on { border-color: var(--accent); box-shadow: 0 0 0 1px var(--
 .artifact-size { font-size: 11.5px; color: var(--text-faint); margin-right: 4px; }
 .artifact-build { color: var(--accent); }
 button.artifact-more { margin-top: 8px; }
+button.artifact-toggle { width: 100%; display: flex; align-items: center; gap: 12px; cursor: pointer; }
+button.artifact-toggle h3 { display: inline-flex; align-items: center; gap: 6px; }
+button.artifact-toggle:hover h3 { color: var(--text); }
+.artifact-summary { font-size: 12px; color: var(--text-faint); text-transform: none; letter-spacing: 0; }
 button.ws-badge { width: auto; height: auto; font-weight: 600; cursor: pointer; }
 button.ws-badge:hover:not(:disabled) { border-color: currentColor; }
 .ws-repo-open { font-size: 12px; color: var(--text-faint); opacity: 0; transition: opacity var(--transition); white-space: nowrap; margin-right: 4px; }

@@ -790,7 +790,7 @@ pub struct ThreadReply {
 
 /// Several threads at once is deliberate: one pass keeps the fixes
 /// coherent instead of the agent swinging back and forth per comment.
-fn address_prompt(number: u64, threads: &[&crate::review::ReviewThread]) -> String {
+fn address_prompt(number: u64, threads: &[&crate::review::ReviewThread], notes: &[String]) -> String {
     let mut list = String::new();
     for (i, t) in threads.iter().enumerate() {
         let loc = match (t.line, t.original_line) {
@@ -803,6 +803,13 @@ fn address_prompt(number: u64, threads: &[&crate::review::ReviewThread]) -> Stri
             list.push_str(&format!("@{}: {}\n", c.author, c.body.trim()));
         }
     }
+    // Reviews' general comments (no thread to reply to): act on them, no entry in the list.
+    let general = if notes.is_empty() {
+        String::new()
+    } else {
+        let items = notes.iter().map(|n| format!("- {}", n.trim().replace('\n', "\n  "))).collect::<Vec<_>>().join("\n");
+        format!("\n## General review comments\nNot tied to a line: apply what's valid; they need no entry in your reply list.\n{items}\n")
+    };
     format!(
         r#"You are addressing code review feedback on pull request #{number} of the repository in this folder.
 
@@ -811,7 +818,7 @@ For each review thread below decide:
 - "answered": it is a question, not applicable, or you disagree. Do not change code for it; answer it.
 
 Do not commit or push. Do not touch unrelated code.
-{list}
+{list}{general}
 When you are done, reply with ONLY a JSON array (no prose, no code fences), one entry per thread:
 [{{"id": "<thread id>", "status": "fixed" | "answered", "reply": "<reply to post on the thread>"}}]
 
@@ -833,25 +840,46 @@ pub fn parse_thread_replies(raw: &str) -> Option<Vec<ThreadReply>> {
 
 /// Runs the agent in the repo's worktree on the selected unresolved threads
 /// of a PR; it edits files (no commit) and drafts one reply per thread.
-pub fn address_review(workspace: &str, repo: &str, owner_repo: &str, number: u64, thread_ids: &[String]) -> Result<Vec<ThreadReply>, String> {
+/// Applies the selected review conversations (and general review notes) in
+/// the repo's worktree with a live, cancellable agent (`run`); returns the
+/// reply drafted for each conversation.
+#[allow(clippy::too_many_arguments)]
+pub fn address_review(
+    app: &tauri::AppHandle,
+    run: &str,
+    workspace: &str,
+    repo: &str,
+    owner_repo: &str,
+    number: u64,
+    thread_ids: &[String],
+    notes: &[String],
+) -> Result<Vec<ThreadReply>, String> {
     let dir = crate::workspace::repo_path(workspace, repo)?;
     if !dir.exists() {
         return Err(format!("worktree for '{repo}' not found"));
     }
     let data = crate::review::review_data(owner_repo, number, false)?;
     let threads: Vec<&crate::review::ReviewThread> = data.threads.iter().filter(|t| thread_ids.contains(&t.id)).collect();
-    if threads.is_empty() {
+    if threads.is_empty() && notes.is_empty() {
         return Err("none of the selected conversations are open anymore".into());
     }
     let ai = crate::config::Config::load()?.ai;
     // Several fixes in one run: give it more room than a single edit.
-    let out = runner::run_capture(
-        agent_cmd(&ai, &address_prompt(number, &threads), Access::Edit, false),
+    let reply = live::run_live(
+        app,
+        run,
+        &ai,
         &dir,
+        &address_prompt(number, &threads, notes),
+        Access::Edit,
+        None,
         Duration::from_secs(AGENT_TIMEOUT_SECS * 3),
     )?;
-    let replies = parse_thread_replies(&out).ok_or_else(|| {
-        let preview: String = out.trim().chars().rev().take(200).collect::<Vec<_>>().into_iter().rev().collect();
+    if threads.is_empty() {
+        return Ok(vec![]);
+    }
+    let replies = parse_thread_replies(&reply.text).ok_or_else(|| {
+        let preview: String = reply.text.trim().chars().rev().take(200).collect::<Vec<_>>().into_iter().rev().collect();
         format!("the agent finished without the reply list: …{preview}")
     })?;
     Ok(replies.into_iter().filter(|r| thread_ids.contains(&r.id)).collect())
@@ -883,8 +911,11 @@ mod address_tests {
             is_outdated: true,
             comments: vec![],
         };
-        let p = address_prompt(3, &[&t]);
+        let p = address_prompt(3, &[&t], &[]);
         assert!(p.contains("(id: PRRT_1) — src/a.rs:7 (outdated"));
         assert!(p.contains("pull request #3"));
+        assert!(!p.contains("General review comments"));
+        let p = address_prompt(3, &[&t], &["Please add tests\nfor the edge case".into()]);
+        assert!(p.contains("## General review comments") && p.contains("- Please add tests\n  for the edge case"));
     }
 }
