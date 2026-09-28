@@ -763,14 +763,16 @@ fn which(bin: &str) -> bool {
 pub async fn ws_commit_message(
     workspace: String,
     repo: String,
+    paths: Option<Vec<String>>,
 ) -> Result<agent::CommitMsg, String> {
-    blocking(move || agent::commit_message(&workspace, &repo)).await
+    blocking(move || agent::commit_message(&workspace, &repo, paths.as_deref().unwrap_or(&[]))).await
 }
 
-/// Stage + commit one repo with the given message.
+/// Stage + commit one repo with the given message: only `paths` when
+/// given, every change otherwise.
 #[tauri::command]
-pub async fn ws_commit(workspace: String, repo: String, message: String) -> Result<(), String> {
-    blocking(move || git::commit_all(&worktree_on_branch(&workspace, &repo)?, &message)).await
+pub async fn ws_commit(workspace: String, repo: String, message: String, paths: Option<Vec<String>>) -> Result<(), String> {
+    blocking(move || git::commit_paths(&worktree_on_branch(&workspace, &repo)?, &message, &paths.unwrap_or_default())).await
 }
 
 /// Push one repo's branch to origin. `force` pushes with
@@ -1045,6 +1047,13 @@ pub async fn ws_pr_merge(workspace: String, repo: String, number: u64) -> Result
         github::squash_merge(&owner_repo, number).map_err(|e| format!("{repo} #{number}: {e}"))
     })
     .await
+}
+
+/// Squash-merges a PR addressed on GitHub alone (a Code Review feature
+/// that was never checked out) and deletes its branch there.
+#[tauri::command]
+pub async fn pr_merge_remote(owner_repo: String, number: u64) -> Result<(), String> {
+    blocking(move || github::squash_merge(&owner_repo, number).map_err(|e| format!("{owner_repo} #{number}: {e}"))).await
 }
 
 fn remote_of(dir: &std::path::Path) -> Option<String> {

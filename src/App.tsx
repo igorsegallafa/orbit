@@ -49,7 +49,12 @@ type NavPage =
   | { kind: "dashboard" }
   | { kind: "reviews" }
   | { kind: "settings" }
-  | { kind: "integrations" };
+  | { kind: "integrations" }
+  /** A repo's clone (commit, push, branches): a page, not a tab. */
+  | { kind: "repo"; repo: string };
+
+/** Identity of a page for history: repo pages differ by repo. */
+const pageKey = (p: NavPage) => (p.kind === "repo" ? `repo:${p.repo}` : p.kind);
 
 type Tab =
   | { kind: "workspace"; workspace: Workspace }
@@ -60,7 +65,6 @@ type Tab =
   /** A Code Review feature (PRs sharing a branch) before it is checked out. */
   | { kind: "feature"; prs: PullRequest[] }
   | { kind: "ralph"; workspace: string }
-  | { kind: "repo"; repo: string }
   | { kind: "terminal"; terminal: TerminalTab };
 
 /** A repo's base clone addressed like a workspace ("@repo"): the dock,
@@ -77,6 +81,25 @@ function repoScope(name: string): Workspace {
   return ws;
 }
 const isScope = (workspace: string) => workspace.startsWith("@");
+
+type TerminalTabOf = Extract<Tab, { kind: "terminal" }>;
+/** Terminal commands that are AI agents: their tabs minimize instead of closing. */
+const AGENT_CMDS = ["claude", "opencode", "omp"];
+
+/** An ended agent session that can be picked up again. */
+interface RecentSession {
+  /** claude conversation id / opencode session id. */
+  resumeId: string;
+  agent: "claude" | "opencode";
+  workspace: string;
+  repo?: string;
+  sessionName: string;
+  endedAt: number;
+}
+const RECENT_KEY = "orbit.recent-sessions";
+const RECENT_MAX = 30;
+/** Recent sessions listed under each workspace in the sidebar. */
+const RECENT_SHOWN = 5;
 
 const SIDEBAR_KEY = "orbit.sidebar-width";
 const DOCK_KEY = "orbit.dock-width";
@@ -97,7 +120,6 @@ function tabId(tab: Tab): string {
   if (t.kind === "pr") return `pr:${t.prs.map((p) => `${p.ownerRepo}/${p.number}`).join("+")}`;
   if (t.kind === "feature") return `ft:${t.prs.map((p) => `${p.ownerRepo}/${p.number}`).join("+")}`;
   if (t.kind === "ralph") return `ralph:${t.workspace}`;
-  if (t.kind === "repo") return `repo:${t.repo}`;
   // Stable id: must NOT embed the display name, or renaming re-keys the pane
   // and remounts the terminal (killing the PTY session).
   return t.terminal.id;
@@ -110,7 +132,10 @@ function loadSession(): { tabs: Tab[]; active: string | null } {
   try {
     const raw = JSON.parse(localStorage.getItem(SESSION_KEY) ?? "null");
     if (!raw || !Array.isArray(raw.tabs)) return { tabs: [], active: null };
-    const tabs = (raw.tabs as Tab[]).map((t) => (t.kind === "terminal" ? { ...t, terminal: { ...t.terminal, restored: true } } : t));
+    const tabs = (raw.tabs as Tab[])
+      // Repo tabs from older versions: the repo view is a page now.
+      .filter((t) => (t as { kind: string }).kind !== "repo")
+      .map((t) => (t.kind === "terminal" ? { ...t, terminal: { ...t.terminal, restored: true } } : t));
     const active = tabs.some((t) => tabId(t) === raw.active) ? raw.active : (tabs[0] ? tabId(tabs[0]) : null);
     return { tabs, active };
   } catch {
@@ -154,6 +179,8 @@ function App() {
   const { menu, setMenu, openFromEvent } = useContextMenu<Workspace>();
   const tabStripRef = useRef<HTMLDivElement>(null);
   const tabMenu = useContextMenu<Tab>();
+  /** Right-click on a session row in the sidebar. */
+  const sessionMenu = useContextMenu<Tab>();
   const [checkoutPrs, setCheckoutPrs] = useState<PullRequest[] | null>(null);
 
   const loadWorkspaces = useCallback(async () => {
@@ -167,7 +194,7 @@ function App() {
           ? t.workspace.name
           : t.kind === "terminal"
             ? t.terminal.workspace
-            : t.kind === "pr" || t.kind === "feature" || t.kind === "repo"
+            : t.kind === "pr" || t.kind === "feature"
               ? null
               : t.workspace;
       setTabs((ts) => {
@@ -279,6 +306,11 @@ function App() {
     });
   }, []);
 
+  /** Opens the dock if hidden (e.g. "Browse files" needs the file tree). */
+  const showDock = () => {
+    if (dockHidden) toggleDock();
+  };
+
   const onDockResize = useCallback(
     (w: number) => {
       setDockWidth(w);
@@ -371,7 +403,7 @@ function App() {
   // them: close their tabs (killing the processes) before a removal.
   const closeWorkspaceSessions = (names: string[]) => {
     const doomed = tabs.filter(
-      (t) => t.kind !== "pr" && t.kind !== "feature" && t.kind !== "workspace" && t.kind !== "repo" && names.includes(t.kind === "terminal" ? t.terminal.workspace : t.workspace),
+      (t) => t.kind !== "pr" && t.kind !== "feature" && t.kind !== "workspace" && names.includes(t.kind === "terminal" ? t.terminal.workspace : t.workspace),
     );
     if (!doomed.length) return;
     doomed.forEach(forgetTerminal);
@@ -384,13 +416,105 @@ function App() {
     if (t?.kind === "terminal") invoke("pty_forget", { key: t.terminal.id }).catch(() => null);
   };
 
+  // ---- Agent sessions: the X minimizes (the agent keeps working, the
+  // sidebar still lists it); "End session" stops it and keeps it in Recent
+  // so the conversation can be resumed later.
+  const isAgentTab = (t: Tab | undefined): t is TerminalTabOf =>
+    t?.kind === "terminal" && AGENT_CMDS.includes(t.terminal.cmd ?? "");
+  const isShown = (t: Tab) => !(t.kind === "terminal" && t.terminal.minimized);
+
+  const minimizeTab = (id: string) => {
+    setTabs((ts) => {
+      const shown = ts.filter(isShown);
+      const next = ts.map((t) => (tabId(t) === id && t.kind === "terminal" ? { ...t, terminal: { ...t.terminal, minimized: true } } : t));
+      if (activeTab === id) {
+        const idx = shown.findIndex((t) => tabId(t) === id);
+        const rest = shown.filter((t) => tabId(t) !== id);
+        const nextTab = rest[Math.min(idx, rest.length - 1)];
+        setActiveTab(nextTab ? tabId(nextTab) : null);
+      }
+      return next;
+    });
+  };
+
+  /** The tab's X / middle-click: minimize agent sessions, close the rest. */
+  const dismissTab = (id: string) => (isAgentTab(tabs.find((t) => tabId(t) === id)) ? minimizeTab(id) : closeTab(id));
+
+  // Showing a minimized session (sidebar click, nav history) brings its tab back.
+  useEffect(() => {
+    const t = tabs.find((x) => tabId(x) === activeTab);
+    if (t?.kind === "terminal" && t.terminal.minimized) {
+      setTabs((ts) => ts.map((x) => (x === t ? { ...t, terminal: { ...t.terminal, minimized: false } } : x)));
+    }
+  }, [activeTab, tabs]);
+
+  const [recentSessions, setRecentSessions] = useState<RecentSession[]>(() => {
+    try {
+      return JSON.parse(localStorage.getItem(RECENT_KEY) ?? "[]");
+    } catch {
+      return [];
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem(RECENT_KEY, JSON.stringify(recentSessions));
+    } catch {
+      // Not remembered across restarts; still listed for now.
+    }
+  }, [recentSessions]);
+
+  /** Stops an agent session; claude/opencode ones go to Recent (resumable). */
+  const endSession = async (t: TerminalTabOf) => {
+    const { terminal: tm } = t;
+    closeTab(tabId(t));
+    let resumeId: string | null = tm.agentSessionId ?? null;
+    if (tm.cmd === "opencode") {
+      // The tab id carries its launch time: the session opencode made after it.
+      const since = Number(tm.id.match(/^tm:(\d+)/)?.[1] ?? 0);
+      resumeId = await invoke<string | null>("opencode_session_id", { workspace: tm.workspace, repo: tm.repo ?? null, sinceMs: since }).catch(() => null);
+    }
+    if (!resumeId || (tm.cmd !== "claude" && tm.cmd !== "opencode")) return;
+    const entry: RecentSession = {
+      resumeId,
+      agent: tm.cmd,
+      workspace: tm.workspace,
+      repo: tm.repo,
+      sessionName: tm.sessionName,
+      endedAt: Date.now(),
+    };
+    setRecentSessions((rs) => [entry, ...rs.filter((r) => r.resumeId !== resumeId)].slice(0, RECENT_MAX));
+  };
+
+  /** Reopens a recent session in a new tab, picking the conversation up. */
+  const resumeSession = (r: RecentSession) => {
+    setRecentSessions((rs) => rs.filter((x) => x.resumeId !== r.resumeId));
+    setNavPage({ kind: "dashboard" });
+    openTab({
+      kind: "terminal",
+      terminal: {
+        id: `tm:${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        workspace: r.workspace,
+        label: r.agent,
+        sessionName: r.sessionName,
+        cmd: r.agent,
+        args: r.agent === "claude" ? ["--resume", r.resumeId] : ["--session", r.resumeId],
+        agentSessionId: r.agent === "claude" ? r.resumeId : undefined,
+        repo: r.repo,
+      },
+    });
+  };
+
   const closeTab = (id: string) => {
     forgetTerminal(tabs.find((t) => tabId(t) === id));
     setTabs((ts) => {
-      const idx = ts.findIndex((t) => tabId(t) === id);
       const next = ts.filter((t) => tabId(t) !== id);
       if (activeTab === id) {
-        const nextTab = next[Math.min(idx, next.length - 1)];
+        // The neighbour on the strip: minimized sessions aren't on it, and
+        // activating one would bring it back.
+        const shown = ts.filter(isShown);
+        const idx = shown.findIndex((t) => tabId(t) === id);
+        const rest = shown.filter((t) => tabId(t) !== id);
+        const nextTab = rest[Math.min(idx, rest.length - 1)];
         // Never leave a null active tab while tabs remain — the tab body
         // would render an empty viewport.
         setActiveTab(nextTab ? tabId(nextTab) : null);
@@ -405,12 +529,16 @@ function App() {
 
   // Batch closes for the tab context menu. All remount their panes, so PTY
   // sessions in closed tabs end naturally via cleanup.
+  // Agent sessions survive both: they're minimized, not killed.
   const closeOtherTabs = (keepId: string) => {
     const keep = tabs.find((t) => tabId(t) === keepId);
     if (!keep) return;
     setTabs((ts) => {
+      const next: Tab[] = [];
       for (const t of ts) {
-        if (tabId(t) !== keepId) {
+        if (tabId(t) === keepId) next.push(t);
+        else if (isAgentTab(t)) next.push({ ...t, terminal: { ...t.terminal, minimized: true } });
+        else {
           forgetTerminal(t);
           setSessionStatuses((s) => {
             const { [tabId(t)]: _drop, ...rest } = s;
@@ -418,23 +546,42 @@ function App() {
           });
         }
       }
-      return [keep];
+      return next;
     });
     setActiveTab(keepId);
   };
 
   const closeAllTabs = () => {
-    tabs.forEach(forgetTerminal);
-    setTabs([]);
+    const agents = tabs.filter(isAgentTab);
+    tabs.filter((t) => !isAgentTab(t)).forEach(forgetTerminal);
+    setTabs(agents.map((t) => ({ ...t, terminal: { ...t.terminal, minimized: true } })));
     setActiveTab(null);
-    setSessionStatuses({});
+    setSessionStatuses((s) => Object.fromEntries(Object.entries(s).filter(([id]) => agents.some((t) => tabId(t) === id))));
   };
 
+  /** Sidebar session row: open it, or stop it without opening its tab. */
+  const sessionMenuItems = (t: Tab): MenuItem[] => [
+    { label: "Open", onSelect: () => setActiveTab(tabId(t)) },
+    ...(isAgentTab(t)
+      ? [
+          ...(t.terminal.minimized ? [] : [{ label: "Minimize", onSelect: () => minimizeTab(tabId(t)) }]),
+          { label: "End session", danger: true, onSelect: () => void endSession(t) },
+        ]
+      : [{ label: "Close", danger: true, onSelect: () => closeTab(tabId(t)) }]),
+  ];
+
   const tabMenuItems = (t: Tab): MenuItem[] => [
-    {
-      label: "Close",
-      onSelect: () => closeTab(tabId(t)),
-    },
+    ...(isAgentTab(t)
+      ? [
+          { label: "Minimize", onSelect: () => minimizeTab(tabId(t)) },
+          { label: "End session", danger: true, onSelect: () => void endSession(t) },
+        ]
+      : [
+          {
+            label: "Close",
+            onSelect: () => closeTab(tabId(t)),
+          },
+        ]),
     {
       label: "Close Other Tabs",
       onSelect: () => closeOtherTabs(tabId(t)),
@@ -451,9 +598,10 @@ function App() {
     openTab({ kind: "workspace", workspace: ws });
   };
 
-  const openRepoTab = (repo: string) => {
-    setNavPage({ kind: "dashboard" });
-    openTab({ kind: "repo", repo });
+  /** The repo view is a page (like Dashboard), not a tab. */
+  const openRepoPage = (repo: string) => {
+    setActiveTab(null);
+    setNavPage({ kind: "repo", repo });
   };
 
   const openFileTab = (wsName: string, repo: string, path: string) => {
@@ -515,18 +663,19 @@ function App() {
       return;
     }
     const tab = tabs.find((t) => tabId(t) === activeTab);
-    navHistory.visit(tab ? { key: tabId(tab), target: { tab } } : { key: `page:${navPage.kind}`, target: { page: navPage } });
+    navHistory.visit(tab ? { key: tabId(tab), target: { tab } } : { key: `page:${pageKey(navPage)}`, target: { page: navPage } });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab, navPage.kind]);
+  }, [activeTab, pageKey(navPage)]);
 
   const goNav = (dir: "back" | "forward") => {
-    const open = new Set(tabs.map(tabId));
+    // Minimized sessions count as closed here too: back/forward skips them.
+    const open = new Set(tabs.filter(isShown).map(tabId));
     // Closed tabs reopen, except terminals: that would be a new session.
     const e = navHistory.step(dir, (x) => "page" in x.target || open.has(x.key) || x.target.tab.kind !== "terminal");
     if (!e) return;
     navHistory.quiet();
     if ("page" in e.target) {
-      if (activeTab !== null || navPage.kind !== e.target.page.kind) {
+      if (activeTab !== null || pageKey(navPage) !== pageKey(e.target.page)) {
         applyingNav.current = true;
         setActiveTab(null);
         setNavPage(e.target.page);
@@ -683,6 +832,42 @@ function App() {
         (t.kind === "terminal" && t.terminal.workspace === wsName) || (t.kind === "editor" && t.workspace === wsName),
     );
 
+  const recentOf = (wsName: string) => recentSessions.filter((r) => r.workspace === wsName).slice(0, RECENT_SHOWN);
+
+  /** Ended agent sessions of a workspace: click to resume the conversation. */
+  const renderRecent = (wsName: string) => {
+    const list = recentOf(wsName);
+    if (!list.length || collapsed) return null;
+    return (
+      <div className="nav-recent">
+        <div className="nav-recent-label">Recent sessions</div>
+        {list.map((r) => (
+          <button
+            key={r.resumeId}
+            className="nav-item nav-sub nav-sub-recent"
+            onClick={() => resumeSession(r)}
+            title={`Resume ${r.sessionName} (${r.agent}) — ended ${new Date(r.endedAt).toLocaleString()}`}
+          >
+            <span className="nav-icon">↺</span>
+            <span className="nav-item-label">{r.sessionName}</span>
+            <span
+              role="button"
+              tabIndex={0}
+              className="nav-recent-forget"
+              title="Remove from recent"
+              onClick={(e) => {
+                e.stopPropagation();
+                setRecentSessions((rs) => rs.filter((x) => x.resumeId !== r.resumeId));
+              }}
+            >
+              ×
+            </span>
+          </button>
+        ))}
+      </div>
+    );
+  };
+
   /** Sidebar row of one open session under its workspace or repo. */
   const renderSessionItem = (t: SessionTab) => {
     const id = tabId(t);
@@ -695,9 +880,15 @@ function App() {
     return (
       <button
         key={id}
-        className={`nav-item nav-sub ${activeTab === id ? "active" : ""}`}
+        className={`nav-item nav-sub ${activeTab === id ? "active" : ""} ${t.kind === "terminal" && t.terminal.minimized ? "nav-sub-minimized" : ""}`}
         onClick={() => setActiveTab(id)}
-        title={full}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          sessionMenu.setMenu({ x: e.clientX, y: e.clientY, payload: t });
+        }}
+        onMouseDown={(e) => sessionMenu.openFromEvent(e, t)}
+        onPointerDown={(e) => sessionMenu.openFromEvent(e, t)}
+        title={t.kind === "terminal" && t.terminal.minimized ? `${full} — minimized, still running` : full}
       >
         {t.kind === "terminal" ? (
           <StatusIndicator status={sessionStatuses[id] ?? "idle"} />
@@ -718,10 +909,12 @@ function App() {
   // commit tabs carry one.
   // Repo tabs (and editors/terminals opened from one) focus the repo's clone.
   const focusName =
-    !active || active.kind === "pr" || active.kind === "feature" || active.kind === "workspace"
-      ? null
-      : active.kind === "repo"
-        ? `@${active.repo}`
+    !active
+      ? navPage.kind === "repo"
+        ? `@${navPage.repo}`
+        : null
+      : active.kind === "pr" || active.kind === "feature" || active.kind === "workspace"
+        ? null
         : active.kind === "terminal"
           ? active.terminal.workspace
           : active.workspace;
@@ -760,7 +953,10 @@ function App() {
       return (
         <WorkspaceDetailPage
           workspace={tab.workspace}
-          onOpenEditor={(repo) => openFileTab(tab.workspace.name, repo, "")}
+          onOpenEditor={(repo) => {
+            showDock();
+            openFileTab(tab.workspace.name, repo, "");
+          }}
           onOpenPlan={() => openFileTab(tab.workspace.name, "", "PLAN.md")}
           onRemoved={() => {
             loadWorkspaces();
@@ -788,25 +984,6 @@ function App() {
     if (tab.kind === "ralph") {
       const ws = isScope(tab.workspace) ? repoScope(tab.workspace) : workspaces.find((w) => w.name === tab.workspace);
       return ws ? <RalphView workspace={ws} onError={setError} /> : null;
-    }
-    if (tab.kind === "repo") {
-      const scope = `@${tab.repo}`;
-      return (
-        <RepoPage
-          repo={tab.repo}
-          config={config}
-          workspaces={workspaces}
-          onOpenWorkspace={openWorkspaceTab}
-          onReviewFile={(path) => openTab({ kind: "review", workspace: scope, repo: tab.repo, path })}
-          onReviewCommit={(commit) => openTab({ kind: "commit", workspace: scope, repo: tab.repo, commit })}
-          onOpenPrList={(prs) => openTab({ kind: "pr", prs })}
-          onNewSession={(label, cmd) => newTerminal(scope, label, cmd)}
-          onOpenRalph={() => openTab({ kind: "ralph", workspace: scope })}
-          onNewWorkspace={() => setCreateWsFor(tab.repo)}
-          onChanged={refreshRepoBriefs}
-          onError={setError}
-        />
-      );
     }
     if (tab.kind === "review") {
       return (
@@ -868,6 +1045,7 @@ function App() {
         onError={setError}
         onStatusChange={(s) => setSessionStatus(tabId(tab), s)}
         onSignal={(sig) => onAgentSignal(tab.terminal, sig)}
+        active={activeTab === tabId(tab)}
       />
     );
   };
@@ -879,6 +1057,27 @@ function App() {
   };
 
   const renderMain = () => {
+    if (navPage.kind === "repo") {
+      const repo = navPage.repo;
+      const scope = `@${repo}`;
+      return (
+        <RepoPage
+          key={repo}
+          repo={repo}
+          config={config}
+          workspaces={workspaces}
+          onOpenWorkspace={openWorkspaceTab}
+          onReviewFile={(path) => openTab({ kind: "review", workspace: scope, repo, path })}
+          onReviewCommit={(commit) => openTab({ kind: "commit", workspace: scope, repo, commit })}
+          onOpenPrList={(prs) => openTab({ kind: "pr", prs })}
+          onNewSession={(label, cmd) => newTerminal(scope, label, cmd)}
+          onOpenRalph={() => openTab({ kind: "ralph", workspace: scope })}
+          onNewWorkspace={() => setCreateWsFor(repo)}
+          onChanged={refreshRepoBriefs}
+          onError={setError}
+        />
+      );
+    }
     if (navPage.kind === "reviews") {
       return (
         <CodeReviewPage
@@ -1070,7 +1269,7 @@ function App() {
                       if (!live.length) return null;
                       return <span className={`nav-unread ${live.includes("waiting") ? "nav-unread-waiting" : ""}`} />;
                     })()}
-                    {wsSessions.length > 0 && (
+                    {(wsSessions.length > 0 || recentOf(ws.name).length > 0) && (
                       <span
                         role="button"
                         tabIndex={0}
@@ -1091,7 +1290,12 @@ function App() {
                       </span>
                     )}
                   </button>
-                  {(wsExpanded[ws.name] ?? true) && wsSessions.map(renderSessionItem)}
+                  {(wsExpanded[ws.name] ?? true) && (
+                    <>
+                      {wsSessions.map(renderSessionItem)}
+                      {renderRecent(ws.name)}
+                    </>
+                  )}
                 </div>
               );
             })}
@@ -1101,7 +1305,7 @@ function App() {
             [...config.services]
               .sort((a, b) => a.name.localeCompare(b.name))
               .map((svc) => {
-                const id = `repo:${svc.name}`;
+                const onPage = !active && navPage.kind === "repo" && navPage.repo === svc.name;
                 const sessions = sessionsOf(`@${svc.name}`);
                 const unread = sessions.some((t) => unreadByTab.has(tabId(t)));
                 const b = repoBriefs[svc.name];
@@ -1120,8 +1324,8 @@ function App() {
                 return (
                   <div key={svc.name} className="nav-workspace">
                     <button
-                      className={`nav-item nav-ws ${activeTab === id ? "active" : ""}`}
-                      onClick={() => openRepoTab(svc.name)}
+                      className={`nav-item nav-ws ${onPage ? "active" : ""}`}
+                      onClick={() => openRepoPage(svc.name)}
                       onMouseEnter={(e) => tooltip.show(tip, e)}
                       onMouseLeave={() => tooltip.hide()}
                     >
@@ -1141,6 +1345,7 @@ function App() {
                       </span>
                     </button>
                     {sessions.map(renderSessionItem)}
+                    {renderRecent(`@${svc.name}`)}
                   </div>
                 );
               })}
@@ -1205,7 +1410,7 @@ function App() {
                 }
               }}
             >
-              {tabs.map((t) => {
+              {tabs.filter(isShown).map((t) => {
                 const id = tabId(t);
                 const label =
                   t.kind === "workspace"
@@ -1228,14 +1433,10 @@ function App() {
                             ? t.prs.length > 0
                               ? `#${t.prs[0].number}` + (t.prs.length > 1 ? ` (+${t.prs.length - 1})` : "")
                               : "PRs"
-                            : t.kind === "repo"
-                              ? t.repo
-                              : t.terminal.sessionName;
+                            : t.terminal.sessionName;
                 const icon =
                   t.kind === "workspace" ? (
                     <SatelliteIcon size={13} />
-                  ) : t.kind === "repo" ? (
-                    <RepoIcon size={13} />
                   ) : t.kind === "editor" ? (
                     <DocIcon size={13} />
                   ) : t.kind === "feature" ? (
@@ -1263,7 +1464,7 @@ function App() {
                     onMouseDown={(e) => {
                       if (e.button === 1) {
                         e.preventDefault();
-                        closeTab(id);
+                        dismissTab(id);
                       } else {
                         tabMenu.openFromEvent(e, t);
                       }
@@ -1299,9 +1500,10 @@ function App() {
                     {status && <StatusIndicator status={status} />}
                     <button
                       className="tab-close"
+                      title={isAgentTab(t) ? "Minimize (the session keeps running) — End session from the tab's menu" : "Close"}
                       onClick={(e) => {
                         e.stopPropagation();
-                        closeTab(id);
+                        dismissTab(id);
                       }}
                     >
                       ×
@@ -1379,6 +1581,14 @@ function App() {
           onClose={() => tabMenu.setMenu(null)}
         />
       )}
+      {sessionMenu.menu && (
+        <ContextMenu
+          x={sessionMenu.menu.x}
+          y={sessionMenu.menu.y}
+          items={sessionMenuItems(sessionMenu.menu.payload)}
+          onClose={() => sessionMenu.setMenu(null)}
+        />
+      )}
       {plusMenu && focusWorkspace && (
         <ContextMenu
           x={plusMenu.x}
@@ -1429,6 +1639,8 @@ function App() {
                 openTab({ kind: "review", workspace: focusWorkspace.name, repo, path });
               }}
               onOpenFind={() => setFindOpen(true)}
+              activeRepo={active?.kind === "editor" && active.repo ? active.repo : undefined}
+              browsing={active?.kind === "editor" && !active.path}
               onReviewCommit={(repo, commit) => {
                 setNavPage({ kind: "dashboard" });
                 openTab({ kind: "commit", workspace: focusWorkspace.name, repo, commit });

@@ -269,6 +269,20 @@ body {
   background: var(--accent);
 }
 
+/* Drag handle on a side panel's edge (review file lists). */
+.pane-resizer {
+  width: 5px;
+  margin: 0 -3px 0 -2px;
+  flex-shrink: 0;
+  cursor: col-resize;
+  z-index: 5;
+  transition: background var(--transition);
+}
+
+.pane-resizer:hover {
+  background: var(--accent);
+}
+
 .brand {
   font-weight: 700;
   font-size: 15px;
@@ -362,23 +376,27 @@ body {
   color: color-mix(in srgb, var(--info) 40%, var(--text));
 }
 
-/* Workspace rows in the sidebar read as tree headers, not buttons: no hover
-   background — only a subtle text lift. The chevron is the affordance.
-   !important beats the global `button:hover` blue fill. */
+/* Workspace and repo rows in the sidebar: a soft fill on hover (never the
+   global accent fill: !important beats `button:hover`), and the open one
+   gets the accent tint with a bar on its left edge. */
 .nav-ws:hover {
-  background: transparent !important;
+  background: var(--panel-hover) !important;
   color: var(--text);
 }
 
 .nav-ws:hover:active {
-  background: transparent !important;
   transform: none !important;
 }
 
-/* Selected workspace: text color marks it, not a filled pill */
-.nav-ws.active {
-  background: transparent !important;
-  color: color-mix(in srgb, var(--info) 40%, var(--text));
+.nav-ws.active,
+.nav-ws.active:hover {
+  background: var(--accent-soft) !important;
+  color: var(--text);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.nav-ws.active .nav-icon {
+  color: var(--accent);
 }
 
 /* Chevron: the one clearly interactive element on the workspace row —
@@ -628,7 +646,7 @@ button {
 
 /* Buttons default to control height unless they opt out
    (cards, links, rows, nav items, tree rows set their own) */
-button:not(.workspace-card):not(.nav-item):not(.modal-row):not(.link):not(.back-link):not(.chip):not(.tree-item):not(.dock-icon):not(.tab-close):not(.icon-button):not(.context-menu-item):not(.tab-plus):not(.mode-btn):not(.integration-card-row):not(.wizard-source-pill):not(.select-trigger):not(.select-option):not(.git-commit-row):not(.btn-mini):not(.orbit-check):not(.btn-plain) {
+button:not(.workspace-card):not(.nav-item):not(.modal-row):not(.link):not(.back-link):not(.chip):not(.tree-item):not(.dock-icon):not(.tab-close):not(.icon-button):not(.context-menu-item):not(.tab-plus):not(.mode-btn):not(.integration-card-row):not(.wizard-source-pill):not(.select-trigger):not(.select-option):not(.git-commit-row):not(.btn-mini):not(.orbit-check):not(.btn-plain):not(.btn-link) {
   height: var(--control-height);
 }
 
@@ -1359,6 +1377,39 @@ table.list tbody tr:hover .row-actions,
   font-size: 11px;
 }
 
+/* Minimized agent session: off the tab strip, still running. */
+.nav-sub-minimized .nav-item-label {
+  font-style: italic;
+  opacity: 0.75;
+}
+
+/* Ended agent sessions, resumable. */
+.nav-recent-label {
+  padding: 6px 12px 2px 30px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-faint);
+}
+.nav-sub-recent {
+  color: var(--text-faint) !important;
+}
+.nav-sub-recent:hover {
+  color: var(--text) !important;
+}
+.nav-recent-forget {
+  margin-left: auto;
+  padding: 0 4px;
+  opacity: 0;
+  color: var(--text-faint);
+}
+.nav-sub-recent:hover .nav-recent-forget {
+  opacity: 1;
+}
+.nav-recent-forget:hover {
+  color: var(--text);
+}
+
 .stats-row {
   display: flex;
   gap: 14px;
@@ -1498,11 +1549,19 @@ table.list tbody tr:hover .row-actions,
   width: 28px;
   height: 28px;
   padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   background: transparent;
   color: var(--text-dim);
   border: 1px solid var(--border-strong);
   border-radius: 6px;
   font-size: 14px;
+}
+
+/* Alone in an icon button (refresh while loading): no gap for a label. */
+.icon-button .spinner {
+  margin: 0;
 }
 
 .icon-button:hover:not(:disabled) {
@@ -4121,6 +4180,70 @@ button.cr-segment.on, button.cr-segment.on:hover:not(:disabled) { background: va
   color: var(--on-accent);
 }
 
+/* ---------- Commit modal: files + diff ---------- */
+
+.modal.commit-modal {
+  width: min(1180px, 94vw);
+  height: min(780px, 86vh);
+  max-height: none;
+}
+.commit-modal-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 18px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.commit-modal-head h3 { margin: 0 0 4px; }
+.commit-modal-body { flex: 1; min-height: 0; display: flex; }
+.commit-modal-list {
+  width: 380px;
+  flex-shrink: 0;
+  overflow-y: auto;
+  border-right: 1px solid var(--border);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.commit-modal-diff { flex: 1; min-width: 0; display: flex; background: var(--bg); }
+.commit-modal-empty { margin: auto; color: var(--text-faint); font-size: 12.5px; }
+.commit-modal-kbd { margin-right: auto; align-self: center; font-size: 11.5px; color: var(--text-faint); }
+
+.commit-repo {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-raised);
+}
+.commit-repo-done { opacity: 0.7; }
+.commit-repo-head { display: flex; align-items: center; gap: 7px; min-width: 0; }
+button.commit-repo-toggle { display: inline-flex; padding: 2px; color: var(--text-faint); }
+.commit-repo-name { font-size: 12.5px; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.commit-repo-count { font-size: 11px; color: var(--text-faint); white-space: nowrap; }
+.commit-repo-state { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-dim); white-space: nowrap; }
+.commit-repo-files { display: flex; flex-direction: column; gap: 1px; }
+.commit-file-skeleton { display: flex; flex-direction: column; gap: 6px; padding: 4px 6px; }
+.commit-file {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  padding: 3px 6px;
+  border-radius: 5px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.commit-file:hover { background: var(--panel-hover); }
+.commit-file.on { background: var(--accent-soft); }
+.commit-file .orbit-check { flex-shrink: 0; }
+.commit-repo-msg { min-height: 52px; }
+.commit-repo-done-msg { font-size: 12px; color: var(--text-dim); padding: 0 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 /* ---------- Commit modal cards ---------- */
 
 .ws-commit-card {
@@ -5009,6 +5132,10 @@ button.cr-segment.on, button.cr-segment.on:hover:not(:disabled) { background: va
 .ralph-extra textarea { min-height: 64px; }
 .ralph-prompt-edit textarea { width: 100%; min-height: 260px; font-size: 11px; }
 .btn-link { background: none; border: none; padding: 0; color: var(--accent); cursor: pointer; font-size: 12px; }
+/* A link, not a button: no accent fill on hover (it hid the text, which is
+   accent-colored too), no press scale. */
+button.btn-link:hover:not(:disabled) { background: none; color: var(--accent-hover); text-decoration: underline; }
+button.btn-link:active:not(:disabled) { transform: none; }
 
 .muted { color: var(--text-faint); font-size: 12px; margin: 0 0 12px; }
 
@@ -5433,9 +5560,12 @@ button.theme-card.on { border-color: var(--accent); box-shadow: 0 0 0 1px var(--
 .ws-badge-merged { color: var(--purple); font-weight: 600; }
 .ws-feature-size { display: inline-flex; align-items: center; gap: 8px; margin-right: 4px; font-size: 11.5px; color: var(--text-faint); }
 .flow-actions > span { display: inline-flex; }
+.artifact-size { font-size: 11.5px; color: var(--text-faint); margin-right: 4px; }
+.artifact-build { color: var(--accent); }
+button.artifact-more { margin-top: 8px; }
 button.ws-badge { width: auto; height: auto; font-weight: 600; cursor: pointer; }
 button.ws-badge:hover:not(:disabled) { border-color: currentColor; }
-.ws-repo-open { font-size: 12px; color: var(--text-faint); opacity: 0; transition: opacity var(--transition); }
+.ws-repo-open { font-size: 12px; color: var(--text-faint); opacity: 0; transition: opacity var(--transition); white-space: nowrap; margin-right: 4px; }
 .ws-repo-row:hover .ws-repo-open { opacity: 1; color: var(--accent); }
 .modal-row-check .orbit-check { margin-right: 2px; }
 
@@ -6152,6 +6282,8 @@ button.lsp-chip-restart:hover:not(:disabled) { color: var(--text); }
 
 /* ---------- Repository view ---------- */
 .repo-page { padding: 24px 36px; }
+/* As a page (sidebar → repo) the page wrapper already pads it. */
+.nav-page > .repo-page { padding: 0; }
 .repo-title { display: flex; align-items: center; gap: 10px; }
 .repo-title svg { color: var(--text-dim); }
 .repo-gh-link { display: inline-flex; align-items: center; gap: 6px; }

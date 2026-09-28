@@ -252,6 +252,58 @@ pub fn claude_session_exists(workspace: String, session_id: String) -> bool {
         .exists()
 }
 
+/// The opencode session a terminal tab started: the latest one in the tab's
+/// folder created since `since_ms` (the tab's launch), so it can be resumed
+/// with `opencode --session <id>` after the tab is closed.
+#[tauri::command]
+pub async fn opencode_session_id(workspace: String, repo: Option<String>, since_ms: u64) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let cwd = match repo.filter(|r| !r.is_empty()) {
+            Some(r) => crate::workspace::repo_path(&workspace, &r)?,
+            None => crate::workspace::scope_dir(&workspace)?,
+        };
+        let out = crate::proc::cmd("opencode")
+            .args(["session", "list", "--format", "json", "-n", "50"])
+            .current_dir(&cwd)
+            .env("PWD", &cwd)
+            .output()
+            .map_err(|e| format!("failed to run opencode: {e}"))?;
+        let list: Vec<serde_json::Value> = serde_json::from_slice(&out.stdout).unwrap_or_default();
+        Ok(pick_opencode_session(&list, &cwd.to_string_lossy(), since_ms))
+    })
+    .await
+    .map_err(|e| format!("background task failed: {e}"))?
+}
+
+/// Latest-updated session in `dir` created at or after `since_ms` (with a
+/// little slack for the tab's clock read vs opencode's).
+fn pick_opencode_session(list: &[serde_json::Value], dir: &str, since_ms: u64) -> Option<String> {
+    let norm = |p: &str| p.trim_end_matches(['/', '\\']).to_string();
+    let dir = norm(dir);
+    list.iter()
+        .filter(|s| s.get("directory").and_then(|d| d.as_str()).map(norm).as_deref() == Some(dir.as_str()))
+        .filter(|s| s.get("created").and_then(|c| c.as_u64()).unwrap_or(0) + 5_000 >= since_ms)
+        .max_by_key(|s| s.get("updated").and_then(|u| u.as_u64()).unwrap_or(0))
+        .and_then(|s| s.get("id").and_then(|i| i.as_str()).map(String::from))
+}
+
+#[cfg(test)]
+mod opencode_tests {
+    use super::pick_opencode_session;
+    use serde_json::json;
+
+    #[test]
+    fn picks_the_tabs_session_in_its_folder() {
+        let list = vec![
+            json!({"id": "old", "directory": "/w/a", "created": 1_000, "updated": 9_000}),
+            json!({"id": "other-dir", "directory": "/w/b", "created": 20_000, "updated": 30_000}),
+            json!({"id": "mine", "directory": "/w/a/", "created": 20_000, "updated": 25_000}),
+        ];
+        assert_eq!(pick_opencode_session(&list, "/w/a", 19_000).as_deref(), Some("mine"));
+        assert_eq!(pick_opencode_session(&list, "/w/c", 0), None);
+    }
+}
+
 fn is_claude(cmd: &str) -> bool {
     let name = std::path::Path::new(cmd.trim()).file_stem().map(|s| s.to_string_lossy().to_lowercase());
     name.as_deref() == Some("claude")

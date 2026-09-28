@@ -16,6 +16,7 @@ import {
 } from "../types/config";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { CheckBox } from "../components/CheckBox";
+import { ArtifactSource, ArtifactsSection } from "../components/ArtifactsSection";
 import { Skeleton } from "../components/Skeleton";
 import { PlanModal } from "../components/PlanModal";
 import { GrillModal } from "../components/GrillModal";
@@ -83,6 +84,8 @@ export function WorkspaceDetailPage({
   const [wsChecks, setWsChecks] = useState<WsCheck[] | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null); // "repo/number"
   const [investigatingAll, setInvestigatingAll] = useState(false);
+  // Where CI builds live: each repo's GitHub name + the branch it's on.
+  const [artifactSources, setArtifactSources] = useState<ArtifactSource[]>([]);
   const [investigation, setInvestigation] = useState<null | {
     repo: string;
     check: PrCheck;
@@ -166,6 +169,20 @@ export function WorkspaceDetailPage({
     }
   };
 
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all(
+      workspace.repos.map((repo) =>
+        invoke<string>("ws_owner_repo", { workspace: workspace.name, repo })
+          .then((ownerRepo) => ({ repo, ownerRepo, branch: workspace.branch }))
+          .catch(() => null)
+      )
+    ).then((list) => !cancelled && setArtifactSources(list.filter((s): s is ArtifactSource => !!s)));
+    return () => {
+      cancelled = true;
+    };
+  }, [workspace.name, workspace.repos, workspace.branch]);
+
   // Entering the page: local status right away, then fetch the remotes so
   // ahead/behind, PRs and checks are current. While the page stays open
   // (and the window is visible), refresh the same way every minute.
@@ -210,9 +227,17 @@ export function WorkspaceDetailPage({
   };
 
   const dirtyCount = (statuses ?? []).filter((s) => s.dirty).length;
+  // Repos whose PRs were all closed without merging: dropped from the
+  // feature (often with the branch deleted on GitHub). Push leaves them out,
+  // or it would recreate that branch; the push dialog can still do it.
+  const droppedPrs = new Map<string, WsPrStatus>();
+  for (const repo of workspace.repos) {
+    const prs = (prStatuses ?? []).filter((p) => p.repo === repo);
+    if (prs.length && prs.every((p) => p.state === "CLOSED")) droppedPrs.set(repo, prs[0]);
+  }
   // Squash-merged repos keep local commits no remote has; they need no push
   // (pushing would even recreate the deleted branch).
-  const pushRepos = (statuses ?? []).filter((s) => !s.integrated);
+  const pushRepos = (statuses ?? []).filter((s) => !s.integrated && !droppedPrs.has(s.repo));
   const aheadCount = pushRepos.reduce((a, s) => a + s.ahead, 0);
   const pushedContent = (statuses ?? []).some((s) => s.prCommits > 0);
   const openPrs = (prStatuses ?? []).filter((p) => p.state === "OPEN");
@@ -293,8 +318,9 @@ export function WorkspaceDetailPage({
       key: "push",
       icon: <PushIcon size={15} />,
       title: "Push",
-      state: loadingStatus ? "loading" : aheadCount > 0 ? "action" : pushedContent || landed ? "done" : "idle",
-      detail: loadingStatus
+      // Waits for the PRs too: they decide which repos were dropped.
+      state: loadingStatus || prStatuses === null ? "loading" : aheadCount > 0 ? "action" : pushedContent || landed ? "done" : "idle",
+      detail: loadingStatus || prStatuses === null
         ? "Checking…"
         : aheadCount > 0
           ? `${aheadCount} commit${aheadCount === 1 ? "" : "s"} to push`
@@ -527,7 +553,17 @@ export function WorkspaceDetailPage({
                     <span className="repo-name">{st.repo}</span>
                     <span className="repo-sub">{st.branch ?? "no branch"}</span>
                   </div>
+                  {/* Before the badges: they stay flush right, hover or not. */}
+                  <span className="ws-repo-open">Browse files →</span>
                   <div className="ws-repo-badges">
+                    {droppedPrs.has(st.repo) && (
+                      <span
+                        className="ws-badge"
+                        {...hint(`PR #${droppedPrs.get(st.repo)!.number} was closed without merging: Push leaves this repo out`)}
+                      >
+                        PR closed
+                      </span>
+                    )}
                     {st.offBranch && (
                       <span
                         className="ws-badge ws-badge-warn"
@@ -575,7 +611,6 @@ export function WorkspaceDetailPage({
                         </span>
                       ))}
                   </div>
-                  <span className="ws-repo-open">Browse files →</span>
                 </div>
               ))}
         </div>
@@ -717,6 +752,8 @@ export function WorkspaceDetailPage({
         )}
       </section>
 
+      <ArtifactsSection sources={artifactSources} folder={workspace.name} onError={onError} />
+
       {addressing && (
         <AddressReviewModal
           workspace={workspace.name}
@@ -755,7 +792,8 @@ export function WorkspaceDetailPage({
       {pushOpen && (
         <PushModal
           workspace={workspace.name}
-          repos={statuses ? pushRepos.map((s) => s.repo) : workspace.repos}
+          repos={pushRepos.filter((s) => s.ahead > 0).map((s) => s.repo)}
+          skipped={[...droppedPrs].map(([repo, pr]) => ({ repo, reason: `PR #${pr.number} was closed without merging` }))}
           onCreatePrs={() => {
             setPushOpen(false);
             setPrCreateOpen(true);
