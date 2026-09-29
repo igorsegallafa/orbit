@@ -60,3 +60,7 @@ npm run tauri build   # installers in src-tauri/target/release/bundle
 Publishing a GitHub release tagged `vX.Y.Z` builds the Windows installers and the macOS (Apple Silicon) app and dmg, plus the updater manifest (`latest.json`) covering both, and attaches them to the release (`.github/workflows/release.yml`). macOS builds are ad-hoc signed; to sign with a Developer ID and notarize, add the `APPLE_*` secrets Tauri documents and pass them to the `tauri-action` step. The tag is the version; nothing needs bumping in the code.
 
 Updates are signed: the workflow needs the `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` secrets, matching the public key in `src-tauri/tauri.conf.json`.
+
+## License
+
+[MIT](LICENSE)
