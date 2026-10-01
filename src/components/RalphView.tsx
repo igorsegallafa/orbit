@@ -324,6 +324,7 @@ export function RalphView({ workspace, onRunFinished, onError, onOpenPlan, onPla
               <div className="rv-stats">
                 <Stat value={`${passed}/${total}`} label={noun === "task" ? "tasks" : "stories"} />
                 {last && <Stat value={String(last.commits)} label={last.commits === 1 ? "commit" : "commits"} />}
+                {last?.model && <Stat value={last.model} label="model" />}
                 {last && last.costUsd > 0 && <Stat value={`$${last.costUsd.toFixed(2)}`} label="cost" />}
                 {last && <Stat value={formatDuration(((last.finishedAt ?? now) - last.startedAt) * 1000)} label="time" />}
               </div>
@@ -718,6 +719,8 @@ function FeedLine({ ev }: { ev: RalphEvent }) {
           Run started with {ev.agent} · {ev.model}
         </div>
       );
+    case "model":
+      return <div className="rv-line rv-event">Agent is running {ev.model}</div>;
     case "stopped":
       return (
         <div className={`rv-line rv-event ${ev.reason?.kind === "complete" ? "rv-event-ok" : ""}`}>

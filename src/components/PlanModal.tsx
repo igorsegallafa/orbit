@@ -467,7 +467,9 @@ export function PlanModal({ workspace, card, planExists, onPlanReady, onPlanInTe
             </>
           )}
           {phase === "summary" && (
-            <button type="button" onClick={() => draft(summary ?? "")}>
+            // The summary alone drops the nuance of each answer: the drafter
+            // gets the full interview too.
+            <button type="button" onClick={() => draft(`${summary ?? ""}\n\nFull interview:\n${asSummary(answers)}`)}>
               Draft the plan
             </button>
           )}

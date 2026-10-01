@@ -3449,11 +3449,9 @@ button.plan-choice-main:hover:not(:disabled) { border-color: var(--accent); }
   line-height: 1.45;
 }
 
-.plan-task input[type="checkbox"] {
-  margin: 2px 0 0;
-  flex-shrink: 0;
-  accent-color: var(--accent);
-  cursor: pointer;
+/* 16px box centred on the first 18px text line, so wrapped tasks stay aligned. */
+.plan-task .orbit-check {
+  margin-top: 1px;
 }
 
 .plan-task-done .plan-task-text {

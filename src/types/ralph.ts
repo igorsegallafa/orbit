@@ -50,6 +50,7 @@ export interface RalphEvent {
     | "iteration_end"
     | "push"
     | "limit_wait"
+    | "model"
     | "stopped";
   ts: number;
   [field: string]: any;
@@ -69,6 +70,8 @@ export interface RunState {
   commits: number;
   costUsd: number;
   limitUntil: number | null;
+  /** The model the agent reported running (absent on runs from older builds). */
+  model?: string | null;
   config: RunConfig;
   events: RalphEvent[];
 }

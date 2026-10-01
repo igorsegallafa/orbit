@@ -101,7 +101,7 @@ pub fn run_live(
                             session = Some(id);
                         }
                     }
-                    Event::Cost { .. } => {}
+                    Event::Cost { .. } | Event::Model { .. } => {}
                 }
             }
         }

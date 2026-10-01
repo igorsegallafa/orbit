@@ -22,6 +22,9 @@ export function applyEvent(run: RunState, ev: RalphEvent): RunState {
     case "limit_wait":
       next.limitUntil = ev.until;
       break;
+    case "model":
+      next.model = ev.model;
+      break;
     case "stopped":
       next.running = false;
       next.finishedAt = ev.ts;

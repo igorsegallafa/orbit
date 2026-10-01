@@ -259,6 +259,7 @@ impl RalphEnv for PlanEnv {
                             record(&app, &key, json!({"kind": "tool", "name": name, "summary": summary}), |_| {})
                         }
                         Event::Cost { usd } => step_cost += usd,
+                        Event::Model { name } => super::record_model(&app, &key, &name),
                         Event::Session { .. } => {}
                     }
                 }
@@ -452,6 +453,7 @@ pub fn start(app: AppHandle, workspace: String, config: RunConfig) -> Result<(),
                 commits: 0,
                 cost_usd: 0.0,
                 limit_until: None,
+                model: None,
                 config: config.clone(),
                 events: VecDeque::new(),
                 stop: false,
