@@ -23,6 +23,9 @@ pub enum Event {
     },
     /// The conversation id to resume with (`--resume` / `--session`).
     Session { id: String },
+    /// Claude: the model the CLI resolved and actually runs (its init line),
+    /// which can differ from the alias Orbit asked for.
+    Model { name: String },
     /// OpenCode: cost of one step (Claude reports it in its Result).
     Cost { usd: f64 },
 }
@@ -35,11 +38,14 @@ pub fn parse_line(line: &str) -> Vec<Event> {
         return opencode(&v);
     }
     match v.get("type").and_then(Value::as_str) {
-        Some("system") => v
-            .get("session_id")
-            .and_then(Value::as_str)
-            .map(|id| vec![Event::Session { id: id.to_string() }])
-            .unwrap_or_default(),
+        Some("system") => {
+            let mut out: Vec<Event> =
+                v.get("session_id").and_then(Value::as_str).map(|id| Event::Session { id: id.to_string() }).into_iter().collect();
+            if let Some(name) = v.get("model").and_then(Value::as_str).filter(|m| !m.is_empty()) {
+                out.push(Event::Model { name: name.to_string() });
+            }
+            out
+        }
         Some("assistant") => v
             .pointer("/message/content")
             .and_then(Value::as_array)
@@ -173,6 +179,8 @@ mod tests {
         );
         let s = r#"{"type":"system","subtype":"init","session_id":"abc-123"}"#;
         assert_eq!(parse_line(s), vec![Event::Session { id: "abc-123".into() }]);
+        let m = r#"{"type":"system","subtype":"init","session_id":"abc-123","model":"claude-opus-5-5"}"#;
+        assert_eq!(parse_line(m), vec![Event::Session { id: "abc-123".into() }, Event::Model { name: "claude-opus-5-5".into() }]);
     }
 
     #[test]

@@ -90,7 +90,7 @@ You are an autonomous coding agent implementing ONE task of a feature plan. You 
 1. Read the progress log at `{progress_path}` (check `Codebase Patterns` first): what earlier tasks learned.
 2. Stay on the current branch `{branch}`. Do **not** create, switch or rename branches.
 3. Implement this task, and only this task. Follow existing code patterns; keep changes focused.
-4. Run the checks its acceptance criteria name, plus this repo's typecheck / lint / tests when it has them. Prefer an existing project script for them. Fix what fails.
+4. Run the checks its acceptance criteria name, plus this repo's typecheck / lint / tests when it has them. Prefer an existing project script for them. Fix what fails. Validate through those checks: launch the app or take screenshots only when the task changes something visible that no check covers, and then at most 3-5 screenshots (each one stays in your context and makes every later step slower and costlier).
 5. Update AGENTS.md/CLAUDE.md files if you discover reusable patterns (see below).
 6. When the criteria pass, commit ALL your changes in this repository with message: `feat: [{task_id}] - {task_title}`. Do not add `Co-Authored-By` or any AI attribution trailer.
 7. Append your progress to `{progress_path}` (format below).

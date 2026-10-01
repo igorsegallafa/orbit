@@ -69,6 +69,9 @@ pub struct RunState {
     pub commits: u32,
     pub cost_usd: f64,
     pub limit_until: Option<u64>,
+    /// The model the agent reported running (Claude's init line), latest
+    /// iteration: proof of what ran, not just what was asked for.
+    pub model: Option<String>,
     pub config: RunConfig,
     pub events: VecDeque<Value>,
     #[serde(skip)]
@@ -152,6 +155,15 @@ fn record(app: &AppHandle, key: &str, mut ev: Value, update: impl FnOnce(&mut Ru
         let _ = writeln!(f, "{ev}");
     }
     let _ = app.emit("ralph-event", json!({ "key": key, "event": ev }));
+}
+
+/// The model an iteration's agent reported; an event only when it changes,
+/// so the feed shows it once per run (and again if it ever switches).
+fn record_model(app: &AppHandle, key: &str, name: &str) {
+    if snapshot(key).is_some_and(|s| s.model.as_deref() == Some(name)) {
+        return;
+    }
+    record(app, key, json!({"kind": "model", "model": name}), |st| st.model = Some(name.to_string()));
 }
 
 fn snapshot(key: &str) -> Option<RunState> {
@@ -276,6 +288,7 @@ impl RalphEnv for RealEnv {
                             let summary = relativize(summary, &root);
                             record(&app, &key, json!({"kind": "tool", "name": name, "summary": summary}), |_| {})
                         }
+                        Event::Model { name } => record_model(&app, &key, name),
                         Event::Session { .. } | Event::Cost { .. } | Event::Thinking { .. } => {}
                     }
                 }
@@ -608,6 +621,7 @@ pub async fn ralph_start(app: AppHandle, workspace: String, repo: String, config
                 commits: 0,
                 cost_usd: 0.0,
                 limit_until: None,
+                model: None,
                 config: config.clone(),
                 events: VecDeque::new(),
                 stop: false,

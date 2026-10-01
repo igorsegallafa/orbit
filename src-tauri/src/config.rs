@@ -185,7 +185,7 @@ fn default_agent() -> String {
     "claude".into()
 }
 fn default_model() -> String {
-    "claude-sonnet-5".into()
+    "claude-sonnet-5-5".into()
 }
 
 impl AiSettings {

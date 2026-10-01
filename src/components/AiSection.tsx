@@ -53,7 +53,7 @@ export function AiSection({ onError }: Props) {
         ? "aihub/aihub/best"
         : agent === "omp"
           ? "aihub/glm-5.3"
-          : "claude-sonnet-5";
+          : "claude-sonnet-5-5";
     const next = { agent, model: first, fast_model: null };
     setAi(next);
     invoke("set_ai_settings", { ai: next }).catch((e) => onError(String(e)));
@@ -128,8 +128,9 @@ export function AiSection({ onError }: Props) {
               <Skeleton w="100%" h={34} />
             ) : (
               <Select
-                value={models.includes(ai.model) ? ai.model : models[0] ?? ai.model}
-                options={models.map((m) => ({ value: m, label: m }))}
+                value={ai.model}
+                // The saved model stays visible even when the list doesn't carry it.
+                options={(models.includes(ai.model) ? models : [ai.model, ...models]).map((m) => ({ value: m, label: m }))}
                 onChange={changeModel}
                 searchable
               />

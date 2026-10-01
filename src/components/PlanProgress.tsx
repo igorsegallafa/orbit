@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { CheckBox } from "./CheckBox";
 
 interface PlanTask {
   text: string;
@@ -88,11 +89,7 @@ export function PlanProgress({ workspace, refreshKey, onOpenPlan, onRunRalph, on
       <div className="plan-tasks">
         {tasks.map((t, i) => (
           <label key={i} className={`plan-task ${t.done ? "plan-task-done" : ""}`}>
-            <input
-              type="checkbox"
-              checked={t.done}
-              onChange={(e) => toggle(i, e.target.checked)}
-            />
+            <CheckBox checked={t.done} onChange={(next) => toggle(i, next)} label={t.text} />
             <span className="plan-task-text">{t.text}</span>
           </label>
         ))}

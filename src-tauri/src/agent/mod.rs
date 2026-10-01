@@ -141,9 +141,16 @@ pub fn default_models(agent: &str) -> Vec<String> {
             "aihub/aihub/cheap".into(),
             "aihub/aihub/balanced".into(),
         ],
+        // `claude` has no model listing: the aliases always resolve to the
+        // newest release, the pinned ids follow for reproducible runs.
         _ => vec![
-            "claude-sonnet-5".into(),
+            "opus".into(),
+            "sonnet".into(),
+            "claude-opus-5-5".into(),
+            "claude-sonnet-5-5".into(),
+            "claude-fable-5-1".into(),
             "claude-opus-5".into(),
+            "claude-sonnet-5".into(),
             "claude-haiku-4-5".into(),
         ],
     }
