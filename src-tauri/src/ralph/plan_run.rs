@@ -22,6 +22,13 @@ use tauri::AppHandle;
 pub const PLAN_REPO: &str = "plan";
 const DONE_MARK: &str = "<task-done/>";
 
+/// The reason inside the agent's `<task-blocked>…</task-blocked>`, if it gave one.
+fn blocked_reason(text: &str) -> Option<String> {
+    let rest = &text[text.rfind("<task-blocked>")? + "<task-blocked>".len()..];
+    let reason = rest.split("</task-blocked>").next().unwrap_or(rest).trim();
+    Some(if reason.is_empty() { "the agent gave no reason".to_string() } else { reason.chars().take(1200).collect() })
+}
+
 /// Claude's closing result: text, is_error, cost, duration ms, turns.
 type RunResult = (String, bool, Option<f64>, Option<u64>, Option<u64>);
 
@@ -310,6 +317,11 @@ impl RalphEnv for PlanEnv {
         if iteration == Iteration::Done && total > 0 && passed == total {
             iteration = Iteration::Complete;
         }
+        if iteration == Iteration::Done && !full.contains(DONE_MARK) {
+            if let Some(why) = blocked_reason(&full) {
+                iteration = Iteration::Blocked(format!("{}: {why}", task.id));
+            }
+        }
         record(
             &self.app,
             &self.key,
@@ -516,5 +528,12 @@ mod tests {
         let problems = unknown_repos(&[item("T3", "api", false), item("T4", "api", true), item("T5", "", false)], &repos);
         assert_eq!(problems.len(), 2);
         assert!(problems[0].contains("T3") && problems[1].contains("T5"));
+    }
+
+    #[test]
+    fn reads_the_blocked_reason() {
+        assert_eq!(blocked_reason("notes\n<task-blocked>\ncriterion 2 can't pass: (a) relax it (b) drop it\n</task-blocked>").as_deref(), Some("criterion 2 can't pass: (a) relax it (b) drop it"));
+        assert_eq!(blocked_reason("<task-blocked>cut off").as_deref(), Some("cut off"));
+        assert_eq!(blocked_reason("all good\n<task-done/>"), None);
     }
 }

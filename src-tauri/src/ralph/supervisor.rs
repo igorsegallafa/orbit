@@ -45,6 +45,8 @@ pub enum Iteration {
     Limit,
     /// Agent exited with an error.
     Failed(String),
+    /// Agent says the task can't be closed without a human decision.
+    Blocked(String),
     /// Stopped by the user mid-iteration.
     Cancelled,
 }
@@ -59,6 +61,7 @@ pub enum StopReason {
     Limit,
     Deadline,
     Failed(String),
+    Blocked(String),
     Stopped,
     Paused,
 }
@@ -119,6 +122,9 @@ pub fn supervise(limits: &Limits, env: &mut impl RalphEnv) -> Summary {
                 }
                 continue;
             }
+            // Retrying can't unblock it: another attempt reads the same
+            // criteria and gives the same answer.
+            Iteration::Blocked(why) => return done(StopReason::Blocked(why), iterations + 1, limit_waits),
             _ => {}
         }
         iterations += 1;
@@ -293,6 +299,14 @@ mod tests {
         let fail = || (Iteration::Failed("boom".into()), true);
         let mut f = Fake::new(vec![fail(), fail(), fail()]);
         assert_eq!(supervise(&limits(), &mut f).reason, StopReason::Failed("boom".into()));
+    }
+
+    #[test]
+    fn a_blocked_task_stops_the_run_at_once() {
+        let mut f = Fake::new(vec![(Iteration::Done, true), (Iteration::Blocked("needs a decision".into()), false)]);
+        let l = Limits { stall_after: 5000, until_complete: true, ..limits() };
+        let s = supervise(&l, &mut f);
+        assert_eq!((s.reason, s.iterations), (StopReason::Blocked("needs a decision".into()), 2));
     }
 
     #[test]

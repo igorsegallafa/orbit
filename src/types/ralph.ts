@@ -35,7 +35,8 @@ export interface RunConfig {
 export type StopReason =
   | { kind: "complete" | "maxIterations" | "stalled" | "limit" | "deadline" | "stopped" | "paused" }
   | { kind: "storyReached"; detail: string }
-  | { kind: "failed"; detail: string };
+  | { kind: "failed"; detail: string }
+  | { kind: "blocked"; detail: string };
 
 /** One entry of the live feed (`ralph-event`). */
 export interface RalphEvent {
@@ -106,6 +107,8 @@ export function reasonLabel(r: StopReason | null): string {
       return "Time budget used";
     case "failed":
       return `Failed: ${r.detail}`;
+    case "blocked":
+      return `Blocked, needs your decision. ${r.detail}`;
     case "stopped":
       return "Stopped";
     case "paused":

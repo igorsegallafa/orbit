@@ -105,7 +105,11 @@ Rules for the tasks:
 - Each task fits ONE focused agent session: if it touches many files or can't be described in 2-3 lines, split it.
 - Order by dependency (data/schema → backend → API → UI); a task never depends on a later one.
 - Each task names exactly one repository from the list, spelled as listed.
-- "Accept" lists checks anyone can verify: a command that passes (the repo's typecheck/lint/tests when it has them), an endpoint returning X, a screen showing Y. Never "works correctly".
+- "Accept" lists checks the agent implementing the task runs itself, unattended, on this machine: a command that passes (the repo's typecheck/lint/tests when it has them), an endpoint returning X, a screen showing Y. Never "works correctly".
+- No "Accept" check may need what that agent doesn't have: another operating system or device, a CI job (it only runs after a push or a pull request), credentials or an account nobody created yet, or a person doing a step. A task for another platform is accepted on this machine's build and tests staying green. What only a person can check goes in one Context bullet as manual verification after Ralph, never in "Accept".
+- Leave no decision open inside a task: when it needs a value or a place still undecided (an id, a key, where a setting lives), ask in the interview or name a default in the task.
+- Every "Accept" check must be reachable whatever the task finds out. When the cause of a bug is still a hypothesis, never require a metric to improve or a bug to reproduce: require the measurement to be recorded and the metric not to get worse, and say what closes the task when the hypothesis turns out wrong. A threshold on a noisy measurement (timings, image diffs) names how it is judged: against a measured noise floor, or the median of N runs.
+- Ralph closes a task on a commit in its repository: a task whose output is a note, a measurement or a file in an ignored folder also names a tracked file to change.
 - Explore the code first: no task for what already exists; reference real paths."#,
         title = ctx.title,
         card_line = ctx.card_line,

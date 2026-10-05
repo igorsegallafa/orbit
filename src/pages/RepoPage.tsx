@@ -114,6 +114,7 @@ export function RepoPage({
   const [sessionMenu, setSessionMenu] = useState<{ x: number; y: number } | null>(null);
   const [branchFilter, setBranchFilter] = useState("");
   const [showRemote, setShowRemote] = useState(false);
+  const [showStale, setShowStale] = useState(false);
   const [historyTab, setHistoryTab] = useState<"history" | "compare">("history");
   const [compareWith, setCompareWith] = useState<string | null>(null);
   const [comparison, setComparison] = useState<Comparison | null>(null);
@@ -195,7 +196,11 @@ export function RepoPage({
   const holder =
     service?.worktree === false ? repoWorkspaces.find((w) => w.branch === branch && !w.variant_of) : undefined;
   const otherWorktrees = (ov?.worktrees ?? []).filter((w) => !w.main && !w.workspace);
-  const locals = (ov?.branches ?? []).filter((b) => !b.remoteOnly);
+  // Branches deleted on origin (PR most likely merged) fold away like the
+  // origin-only ones, unless checked out here or in a worktree.
+  const isStale = (b: BranchInfo) => b.gone && !b.current && !b.worktree;
+  const locals = (ov?.branches ?? []).filter((b) => !b.remoteOnly && !isStale(b));
+  const stale = (ov?.branches ?? []).filter((b) => !b.remoteOnly && isStale(b));
   const remotes = (ov?.branches ?? []).filter((b) => b.remoteOnly);
   const filterText = branchFilter.trim().toLowerCase();
   const matches = (b: BranchInfo) => !filterText || b.name.toLowerCase().includes(filterText);
@@ -811,6 +816,22 @@ export function RepoPage({
                     }}
                   />
                 ))}
+                {stale.length > 0 && (
+                  <button className="btn-plain repo-remote-toggle" onClick={() => setShowStale((s) => !s)}>
+                    <ChevronIcon size={10} /> {showStale ? "Hide" : "Show"} {stale.length} branch{stale.length === 1 ? "" : "es"} deleted on origin
+                  </button>
+                )}
+                {(showStale || filterText) &&
+                  stale.filter(matches).map((b) => (
+                    <BranchRow
+                      key={`g:${b.name}`}
+                      b={b}
+                      owner={null}
+                      busy={busy !== null}
+                      onSwitch={() => requestSwitch(b.name)}
+                      onDelete={() => deleteBranch(b)}
+                    />
+                  ))}
                 {remotes.length > 0 && (
                   <button className="btn-plain repo-remote-toggle" onClick={() => setShowRemote((s) => !s)}>
                     <ChevronIcon size={10} /> {showRemote ? "Hide" : "Show"} {remotes.length} branch{remotes.length === 1 ? "" : "es"} only on origin
