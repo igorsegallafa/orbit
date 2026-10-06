@@ -825,7 +825,6 @@ struct GhPrView {
     body: Option<String>,
     additions: u64,
     deletions: u64,
-    files: Option<Vec<GhViewFile>>,
     #[serde(rename = "headRefOid")]
     head_sha: String,
     #[serde(rename = "baseRefOid")]
@@ -839,6 +838,25 @@ struct GhViewFile {
     deletions: Option<u64>,
 }
 
+/// Every changed file of a PR: `gh pr view --json files` stops at 100, the REST listing pages through
+/// all of them (GitHub itself stops at 3000).
+fn pr_files(owner_repo: &str, number: u64) -> Result<Vec<PrFile>, String> {
+    let endpoint = format!("repos/{owner_repo}/pulls/{number}/files?per_page=100");
+    let out = run_gh(&["api", "--paginate", &endpoint, "--jq", ".[] | {path: .filename, additions, deletions}"])?;
+    parse_pr_files(&out)
+}
+
+fn parse_pr_files(out: &[u8]) -> Result<Vec<PrFile>, String> {
+    String::from_utf8_lossy(out)
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            let f: GhViewFile = serde_json::from_str(l).map_err(|e| format!("failed to parse pr files: {e}"))?;
+            Ok(PrFile { path: f.path, additions: f.additions.unwrap_or(0), deletions: f.deletions.unwrap_or(0) })
+        })
+        .collect()
+}
+
 /// PR metadata + changed files list.
 pub fn pr_detail(owner_repo: &str, number: u64) -> Result<PrDetail, String> {
     let out = run_gh(&[
@@ -848,7 +866,7 @@ pub fn pr_detail(owner_repo: &str, number: u64) -> Result<PrDetail, String> {
         owner_repo,
         &number.to_string(),
         "--json",
-        "title,author,url,headRefName,baseRefName,body,additions,deletions,files,headRefOid,baseRefOid",
+        "title,author,url,headRefName,baseRefName,body,additions,deletions,headRefOid,baseRefOid",
     ])?;
     let v: GhPrView =
         serde_json::from_slice(&out).map_err(|e| format!("failed to parse pr view: {e}"))?;
@@ -861,16 +879,7 @@ pub fn pr_detail(owner_repo: &str, number: u64) -> Result<PrDetail, String> {
         body: v.body.unwrap_or_default(),
         additions: v.additions,
         deletions: v.deletions,
-        files: v
-            .files
-            .unwrap_or_default()
-            .into_iter()
-            .map(|f| PrFile {
-                path: f.path,
-                additions: f.additions.unwrap_or(0),
-                deletions: f.deletions.unwrap_or(0),
-            })
-            .collect(),
+        files: pr_files(owner_repo, number)?,
         head_sha: v.head_sha,
         base_sha: v.base_sha,
     })
@@ -1020,10 +1029,18 @@ mod tests {
     fn pr_view_shape_parses_gh_output() {
         // Simulate `gh pr view --json` output including the exact field set
         // pr_detail requests.
-        let sample = r#"{"title":"t","author":{"login":"me"},"url":"u","headRefName":"b","baseRefName":"main","body":null,"additions":3,"deletions":1,"files":[{"path":"go.mod","additions":3,"deletions":9}],"headRefOid":"abc","baseRefOid":"def"}"#;
+        let sample = r#"{"title":"t","author":{"login":"me"},"url":"u","headRefName":"b","baseRefName":"main","body":null,"additions":3,"deletions":1,"headRefOid":"abc","baseRefOid":"def"}"#;
         let v: GhPrView = serde_json::from_str(sample).expect("should parse pr view json");
         assert_eq!(v.head_sha, "abc");
-        assert_eq!(v.files.unwrap()[0].path, "go.mod");
+    }
+
+    #[test]
+    fn pr_files_parse_one_json_line_per_file() {
+        let out = b"{\"path\":\"go.mod\",\"additions\":3,\"deletions\":9}\n{\"path\":\"a.rs\",\"additions\":null,\"deletions\":1}\n";
+        let files = parse_pr_files(out).expect("should parse jq lines");
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].path, "go.mod");
+        assert_eq!(files[1].additions, 0);
     }
 
     #[test]
