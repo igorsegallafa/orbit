@@ -9,6 +9,7 @@ import { Skeleton } from "./Skeleton";
 import { tooltip } from "./Tooltip";
 import { toast } from "./Toast";
 import { useDiffNav } from "./useDiffNav";
+import { arrowNav } from "../lib/arrowNav";
 import { RangeMark, ZoneItem, useReviewZones } from "./useReviewZones";
 import { Composer, DraftCard, ThreadActions, ThreadCard } from "./ReviewThreads";
 import { SubmitReview } from "./SubmitReview";
@@ -375,7 +376,7 @@ export function PrReviewPane({ prs, onError }: Props) {
               </div>
             </div>
 
-            <div className="pr-files">
+            <div className="pr-files" tabIndex={-1} onKeyDown={arrowNav(".rv-nav, .rv-file-btn", true)}>
               <button className={`rv-nav ${selected === OVERVIEW ? "on" : ""}`} onClick={() => setSelected(OVERVIEW)}>
                 <DocIcon size={13} />
                 <span>Overview</span>

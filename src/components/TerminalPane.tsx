@@ -6,6 +6,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { AgentStatus, AgentStatusTracker, HookState } from "../lib/agentStatus";
 import { StatusIndicator } from "./StatusIndicator";
+import { isMac } from "./WindowControls";
 import { currentTheme, onThemeChange, terminalTheme } from "../lib/theme";
 
 export interface TerminalTab {
@@ -131,6 +132,8 @@ export function TerminalPane({ tab, onError, onStatusChange, onSignal, active }:
       fontFamily: 'ui-monospace, "SF Mono", Menlo, monospace',
       cursorBlink: true,
       theme: terminalTheme(currentTheme()),
+      // Full key reports (modifiers on Enter, etc.) once the program or ConPTY asks for them.
+      vtExtensions: { win32InputMode: true, kittyKeyboard: true },
     });
     const offTheme = onThemeChange((t) => {
       term.options.theme = terminalTheme(t);
@@ -142,6 +145,22 @@ export function TerminalPane({ tab, onError, onStatusChange, onSignal, active }:
     fit.fit();
     requestAnimationFrame(() => fit.fit());
     term.focus();
+
+    // Copy and paste belong to the terminal app; xterm.js alone sends ^C / ^V.
+    term.attachCustomKeyEventHandler((e) => {
+      if (e.type !== "keydown") return true;
+      // macOS copies and pastes with Cmd, which xterm already leaves to the webview.
+      if (isMac || !e.ctrlKey || e.altKey || e.metaKey) return true;
+      const key = e.key.toLowerCase();
+      if (key === "c" && (e.shiftKey || term.hasSelection())) {
+        e.preventDefault();
+        navigator.clipboard.writeText(term.getSelection()).catch(() => null);
+        term.clearSelection();
+        return false;
+      }
+      // Unhandled, the webview pastes into xterm (bracketed when the program asks).
+      return key !== "v";
+    });
 
     let delivered = false;
     // Unmounted before the spawn resolved (StrictMode, fast tab close): that

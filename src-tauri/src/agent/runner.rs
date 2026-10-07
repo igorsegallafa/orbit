@@ -65,7 +65,7 @@ pub struct Outcome {
 /// Spawns `cmd` in `dir`, calling `on_line` for every stdout/stderr line
 /// as it arrives. Kills the process tree after `timeout`. When `id` is
 /// given the run is cancellable via `cancel(id)`; a previous run with the
-/// same id is killed first.
+/// same id is killed first. Stdin is the caller's to set.
 pub fn run_streaming(
     mut cmd: Command,
     dir: &Path,
@@ -77,7 +77,6 @@ pub fn run_streaming(
     // inherited from wherever Orbit was launched would win over current_dir.
     cmd.current_dir(dir)
         .env("PWD", dir)
-        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     #[cfg(unix)]

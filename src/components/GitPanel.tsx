@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { GitChange, GitCommit, Workspace } from "../types/config";
 import { Skeleton } from "./Skeleton";
+import { arrowNav } from "../lib/arrowNav";
 import { tooltip } from "./Tooltip";
 
 interface Props {
@@ -72,7 +73,7 @@ export function GitPanel({ workspace, onReviewFile, onReviewCommit, onError }: P
           ⟳
         </button>
       </div>
-      <div className="dock-panel-body git-panel-body">
+      <div className="dock-panel-body git-panel-body" onKeyDown={arrowNav(".git-change-row, .git-commit-row")}>
         <div className="git-section-label">Changes</div>
         {changes === null ? (
           <div className="modal-row"><Skeleton w={30} h={11} /> <Skeleton w="70%" h={11} /></div>

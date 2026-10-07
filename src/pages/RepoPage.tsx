@@ -19,6 +19,7 @@ import { MergeModal } from "../components/MergeModal";
 import { PrsModal } from "../components/PrsModal";
 import { Select } from "../components/Select";
 import { Skeleton } from "../components/Skeleton";
+import { arrowNav } from "../lib/arrowNav";
 import { toast } from "../components/Toast";
 import { tooltip } from "../components/Tooltip";
 import {
@@ -356,6 +357,9 @@ export function RepoPage({
   return (
     <div className="page repo-page">
       <RepoHeader repo={repo} ov={ov}>
+        <button className="ws-tool" onClick={onNewWorkspace} {...hint(`New workspace with ${repo}: a branch in its own worktree`)}>
+          <PlusIcon size={14} /> New workspace
+        </button>
         <button className="secondary ws-tool" onClick={onOpenRalph} {...hint("Write a PRD and let the agent implement it story by story on this branch")}>
           <SparkIcon size={14} /> Ralph
         </button>
@@ -545,7 +549,7 @@ export function RepoPage({
             )}
           </div>
 
-          <div className="repo-files">
+          <div className="repo-files" onKeyDown={arrowNav(".repo-file-main")}>
             {changes === null ? (
               <div className="repo-file">
                 <Skeleton w="70%" h={12} />

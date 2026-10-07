@@ -137,7 +137,9 @@ pub fn build(app: &AppHandle, workspace: Option<&str>, repo: &str, force: bool) 
     };
     emit(format!("$ {script}"));
     let run_id = format!("build:{key}");
-    let outcome = runner::run_streaming(shell(&script), &dir, BUILD_TIMEOUT, Some(&run_id), |l| match l {
+    let mut cmd = shell(&script);
+    cmd.stdin(std::process::Stdio::null());
+    let outcome = runner::run_streaming(cmd, &dir, BUILD_TIMEOUT, Some(&run_id), |l| match l {
         Line::Out(s) | Line::Err(s) => emit(s),
     });
 

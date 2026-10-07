@@ -4219,6 +4219,11 @@ button.cr-segment.on, button.cr-segment.on:hover:not(:disabled) { background: va
   max-width: 620px;
 }
 
+/* One card per repo: past the modal's height the list scrolls, the footer stays. */
+.ws-action-modal .modal-body {
+  overflow-y: auto;
+}
+
 .ws-action-list {
   display: flex;
   flex-direction: column;

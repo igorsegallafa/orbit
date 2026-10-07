@@ -1414,6 +1414,8 @@ function App() {
             <div
               ref={tabStripRef}
               className="tab-strip"
+              // Settings is its own screen: no tabs over it.
+              style={navPage.kind === "settings" && !activeTab ? { display: "none" } : undefined}
               onWheel={(e) => {
                 // WKWebView: vertical wheel/two-finger gestures don't scroll
                 // overflow-x containers — translate deltaY into scrollLeft.
