@@ -144,11 +144,11 @@ export function TerminalPane({ tab, onError, onStatusChange, onSignal, active }:
     requestAnimationFrame(() => fit.fit());
     term.focus();
 
-    // xterm.js alone sends Shift+Enter as Enter and Ctrl+C / Ctrl+V as ^C / ^V.
+    // xterm.js alone sends Shift/Ctrl+Enter as Enter and Ctrl+C / Ctrl+V as ^C / ^V.
     term.attachCustomKeyEventHandler((e) => {
       if (e.type !== "keydown") return true;
       // ESC+CR breaks the line in agent CLIs; in a shell PSReadLine reads the ESC as "revert line".
-      if (tab.cmd && e.key === "Enter" && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      if (tab.cmd && e.key === "Enter" && (e.shiftKey || e.ctrlKey) && !e.altKey && !e.metaKey) {
         e.preventDefault();
         injectText("\x1b\r");
         return false;
