@@ -132,6 +132,8 @@ export function TerminalPane({ tab, onError, onStatusChange, onSignal, active }:
       fontFamily: 'ui-monospace, "SF Mono", Menlo, monospace',
       cursorBlink: true,
       theme: terminalTheme(currentTheme()),
+      // Full key reports (modifiers on Enter, etc.) once the program or ConPTY asks for them.
+      vtExtensions: { win32InputMode: true, kittyKeyboard: true },
     });
     const offTheme = onThemeChange((t) => {
       term.options.theme = terminalTheme(t);
@@ -144,15 +146,9 @@ export function TerminalPane({ tab, onError, onStatusChange, onSignal, active }:
     requestAnimationFrame(() => fit.fit());
     term.focus();
 
-    // xterm.js alone sends Shift/Ctrl+Enter as Enter and Ctrl+C / Ctrl+V as ^C / ^V.
+    // Copy and paste belong to the terminal app; xterm.js alone sends ^C / ^V.
     term.attachCustomKeyEventHandler((e) => {
       if (e.type !== "keydown") return true;
-      // ESC+CR breaks the line in agent CLIs; in a shell PSReadLine reads the ESC as "revert line".
-      if (tab.cmd && e.key === "Enter" && (e.shiftKey || e.ctrlKey) && !e.altKey && !e.metaKey) {
-        e.preventDefault();
-        injectText("\x1b\r");
-        return false;
-      }
       // macOS copies and pastes with Cmd, which xterm already leaves to the webview.
       if (isMac || !e.ctrlKey || e.altKey || e.metaKey) return true;
       const key = e.key.toLowerCase();
