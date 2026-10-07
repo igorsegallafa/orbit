@@ -7,6 +7,7 @@ import { STATUS_LABEL } from "./GitPanel";
 import { ChevronRightIcon, SparkIcon } from "./Icons";
 import { ReviewPane } from "./ReviewPane";
 import { Skeleton } from "./Skeleton";
+import { arrowNav } from "../lib/arrowNav";
 import { tooltip } from "./Tooltip";
 import { toast } from "./Toast";
 import { StatusIcon } from "./StatusIcon";
@@ -176,7 +177,7 @@ export function CommitModal({ workspace, repos, onClose, onSettled, onError }: P
         </div>
 
         <div className="commit-modal-body">
-          <div className="commit-modal-list">
+          <div className="commit-modal-list" onKeyDown={arrowNav(".commit-file", true)}>
             {items.map((r) => {
               const total = r.files?.length ?? 0;
               const count = r.selected.size;

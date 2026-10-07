@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { GitChange, GitCommit } from "../types/config";
 import { fetchCommitFiles, ReviewPane } from "./ReviewPane";
 import { Skeleton } from "./Skeleton";
+import { arrowNav } from "../lib/arrowNav";
 import { usePaneWidth } from "./PaneResizer";
 
 interface Props {
@@ -43,7 +44,7 @@ export function CommitReviewPane({ workspace, repo, commit, onError }: Props) {
 
   return (
     <div className="commit-review">
-      <div className="commit-review-files" style={{ width: side.width }}>
+      <div className="commit-review-files" style={{ width: side.width }} tabIndex={-1} onKeyDown={arrowNav(".git-change-row", true)}>
         <div className="git-section-label" style={{ paddingLeft: 4 }}>
           {commit.sha}
         </div>

@@ -6,6 +6,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { AgentStatus, AgentStatusTracker, HookState } from "../lib/agentStatus";
 import { StatusIndicator } from "./StatusIndicator";
+import { isMac } from "./WindowControls";
 import { currentTheme, onThemeChange, terminalTheme } from "../lib/theme";
 
 export interface TerminalTab {
@@ -142,6 +143,28 @@ export function TerminalPane({ tab, onError, onStatusChange, onSignal, active }:
     fit.fit();
     requestAnimationFrame(() => fit.fit());
     term.focus();
+
+    // xterm.js alone sends Shift+Enter as Enter and Ctrl+C / Ctrl+V as ^C / ^V.
+    term.attachCustomKeyEventHandler((e) => {
+      if (e.type !== "keydown") return true;
+      // ESC+CR breaks the line in agent CLIs; in a shell PSReadLine reads the ESC as "revert line".
+      if (tab.cmd && e.key === "Enter" && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        e.preventDefault();
+        injectText("\x1b\r");
+        return false;
+      }
+      // macOS copies and pastes with Cmd, which xterm already leaves to the webview.
+      if (isMac || !e.ctrlKey || e.altKey || e.metaKey) return true;
+      const key = e.key.toLowerCase();
+      if (key === "c" && (e.shiftKey || term.hasSelection())) {
+        e.preventDefault();
+        navigator.clipboard.writeText(term.getSelection()).catch(() => null);
+        term.clearSelection();
+        return false;
+      }
+      // Unhandled, the webview pastes into xterm (bracketed when the program asks).
+      return key !== "v";
+    });
 
     let delivered = false;
     // Unmounted before the spawn resolved (StrictMode, fast tab close): that

@@ -1,6 +1,7 @@
 // Builds the headless command line for the configured agent CLI.
 use crate::config::AiSettings;
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 /// What the agent may do on its own in a headless run.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -87,9 +88,28 @@ pub fn live_args(ai: &AiSettings, prompt: &str, access: Access, resume: Option<&
     a
 }
 
-pub fn live_cmd(ai: &AiSettings, prompt: &str, access: Access, resume: Option<&str>) -> Command {
+/// Claude takes the prompt (last of `args`) on stdin: as an argument, one
+/// carrying a diff overflows Windows' 32k command line (os error 206).
+// ponytail: opencode/omp still get it as an argument; pipe theirs if they hit the limit.
+fn with_prompt(ai: &AiSettings, mut args: Vec<String>) -> Command {
     let mut c = crate::proc::cmd(&ai.agent_bin());
-    c.args(live_args(ai, prompt, access, resume));
+    c.stdin(Stdio::null());
+    if ai.agent_bin() == "claude" {
+        if let Ok((reader, mut writer)) = std::io::pipe() {
+            let prompt = args.pop().unwrap_or_default();
+            c.stdin(reader);
+            // Off-thread: past the pipe buffer the write blocks until the child reads.
+            std::thread::spawn(move || {
+                let _ = writer.write_all(prompt.as_bytes());
+            });
+        }
+    }
+    c.args(args);
+    c
+}
+
+pub fn live_cmd(ai: &AiSettings, prompt: &str, access: Access, resume: Option<&str>) -> Command {
+    let mut c = with_prompt(ai, live_args(ai, prompt, access, resume));
     if ai.agent_bin() == "opencode" {
         c.env("OPENCODE_CONFIG_CONTENT", if access.writes() { OPENCODE_LIVE } else { OPENCODE_LIVE_READ_ONLY });
     }
@@ -116,8 +136,7 @@ fn read_only_env(ai: &AiSettings, access: Access, c: &mut Command) {
 
 /// Ready-to-spawn command for the configured agent (cwd/stdio set by the runner).
 pub fn agent_cmd(ai: &AiSettings, prompt: &str, access: Access, stream_json: bool) -> Command {
-    let mut c = crate::proc::cmd(&ai.agent_bin());
-    c.args(agent_args(ai, prompt, access, stream_json));
+    let mut c = with_prompt(ai, agent_args(ai, prompt, access, stream_json));
     read_only_env(ai, access, &mut c);
     c
 }
@@ -174,6 +193,15 @@ mod tests {
             ["run", "--model", "m", "--auto", "--session", "ses_1", "--format", "json", "--thinking", "hi"]
         );
         assert_eq!(live_args(&ai("omp"), "hi", Access::ReadOnly, Some("x")), ["-p", "--model", "m", "hi"]);
+    }
+
+    #[test]
+    fn claude_prompt_goes_through_stdin_not_argv() {
+        let args = |c: Command| c.get_args().map(|a| a.to_string_lossy().to_string()).collect::<Vec<_>>();
+        let long = "x".repeat(40_000);
+        assert_eq!(args(agent_cmd(&ai("claude"), &long, Access::Answer, false)), ["-p", "--model", "m", "--tools=", "--strict-mcp-config"]);
+        assert!(!args(live_cmd(&ai("claude"), &long, Access::ReadOnly, None)).contains(&long));
+        assert_eq!(args(agent_cmd(&ai("opencode"), "hi", Access::Answer, false)), ["run", "--model", "m", "hi"]);
     }
 
     #[test]
