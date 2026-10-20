@@ -529,8 +529,10 @@ pub fn pr_draft(ws_name: &str, repo: &str) -> Result<PrDraft, String> {
         Some(_) => crate::git::default_branch(&dir).unwrap_or_else(|| "main".into()),
         None => crate::workspace::load_meta(&crate::workspace::ws_dir(ws_name)?)?.base,
     };
-    let commits = git_out(&dir, &["log", "--oneline", "--no-decorate", &format!("origin/{base}..HEAD")]);
-    let range = format!("origin/{base}...HEAD");
+    let base_ref = crate::git::base_ref(&dir, &base);
+    let base = crate::git::base_branch(&dir, &base);
+    let commits = git_out(&dir, &["log", "--oneline", "--no-decorate", &format!("{base_ref}..HEAD")]);
+    let range = format!("{base_ref}...HEAD");
     let stat = git_out(&dir, &["diff", "--stat", &range]);
     let diff = clip(&git_out(&dir, &["diff", "--no-color", "--no-ext-diff", "--unified=2", &range]), DRAFT_DIFF_CHARS);
     let template = match pr_template(&dir) {

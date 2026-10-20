@@ -849,6 +849,7 @@ fn create_pr_for_repo(
     let owner_repo = remote_of(&dir).ok_or_else(|| format!("{repo}: cannot resolve origin remote"))?;
     let branch = git::current_branch(&dir)
         .ok_or_else(|| format!("{repo}: detached HEAD"))?;
+    let base = git::base_branch(&dir, base);
     let out = crate::proc::cmd("gh")
         .args([
             "pr",
@@ -856,7 +857,7 @@ fn create_pr_for_repo(
             "-R",
             &owner_repo,
             "--base",
-            base,
+            &base,
             "--head",
             &branch,
             "--title",
