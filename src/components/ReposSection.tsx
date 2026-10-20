@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Config, GithubRepo, Service } from "../types/config";
 import { GithubRepoModal } from "./GithubRepoModal";
 import { ConfirmDialog } from "./ConfirmDialog";
@@ -79,6 +80,22 @@ export function ReposSection({ config, onChange, onError }: Props) {
     afterAdd(cfg, repo.name, cloneNow);
   };
 
+  const addLocalClones = async () => {
+    const picked = await openDialog({ directory: true, multiple: true, defaultPath: folders?.reposDir });
+    const paths = picked === null ? [] : Array.isArray(picked) ? picked : [picked];
+    for (const path of paths) {
+      const name = path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+      try {
+        const repo = await invoke<string>("local_repo_origin", { path });
+        onChange(await invoke<Config>("add_service", { name, repo, path }));
+        setClone((p) => ({ ...p, [name]: "unknown" }));
+        toast.success(`${name} added`, { description: path });
+      } catch (e) {
+        toast.error(`Couldn't add ${name}`, { description: String(e) });
+      }
+    }
+  };
+
   const remove = async (svc: Service) => {
     try {
       onChange(await invoke<Config>("remove_service", { name: svc.name }));
@@ -108,6 +125,9 @@ export function ReposSection({ config, onChange, onError }: Props) {
         <div className="section-actions">
           <button className="secondary" onClick={() => setModal({ mode: "add" })}>
             <PlusIcon size={14} /> Add manually
+          </button>
+          <button className="secondary" onClick={addLocalClones}>
+            <FolderIcon size={14} /> Add local clone
           </button>
           <button onClick={() => setShowGithub(true)}>
             <GitIcon size={14} /> Add from GitHub

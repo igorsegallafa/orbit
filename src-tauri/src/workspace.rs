@@ -265,9 +265,27 @@ fn create_at(
         return Err("select at least one repository".into());
     }
 
-    let cfg = Config::load()?;
-    let ws_dir = ws_dir(name)?;
+    setup_repos(&ws_dir(name)?, repos, branch, base, start)?;
+    finish_create(name, branch, base, repos.to_vec(), card)
+}
 
+/// Adds repos to an existing workspace, on its branch and base.
+pub fn add_repos(name: &str, repos: &[String]) -> Result<Workspace, String> {
+    let dir = ws_dir(name)?;
+    let mut ws = load_meta(&dir)?;
+    let new: Vec<String> = repos.iter().filter(|r| !ws.repos.contains(r)).cloned().collect();
+    if new.is_empty() {
+        return Err("select at least one repository not in the workspace".into());
+    }
+    setup_repos(&dir, &new, &ws.branch, &ws.base, None)?;
+    ws.repos.extend(new);
+    save_meta(&dir, &ws)?;
+    Ok(ws)
+}
+
+/// Clones each repo if needed and sets up its worktree, or branch-only junction.
+fn setup_repos(ws_dir: &Path, repos: &[String], branch: &str, base: &str, start: Option<&str>) -> Result<(), String> {
+    let cfg = Config::load()?;
     let svcs = repos
         .iter()
         .map(|repo| {
@@ -304,8 +322,7 @@ fn create_at(
             links::link_dir(&clone_dir, &wt)?;
         }
     }
-
-    finish_create(name, branch, base, repos.to_vec(), card)
+    Ok(())
 }
 
 enum CheckoutResult {

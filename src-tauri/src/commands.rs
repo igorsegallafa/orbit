@@ -56,6 +56,18 @@ pub async fn add_service(name: String, repo: String, path: Option<String>) -> Re
 }
 
 #[tauri::command]
+pub async fn local_repo_origin(path: String) -> Result<String, String> {
+    blocking(move || {
+        let dir = PathBuf::from(&path);
+        if !workspace::is_cloned(&dir) {
+            return Err(format!("{path} is not a git repository"));
+        }
+        origin_url(&dir).ok_or_else(|| format!("{path} has no 'origin' remote"))
+    })
+    .await
+}
+
+#[tauri::command]
 pub async fn update_service(name: String, repo: String) -> Result<Config, String> {
     blocking(move || {
         let mut cfg = Config::load()?;
@@ -290,6 +302,11 @@ pub async fn create_workspace(
     card: Option<CardRef>,
 ) -> Result<Workspace, String> {
     blocking(move || workspace::create(&name, &branch, &base, &repos, card)).await
+}
+
+#[tauri::command]
+pub async fn add_workspace_repos(name: String, repos: Vec<String>) -> Result<Workspace, String> {
+    blocking(move || workspace::add_repos(&name, &repos)).await
 }
 
 #[derive(serde::Serialize)]
@@ -1056,17 +1073,19 @@ pub async fn pr_merge_remote(owner_repo: String, number: u64) -> Result<(), Stri
     blocking(move || github::squash_merge(&owner_repo, number).map_err(|e| format!("{owner_repo} #{number}: {e}"))).await
 }
 
-fn remote_of(dir: &std::path::Path) -> Option<String> {
+fn origin_url(dir: &std::path::Path) -> Option<String> {
     let out = crate::proc::cmd("git")
         .args(["remote", "get-url", "origin"])
         .current_dir(dir)
         .output()
         .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let remote = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    github::parse_owner_repo(&remote).ok()
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+fn remote_of(dir: &std::path::Path) -> Option<String> {
+    github::parse_owner_repo(&origin_url(dir)?).ok()
 }
 
 /// PR status rows for the workspace home tracker. Source of truth is the

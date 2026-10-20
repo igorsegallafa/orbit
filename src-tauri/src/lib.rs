@@ -52,6 +52,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_config,
             commands::add_service,
+            commands::local_repo_origin,
             commands::update_service,
             commands::remove_service,
             commands::clone_service,
@@ -68,6 +69,7 @@ pub fn run() {
             commands::list_workspaces,
             commands::create_workspace,
             commands::create_workspace_from_branch,
+            commands::add_workspace_repos,
             commands::pr_checkout_plan,
             commands::pr_checkout,
             commands::ws_pull,
