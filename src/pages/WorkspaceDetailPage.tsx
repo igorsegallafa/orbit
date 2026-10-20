@@ -16,6 +16,7 @@ import {
 } from "../types/config";
 import { ReviewData } from "../types/review";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { AddReposModal } from "../components/AddReposModal";
 import { CheckBox } from "../components/CheckBox";
 import { ArtifactSource, ArtifactsSection } from "../components/ArtifactsSection";
 import { Skeleton } from "../components/Skeleton";
@@ -29,7 +30,7 @@ import { MergeModal } from "../components/MergeModal";
 import { PrsModal } from "../components/PrsModal";
 import { BuildModal } from "../components/BuildModal";
 import { tooltip } from "../components/Tooltip";
-import { RebaseIcon, CommitIcon, PushIcon, PullRequestIcon, ChevronRightIcon, SparkIcon, CheckIcon, XIcon, CircleIcon, SpinnerIcon, GitIcon, DocIcon, TrashIcon, RefreshIcon, RaceIcon, BranchIcon, DiffIcon } from "../components/Icons";
+import { RebaseIcon, CommitIcon, PushIcon, PullRequestIcon, ChevronRightIcon, SparkIcon, CheckIcon, XIcon, CircleIcon, SpinnerIcon, GitIcon, DocIcon, TrashIcon, RefreshIcon, RaceIcon, BranchIcon, DiffIcon, PlusIcon } from "../components/Icons";
 import { GitHubIcon } from "../components/BrandIcons";
 
 interface Props {
@@ -66,6 +67,7 @@ export function WorkspaceDetailPage({
   onBeforeRemove,
 }: Props) {
   const [raceOpen, setRaceOpen] = useState(false);
+  const [addReposOpen, setAddReposOpen] = useState(false);
   const [reviewOpen, setReviewOpen] = useState(false);
   /** Open review conversations across the feature's open PRs (null: counting). */
   const [openFeedback, setOpenFeedback] = useState<number | null>(null);
@@ -472,6 +474,9 @@ export function WorkspaceDetailPage({
             <RebaseIcon size={14} /> Rebase
           </button>
           <span className="ws-tool-sep" />
+          <button className="icon-button ws-icon-tool" aria-label="Add repositories" {...hint("Add repositories to this workspace")} onClick={() => setAddReposOpen(true)}>
+            <PlusIcon size={15} />
+          </button>
           <button
             className="icon-button ws-icon-tool"
             disabled={refreshing}
@@ -542,6 +547,16 @@ export function WorkspaceDetailPage({
           }}
           onBeforeRemove={onBeforeRemove}
           onError={onError}
+        />
+      )}
+      {addReposOpen && (
+        <AddReposModal
+          workspace={workspace}
+          onAdded={() => {
+            onWorkspacesChanged();
+            load(false);
+          }}
+          onClose={() => setAddReposOpen(false)}
         />
       )}
       {raceOpen && (
