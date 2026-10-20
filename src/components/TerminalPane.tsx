@@ -148,8 +148,9 @@ export function TerminalPane({ tab, onError, onStatusChange, onSignal, active }:
 
     // Copy and paste belong to the terminal app; xterm.js alone sends ^C / ^V.
     term.attachCustomKeyEventHandler((e) => {
+      // macOS: Cmd shortcuts belong to the webview; kitty keyboard would send Cmd to the program as super.
+      if (isMac && e.metaKey) return false;
       if (e.type !== "keydown") return true;
-      // macOS copies and pastes with Cmd, which xterm already leaves to the webview.
       if (isMac || !e.ctrlKey || e.altKey || e.metaKey) return true;
       const key = e.key.toLowerCase();
       if (key === "c" && (e.shiftKey || term.hasSelection())) {
