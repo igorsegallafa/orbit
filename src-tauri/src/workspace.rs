@@ -965,6 +965,20 @@ dist
     }
 
     #[test]
+    fn base_missing_on_origin_falls_back_to_its_default_branch() {
+        let root = std::env::temp_dir().join(format!("orbit-base-fallback-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let bare = origin(&root);
+        git(&root, &["clone", &bare.to_string_lossy(), "clone"]);
+        let clone = root.join("clone");
+        assert_eq!(git::base_branch(&clone, "master"), "main");
+        assert_eq!(git::base_ref(&clone, "master"), "origin/main");
+        assert_eq!(git::base_ref(&clone, "feat/existing"), "origin/feat/existing");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn checks_out_prs_from_origin_and_forks() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let root = std::env::temp_dir().join(format!("orbit-pr-checkout-{}", std::process::id()));

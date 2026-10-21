@@ -52,7 +52,7 @@ pub fn github_https(url: &str) -> Option<String> {
 /// already exists it is reused; if the branch already exists (leftover
 /// from a removed workspace), it is reused instead of failing on `-b`.
 pub fn worktree_add(repo_dir: &Path, path: &Path, branch: &str, base: &str) -> Result<(), String> {
-    worktree_add_from(repo_dir, path, branch, &start_point(repo_dir, base))
+    worktree_add_from(repo_dir, path, branch, &base_ref(repo_dir, base))
 }
 
 /// `worktree_add` starting a new branch at an explicit ref (e.g. another
@@ -69,14 +69,23 @@ pub fn worktree_add_from(repo_dir: &Path, path: &Path, branch: &str, start: &str
     git_in(repo_dir, &["worktree", "add", "-b", branch, &path.to_string_lossy(), start])
 }
 
+/// `base`, or origin's default branch when origin has no `base` (a `master` repo in a `main` workspace).
+pub fn base_branch(repo_dir: &Path, base: &str) -> String {
+    if ref_exists(repo_dir, &format!("refs/remotes/origin/{base}")) {
+        return base.to_string();
+    }
+    default_branch(repo_dir).unwrap_or_else(|| base.to_string())
+}
+
 /// `origin/<base>` when it exists: the local base branch is not moved by
 /// `fetch`, so branching from it could start the feature from stale code.
-fn start_point(repo_dir: &Path, base: &str) -> String {
+pub fn base_ref(repo_dir: &Path, base: &str) -> String {
+    let base = base_branch(repo_dir, base);
     let remote = format!("origin/{base}");
     if ref_exists(repo_dir, &format!("refs/remotes/{remote}")) {
         remote
     } else {
-        base.to_string()
+        base
     }
 }
 
@@ -179,7 +188,7 @@ pub fn checkout_branch_in_place(repo_dir: &Path, branch: &str, base: &str) -> Re
     if branch_exists(repo_dir, branch) {
         git_in(repo_dir, &["checkout", branch])
     } else {
-        let start = start_point(repo_dir, base);
+        let start = base_ref(repo_dir, base);
         git_in(repo_dir, &["checkout", "-b", branch, &start])
     }
 }
@@ -341,7 +350,7 @@ pub fn merge(dir: &Path, branch: &str) -> Result<(), String> {
 /// Files, added and removed lines and commits of `dir` since it forked
 /// from `base`, uncommitted and untracked work included.
 pub fn diff_since_base(dir: &Path, base: &str) -> (usize, usize, usize, usize) {
-    diff_since(dir, &start_point(dir, base))
+    diff_since(dir, &base_ref(dir, base))
 }
 
 /// Same as `diff_since_base`, measured from where HEAD forked off `start`.
@@ -391,7 +400,7 @@ pub enum RebaseStatus {
 /// `rebase_abort` to roll back.
 pub fn rebase_onto(dir: &Path, base: &str) -> Result<RebaseStatus, String> {
     git_in(dir, &["fetch", "--prune"])?;
-    let target = format!("origin/{base}");
+    let target = base_ref(dir, base);
     let out = crate::proc::cmd("git")
         .args(["rebase", &target])
         .current_dir(dir)
@@ -451,7 +460,7 @@ pub fn ahead_behind(path: &Path, base: &str) -> (usize, usize) {
     let remote_branch = remote_branch.as_deref();
 
     // ahead: HEAD --not origin/base origin/branch
-    let mut nots: Vec<String> = vec![format!("origin/{base}")];
+    let mut nots: Vec<String> = vec![base_ref(path, base)];
     if let Some(rb) = remote_branch {
         nots.push(rb.to_string());
     }
@@ -478,7 +487,7 @@ pub fn ahead_behind(path: &Path, base: &str) -> (usize, usize) {
 /// ids differ, the content doesn't). Conflicts or errors count as "not
 /// integrated". Needs git >= 2.38 (`merge-tree --write-tree`).
 pub fn is_integrated(dir: &Path, rev: &str, base: &str) -> bool {
-    let target = format!("origin/{base}");
+    let target = base_ref(dir, base);
     let Ok(merged) = git_out(dir, &["merge-tree", "--write-tree", &target, rev]) else { return false };
     let Ok(base_tree) = git_out(dir, &["rev-parse", &format!("{target}^{{tree}}")]) else { return false };
     merged.lines().next().map(str::trim) == Some(base_tree.trim())
@@ -493,7 +502,7 @@ pub fn remote_branch_feature_commits(path: &Path, base: &str) -> usize {
     if !ref_exists(path, &remote) {
         return 0;
     }
-    let target = format!("origin/{base}");
+    let target = base_ref(path, base);
     let out = crate::proc::cmd("git")
         .args([
             "rev-list",
