@@ -98,6 +98,12 @@ pub async fn pty_spawn(
         for k in crate::proc::CLAUDE_SESSION_ENV {
             cmd_builder.env_remove(k);
         }
+        for (k, v) in crate::proc::host_env() {
+            match v {
+                Some(v) => cmd_builder.env(k, v),
+                None => cmd_builder.env_remove(k),
+            }
+        }
 
         let child = match pair.slave.spawn_command(cmd_builder) {
             Ok(c) => c,
