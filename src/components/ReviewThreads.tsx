@@ -12,7 +12,7 @@ function Avatar({ url, name }: { url?: string; name: string }) {
 }
 
 /** Textarea with Ctrl/Cmd+Enter for the primary action and Esc to cancel. */
-function Editor({
+export function Editor({
   initial = "",
   placeholder,
   autoFocus = true,

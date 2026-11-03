@@ -11,6 +11,7 @@ mod health;
 mod integrations;
 mod links;
 mod lsp;
+mod notes;
 mod proc;
 mod pty;
 mod ralph;
@@ -18,6 +19,7 @@ mod repo;
 mod review;
 mod search;
 mod usage;
+mod watch;
 mod workspace;
 
 /// `Orbit --orbit-statusline <file>`: status line helper for the Claude
@@ -80,6 +82,12 @@ pub fn run() {
             review::pr_delete_comment,
             review::pr_resolve_thread,
             review::pr_submit_review,
+            watch::fs_watch,
+            watch::fs_unwatch,
+            notes::notes_list,
+            notes::notes_add,
+            notes::notes_update,
+            notes::notes_delete,
             ralph::ralph_state,
             ralph::ralph_plan_state,
             ralph::ralph_plan_start,

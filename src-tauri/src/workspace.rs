@@ -154,8 +154,27 @@ pub fn repo_scope(workspace: &str) -> Option<&str> {
     workspace.strip_prefix('@')
 }
 
+// ---------- Folder scope: any folder, for sessions outside workspaces ----------
+
+/// The folder a folder scope addresses ("dir:/some/path" → that path; a
+/// leading "~" is the home folder). Terminals and agents can be opened in
+/// any folder this way; there are no repos behind it.
+pub fn folder_scope(workspace: &str) -> Option<PathBuf> {
+    let raw = workspace.strip_prefix("dir:")?;
+    match raw.strip_prefix('~') {
+        Some(rest) => {
+            let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })?;
+            Some(PathBuf::from(home).join(rest.trim_start_matches(['/', '\\'])))
+        }
+        None => Some(PathBuf::from(raw)),
+    }
+}
+
 /// Folder of `repo` in `workspace`: its worktree, or the base clone for a repo scope.
 pub fn repo_path(workspace: &str, repo: &str) -> Result<PathBuf, String> {
+    if workspace.starts_with("dir:") {
+        return Err("a folder session has no repositories".into());
+    }
     match repo_scope(workspace) {
         Some(r) if r == repo => clone_dir_of(repo),
         Some(r) => Err(format!("'{repo}' is not part of the '{r}' repository view")),
@@ -165,6 +184,9 @@ pub fn repo_path(workspace: &str, repo: &str) -> Result<PathBuf, String> {
 
 /// Root folder of a workspace, or the base clone for a repo scope.
 pub fn scope_dir(workspace: &str) -> Result<PathBuf, String> {
+    if let Some(dir) = folder_scope(workspace) {
+        return Ok(dir);
+    }
     match repo_scope(workspace) {
         Some(repo) => clone_dir_of(repo),
         None => ws_dir(workspace),
@@ -584,7 +606,12 @@ fn finish_create(
 
 fn save_meta(ws_dir: &Path, ws: &Workspace) -> Result<(), String> {
     let raw = serde_yaml::to_string(ws).map_err(|e| e.to_string())?;
-    std::fs::write(meta_path(ws_dir), raw).map_err(|e| e.to_string())
+    // Write then rename: a reader (list) never sees a half-written file,
+    // which would drop the workspace from the list and close its sessions.
+    let path = meta_path(ws_dir);
+    let tmp = path.with_extension("yaml.tmp");
+    std::fs::write(&tmp, raw).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
 }
 
 // ---------- agent races ----------
@@ -731,6 +758,8 @@ pub fn remove(name: &str, force: bool) -> Result<Vec<String>, String> {
 pub fn remove_opts(name: &str, force: bool, discard: bool) -> Result<Vec<String>, String> {
     let ws_dir = ws_dir(name)?;
     let ws = load_meta(&ws_dir)?;
+    // Windows can't delete folders a watcher holds open.
+    crate::watch::forget(name);
 
     for repo in &ws.repos {
         let wt = ws_dir.join(repo);
@@ -1210,6 +1239,17 @@ dist
 #[cfg(test)]
 mod wire_tests {
     use super::*;
+
+    #[test]
+    fn folder_scope_resolves_paths_and_home() {
+        assert_eq!(folder_scope("dir:/srv/app"), Some(PathBuf::from("/srv/app")));
+        let home = PathBuf::from(std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).unwrap());
+        assert_eq!(folder_scope("dir:~"), Some(home.clone()));
+        assert_eq!(folder_scope("dir:~/code"), Some(home.join("code")));
+        assert_eq!(folder_scope("@api"), None);
+        assert_eq!(folder_scope("my-feature"), None);
+        assert!(repo_path("dir:/srv/app", "api").is_err());
+    }
 
     #[test]
     fn repo_status_serializes_camel_case_for_frontend() {

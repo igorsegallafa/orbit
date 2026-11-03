@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Editor, { BeforeMount, OnMount, loader } from "@monaco-editor/react";
 import type * as Monaco from "monaco-editor";
 import { invoke } from "@tauri-apps/api/core";
@@ -10,6 +10,7 @@ import { tooltip } from "./Tooltip";
 import { toast } from "./Toast";
 import * as lsp from "../lib/lsp/manager";
 import { currentTheme, defineMonacoThemes, monacoThemeName, onThemeChange, useMonacoTheme } from "../lib/theme";
+import { touches, useFsChanges } from "../lib/useFsChanges";
 
 interface CppSetup {
   compileCommands: string | null;
@@ -292,28 +293,36 @@ export function EditorPane({ workspace, repo, path, onError, onApplyPlan, onRunI
   const applyDiskRef = useRef(applyDisk);
   applyDiskRef.current = applyDisk;
 
-  // Follow the file on disk while this editor is on screen: every 1.5s and
-  // when the window regains focus (back from the other IDE).
-  useEffect(() => {
+  // Follow the file on disk: re-read when the watcher reports it changed
+  // (or on window focus, which the hook also signals). Hidden tabs catch up
+  // when they're shown again.
+  const staleRef = useRef(false);
+  const checkDisk = useCallback(async () => {
     if (!path) return;
-    let stopped = false;
-    const check = async () => {
-      // Hidden tabs are display: none (no offsetParent): only the visible one polls.
-      if (document.visibilityState !== "visible" || !paneRef.current?.offsetParent) return;
-      const text = await invoke<string>("read_file", { workspace, repo, path }).catch(() => null);
-      if (stopped || text === null || diskRef.current === null || text === diskRef.current) return;
-      diskRef.current = text;
-      if (dirtyRef.current) setDiskChanged(true);
-      else applyDiskRef.current(text);
-    };
-    const t = window.setInterval(check, 1500);
-    window.addEventListener("focus", check);
-    return () => {
-      stopped = true;
-      window.clearInterval(t);
-      window.removeEventListener("focus", check);
-    };
+    // Hidden tabs are display: none (no offsetParent): they check once shown.
+    if (!paneRef.current?.offsetParent) {
+      staleRef.current = true;
+      return;
+    }
+    staleRef.current = false;
+    const text = await invoke<string>("read_file", { workspace, repo, path }).catch(() => null);
+    if (text === null || diskRef.current === null || text === diskRef.current) return;
+    diskRef.current = text;
+    if (dirtyRef.current) setDiskChanged(true);
+    else applyDiskRef.current(text);
   }, [workspace, repo, path]);
+  useFsChanges(path ? workspace : null, repo, (c) => {
+    if (touches(c, path)) checkDisk();
+  });
+  useEffect(() => {
+    const el = paneRef.current;
+    if (!el) return;
+    const io = new IntersectionObserver((es) => {
+      if (es.some((e) => e.isIntersecting) && staleRef.current) checkDisk();
+    });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [checkDisk]);
 
   const restartServer = () => {
     const model = editorRef.current?.getModel();

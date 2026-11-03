@@ -1,10 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { DiffEditor, type BeforeMount } from "@monaco-editor/react";
 import { invoke } from "@tauri-apps/api/core";
 import { GitChange, GitFileDiff } from "../types/config";
 import { tooltip } from "./Tooltip";
 import { useDiffNav } from "./useDiffNav";
 import { defineMonacoThemes, useMonacoTheme } from "../lib/theme";
+import { touches, useFsChanges } from "../lib/useFsChanges";
 
 interface Props {
   workspace: string;
@@ -42,19 +43,31 @@ export function ReviewPane({ workspace, repo, path, sha, shaLabel, onError }: Pr
   const [split, setSplit] = useState(false); // unified by default (GitHub-style)
   const nav = useDiffNav();
 
+  // Working-tree diffs follow the disk: bump to refetch in place.
+  const [rev, setRev] = useState(0);
+  useFsChanges(sha ? null : workspace, repo, (c) => {
+    if (touches(c, path)) setRev((r) => r + 1);
+  });
+  const lastKey = useRef("");
+
   useEffect(() => {
-    setDiff(null);
+    const key = `${workspace}|${repo}|${path}|${sha ?? ""}`;
+    // Only a different file blanks the view; a refresh swaps content in place.
+    if (lastKey.current !== key) setDiff(null);
+    lastKey.current = key;
     const cmd = sha ? "git_commit_diff" : "git_file_diff";
     const args = sha
       ? { workspace, repo, sha, path }
       : { workspace, repo, path };
     invoke<GitFileDiff>(cmd, args)
-      .then(setDiff)
+      .then((d) => setDiff((old) => (old && old.original === d.original && old.modified === d.modified ? old : d)))
       .catch((e) => {
+        if (rev > 0) return; // a refresh that failed keeps what's shown
         setDiff({ original: "", modified: "" });
         onError(String(e));
       });
-  }, [workspace, repo, path, sha, onError]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspace, repo, path, sha, onError, rev]);
 
   return (
     <div className="review-pane">

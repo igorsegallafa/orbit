@@ -11,7 +11,7 @@ import { SidebarResizer } from "./components/SidebarResizer";
 import { ContextMenu, MenuItem, useContextMenu } from "./components/ContextMenu";
 import { EditorPane, revealInEditor } from "./components/EditorPane";
 import { FindPopup, OpenMatch } from "./components/FindInFiles";
-import { AgentSignal, TerminalPane, TerminalTab, claudeSessionArgs, dropFilesIntoTerminal } from "./components/TerminalPane";
+import { AgentSignal, TerminalPane, TerminalTab, claudeSessionArgs, dropFilesIntoTerminal, sendToTerminal } from "./components/TerminalPane";
 import { InboxButton, InboxItem, InboxKind, notifyOs } from "./components/Inbox";
 import { FileTreePanel } from "./components/FileTreePanel";
 import { ReviewPane } from "./components/ReviewPane";
@@ -22,6 +22,9 @@ import { SearchEverywhereModal } from "./components/SearchEverywhereModal";
 import { UsageBar } from "./components/UsageBar";
 import { TooltipHost, tooltip } from "./components/Tooltip";
 import { WindowControls, isMac } from "./components/WindowControls";
+import { NewSessionMenu } from "./components/NewSessionMenu";
+import { ChangesReview } from "./components/ChangesReview";
+import { folderLabel, folderPath, isFolderScope, scopeLabel } from "./lib/folderScope";
 import { RalphView } from "./components/RalphView";
 import { RepoPage } from "./pages/RepoPage";
 import { WorkspaceCreateModal } from "./components/WorkspaceCreateModal";
@@ -33,7 +36,7 @@ import { startUpdateChecks } from "./lib/updater";
 import { listen } from "@tauri-apps/api/event";
 import { reasonLabel, StopReason } from "./types/ralph";
 import {
-  HomeIcon, SettingsIcon, SatelliteIcon, DocIcon, TerminalIcon, PlusIcon,
+  HomeIcon, SettingsIcon, SatelliteIcon, DocIcon, TerminalIcon, PlusIcon, FolderIcon,
   ChevronRightIcon, PlugIcon, DiffIcon, GitIcon, PanelLeftIcon, PanelLeftExpandIcon,
   PanelRightIcon, PanelRightExpandIcon, SparkIcon, RepoIcon, ArrowLeftIcon, ArrowRightIcon, PullRequestIcon,
 } from "./components/Icons";
@@ -60,6 +63,8 @@ type Tab =
   | { kind: "workspace"; workspace: Workspace }
   | { kind: "editor"; workspace: string; repo: string; path: string }
   | { kind: "review"; workspace: string; repo: string; path: string }
+  /** All local changes of a workspace, with review notes; `focus` scrolls to a file. */
+  | { kind: "changes"; workspace: string; focus?: { repo: string; path: string; at: number } }
   | { kind: "commit"; workspace: string; repo: string; commit: GitCommit }
   | { kind: "pr"; prs: PullRequest[] }
   /** A Code Review feature (PRs sharing a branch) before it is checked out. */
@@ -116,6 +121,7 @@ function tabId(tab: Tab): string {
   if (t.kind === "workspace") return `ws:${t.workspace.name}`;
   if (t.kind === "editor") return `ed:${t.workspace}/${t.repo}/${t.path}`;
   if (t.kind === "review") return `rv:${t.workspace}/${t.repo}/${t.path}`;
+  if (t.kind === "changes") return `chg:${t.workspace}`;
   if (t.kind === "commit") return `cm:${t.workspace}/${t.repo}/${t.commit.sha}`;
   if (t.kind === "pr") return `pr:${t.prs.map((p) => `${p.ownerRepo}/${p.number}`).join("+")}`;
   if (t.kind === "feature") return `ft:${t.prs.map((p) => `${p.ownerRepo}/${p.number}`).join("+")}`;
@@ -168,7 +174,8 @@ function App() {
   const [dockWidth, setDockWidth] = useState(() => loadStored(DOCK_KEY, 240, 180, 460));
   const [searchOpen, setSearchOpen] = useState(false);
   const [findOpen, setFindOpen] = useState(false);
-  const [plusMenu, setPlusMenu] = useState<{ x: number; y: number } | null>(null);
+  /** New-session menu; `scope` preselects where (a sidebar folder row). */
+  const [plusMenu, setPlusMenu] = useState<{ x: number; y: number; scope?: string } | null>(null);
   const [wsExpanded, setWsExpanded] = useState<Record<string, boolean>>(() => {
     try {
       return JSON.parse(localStorage.getItem("orbit.ws-expanded") ?? "{}");
@@ -200,7 +207,7 @@ function App() {
       setTabs((ts) => {
         const kept = ts.filter((t) => {
           const ws = owner(t);
-          return ws === null || isScope(ws) || names.has(ws);
+          return ws === null || isScope(ws) || isFolderScope(ws) || names.has(ws);
         });
         return kept.length === ts.length ? ts : kept;
       });
@@ -374,8 +381,9 @@ function App() {
 
   const onAgentSignal = (t: TerminalTab, sig: AgentSignal) => {
     const name = t.sessionName;
-    if (sig.kind === "done") pushInbox(t.id, "done", `${name} finished`, t.workspace);
-    else pushInbox(t.id, "waiting", `${name} needs your attention`, sig.message ? `${t.workspace} · ${sig.message}` : t.workspace);
+    const where = scopeLabel(t.workspace);
+    if (sig.kind === "done") pushInbox(t.id, "done", `${name} finished`, where);
+    else pushInbox(t.id, "waiting", `${name} needs your attention`, sig.message ? `${where} · ${sig.message}` : where);
   };
 
   // Seeing the tab settles its notifications.
@@ -602,6 +610,15 @@ function App() {
   const openRepoPage = (repo: string) => {
     setActiveTab(null);
     setNavPage({ kind: "repo", repo });
+  };
+
+  /** The workspace's Review tab (one per workspace), scrolled to a file if given. */
+  const openChanges = (wsName: string, repo?: string, path?: string) => {
+    setNavPage({ kind: "dashboard" });
+    const tab: Tab = { kind: "changes", workspace: wsName, focus: repo && path ? { repo, path, at: Date.now() } : undefined };
+    const id = tabId(tab);
+    setTabs((ts) => (ts.some((t) => tabId(t) === id) ? ts.map((t) => (tabId(t) === id ? tab : t)) : [...ts, tab]));
+    setActiveTab(id);
   };
 
   const openFileTab = (wsName: string, repo: string, path: string) => {
@@ -832,6 +849,14 @@ function App() {
         (t.kind === "terminal" && t.terminal.workspace === wsName) || (t.kind === "editor" && t.workspace === wsName),
     );
 
+  /** Folders with open or recent sessions outside workspaces, A→Z. */
+  const folderScopes = [
+    ...new Set([
+      ...tabs.flatMap((t) => (t.kind === "terminal" && isFolderScope(t.terminal.workspace) ? [t.terminal.workspace] : [])),
+      ...recentSessions.flatMap((r) => (isFolderScope(r.workspace) ? [r.workspace] : [])),
+    ]),
+  ].sort((a, b) => folderLabel(a).localeCompare(folderLabel(b)));
+
   const recentOf = (wsName: string) => recentSessions.filter((r) => r.workspace === wsName).slice(0, RECENT_SHOWN);
 
   /** Ended agent sessions of a workspace: click to resume the conversation. */
@@ -927,6 +952,14 @@ function App() {
           ? repoScope(focusName)
           : (workspaces.find((w) => w.name === focusName) ?? null);
 
+  /** Where the new-session menu points first: `scope` if given, else the
+   *  workspace, repo or folder in focus. */
+  const sessionFocus = (scope?: string): { scope: string; label: string; kind: "workspace" | "repo" | "folder" } | null => {
+    const s = scope ?? (focusName && isFolderScope(focusName) ? focusName : focusWorkspace?.name);
+    if (!s) return null;
+    return { scope: s, label: scopeLabel(s), kind: isFolderScope(s) ? "folder" : isScope(s) ? "repo" : "workspace" };
+  };
+
   const openMatch =
     (wsName: string): OpenMatch =>
     (m, length) => {
@@ -943,9 +976,16 @@ function App() {
         e.preventDefault();
         setFindOpen(true);
       }
+      // Ctrl/Cmd+Shift+T: new session, from anywhere (even over a terminal).
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.code === "KeyT") {
+        e.preventDefault();
+        e.stopPropagation();
+        setPlusMenu({ x: window.innerWidth / 2 - 130, y: 72 });
+      }
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    // Capture: runs before xterm, which would otherwise swallow the keys.
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
   }, []);
 
   const renderPane = (tab: Tab) => {
@@ -995,6 +1035,30 @@ function App() {
               .then((ai) => openPromptedSession(tab.workspace, ai.agent, ai.model, prompt, { name: "plan", autoEdit: true }))
               .catch((e) => setError(String(e)))
           }
+        />
+      );
+    }
+    if (tab.kind === "changes") {
+      const ws = isScope(tab.workspace) ? repoScope(tab.workspace) : workspaces.find((w) => w.name === tab.workspace);
+      if (!ws) return null;
+      return (
+        <ChangesReview
+          workspace={ws}
+          focus={tab.focus}
+          sessions={tabs.flatMap((t) =>
+            t.kind === "terminal" && t.terminal.workspace === tab.workspace && t.terminal.cmd !== null ? [{ id: t.terminal.id, name: t.terminal.sessionName }] : [],
+          )}
+          onSendToSession={(id, prompt) => {
+            if (sendToTerminal(id, prompt)) setActiveTab(id);
+            else setError("That session isn't running any more");
+          }}
+          onNewSession={(prompt) =>
+            invoke<{ agent: string; model: string }>("get_ai_settings")
+              .then((ai) => openPromptedSession(tab.workspace, ai.agent, ai.model, prompt, { name: "review", autoEdit: true }))
+              .catch((e) => setError(String(e)))
+          }
+          onOpenFile={(repo, path) => openFileTab(tab.workspace, repo, path)}
+          onError={setError}
         />
       );
     }
@@ -1080,7 +1144,7 @@ function App() {
           config={config}
           workspaces={workspaces}
           onOpenWorkspace={openWorkspaceTab}
-          onReviewFile={(path) => openTab({ kind: "review", workspace: scope, repo, path })}
+          onReviewFile={(path) => openChanges(scope, repo, path)}
           onReviewCommit={(commit) => openTab({ kind: "commit", workspace: scope, repo, commit })}
           onOpenPrList={(prs) => openTab({ kind: "pr", prs })}
           onNewSession={(label, cmd) => newTerminal(scope, label, cmd)}
@@ -1313,6 +1377,41 @@ function App() {
               );
             })}
 
+          {!collapsed && (
+            <div className="nav-section nav-section-row">
+              Sessions
+              <button
+                className="nav-section-add"
+                title="New session (Ctrl+Shift+T)"
+                onClick={(e) => {
+                  const r = e.currentTarget.getBoundingClientRect();
+                  setPlusMenu({ x: r.left, y: r.bottom + 4 });
+                }}
+              >
+                <PlusIcon size={12} />
+              </button>
+            </div>
+          )}
+          {!collapsed &&
+            folderScopes.map((scope) => (
+              <div key={scope} className="nav-workspace">
+                <button
+                  className="nav-item nav-ws"
+                  title={`${folderPath(scope)} — new session here`}
+                  onClick={(e) => {
+                    const r = e.currentTarget.getBoundingClientRect();
+                    setPlusMenu({ x: r.right - 40, y: r.bottom + 4, scope });
+                  }}
+                >
+                  <span className="nav-icon"><FolderIcon size={15} /></span>
+                  <span className="nav-item-label">{folderLabel(scope)}</span>
+                  {sessionsOf(scope).some((t) => unreadByTab.has(tabId(t))) && <span className="nav-unread" />}
+                </button>
+                {sessionsOf(scope).map(renderSessionItem)}
+                {renderRecent(scope)}
+              </div>
+            ))}
+
           {!collapsed && config.services.length > 0 && <div className="nav-section">Repos</div>}
           {!collapsed &&
             [...config.services]
@@ -1436,6 +1535,8 @@ function App() {
                           : (t.path.split("/").pop() || "Files"))
                       : t.kind === "review"
                         ? `${t.repo}/${t.path.split("/").pop()} (diff)`
+                        : t.kind === "changes"
+                        ? `Review · ${scopeLabel(t.workspace)}`
                         : t.kind === "commit"
                           ? `${t.commit.message.slice(0, 24)}…`
                           : t.kind === "ralph"
@@ -1456,7 +1557,7 @@ function App() {
                     <DocIcon size={13} />
                   ) : t.kind === "feature" ? (
                     <PullRequestIcon size={13} />
-                  ) : t.kind === "review" || t.kind === "commit" || t.kind === "pr" ? (
+                  ) : t.kind === "review" || t.kind === "changes" || t.kind === "commit" || t.kind === "pr" ? (
                     <DiffIcon size={13} />
                   ) : t.kind === "ralph" ? (
                     <SparkIcon size={13} />
@@ -1604,16 +1705,16 @@ function App() {
           onClose={() => sessionMenu.setMenu(null)}
         />
       )}
-      {plusMenu && focusWorkspace && (
-        <ContextMenu
+      {plusMenu && (
+        <NewSessionMenu
           x={plusMenu.x}
           y={plusMenu.y}
-          items={[
-            { label: "Terminal", onSelect: () => openShellTerminal(focusWorkspace.name) },
-            { label: "Claude Code", onSelect: () => newTerminal(focusWorkspace.name, "claude", "claude") },
-            { label: "Open Code", onSelect: () => newTerminal(focusWorkspace.name, "opencode", "opencode") },
-            { label: "OMP", onSelect: () => newTerminal(focusWorkspace.name, "omp", "omp") },
-          ]}
+          focus={sessionFocus(plusMenu.scope)}
+          repos={config.services.map((svc) => svc.name).filter((n) => repoBriefs[n]?.cloned !== false)}
+          onOpen={(scope, label, cmd) => {
+            setNavPage({ kind: "dashboard" });
+            newTerminal(scope, label, cmd);
+          }}
           onClose={() => setPlusMenu(null)}
         />
       )}
@@ -1649,10 +1750,8 @@ function App() {
             <FileTreePanel
               workspace={focusWorkspace}
               onOpenFile={(repo, path) => openFileTab(focusWorkspace.name, repo, path)}
-              onReviewFile={(repo, path) => {
-                setNavPage({ kind: "dashboard" });
-                openTab({ kind: "review", workspace: focusWorkspace.name, repo, path });
-              }}
+              onReviewFile={(repo, path) => openChanges(focusWorkspace.name, repo, path)}
+              onReviewAll={() => openChanges(focusWorkspace.name)}
               onOpenFind={() => setFindOpen(true)}
               activeRepo={active?.kind === "editor" && active.repo ? active.repo : undefined}
               browsing={active?.kind === "editor" && !active.path}
@@ -1687,4 +1786,4 @@ function App() {
   );
 }
 
-export default App;
+export default App;

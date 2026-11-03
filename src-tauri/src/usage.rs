@@ -195,10 +195,10 @@ fn opencode_usage(ws_dir: &std::path::Path, repos: &[String]) -> Raw {
             .and_then(|t| t.as_str())
             .unwrap_or("opencode session")
             .to_string();
-        let inp = row.get("tokens_input").map(&num).unwrap_or(0);
-        let outp = row.get("tokens_output").map(&num).unwrap_or(0);
-        let cache = row.get("tokens_cache_read").map(&num).unwrap_or(0)
-            + row.get("tokens_cache_write").map(&num).unwrap_or(0);
+        let inp = row.get("tokens_input").map(num).unwrap_or(0);
+        let outp = row.get("tokens_output").map(num).unwrap_or(0);
+        let cache = row.get("tokens_cache_read").map(num).unwrap_or(0)
+            + row.get("tokens_cache_write").map(num).unwrap_or(0);
         let cost = row.get("cost").and_then(|c| c.as_f64()).unwrap_or(0.0);
         let last_active = row.get("time_updated").and_then(|t| t.as_i64()).unwrap_or(0) / 1000;
 

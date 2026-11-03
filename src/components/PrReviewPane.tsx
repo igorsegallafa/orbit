@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DiffEditor, type BeforeMount } from "@monaco-editor/react";
 import type { editor as Monaco } from "monaco-editor";
 import { invoke } from "@tauri-apps/api/core";
@@ -133,6 +133,39 @@ export function PrReviewPane({ prs, onError }: Props) {
       .catch((e) => onError(String(e)));
     loadReview(true);
   }, [pr?.ownerRepo, pr?.number, onError, loadReview]);
+
+  // New commits pushed while reviewing: check every minute (visible tab
+  // only) and when the window regains focus. The diff isn't swapped under
+  // the reader; a banner offers the update. Threads refresh quietly.
+  const [newHead, setNewHead] = useState<PrDetail | null>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    setNewHead(null);
+    if (!pr || !detail) return;
+    let stopped = false;
+    const check = async () => {
+      if (document.visibilityState !== "visible" || !rootRef.current?.offsetParent) return;
+      const d = await invoke<PrDetail>("pr_detail", { ownerRepo: pr.ownerRepo, number: pr.number }).catch(() => null);
+      if (stopped || !d) return;
+      if (d.headSha !== detail.headSha) setNewHead(d);
+      loadReview(false);
+    };
+    const t = window.setInterval(check, 60_000);
+    window.addEventListener("focus", check);
+    return () => {
+      stopped = true;
+      window.clearInterval(t);
+      window.removeEventListener("focus", check);
+    };
+  }, [pr?.ownerRepo, pr?.number, detail?.headSha, loadReview]);
+
+  const applyNewHead = () => {
+    if (!newHead) return;
+    setDetail(newHead);
+    if (selected && selected !== OVERVIEW && !newHead.files.some((f) => f.path === selected)) setSelected(OVERVIEW);
+    setNewHead(null);
+    loadReview(true);
+  };
 
   useEffect(() => {
     setComposer(null);
@@ -315,7 +348,7 @@ export function PrReviewPane({ prs, onError }: Props) {
   const decision = review?.reviewDecision ? DECISION[review.reviewDecision] : null;
 
   return (
-    <div className="commit-review pr-review">
+    <div className="commit-review pr-review" ref={rootRef}>
       <div className="pr-review-side" style={{ width: side.width }}>
         {prs.length > 1 && (
           <div className="pr-selector">
@@ -443,6 +476,16 @@ export function PrReviewPane({ prs, onError }: Props) {
       {side.handle}
 
       <div className="pr-diff-col">
+        {newHead && (
+          <div className="pr-update-banner">
+            <span>
+              <strong>New commits</strong> were pushed to this PR.
+            </span>
+            <button className="secondary btn-mini" onClick={applyNewHead}>
+              Update diff
+            </button>
+          </div>
+        )}
         <div className="editor-filebar rv-filebar">
           {selected && selected !== OVERVIEW ? (
             <span className="rv-path" title={selected}>

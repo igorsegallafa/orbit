@@ -4,11 +4,14 @@ import { GitChange, GitCommit, Workspace } from "../types/config";
 import { Skeleton } from "./Skeleton";
 import { arrowNav } from "../lib/arrowNav";
 import { tooltip } from "./Tooltip";
+import { useFsChanges } from "../lib/useFsChanges";
 
 interface Props {
   workspace: Workspace;
-  /** Opens the diff review for a changed file in a new tab. */
+  /** Opens the Review tab scrolled to a changed file. */
   onReviewFile: (repo: string, path: string) => void;
+  /** Opens the Review tab with every change. */
+  onReviewAll: () => void;
   /** Opens commit inspection in a new tab. */
   onReviewCommit: (repo: string, commit: GitCommit) => void;
   onError: (msg: string) => void;
@@ -25,17 +28,20 @@ export const STATUS_LABEL: Record<string, { letter: string; cls: string }> = {
  * Dock "Git" panel: working changes and recent commits for the selected
  * repo. Clicking a changed file opens the diff review tab.
  */
-export function GitPanel({ workspace, onReviewFile, onReviewCommit, onError }: Props) {
+export function GitPanel({ workspace, onReviewFile, onReviewAll, onReviewCommit, onError }: Props) {
   // Only while it belongs to the focused workspace (see FileTreePanel).
   const [picked, setRepo] = useState(workspace.repos[0] ?? "");
   const repo = workspace.repos.includes(picked) ? picked : (workspace.repos[0] ?? "");
   const [changes, setChanges] = useState<GitChange[] | null>(null);
   const [commits, setCommits] = useState<GitCommit[] | null>(null);
 
-  const load = useCallback(async () => {
+  /** `quiet`: refresh in place (watcher), without the loading skeleton. */
+  const load = useCallback(async (quiet = false) => {
     if (!repo) return;
-    setChanges(null);
-    setCommits(null);
+    if (!quiet) {
+      setChanges(null);
+      setCommits(null);
+    }
     try {
       const [chg, cmt] = await Promise.all([
         invoke<GitChange[]>("git_changes", { workspace: workspace.name, repo }),
@@ -44,6 +50,7 @@ export function GitPanel({ workspace, onReviewFile, onReviewCommit, onError }: P
       setChanges(chg);
       setCommits(cmt);
     } catch (e) {
+      if (quiet) return;
       onError(String(e));
       setChanges([]);
       setCommits([]);
@@ -53,6 +60,8 @@ export function GitPanel({ workspace, onReviewFile, onReviewCommit, onError }: P
   useEffect(() => {
     load();
   }, [load]);
+
+  useFsChanges(workspace.name, repo, () => load(true));
 
   return (
     <div className="dock-panel">
@@ -68,13 +77,20 @@ export function GitPanel({ workspace, onReviewFile, onReviewCommit, onError }: P
           className="dock-icon"
           onMouseEnter={(e) => tooltip.show("Refresh git state", e)}
           onMouseLeave={() => tooltip.hide()}
-          onClick={load}
+          onClick={() => load()}
         >
           ⟳
         </button>
       </div>
       <div className="dock-panel-body git-panel-body" onKeyDown={arrowNav(".git-change-row, .git-commit-row")}>
-        <div className="git-section-label">Changes</div>
+        <div className="git-section-label git-section-row">
+          Changes
+          {!!changes?.length && (
+            <button className="btn-link" onClick={onReviewAll}>
+              Review all
+            </button>
+          )}
+        </div>
         {changes === null ? (
           <div className="modal-row"><Skeleton w={30} h={11} /> <Skeleton w="70%" h={11} /></div>
         ) : changes.length === 0 ? (
