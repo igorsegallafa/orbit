@@ -83,12 +83,31 @@ fn host_env_from(vars: impl Iterator<Item = (OsString, OsString)>, appdir: &Path
             || (key == "GTK_THEME" && val.starts_with("Adwaita:"));
         if launcher_only {
             out.push((k, None));
-        } else if val.contains(appdir.to_string_lossy().as_ref()) {
-            let kept: Vec<&str> = val.split(':').filter(|e| !e.is_empty() && !Path::new(e).starts_with(appdir)).collect();
+        } else if val.split(':').any(|e| in_bundle(e, appdir)) {
+            let kept: Vec<&str> = val.split(':').filter(|e| !e.is_empty() && !in_bundle(e, appdir)).collect();
             out.push((k, (!kept.is_empty()).then(|| kept.join(":").into())));
         }
     }
     out
+}
+
+/// True for a path inside this AppImage's mount, or inside an earlier
+/// instance's mount next to it: an update relaunches Orbit with the old
+/// process's environment, so the old mount's entries come along too.
+fn in_bundle(entry: &str, appdir: &Path) -> bool {
+    let p = Path::new(entry);
+    if p.starts_with(appdir) {
+        return true;
+    }
+    let (Some(parent), Some(name)) = (appdir.parent(), appdir.file_name()) else { return false };
+    let Some(prefix) = name.to_str().and_then(|n| n.strip_prefix(".mount_")).map(|n| &n[..n.find('.').unwrap_or(n.len())]) else {
+        return false;
+    };
+    p.strip_prefix(parent)
+        .ok()
+        .and_then(|rest| rest.components().next())
+        .and_then(|c| c.as_os_str().to_str())
+        .is_some_and(|c| c.strip_prefix(".mount_").is_some_and(|m| m.starts_with(prefix)))
 }
 
 /// PATH as a child gets it (see `host_env`).
@@ -313,6 +332,19 @@ mod tests {
                 ("XDG_DATA_DIRS".into(), s("/usr/share")),
             ]
         );
+    }
+
+    #[test]
+    fn host_env_drops_an_earlier_instances_mount_after_an_update() {
+        let vars = [
+            ("LD_LIBRARY_PATH", "/tmp/.mount_Orbit.New/usr/lib/:/tmp/.mount_Orbit.Old/usr/lib/:/opt/x/lib"),
+            ("PWD", "/tmp/.mount_Orbit.Old/usr"),
+            ("OTHER", "/tmp/.mount_Other.Abc/usr/lib"),
+        ]
+        .map(|(k, v)| (OsString::from(k), OsString::from(v)));
+        let mut got = host_env_from(vars.into_iter(), Path::new("/tmp/.mount_Orbit.New"));
+        got.sort();
+        assert_eq!(got, vec![("LD_LIBRARY_PATH".into(), Some(OsString::from("/opt/x/lib"))), ("PWD".into(), None)]);
     }
 
     #[test]
