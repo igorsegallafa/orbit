@@ -41,6 +41,7 @@ import {
   TrashIcon,
   UndoIcon,
 } from "../components/Icons";
+import { useFsChanges } from "../lib/useFsChanges";
 import { GitHubIcon } from "../components/BrandIcons";
 
 interface Props {
@@ -152,18 +153,26 @@ export function RepoPage({
     }
   }, [repo, load, onError]);
 
-  // Fresh state on open, and whenever Orbit regains focus (edits made in an
-  // editor or terminal elsewhere show up without a manual refresh).
+  // Fresh state on open.
   useEffect(() => {
     setOv(null);
     setChanges(null);
     setHistory(null);
     setPrs(null);
     load();
-    const onFocus = () => load();
-    window.addEventListener("focus", onFocus);
-    return () => window.removeEventListener("focus", onFocus);
   }, [load]);
+
+  // Follow the clone on disk: file edits refresh the change list; git moves
+  // (commit, checkout, focus back) refresh everything.
+  useFsChanges(scope, repo, (c) => {
+    if (c.git) {
+      load();
+      return;
+    }
+    invoke<GitChange[]>("git_changes", { workspace: scope, repo })
+      .then(setChanges)
+      .catch(() => null);
+  });
 
   /** Runs one git action with a busy label, then refreshes. */
   const run = async (label: string, action: () => Promise<unknown>, success?: string) => {

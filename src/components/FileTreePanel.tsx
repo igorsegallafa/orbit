@@ -5,6 +5,7 @@ import { FolderIcon, GitIcon, SearchIcon } from "./Icons";
 import { FileTypeIcon, FolderTreeIcon } from "./FileIcons";
 import { ContextMenu, MenuItem, useContextMenu } from "./ContextMenu";
 import { GitPanel } from "./GitPanel";
+import { useFsChanges } from "../lib/useFsChanges";
 import { GitCommit, Workspace } from "../types/config";
 
 interface FileNode {
@@ -26,6 +27,8 @@ interface Props {
   onOpenFile: (repo: string, path: string) => void;
   /** Opens the diff review for a changed file (Git tab). */
   onReviewFile: (repo: string, path: string) => void;
+  /** Opens the Review tab with every change of the workspace. */
+  onReviewAll: () => void;
   /** Opens commit inspection (Git tab). */
   onReviewCommit: (repo: string, commit: GitCommit) => void;
   /** Opens the Find in Files popup. */
@@ -47,7 +50,7 @@ interface Props {
  * move past a 4px threshold → hit-test folders with elementFromPoint →
  * move on mouseup, with a floating ghost and target highlight.
  */
-export function FileTreePanel({ workspace, onOpenFile, onReviewFile, onReviewCommit, onOpenFind, onError, activeRepo, browsing }: Props) {
+export function FileTreePanel({ workspace, onOpenFile, onReviewFile, onReviewAll, onReviewCommit, onOpenFind, onError, activeRepo, browsing }: Props) {
   const [view, setView] = useState<DockView>("files");
   // The picked repo only counts while it belongs to the focused workspace:
   // switching focus must never pair the new workspace with the old repo.
@@ -104,31 +107,25 @@ export function FileTreePanel({ workspace, onOpenFile, onReviewFile, onReviewCom
     if (browsing) setView("files");
   }, [browsing, activeRepo]);
 
-  // Files created or deleted elsewhere (another IDE, an agent): reload the
-  // open folders when the window regains focus, and every 5s while shown.
+  // Files created or deleted elsewhere (another IDE, an agent): the watcher
+  // reports them and the open folders they touched are reloaded.
   const expandedRef = useRef(expanded);
   expandedRef.current = expanded;
   const hostRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!repo || view !== "files") return;
-    const refresh = () => {
-      if (document.visibilityState !== "visible" || !hostRef.current?.offsetParent) return;
-      const dirs = Object.keys(expandedRef.current).filter((d) => expandedRef.current[d]);
-      for (const dir of dirs) {
+  // Re-list the open folders a change touched (any of them for git/focus).
+  useFsChanges(repo && view === "files" ? workspace.name : null, repo, (c) => {
+    if (!hostRef.current?.offsetParent) return;
+    const parents = new Set(c.paths.map((p) => (p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "")));
+    const all = c.git || c.paths.length === 0;
+    const dirs = Object.keys(expandedRef.current).filter((d) => expandedRef.current[d] && (all || parents.has(d)));
+    for (const dir of dirs) {
         invoke<FileNode[]>("list_files", { workspace: workspace.name, repo, path: dir })
           .then((nodes) =>
             setTree((t) => (JSON.stringify(t[dir]) === JSON.stringify(nodes) ? t : { ...t, [dir]: nodes }))
           )
-          .catch(() => null); // gone (deleted folder) or transient: the next pass settles it
-      }
-    };
-    const t = window.setInterval(refresh, 5000);
-    window.addEventListener("focus", refresh);
-    return () => {
-      window.clearInterval(t);
-      window.removeEventListener("focus", refresh);
-    };
-  }, [workspace.name, repo, view]);
+          .catch(() => null); // gone (deleted folder) or transient: the next change settles it
+    }
+  });
 
   const toggleDir = (dir: string) => {
     setExpanded((x) => {
@@ -499,6 +496,7 @@ export function FileTreePanel({ workspace, onOpenFile, onReviewFile, onReviewCom
         <GitPanel
           workspace={workspace}
           onReviewFile={onReviewFile}
+          onReviewAll={onReviewAll}
           onReviewCommit={onReviewCommit}
           onError={onError}
         />

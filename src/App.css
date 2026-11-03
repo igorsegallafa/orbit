@@ -6651,3 +6651,85 @@ button.lsp-chip-restart:hover:not(:disabled) { color: var(--text); }
 .settings-split { display: flex; gap: 36px; align-items: flex-start; }
 .settings-inline-nav { position: sticky; top: 0; width: 200px; flex-shrink: 0; }
 .settings-split > .settings-page { flex: 1; min-width: 0; }
+
+.pr-update-banner {
+  display: flex; align-items: center; gap: 10px; padding: 6px 12px;
+  border-bottom: 1px solid var(--accent-soft); background: color-mix(in srgb, var(--accent) 7%, transparent);
+  font-size: 12.5px; color: var(--text-dim);
+}
+.pr-update-banner strong { color: var(--text); }
+.pr-update-banner button { margin-left: auto; }
+
+/* Sidebar section header with an action (Sessions +) */
+.nav-section-row { display: flex; align-items: center; justify-content: space-between; padding-right: 6px; }
+.nav-section-add {
+  display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; padding: 0;
+  border: none; border-radius: 4px; background: transparent; color: var(--text-faint); cursor: pointer;
+}
+.nav-section-add:hover { background: var(--bg-hover, color-mix(in srgb, var(--text) 8%, transparent)); color: var(--text); }
+
+/* New-session menu: where (locations) + what (agents) */
+.new-session-menu { width: 260px; }
+.nsm-label { padding: 6px 10px 4px; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-faint); }
+.nsm-locations { max-height: 240px; overflow-y: auto; }
+.context-menu-item.nsm-loc, .context-menu-item.nsm-choose { display: flex; align-items: center; gap: 8px; }
+.nsm-icon { display: inline-flex; color: var(--text-faint); flex-shrink: 0; }
+.nsm-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nsm-hint { margin-left: auto; padding-left: 8px; font-size: 11px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 45%; }
+.context-menu-item.nsm-loc-on { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--text); }
+.nsm-loc-on .nsm-icon { color: var(--accent); }
+.nsm-sep { height: 1px; margin: 4px 0; background: var(--border); }
+
+/* ---------- Review tab: all local changes + notes (ChangesReview) ---------- */
+.git-section-row { display: flex; align-items: center; justify-content: space-between; }
+.git-section-row .btn-link { font-size: 11px; text-transform: none; letter-spacing: 0; }
+.chg-side { padding-bottom: 12px; }
+.chg-repo-name { padding: 8px 12px 2px; font-size: 11px; font-weight: 600; color: var(--text-dim); }
+.chg-viewed { opacity: 0.55; }
+.chg-note-count {
+  margin-left: auto; min-width: 16px; padding: 0 5px; border-radius: 8px; font-size: 10.5px; line-height: 16px; text-align: center;
+  background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent);
+}
+.chg-notes-label { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 12px; }
+.chg-notes-label .btn-link { font-size: 11px; text-transform: none; letter-spacing: 0; font-weight: 500; }
+.chg-note-row { display: flex; align-items: flex-start; gap: 6px; padding: 4px 10px; }
+.chg-note-row .orbit-check { margin-top: 2px; flex-shrink: 0; }
+.chg-note-row.done .chg-note-body { text-decoration: line-through; color: var(--text-faint); }
+.chg-note-text {
+  display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1; padding: 2px 4px; border: none; border-radius: 5px;
+  background: transparent; color: var(--text); text-align: left; cursor: pointer;
+}
+.chg-note-text:hover { background: color-mix(in srgb, var(--text) 6%, transparent); }
+.chg-note-loc { font-size: 11px; color: var(--text-faint); font-family: var(--mono, ui-monospace, monospace); }
+.chg-note-body { font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chg-clear-done { margin: 6px 12px 0; font-size: 11.5px; }
+.chg-toolbar { gap: 10px; }
+.chg-summary { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-dim); }
+.chg-viewed-count { color: var(--text-faint); }
+.chg-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 12px 16px 40vh; display: flex; flex-direction: column; gap: 12px; }
+.chg-file { border: 1px solid var(--border); border-radius: 8px; background: var(--bg); overflow: clip; flex-shrink: 0; }
+.chg-file-head {
+  position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 10px;
+  border-bottom: 1px solid var(--border); background: var(--panel); font-size: 12.5px;
+}
+.chg-chevron { display: inline-flex; transform: rotate(-90deg); transition: transform 0.12s; }
+.chg-chevron.open { transform: rotate(0deg); }
+.chg-file-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono, ui-monospace, monospace); font-size: 12px; }
+.chg-file-path:hover .rv-path-name { text-decoration: underline; }
+.chg-file-repo { font-size: 11px; color: var(--text-faint); }
+.chg-file-viewed { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-dim); cursor: pointer; }
+.chg-file-body { position: relative; }
+.chg-note-done { opacity: 0.6; }
+.chg-empty { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 80px 20px; color: var(--text-dim); font-size: 13px; }
+.chg-empty strong { color: var(--text); font-size: 14px; }
+
+/* Send notes to PR */
+.stp-list { display: flex; flex-direction: column; gap: 2px; max-height: 50vh; overflow-y: auto; margin: 12px 0; }
+.stp-row { display: flex; align-items: flex-start; gap: 8px; padding: 6px 4px; border-radius: 6px; }
+.stp-row .orbit-check { margin-top: 2px; flex-shrink: 0; }
+.stp-off { opacity: 0.6; }
+.stp-main { min-width: 0; }
+.stp-loc { font-size: 11px; color: var(--text-faint); font-family: var(--mono, ui-monospace, monospace); }
+.stp-body { font-size: 12.5px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stp-why { font-size: 11.5px; color: var(--warn); }
+.stp-remove { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text-dim); cursor: pointer; }

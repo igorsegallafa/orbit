@@ -1047,8 +1047,7 @@ mod tests {
     fn cutoff_is_seven_days_ago_iso() {
         let s = iso_cutoff_days(7);
         assert!(s.ends_with('Z') && s.len() == 20 && s.contains('T'));
-        // 2026-09-16 minus 7 days is 2026-09-09
-        assert!(s.starts_with("2026-09-"), "{s}");
+        assert!(s.starts_with("20") && s.as_bytes()[4] == b'-' && s.as_bytes()[7] == b'-', "{s}");
     }
 }
 

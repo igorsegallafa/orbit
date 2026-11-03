@@ -24,7 +24,9 @@ Download from the [latest release](https://github.com/igorsegallafa/orbit/releas
 - **Windows**: `Orbit_x.y.z_x64-setup.exe`.
 - **macOS (Apple Silicon)**: `Orbit_x.y.z_aarch64.dmg`, then drag Orbit to Applications. The app isn't notarized by Apple yet, so the first launch is blocked: open **System Settings → Privacy & Security** and click **Open Anyway** next to the Orbit message (or run `xattr -dr com.apple.quarantine /Applications/Orbit.app`). Updates don't need this again.
 
-On Linux, and on Intel Macs, build from source (below).
+- **Linux (x64)**: `Orbit_x.y.z_amd64.AppImage` (any distro; `chmod +x` and run, updates in-app), or the `.deb` / `.rpm` (updates by installing the new package).
+
+On Intel Macs, build from source (below).
 
 ### Requirements
 
@@ -55,9 +57,11 @@ npm run check         # typecheck, frontend tests, clippy and Rust tests
 npm run tauri build   # installers in src-tauri/target/release/bundle
 ```
 
+On Arch-based distros the AppImage step can fail in `linuxdeploy` (its bundled `strip` predates the system's binaries); build with `NO_STRIP=true npm run tauri build`.
+
 ## Releasing
 
-Publishing a GitHub release tagged `vX.Y.Z` builds the Windows installers and the macOS (Apple Silicon) app and dmg, plus the updater manifest (`latest.json`) covering both, and attaches them to the release (`.github/workflows/release.yml`). macOS builds are ad-hoc signed; to sign with a Developer ID and notarize, add the `APPLE_*` secrets Tauri documents and pass them to the `tauri-action` step. The tag is the version; nothing needs bumping in the code.
+Publishing a GitHub release tagged `vX.Y.Z` builds the Windows installers, the macOS (Apple Silicon) app and dmg, and the Linux AppImage, deb and rpm, plus the updater manifest (`latest.json`) covering all three, and attaches them to the release (`.github/workflows/release.yml`). macOS builds are ad-hoc signed; to sign with a Developer ID and notarize, add the `APPLE_*` secrets Tauri documents and pass them to the `tauri-action` step. The tag is the version; nothing needs bumping in the code.
 
 Updates are signed: the workflow needs the `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` secrets, matching the public key in `src-tauri/tauri.conf.json`.
 

@@ -60,6 +60,17 @@ export function dropFilesIntoTerminal(sessionId: string, paths: string[]) {
   livePtys.get(sessionId)?.inject(paths.join(" "));
 }
 
+/** Types a prompt into a running session and submits it. False when the
+ *  session isn't open. */
+export function sendToTerminal(sessionId: string, text: string): boolean {
+  const entry = livePtys.get(sessionId);
+  if (!entry) return false;
+  entry.inject(text.replace(/\s*\n\s*/g, " "));
+  // A separate keystroke, after the TUI took the text in, submits it.
+  window.setTimeout(() => entry.inject("\r"), 150);
+  return true;
+}
+
 const WAITING_TYPES = new Set(["permission_prompt", "elicitation_dialog", "elicitation_url_dialog", "agent_needs_input"]);
 /** Agents without hooks: a stretch of activity this long ending in silence counts as "done". */
 const FALLBACK_DONE_MS = 10_000;
