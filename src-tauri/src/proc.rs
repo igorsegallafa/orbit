@@ -1,5 +1,6 @@
 // Spawning external CLIs (git, gh, claude, editors) portably.
-use std::path::PathBuf;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// `Command::new(bin)` that also works on Windows for npm/editor shims
@@ -28,6 +29,12 @@ pub fn cmd(bin: &str) -> Command {
     for k in CLAUDE_SESSION_ENV {
         c.env_remove(k);
     }
+    for (k, v) in host_env() {
+        match v {
+            Some(v) => c.env(k, v),
+            None => c.env_remove(k),
+        };
+    }
     if bin == "git" {
         git_env(&mut c);
     }
@@ -53,6 +60,45 @@ fn git_env(c: &mut Command) {
     }
 }
 
+/// Linux AppImage: its launcher points the loader, GTK, GIO, Python and
+/// PATH at the bundled copies inside the mount. Inherited, they make the
+/// host's git, shells and agents load the bundle's older libraries
+/// (`libpcre2-8.so.0: no version information available`). Returns the
+/// changes that give a child the environment it would have had outside:
+/// `Some` sets a value with the bundle's entries dropped, `None` removes
+/// it. Empty when not running from an AppImage.
+pub fn host_env() -> Vec<(OsString, Option<OsString>)> {
+    match (std::env::var_os("APPIMAGE"), std::env::var_os("APPDIR")) {
+        (Some(_), Some(dir)) if !dir.is_empty() => host_env_from(std::env::vars_os(), Path::new(&dir)),
+        _ => Vec::new(),
+    }
+}
+
+fn host_env_from(vars: impl Iterator<Item = (OsString, OsString)>, appdir: &Path) -> Vec<(OsString, Option<OsString>)> {
+    let mut out = Vec::new();
+    for (k, v) in vars {
+        let (key, val) = (k.to_string_lossy(), v.to_string_lossy());
+        let launcher_only = matches!(key.as_ref(), "APPIMAGE" | "APPDIR" | "ARGV0" | "OWD" | "PYTHONDONTWRITEBYTECODE")
+            || (key == "GDK_BACKEND" && val == "x11")
+            || (key == "GTK_THEME" && val.starts_with("Adwaita:"));
+        if launcher_only {
+            out.push((k, None));
+        } else if val.contains(appdir.to_string_lossy().as_ref()) {
+            let kept: Vec<&str> = val.split(':').filter(|e| !e.is_empty() && !Path::new(e).starts_with(appdir)).collect();
+            out.push((k, (!kept.is_empty()).then(|| kept.join(":").into())));
+        }
+    }
+    out
+}
+
+/// PATH as a child gets it (see `host_env`).
+fn child_path() -> Option<OsString> {
+    match host_env().into_iter().find(|(k, _)| k == "PATH") {
+        Some((_, p)) => p,
+        None => std::env::var_os("PATH"),
+    }
+}
+
 /// Runs `bin args` (in `dir` when given) and returns stdout; a non-zero
 /// exit becomes an error carrying stderr.
 pub fn run(bin: &str, args: &[&str], dir: Option<&std::path::Path>) -> Result<String, String> {
@@ -71,12 +117,12 @@ pub fn run(bin: &str, args: &[&str], dir: Option<&std::path::Path>) -> Result<St
 /// Absolute path of `bin` found on PATH (honouring PATHEXT on Windows),
 /// or `bin` unchanged so the spawn error names what's missing.
 pub fn resolve(bin: &str) -> PathBuf {
-    find_in(bin, std::env::var_os("PATH"), &exts()).unwrap_or_else(|| PathBuf::from(bin))
+    find_in(bin, child_path(), &exts()).unwrap_or_else(|| PathBuf::from(bin))
 }
 
 /// True when `bin` is on PATH.
 pub fn exists(bin: &str) -> bool {
-    find_in(bin, std::env::var_os("PATH"), &exts()).is_some()
+    find_in(bin, child_path(), &exts()).is_some()
 }
 
 /// Windows: a GUI app inherits PATH from whatever launched it, which can
@@ -148,7 +194,14 @@ fn login_shell_path() -> Option<String> {
     use std::time::{Duration, Instant};
     const MARK: &str = "__ORBIT_PATH__";
     let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/zsh".into());
-    let mut child = Command::new(shell)
+    let mut shell = Command::new(shell);
+    for (k, v) in host_env() {
+        match v {
+            Some(v) => shell.env(k, v),
+            None => shell.env_remove(k),
+        };
+    }
+    let mut child = shell
         .args(["-ilc", &format!("printf '{MARK}%s{MARK}' \"$PATH\"")])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -232,6 +285,35 @@ fn find_in(bin: &str, path: Option<std::ffi::OsString>, exts: &[String]) -> Opti
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_env_undoes_the_appimage_launcher() {
+        let vars = [
+            ("LD_LIBRARY_PATH", "/tmp/.mount_X/usr/lib/:/tmp/.mount_X/lib64/:"),
+            ("PATH", "/tmp/.mount_X/usr/bin/:/home/u/.local/bin:/usr/bin"),
+            ("XDG_DATA_DIRS", "/tmp/.mount_X//usr/share:/usr/share"),
+            ("GTK_PATH", "/tmp/.mount_X//usr/lib/gtk-3.0"),
+            ("GDK_BACKEND", "x11"),
+            ("APPIMAGE", "/home/u/Applications/Orbit.AppImage"),
+            ("HOME", "/home/u"),
+            ("EDITOR", "nvim"),
+        ]
+        .map(|(k, v)| (OsString::from(k), OsString::from(v)));
+        let mut got = host_env_from(vars.into_iter(), Path::new("/tmp/.mount_X"));
+        got.sort();
+        let s = |v: &str| Some(OsString::from(v));
+        assert_eq!(
+            got,
+            vec![
+                ("APPIMAGE".into(), None),
+                ("GDK_BACKEND".into(), None),
+                ("GTK_PATH".into(), None),
+                ("LD_LIBRARY_PATH".into(), None),
+                ("PATH".into(), s("/home/u/.local/bin:/usr/bin")),
+                ("XDG_DATA_DIRS".into(), s("/usr/share")),
+            ]
+        );
+    }
 
     #[test]
     fn login_shell_path_survives_rc_noise() {
