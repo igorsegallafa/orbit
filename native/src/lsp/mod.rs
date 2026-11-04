@@ -11,32 +11,43 @@ pub use server::{LspServer, Notification};
 use futures::channel::mpsc;
 use futures::future::{FutureExt, Shared};
 use gpui::{App, AppContext as _, Task};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
+use std::rc::Rc;
 use std::sync::Arc;
 
 /// What a file is, for highlighting and for picking a server.
 pub struct FileLanguage {
     /// gpui-component highlighter name.
     pub highlight: &'static str,
+    /// Shown in the status bar.
+    pub name: &'static str,
     /// Server key (`ServerDef::language`) and LSP `languageId`.
     pub lsp: Option<(&'static str, &'static str)>,
 }
 
 pub fn file_language(path: &Path) -> FileLanguage {
     let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
-    let (highlight, lsp) = match ext.as_str() {
-        "c" => ("c", Some(("cpp", "c"))),
-        "h" | "hh" | "hpp" | "hxx" | "inl" | "ipp" | "cc" | "cpp" | "cxx" | "c++" => ("cpp", Some(("cpp", "cpp"))),
-        "rs" => ("rust", Some(("rust", "rust"))),
-        "ts" | "mts" | "cts" => ("typescript", Some(("typescript", "typescript"))),
-        "tsx" => ("tsx", Some(("typescript", "typescriptreact"))),
-        "js" | "mjs" | "cjs" => ("javascript", Some(("typescript", "javascript"))),
-        "jsx" => ("javascript", Some(("typescript", "javascriptreact"))),
-        "json" => ("json", None),
-        _ => ("text", None),
+    // Servers per language come from orbit_core::lsp::LANGUAGES; Python, Go,
+    // C# and Lua have no highlighter compiled in, only the server.
+    let (highlight, name, lsp) = match ext.as_str() {
+        "c" => ("c", "C", Some(("cpp", "c"))),
+        "h" | "hh" | "hpp" | "hxx" | "inl" | "ipp" | "tpp" | "cc" | "cpp" | "cxx" | "c++" => ("cpp", "C++", Some(("cpp", "cpp"))),
+        "rs" => ("rust", "Rust", Some(("rust", "rust"))),
+        "ts" | "mts" | "cts" => ("typescript", "TypeScript", Some(("typescript", "typescript"))),
+        "tsx" => ("tsx", "TypeScript", Some(("typescript", "typescriptreact"))),
+        "js" | "mjs" | "cjs" => ("javascript", "JavaScript", Some(("typescript", "javascript"))),
+        "jsx" => ("javascript", "JavaScript", Some(("typescript", "javascriptreact"))),
+        "py" | "pyi" => ("text", "Python", Some(("python", "python"))),
+        "go" => ("text", "Go", Some(("go", "go"))),
+        "cs" => ("text", "C#", Some(("csharp", "csharp"))),
+        "lua" => ("text", "Lua", Some(("lua", "lua"))),
+        "json" => ("json", "JSON", None),
+        "md" | "markdown" => ("text", "Markdown", None),
+        _ => ("text", "Plain Text", None),
     };
-    FileLanguage { highlight, lsp }
+    FileLanguage { highlight, name, lsp }
 }
 
 /// A server being started; the error says why it isn't running.
@@ -49,28 +60,41 @@ pub struct RepoKey {
     pub repo: String,
 }
 
-/// The running servers, keyed by repo and server language.
-pub struct LspRegistry {
+struct Registry {
     servers: HashMap<(RepoKey, &'static str), ServerFuture>,
     notifications: mpsc::UnboundedSender<Notification>,
 }
 
+/// The running servers, keyed by repo and server language. A cheap handle:
+/// editors keep a clone to restart their server.
+#[derive(Clone)]
+pub struct LspRegistry(Rc<RefCell<Registry>>);
+
 impl LspRegistry {
     pub fn new(notifications: mpsc::UnboundedSender<Notification>) -> Self {
-        Self { servers: HashMap::new(), notifications }
+        Self(Rc::new(RefCell::new(Registry { servers: HashMap::new(), notifications })))
+    }
+
+    /// Stops the server so the next `server` call starts a new one.
+    pub fn restart(&self, repo: &RepoKey, language: &'static str) {
+        let old = self.0.borrow_mut().servers.remove(&(repo.clone(), language));
+        if let Some(server) = old.and_then(|f| f.peek().and_then(|r| r.as_ref().ok()).cloned()) {
+            server.shutdown();
+        }
     }
 
     /// The server for `language` in `repo`, started (and initialized in the
     /// background) the first time it's asked for.
-    pub fn server(&mut self, repo: &RepoKey, language: &'static str, cx: &mut App) -> ServerFuture {
+    pub fn server(&self, repo: &RepoKey, language: &'static str, cx: &mut App) -> ServerFuture {
         let key = (repo.clone(), language);
-        if let Some(existing) = self.servers.get(&key) {
+        let mut this = self.0.borrow_mut();
+        if let Some(existing) = this.servers.get(&key) {
             let dead = existing.peek().is_some_and(|s| s.as_ref().map_or(true, |s| s.has_exited()));
             if !dead {
                 return existing.clone();
             }
         }
-        let tx = self.notifications.clone();
+        let tx = this.notifications.clone();
         let repo = repo.clone();
         let task = cx.background_spawn(async move {
             let started = std::time::Instant::now();
@@ -91,18 +115,18 @@ impl LspRegistry {
             }
         });
         let shared = task.shared();
-        self.servers.insert(key, shared.clone());
+        this.servers.insert(key, shared.clone());
         shared
     }
 
     pub fn running(&self) -> Vec<Arc<LspServer>> {
-        self.servers.values().filter_map(|f| f.peek().and_then(|r| r.as_ref().ok()).cloned()).collect()
+        self.0.borrow().servers.values().filter_map(|f| f.peek().and_then(|r| r.as_ref().ok()).cloned()).collect()
     }
 
     pub fn shutdown_all(&mut self) {
         for server in self.running() {
             server.shutdown();
         }
-        self.servers.clear();
+        self.0.borrow_mut().servers.clear();
     }
 }

@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// A server-to-client notification, URIs already mapped to the workspace root.
 pub struct Notification {
@@ -32,6 +32,11 @@ struct Shared {
     pending: Pending,
     exited: AtomicBool,
     notifications: mpsc::UnboundedSender<Notification>,
+    /// `$/progress` texts by token (clangd's indexing).
+    progress: Mutex<Vec<(String, String)>>,
+    /// `workspace/applyEdit` requests, kept for the editor that ran the
+    /// command (clangd's tweaks arrive this way), URIs already mapped.
+    applied_edits: Mutex<Vec<Value>>,
 }
 
 pub struct LspServer {
@@ -45,6 +50,8 @@ pub struct LspServer {
     pub real_root: PathBuf,
     next_id: AtomicI64,
     shared: Arc<Shared>,
+    /// The server's `ServerCapabilities`, once initialized.
+    capabilities: OnceLock<Value>,
 }
 
 impl Drop for LspServer {
@@ -64,6 +71,8 @@ impl LspServer {
             pending: Mutex::new(HashMap::new()),
             exited: AtomicBool::new(false),
             notifications,
+            progress: Mutex::new(vec![]),
+            applied_edits: Mutex::new(vec![]),
         });
         let (reader, on_exit) = (shared.clone(), shared.clone());
         let info = lsp::start(
@@ -88,11 +97,35 @@ impl LspServer {
             real_root,
             next_id: AtomicI64::new(1),
             shared,
+            capabilities: OnceLock::new(),
         }))
     }
 
     pub fn has_exited(&self) -> bool {
         self.shared.exited.load(Ordering::Acquire)
+    }
+
+    /// A capability by JSON pointer (`/renameProvider`); None when absent or false.
+    pub fn capability(&self, pointer: &str) -> Option<&Value> {
+        self.capabilities.get()?.pointer(pointer).filter(|v| !v.is_null() && **v != Value::Bool(false))
+    }
+
+    /// The trigger characters of a provider (`completionProvider`, `signatureHelpProvider`).
+    pub fn trigger_characters(&self, provider: &str) -> Vec<String> {
+        self.capability(&format!("/{provider}/triggerCharacters"))
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(|c| c.as_str().map(str::to_string)).collect())
+            .unwrap_or_default()
+    }
+
+    /// Work in progress, e.g. "indexing: 40/120", or None when idle.
+    pub fn progress(&self) -> Option<String> {
+        self.shared.progress.lock().unwrap().last().map(|(_, text)| text.clone())
+    }
+
+    /// Edits the server asked to apply since the last call.
+    pub fn take_applied_edits(&self) -> Vec<Value> {
+        std::mem::take(&mut *self.shared.applied_edits.lock().unwrap())
     }
 
     pub fn log_tail(&self, n: usize) -> Vec<String> {
@@ -149,14 +182,51 @@ impl LspServer {
                             "synchronization": { "didSave": true, "dynamicRegistration": false },
                             "hover": { "contentFormat": ["markdown", "plaintext"] },
                             "definition": { "linkSupport": true },
+                            "declaration": { "linkSupport": true },
+                            "typeDefinition": { "linkSupport": true },
+                            "implementation": { "linkSupport": true },
+                            "references": {},
                             "publishDiagnostics": { "relatedInformation": true },
+                            // The editor has no snippet engine: plain insert text only.
+                            "completion": {
+                                "completionItem": {
+                                    "snippetSupport": false,
+                                    "documentationFormat": ["markdown", "plaintext"],
+                                    "labelDetailsSupport": true,
+                                },
+                                "contextSupport": true,
+                            },
+                            "signatureHelp": {
+                                "signatureInformation": {
+                                    "documentationFormat": ["markdown", "plaintext"],
+                                    "parameterInformation": { "labelOffsetSupport": true },
+                                    "activeParameterSupport": true,
+                                },
+                            },
+                            "documentSymbol": { "hierarchicalDocumentSymbolSupport": true },
+                            "codeAction": {
+                                "codeActionLiteralSupport": { "codeActionKind": { "valueSet": [
+                                    "", "quickfix", "refactor", "refactor.extract", "refactor.inline",
+                                    "refactor.rewrite", "source", "source.organizeImports",
+                                ]}},
+                                "isPreferredSupport": true,
+                            },
+                            "formatting": {},
+                            "rename": { "prepareSupport": false },
                         },
-                        "workspace": { "workspaceFolders": true, "configuration": true },
-                        "window": { "workDoneProgress": false },
+                        "workspace": {
+                            "workspaceFolders": true,
+                            "configuration": true,
+                            "applyEdit": true,
+                            "symbol": {},
+                            "workspaceEdit": { "documentChanges": true },
+                        },
+                        "window": { "workDoneProgress": true },
                     },
                 }),
             )
             .await?;
+        let _ = self.capabilities.set(result.get("capabilities").cloned().unwrap_or(Value::Null));
         self.notify("initialized", json!({}));
         Ok(result)
     }
@@ -189,14 +259,57 @@ fn on_message(shared: &Shared, server_id: u32, raw: String) {
                     let n = msg.pointer("/params/items").and_then(Value::as_array).map_or(0, Vec::len);
                     Value::Array(vec![Value::Null; n])
                 }
+                "workspace/workspaceFolders" => {
+                    let uri = path_to_uri(&shared.real_root).map(|u| u.to_string());
+                    json!([{ "uri": uri, "name": shared.real_root.file_name().map(|n| n.to_string_lossy().to_string()) }])
+                }
+                "workspace/applyEdit" => {
+                    let edit = msg.pointer("/params/edit").cloned().unwrap_or(Value::Null);
+                    shared.applied_edits.lock().unwrap().push(map_uris(edit, &shared.real_root, &shared.open_root));
+                    json!({ "applied": true })
+                }
                 _ => Value::Null,
             };
             let _ = lsp::send(server_id, &json!({ "jsonrpc": "2.0", "id": id, "result": result }).to_string());
+        }
+        (None, Some(method)) if method == "$/progress" => {
+            if let Some(params) = msg.get("params") {
+                on_progress(shared, params);
+            }
         }
         (None, Some(method)) => {
             let params = map_uris(msg.get("params").cloned().unwrap_or(Value::Null), &shared.real_root, &shared.open_root);
             let _ = shared.notifications.unbounded_send(Notification { method, params });
         }
         (None, None) => {}
+    }
+}
+
+/// `$/progress` (work done): begin/report set the token's text, end clears it.
+fn on_progress(shared: &Shared, params: &Value) {
+    let token = params.get("token").map(|t| t.to_string()).unwrap_or_default();
+    let Some(value) = params.get("value") else { return };
+    let kind = value.get("kind").and_then(Value::as_str).unwrap_or_default();
+    let mut progress = shared.progress.lock().unwrap();
+    if kind == "end" {
+        progress.retain(|(t, _)| *t != token);
+        return;
+    }
+    let title = match kind {
+        "begin" => value.get("title").and_then(Value::as_str).unwrap_or_default().to_string(),
+        _ => progress.iter().find(|(t, _)| *t == token).map(|(_, text)| text.split(':').next().unwrap_or_default().to_string()).unwrap_or_default(),
+    };
+    let detail = value
+        .get("message")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| value.get("percentage").and_then(Value::as_u64).map(|p| format!("{p}%")));
+    let text = match detail {
+        Some(d) if !d.is_empty() => format!("{title}: {d}"),
+        _ => title,
+    };
+    match progress.iter_mut().find(|(t, _)| *t == token) {
+        Some(entry) => entry.1 = text,
+        None => progress.push((token, text)),
     }
 }

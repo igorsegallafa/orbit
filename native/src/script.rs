@@ -5,6 +5,10 @@
 //! The steps run in a fixed order, each one optional:
 //! workspace → expand → terminals → open (+cursor) → wait for the language
 //! server → type → keys → ctrl-click → hover → diff → terminal drag → dump.
+//!
+//! Besides key specs, `--keys` takes `@namespace::Action` (dispatched to the
+//! focused element, like a key binding would), `wait` (100 ms, `wait*20` for
+//! 2 s) and `type:text` (typed; `\s` is a space).
 use crate::app::{OrbitApp, TabKind};
 use crate::terminal;
 use gpui::{
@@ -101,19 +105,36 @@ impl Script {
     }
 }
 
-/// The typed text, then the keys (so `--type x --keys ctrl-s` saves the edit).
-fn keystrokes(script: &Script) -> Vec<Keystroke> {
-    let mut input: Vec<Keystroke> = script
-        .typed
-        .iter()
-        .flat_map(|t| t.chars())
-        .map(|ch| match ch {
+enum Step {
+    Key(Keystroke),
+    Action(String),
+    Wait,
+}
+
+fn typed(text: &str) -> impl Iterator<Item = Step> + '_ {
+    text.chars().map(|ch| {
+        Step::Key(match ch {
             '\n' => Keystroke::parse("enter").unwrap(),
             ' ' => Keystroke { key: "space".into(), key_char: Some(" ".into()), ..Default::default() },
             ch => Keystroke { key: ch.to_lowercase().to_string(), key_char: Some(ch.to_string()), ..Default::default() },
         })
-        .collect();
-    input.extend(script.keys.iter().filter_map(|k| Keystroke::parse_with_os(k, gpui::OperatingSystem::Linux).ok()));
+    })
+}
+
+/// The typed text, then the keys (so `--type x --keys ctrl-s` saves the edit).
+fn steps(script: &Script) -> Vec<Step> {
+    let mut input: Vec<Step> = script.typed.iter().flat_map(|t| typed(t)).collect();
+    for k in &script.keys {
+        if let Some(action) = k.strip_prefix('@') {
+            input.push(Step::Action(action.to_string()));
+        } else if k == "wait" {
+            input.push(Step::Wait);
+        } else if let Some(text) = k.strip_prefix("type:") {
+            input.extend(typed(&text.replace("\\s", " ")).collect::<Vec<_>>());
+        } else if let Ok(ks) = Keystroke::parse_with_os(k, gpui::OperatingSystem::Linux) {
+            input.push(Step::Key(ks));
+        }
+    }
     input
 }
 
@@ -191,6 +212,33 @@ fn dump(app: &OrbitApp, log: &str, cx: &gpui::App) -> String {
             let _ = writeln!(out, "dirty: {}, lsp attached: {}, lsp status: {}", e.is_dirty(), e.lsp_attached(), e.lsp_status());
             let _ = writeln!(out, "line {line}: {}", text.slice_line((line - 1) as usize).to_string().trim_end());
             let _ = writeln!(out, "selection: {:?}", state.selected_text().to_string());
+            let _ = writeln!(out, "status: {}", e.status_text(cx));
+            let _ = writeln!(out, "breadcrumb: {}", e.display_path.replace('/', " › "));
+            if let Some(m) = &e.message {
+                let _ = writeln!(out, "message: {m}");
+            }
+            if let Some(p) = e.picker_text() {
+                let _ = write!(out, "picker: {p}");
+            }
+            if let Some(sig) = e.signature_text() {
+                let _ = writeln!(out, "signature help: {sig}");
+            }
+            if let Some(b) = e.cpp_banner_text() {
+                let _ = writeln!(out, "clangd banner: {b}");
+            }
+            let menu = state.completion_menu_state();
+            if menu.open {
+                let labels: Vec<_> = menu.items.iter().take(10).map(|i| i.label.as_str()).collect();
+                let _ = writeln!(out, "completion menu ({} items, query {:?}): {}", menu.items.len(), menu.query, labels.join(" | "));
+                if let Some(edit) = menu.items.first().and_then(|i| i.text_edit.as_ref()) {
+                    let _ = writeln!(out, "  first item edit: {}", serde_json::to_string(edit).unwrap_or_default());
+                }
+            }
+            let actions = state.code_action_menu_state();
+            if actions.open {
+                let titles: Vec<_> = actions.items.iter().take(10).map(|i| i.action.title.as_str()).collect();
+                let _ = writeln!(out, "code actions ({}): {}", actions.items.len(), titles.join(" | "));
+            }
             let _ = writeln!(out, "diagnostics: {}", e.diagnostics.len());
             for d in e.diagnostics.iter().take(8) {
                 let _ = writeln!(out, "  {}:{} {:?} {}", d.range.start.line + 1, d.range.start.character + 1, d.severity, d.message.lines().next().unwrap_or_default());
@@ -215,6 +263,12 @@ fn dump(app: &OrbitApp, log: &str, cx: &gpui::App) -> String {
             }
         }
         None => {}
+    }
+    let commands = crate::editor::editor_actions();
+    let unresolved: Vec<_> = commands.iter().filter(|c| cx.build_action(c.id, None).is_err()).map(|c| c.id).collect();
+    let _ = writeln!(out, "--- editor actions: {}, unresolved: {unresolved:?}", commands.len());
+    for c in &commands {
+        let _ = writeln!(out, "  {:40} {:32} {} ({})", c.id, c.title, c.keys.join(" "), c.context);
     }
     if let Some(n) = &app.notice {
         let _ = writeln!(out, "--- notice: {n}");
@@ -281,12 +335,30 @@ pub async fn run(script: Script, window: WindowHandle<Root>, app: Entity<OrbitAp
         }
     }
 
-    let input = keystrokes(&script);
+    let input = steps(&script);
     if !input.is_empty() {
         let t = Instant::now();
         let n = input.len();
-        for ks in input {
-            let _ = any_window.update(cx, |_, window, cx| window.dispatch_keystroke(ks, cx));
+        for step in input {
+            match step {
+                Step::Key(ks) => {
+                    let _ = any_window.update(cx, |_, window, cx| window.dispatch_keystroke(ks, cx));
+                }
+                Step::Action(name) => {
+                    let _ = any_window.update(cx, |_, window, cx| match cx.build_action(&name, None) {
+                        Ok(action) => window.dispatch_action(action, cx),
+                        Err(e) => {
+                            let _ = writeln!(log, "action {name}: {e}");
+                        }
+                    });
+                }
+                Step::Wait => {
+                    sleep(cx, 100).await;
+                    // A hidden or occluded window gets no frame callbacks; overlays
+                    // (completion, code actions) sync their state when drawn.
+                    let _ = any_window.update(cx, |_, window, cx| window.draw(cx).clear(cx));
+                }
+            }
             // Yield a frame so each key is handled (and repainted) like real input.
             sleep(cx, 4).await;
         }
