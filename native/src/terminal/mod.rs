@@ -422,7 +422,15 @@ impl TerminalView {
             cx.stop_propagation();
             return;
         }
-        if m.control && m.shift && ks.key == "v" || m.shift && ks.key == "insert" {
+        // Linux with macOS-style remapping (Toshy, Kinto): outside terminals the
+        // physical Ctrl key arrives as Super, so Super+letter means Ctrl+letter.
+        if cfg!(target_os = "linux") && m.platform && !m.control && !m.alt && ks.key.len() == 1 && ks.key.as_bytes()[0].is_ascii_alphabetic() {
+            self.write(&[ks.key.as_bytes()[0].to_ascii_lowercase() - b'a' + 1]);
+            cx.stop_propagation();
+            return;
+        }
+        // Ctrl+V pastes like Ctrl+Shift+V (Cmd+V under Toshy arrives as Ctrl+V).
+        if m.control && ks.key == "v" && !m.alt || m.shift && ks.key == "insert" {
             match cx.read_from_clipboard().and_then(|c| c.text()) {
                 Some(text) => self.paste(&text),
                 // An image only: ^V is how Claude Code (and others) learn to read

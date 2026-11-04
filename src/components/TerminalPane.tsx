@@ -11,6 +11,8 @@ import { StatusIndicator } from "./StatusIndicator";
 import { isMac } from "./WindowControls";
 import { currentTheme, onThemeChange, terminalTheme } from "../lib/theme";
 
+const IS_LINUX = navigator.userAgent.includes("Linux") && !navigator.userAgent.includes("Android");
+
 export interface TerminalTab {
   id: string; // stable session id — display name may change, this must not
   workspace: string;
@@ -244,6 +246,14 @@ export function TerminalPane({ tab, onError, onStatusChange, onSignal, active }:
       // macOS: Cmd shortcuts belong to the webview; kitty keyboard would send Cmd to the program as super.
       if (isMac && e.metaKey) return false;
       if (e.type !== "keydown") return true;
+      // Linux with macOS-style remapping (Toshy, Kinto): outside terminals the
+      // physical Ctrl key arrives as Super. Super+letter in a terminal is meant
+      // as Ctrl+letter (^C, ^R, ^D…), so the program gets that.
+      if (IS_LINUX && e.metaKey && !e.ctrlKey && !e.altKey && /^[a-z]$/i.test(e.key)) {
+        e.preventDefault();
+        term.input(String.fromCharCode(e.key.toLowerCase().charCodeAt(0) - 96));
+        return false;
+      }
       if (isMac || !e.ctrlKey || e.altKey || e.metaKey) return true;
       const key = e.key.toLowerCase();
       if (key === "c" && (e.shiftKey || term.hasSelection())) {
