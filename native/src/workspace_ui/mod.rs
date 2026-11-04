@@ -86,6 +86,14 @@ impl PageTab {
             watch(&a, window, cx);
             watch(&b, window, cx);
             watch(&c, window, cx);
+            let d = r.compare_filter.clone();
+            watch(&d, window, cx);
+            cx.subscribe_in(&a, window, |t, _, ev: &gpui_component::input::InputEvent, w, cx| {
+                if matches!(ev, gpui_component::input::InputEvent::PressEnter { .. }) {
+                    t.repo_switcher_enter(w, cx);
+                }
+            })
+            .detach();
         }
         tab.reload(false, window, cx);
         tab
@@ -316,6 +324,7 @@ pub fn reload_workspaces(app: &mut OrbitApp, select: Option<&str>, cx: &mut Cont
 }
 
 pub fn init(cx: &mut App) {
+    git::init(cx);
     let has_ws = |a: &OrbitApp, _: &App| a.workspace().is_some();
     for command in [
         Command::new("workspace.dashboard", "Open Dashboard").run(|a, w, cx| {

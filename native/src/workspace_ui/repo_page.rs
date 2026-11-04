@@ -16,7 +16,7 @@ use gpui_component::input::{Input, InputState, Textarea, TextareaState};
 use gpui_component::Sizable;
 use orbit_core::git::{ChangeEntry, CommitEntry};
 use orbit_core::github::WsPrStatus;
-use orbit_core::repo::{self, BranchInfo, RepoOverview};
+use orbit_core::repo::{self, BranchInfo, Comparison, RepoOverview};
 use orbit_core::workspace::Workspace;
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -39,6 +39,15 @@ pub struct RepoView {
     pub drafting: bool,
     pub switcher: bool,
     pub show_remote: bool,
+    pub show_stale: bool,
+    /// History or Compare.
+    pub compare_tab: bool,
+    /// The ref picked to compare with (None: the default).
+    pub compare_with: Option<String>,
+    /// The last comparison and the ref it was against.
+    pub comparison: Load<Box<(String, Comparison)>>,
+    pub compare_picker: bool,
+    pub compare_filter: Entity<InputState>,
     /// The branch switcher's filter / new branch name.
     pub new_branch: Entity<InputState>,
     pub filter: Entity<InputState>,
@@ -61,6 +70,12 @@ impl RepoView {
             drafting: false,
             switcher: false,
             show_remote: false,
+            show_stale: false,
+            compare_tab: false,
+            compare_with: None,
+            comparison: Load::Idle,
+            compare_picker: false,
+            compare_filter: cx.new(|cx| InputState::new(window, cx).placeholder("Filter branches")),
             new_branch: cx.new(|cx| InputState::new(window, cx).placeholder("Filter or create a branch…")),
             filter: cx.new(|cx| InputState::new(window, cx).placeholder("Filter")),
             summary: cx.new(|cx| InputState::new(window, cx).placeholder("Summary (required)")),
@@ -70,6 +85,33 @@ impl RepoView {
 
     fn selected(&self) -> Vec<String> {
         self.changes.ready().into_iter().flatten().filter(|c| !self.excluded.contains(&c.path)).map(|c| c.path.clone()).collect()
+    }
+
+    /// Refs to compare with: the fresh default branch first, then the other branches.
+    fn compare_options(&self) -> Vec<String> {
+        let Some(ov) = self.overview.ready() else { return vec![] };
+        let mut opts = vec![format!("origin/{}", ov.default_branch.as_deref().unwrap_or("main"))];
+        for b in ov.branches.iter().filter(|b| !b.current) {
+            let r = if b.remote_only { format!("origin/{}", b.name) } else { b.name.clone() };
+            if !opts.contains(&r) {
+                opts.push(r);
+            }
+        }
+        opts
+    }
+
+    /// What Compare shows: the pick, else origin/<default> off the default
+    /// branch, else the first other branch.
+    fn compare_target(&self) -> Option<String> {
+        if let Some(t) = &self.compare_with {
+            return Some(t.clone());
+        }
+        let ov = self.overview.ready()?;
+        let origin = format!("origin/{}", ov.default_branch.as_deref().unwrap_or("main"));
+        if ov.branch.is_some() && ov.branch != ov.default_branch {
+            return Some(origin);
+        }
+        Some(self.compare_options().into_iter().find(|o| o != &origin).unwrap_or(origin))
     }
 
     /// The workspace whose branch the base clone is on.
@@ -116,6 +158,17 @@ impl RepoView {
         }
         for c in self.history.ready().into_iter().flatten().take(5) {
             let _ = writeln!(out, "    commit {} {}", c.sha, c.message);
+        }
+        if self.compare_tab {
+            let _ = writeln!(out, "    compare with {:?}: {}", self.compare_target(), super::load_text(&self.comparison));
+            if let Some(c) = self.comparison.ready().map(|b| &b.1) {
+                for cm in &c.behind {
+                    let _ = writeln!(out, "      only on target {} {}", cm.sha, cm.message);
+                }
+                for cm in &c.ahead {
+                    let _ = writeln!(out, "      only on head {} {}", cm.sha, cm.message);
+                }
+            }
         }
         let _ = writeln!(out, "    new branch input {:?} summary {:?}", self.new_branch.read(cx).value(), self.summary.read(cx).value());
     }
@@ -168,7 +221,7 @@ impl PageTab {
                 let workspaces = orbit_core::workspace::list().unwrap_or_default().into_iter().filter(|w| w.repos.contains(&name)).collect::<Vec<_>>();
                 (ov, repo::history(&name, 40), changes, workspaces, repo::branch_prs(&name).ok())
             },
-            |t, (ov, hist, changes, workspaces, prs), _, _| {
+            |t, (ov, hist, changes, workspaces, prs), window, cx| {
                 if let Some(r) = t.repo_view() {
                     r.fetching = false;
                     r.overview = ov.map_or_else(Load::Failed, Load::Ready);
@@ -180,6 +233,7 @@ impl PageTab {
                     r.workspaces = workspaces;
                     r.prs = prs;
                 }
+                t.load_compare(window, cx);
             },
         );
         cx.notify();
@@ -253,7 +307,8 @@ impl PageTab {
         );
     }
 
-    fn repo_create_branch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Creates the typed branch from the current one, or from `from` (a fresh `origin/<base>`).
+    fn repo_create_branch(&mut self, from: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(r) = self.repo_view() else { return };
         let name = r.new_branch.read(cx).value().trim().to_string();
         if name.is_empty() {
@@ -262,16 +317,153 @@ impl PageTab {
         r.switcher = false;
         r.new_branch.update(cx, |i, cx| i.set_value("", window, cx));
         let b = name.clone();
-        self.repo_run("Create branch", Some(format!("Created and switched to {name}")), move |n| repo::create_branch(n, &b, None), window, cx);
+        self.repo_run("Create branch", Some(format!("Created and switched to {name}")), move |n| repo::create_branch(n, &b, from.as_deref()), window, cx);
     }
 
-    fn repo_delete(&mut self, branch: String, window: &mut Window, cx: &mut Context<Self>) {
+    /// Enter in the switcher: switch to the typed branch, or create it.
+    pub fn repo_switcher_enter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(r) = self.repo_view() else { return };
+        if !r.switcher {
+            return;
+        }
+        let q = r.new_branch.read(cx).value().trim().to_string();
+        let exact = r.overview.ready().and_then(|o| o.branches.iter().find(|b| b.name == q)).map(|b| b.current || b.worktree.is_some());
+        match exact {
+            Some(false) => {
+                r.new_branch.update(cx, |i, cx| i.set_value("", window, cx));
+                self.repo_switch(q, window, cx)
+            }
+            Some(true) => {}
+            None if !q.is_empty() => self.repo_create_branch(None, window, cx),
+            None => {}
+        }
+    }
+
+    fn repo_delete(&mut self, branch: String, gone: bool, window: &mut Window, cx: &mut Context<Self>) {
         let b = branch.clone();
         let del: Action = Rc::new(move |t, w, cx| {
             let b2 = b.clone();
             t.repo_run("Delete branch", Some(format!("Deleted {b}")), move |n| repo::delete_branch(n, &b2, true), w, cx)
         });
-        self.repo_ask("Delete branch".into(), format!("Delete {branch}? Commits only on it are lost."), vec![("Delete", del)], window, cx)
+        let message = if gone {
+            format!("Delete {branch}? It was deleted on origin, so its PR was most likely merged.")
+        } else {
+            format!("Delete {branch}? Commits that aren't on any other branch will be lost.")
+        };
+        self.repo_ask("Delete branch".into(), message, vec![("Delete", del)], window, cx)
+    }
+
+    /// Merged and deleted on GitHub: back to the default branch, pulled, and the branch deleted.
+    fn repo_finish(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ov) = self.repo_view().and_then(|r| r.overview.ready().cloned()) else { return };
+        let (Some(current), target) = (ov.branch.clone(), ov.default_branch.clone().unwrap_or_else(|| "main".into())) else { return };
+        let message = format!("Switch to {target}, pull it and delete {current}?");
+        let go: Action = Rc::new(move |t, w, cx| {
+            let (target, current) = (target.clone(), current.clone());
+            t.repo_run(
+                "Finish branch",
+                Some(format!("Back on {target}")),
+                move |n| {
+                    repo::switch(n, &target, false)?;
+                    repo::pull(n, false)?;
+                    repo::delete_branch(n, &current, true)
+                },
+                w,
+                cx,
+            )
+        });
+        self.repo_ask("Finish branch".into(), message, vec![("Finish", go)], window, cx)
+    }
+
+    /// Compares the clone's HEAD with the Compare tab's ref.
+    pub fn load_compare(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(r) = self.repo_view() else { return };
+        let cloned = r.overview.ready().is_some_and(|o| o.cloned);
+        let Some(target) = r.compare_target().filter(|_| r.compare_tab && cloned) else { return };
+        if !matches!(&r.comparison, Load::Ready(b) if b.0 == target) {
+            r.comparison = Load::Loading;
+        }
+        let name = r.name.clone();
+        spawn(window, cx, move || repo::compare(&name, &target).map(|c| (target, c)), |t, res, window, cx| {
+            let Some(r) = t.repo_view() else { return };
+            match res {
+                Ok((target, c)) if r.compare_target().as_ref() == Some(&target) => r.comparison = Load::Ready(Box::new((target, c))),
+                Ok(_) => {}
+                Err(e) => {
+                    r.comparison = Load::Failed(e.clone());
+                    t.toast(ToastKind::Error, "Couldn't compare", Some(e), window, cx);
+                }
+            }
+        });
+        cx.notify();
+    }
+
+    fn repo_set_compare(&mut self, tab: bool, with: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(r) = self.repo_view() else { return };
+        r.compare_tab = tab;
+        r.compare_picker = false;
+        if with.is_some() {
+            r.compare_with = with;
+        }
+        self.load_compare(window, cx);
+    }
+
+    /// A commit (or `base...head` range) of the clone in the inspect modal.
+    fn repo_inspect(&mut self, rev: String, title: String, meta: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dir) = self.repo_view().and_then(|r| r.overview.ready().map(|o| o.path.clone())) else { return };
+        self.open_inspect(std::path::PathBuf::from(dir), rev, title, meta, window, cx);
+    }
+
+    fn repo_cherry_pick(&mut self, sha: String, message: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(r) = self.repo_view() else { return };
+        if r.busy.is_some() {
+            return;
+        }
+        r.busy = Some("Cherry-pick".into());
+        let branch = r.overview.ready().and_then(|o| o.branch.clone()).unwrap_or_else(|| "HEAD".into());
+        let name = r.name.clone();
+        // A conflicting pick pauses (Ok from git's side): say so instead of "applied".
+        spawn(window, cx, move || repo::cherry_pick(&name, &sha).and_then(|_| repo::overview(&name).map(|o| o.conflicts)), move |t, res, window, cx| {
+            if let Some(r) = t.repo_view() {
+                r.busy = None;
+            }
+            match res {
+                Ok(c) if c.is_empty() => t.toast(ToastKind::Success, format!("Applied \"{message}\" to {branch}"), None, window, cx),
+                Ok(c) => t.toast(ToastKind::Info, "Cherry-pick paused on conflicts", Some(format!("Resolve {}, then Continue, or Abort.", c.join(", "))), window, cx),
+                Err(e) => t.toast(ToastKind::Error, "Cherry-pick failed", Some(e), window, cx),
+            }
+            t.load_repo(false, window, cx);
+        });
+        cx.notify();
+    }
+
+    /// The New session menu: a shell or an agent in the clone.
+    fn repo_session_menu(&mut self, position: gpui::Point<gpui::Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(name) = self.repo_view().map(|r| r.name.clone()) else { return };
+        let items = crate::sessions::AGENTS
+            .iter()
+            .map(|(label, _, cmd)| {
+                let (scope, cmd) = (format!("@{name}"), *cmd);
+                crate::overlay::MenuItem::new(*label, move |a: &mut crate::app::OrbitApp, w: &mut Window, cx: &mut Context<crate::app::OrbitApp>| {
+                    crate::sessions::new_session_in(a, scope.clone(), cmd, None, w, cx)
+                })
+            })
+            .collect();
+        self.with_app(window, cx, move |a, w, cx| a.open_menu(position, items, w, cx));
+    }
+
+    fn repo_agent_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(name) = self.repo_view().map(|r| r.name.clone()) else { return };
+        self.with_app(window, cx, move |a, w, cx| crate::sessions::new_session_in(a, format!("@{name}"), Some("claude"), None, w, cx));
+    }
+
+    /// Squash and merge the branch's open PR.
+    fn repo_merge(&mut self, pr: WsPrStatus, cx: &mut Context<Self>) {
+        let Some(r) = self.repo_view() else { return };
+        let base = r.overview.ready().and_then(|o| o.default_branch.clone()).unwrap_or_else(|| "main".into());
+        let scope = format!("@{}", r.name);
+        let item = crate::git::merge::MergeItem { repo: pr.repo, number: pr.number, title: pr.title };
+        self.open_merge(scope, base, vec![item], cx);
     }
 
     fn repo_discard(&mut self, paths: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
@@ -288,7 +480,8 @@ impl PageTab {
         let summary = r.summary.read(cx).value().trim().to_string();
         let description = r.description.read(cx).value().trim().to_string();
         let paths = r.selected();
-        if summary.is_empty() || paths.is_empty() {
+        let op = r.overview.ready().is_some_and(|o| o.operation.is_some());
+        if summary.is_empty() || paths.is_empty() || r.busy.is_some() || op {
             return;
         }
         let message = if description.is_empty() { summary.clone() } else { format!("{summary}\n\n{description}") };
@@ -332,11 +525,6 @@ impl PageTab {
         self.with_app(window, cx, move |a, w, cx| crate::review::open_diff_at(a, file, None, w, cx));
     }
 
-    fn repo_new_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(dir) = self.repo_view().and_then(|r| r.overview.ready().map(|o| o.path.clone())) else { return };
-        self.with_app(window, cx, move |a, w, cx| crate::sessions::new_shell_in(a, std::path::Path::new(&dir), w, cx));
-    }
-
     fn repo_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(dir) = self.repo_view().and_then(|r| r.overview.ready().map(|o| o.path.clone())) else { return };
         spawn(window, cx, move || orbit_core::settings::launch_editor(std::path::Path::new(&dir)), |t, res, window, cx| {
@@ -364,7 +552,32 @@ impl PageTab {
         if let Some(o) = ov.filter(|o| !o.cloned) {
             return wrap
                 .child(header(r, Some(o), cx))
-                .child(div().text_size(px(13.)).text_color(c(theme::TEXT_DIM)).child(format!("{} is not cloned yet (Settings → Repositories clones it).", r.name)))
+                .child(
+                    panel()
+                        .p(px(16.))
+                        .flex_row()
+                        .items_center()
+                        .gap(px(14.))
+                        .child(icon("repo", 18., c(theme::ACCENT)))
+                        .child(
+                            div()
+                                .flex_1()
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.))
+                                .child(strong(format!("{} isn't cloned yet", r.name)))
+                                .child(div().text_size(px(12.5)).text_color(c(theme::TEXT_DIM)).child("Clone it to manage its branches, commit and push from here.")),
+                        )
+                        .child({
+                            let cloning = r.busy.as_deref() == Some("Clone");
+                            let name = r.name.clone();
+                            kit::disabled(kit::button("repo-clone", if cloning { "Cloning…" } else { "Clone repository" }, Kind::Primary, kit::NORMAL), r.busy.is_some()).when(r.busy.is_none(), |b| {
+                                b.on_click(cx.listener(move |t, _: &ClickEvent, w, cx| {
+                                    t.repo_run("Clone", Some(format!("{name} cloned")), orbit_core::settings::clone_service, w, cx)
+                                }))
+                            })
+                        }),
+                )
                 .into_any_element();
         }
         if let Load::Failed(e) = &r.overview {
@@ -479,7 +692,7 @@ fn header(r: &RepoView, ov: Option<&RepoOverview>, cx: &mut Context<PageTab>) ->
                         .when_some(path.clone(), |d, p| d.child(div().max_w(px(520.)).truncate().font_family(theme::MONO_FONT).text_size(px(11.5)).text_color(c(theme::TEXT_DIM)).child(p))),
                 ),
         )
-        .child(
+        .when(ov.is_none_or(|o| o.cloned), |d| d.child(
             div()
                 .flex()
                 .items_center()
@@ -497,7 +710,10 @@ fn header(r: &RepoView, ov: Option<&RepoOverview>, cx: &mut Context<PageTab>) ->
                     |t, w, cx| t.toast(ToastKind::Info, "Ralph runs from a workspace", Some("Create a workspace with this repo, then open Ralph there.".into()), w, cx),
                     cx,
                 ))
-                .child(tool("repo-session", ("terminal", 14.), "New session", Kind::Secondary, "Terminal session in this clone".into(), |t, w, cx| t.repo_new_session(w, cx), cx))
+                .child(
+                    kit::hint(kit::button_icon("repo-session", Some(("terminal", 14.)), "New session", Kind::Secondary, kit::TOOL), "Terminal or agent session in this clone")
+                        .on_click(cx.listener(|t, e: &ClickEvent, w, cx| t.repo_session_menu(e.position(), w, cx))),
+                )
                 .child(tool("repo-editor", ("code", 14.), "Editor", Kind::Secondary, "Open the clone in VS Code or Zed".into(), |t, w, cx| t.repo_editor(w, cx), cx))
                 .child(kit::hint(kit::icon_button("repo-folder", "folder", 32., 15., false), path.clone().unwrap_or_else(|| "Reveal folder".into())).on_click(move |_, _, cx| {
                     if let Some(p) = &path {
@@ -509,7 +725,7 @@ fn header(r: &RepoView, ov: Option<&RepoOverview>, cx: &mut Context<PageTab>) ->
                 }))
                 .child(div().mx(px(4.)).w(px(1.)).h(px(22.)).bg(c(theme::BORDER)))
                 .child(refresh),
-        )
+        ))
 }
 
 /// One cell of the top bar: icon, small label, bold value.
@@ -586,6 +802,7 @@ fn bar(r: &RepoView, ov: Option<&RepoOverview>, cx: &mut Context<PageTab>) -> im
     let prs = r.prs.as_ref();
     let open_pr = prs.and_then(|p| p.iter().find(|p| p.state == "OPEN")).cloned();
     let merged_pr = prs.and_then(|p| p.iter().find(|p| p.state == "MERGED")).cloned();
+    let merge_pr = (!on_default).then(|| open_pr.clone().filter(|p| !p.is_draft)).flatten();
     let pr_cell = if on_default {
         bar_cell("repo-pr", "pull-request", "Pull request".into(), "Create a branch to open one".into(), false, true).opacity(0.8)
     } else if let Some(pr) = open_pr {
@@ -617,7 +834,8 @@ fn bar(r: &RepoView, ov: Option<&RepoOverview>, cx: &mut Context<PageTab>) -> im
             cell.opacity(0.45)
         }
     };
-    let switcher = r.switcher.then(|| switcher(r, ov, cx));
+    // Deferred: painted over the panels below the bar.
+    let switcher = r.switcher.then(|| gpui::deferred(switcher(r, ov, cx)).with_priority(1));
     div()
         .mb(px(14.))
         .flex()
@@ -658,14 +876,37 @@ fn bar(r: &RepoView, ov: Option<&RepoOverview>, cx: &mut Context<PageTab>) -> im
                     .when(!busy, |d| d.on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.repo_sync(w, cx)))),
             ),
         )
-        .child(div().flex_1().min_w_0().flex().border_l_1().border_color(c(theme::BORDER)).rounded_r(px(10.)).child(pr_cell))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .border_l_1()
+                .border_color(c(theme::BORDER))
+                .rounded_r(px(10.))
+                .child(pr_cell)
+                .when_some(merge_pr, |d, pr| {
+                    d.child(
+                        div().flex_none().pr(px(12.)).child(
+                            kit::hint(kit::button("repo-pr-merge", "Merge", Kind::Secondary, kit::MINI), format!("Squash into {default_branch}"))
+                                .on_click(cx.listener(move |t, _: &ClickEvent, _, cx| t.repo_merge(pr.clone(), cx))),
+                        ),
+                    )
+                }),
+        )
 }
 
 /// The branch picker under the branch cell: filter, create, switch.
 fn switcher(r: &RepoView, ov: Option<&RepoOverview>, cx: &mut Context<PageTab>) -> AnyElement {
     let q = r.new_branch.read(cx).value().trim().to_lowercase();
-    let branches: Vec<&BranchInfo> = ov.map(|o| o.branches.iter().filter(|b| !b.remote_only && (q.is_empty() || b.name.to_lowercase().contains(&q))).collect()).unwrap_or_default();
+    let branches: Vec<&BranchInfo> = ov.map(|o| o.branches.iter().filter(|b| q.is_empty() || b.name.to_lowercase().contains(&q)).take(60).collect()).unwrap_or_default();
     let exact = ov.is_some_and(|o| o.branches.iter().any(|b| b.name.to_lowercase() == q));
+    let base = ov.and_then(|o| o.default_branch.clone()).unwrap_or_else(|| "main".into());
+    let fresh_base = ov.is_some_and(|o| o.branch.as_ref() != Some(&base) || o.behind > 0);
+    let current = ov.and_then(|o| o.branch.clone()).unwrap_or_else(|| "HEAD".into());
+    let owner_of = |b: &BranchInfo| b.worktree.as_ref().and_then(|w| ov.and_then(|o| o.worktrees.iter().find(|x| &x.path == w)).and_then(|x| x.workspace.clone()));
+    let pill = |text: String| div().flex_none().h(px(18.)).px(px(7.)).flex().items_center().rounded(px(9.)).border_1().border_color(c(theme::BORDER_STRONG)).text_size(px(10.5)).text_color(c(theme::TEXT_DIM)).child(text);
     div()
         .occlude()
         .absolute()
@@ -691,35 +932,44 @@ fn switcher(r: &RepoView, ov: Option<&RepoOverview>, cx: &mut Context<PageTab>) 
         )
         .when(!q.is_empty() && !exact, |d| {
             let name = r.new_branch.read(cx).value().trim().to_string();
+            let create = |id: &'static str, from: Option<String>, cx: &mut Context<PageTab>| {
+                let label = from.clone().unwrap_or_else(|| current.clone());
+                div()
+                    .id(id)
+                    .relative()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .px(px(10.))
+                    .py(px(7.))
+                    .rounded(px(6.))
+                    .text_size(px(12.5))
+                    .text_color(c(theme::TEXT_DIM))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme::accent_soft()).text_color(c(theme::TEXT)))
+                    .child(icon("plus", 12., c(theme::TEXT_DIM)))
+                    .child("Create")
+                    .child(div().font_weight(FontWeight::BOLD).text_color(c(theme::TEXT)).child(name.clone()))
+                    .child(format!("from {label}"))
+                    .child(probe(id))
+                    .on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.repo_create_branch(from.clone(), w, cx)))
+            };
             d.child(
-                div().p(px(4.)).border_b_1().border_color(c(theme::BORDER)).child(
-                    div()
-                        .id("repo-create-branch")
-                        .relative()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .px(px(10.))
-                        .py(px(7.))
-                        .rounded(px(6.))
-                        .text_size(px(12.5))
-                        .text_color(c(theme::TEXT_DIM))
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme::accent_soft()).text_color(c(theme::TEXT)))
-                        .child(icon("plus", 12., c(theme::TEXT_DIM)))
-                        .child("Create branch")
-                        .child(div().font_weight(FontWeight::BOLD).text_color(c(theme::TEXT)).child(name))
-                        .child(probe("repo-create-branch"))
-                        .on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.repo_create_branch(w, cx))),
-                ),
+                div()
+                    .p(px(4.))
+                    .border_b_1()
+                    .border_color(c(theme::BORDER))
+                    .child(create("repo-create-branch", None, cx))
+                    .when(fresh_base, |d| d.child(create("repo-create-branch-base", Some(format!("origin/{base}")), cx))),
             )
         })
         .child(
             div().id("repo-switcher-list").max_h(px(340.)).overflow_y_scroll().p(px(4.)).children(branches.into_iter().map(|b| {
                 let name = b.name.clone();
                 let free = !b.current && b.worktree.is_none();
+                let owner = owner_of(b);
                 div()
-                    .id(gpui::ElementId::Name(format!("repo-switch:{}", b.name).into()))
+                    .id(gpui::ElementId::Name(format!("repo-switch:{}{}", if b.remote_only { "origin/" } else { "" }, b.name).into()))
                     .relative()
                     .flex()
                     .items_center()
@@ -733,8 +983,11 @@ fn switcher(r: &RepoView, ov: Option<&RepoOverview>, cx: &mut Context<PageTab>) 
                     .when(free, |d| d.cursor_pointer().hover(|s| s.bg(theme::accent_soft()).text_color(c(theme::TEXT))))
                     .child(icon("branch", 13., if b.current { c(theme::ACCENT) } else { c(theme::TEXT_DIM) }))
                     .child(div().flex_1().min_w_0().truncate().child(b.name.clone()))
-                    .child(div().text_size(px(11.)).text_color(c(theme::TEXT_FAINT)).child(b.updated.clone()))
-                    .child(probe(format!("repo-switch:{}", b.name)))
+                    .when(b.remote_only, |d| d.child(pill("origin".into())))
+                    .when_some(owner, |d, o| d.child(pill(format!("in {o}"))))
+                    .when(!free && !b.current, |d| d.opacity(0.5))
+                    .child(div().flex_none().text_size(px(11.)).text_color(c(theme::TEXT_FAINT)).child(b.updated.clone()))
+                    .child(probe(format!("repo-switch:{}{}", if b.remote_only { "origin/" } else { "" }, b.name)))
                     .when(free, |d| d.on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.repo_switch(name.clone(), w, cx))))
             })),
         )
@@ -798,28 +1051,13 @@ fn banners(r: &RepoView, ov: &RepoOverview, cx: &mut Context<PageTab>) -> Div {
     }
     if ov.upstream_gone && !on_default {
         let upstream = ov.upstream.clone().unwrap_or_default();
-        let current = ov.branch.clone().unwrap_or_default();
-        let target = default_branch.clone();
+        let merged = r.prs.as_ref().and_then(|p| p.iter().find(|p| p.state == "MERGED")).map(|p| format!(" after #{} was merged", p.number)).unwrap_or_default();
+        let button = kit::disabled(kit::button("repo-finish", format!("Switch to {default_branch} and delete branch"), Kind::Secondary, kit::MINI), busy || ov.changes > 0)
+            .when(!busy && ov.changes == 0, |b| b.on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.repo_finish(w, cx))));
         out = out.child(
-            banner(Some(theme::PURPLE)).child(div().flex().child(strong(upstream)).child(" was deleted on GitHub.")).child(
-                div().ml_auto().child(
-                    kit::disabled(kit::button("repo-finish", format!("Switch to {default_branch} and delete branch"), Kind::Secondary, kit::MINI), busy || ov.changes > 0).when(
-                        !busy && ov.changes == 0,
-                        |b| {
-                            b.on_click(cx.listener(move |t, _: &ClickEvent, w, cx| {
-                                let (target, current) = (target.clone(), current.clone());
-                                t.repo_run(
-                                    "Finish branch",
-                                    Some(format!("Back on {target}; {current} deleted")),
-                                    move |n| repo::switch(n, &target, false).and_then(|_| repo::delete_branch(n, &current, true)),
-                                    w,
-                                    cx,
-                                )
-                            }))
-                        },
-                    ),
-                ),
-            ),
+            banner(Some(theme::PURPLE))
+                .child(div().flex().child(strong(upstream)).child(format!(" was deleted on GitHub{merged}.")))
+                .child(div().ml_auto().child(if ov.changes > 0 { kit::hint(button, "Commit or stash your changes first") } else { button })),
         );
     }
     if let Some(h) = r.holder() {
@@ -915,6 +1153,10 @@ fn changes_panel(r: &RepoView, ov: Option<&RepoOverview>, cx: &mut Context<PageT
                 "Edit files here, in your editor or with an agent session — changes show up as you work.".to_string()
             })
             .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(theme::TEXT_DIM)).child("No local changes"))
+            .child(
+                kit::button_icon("repo-agent", Some(("spark", 12.)), "Start an agent session", Kind::Secondary, kit::MINI)
+                    .on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.repo_agent_session(w, cx))),
+            )
             .into_any_element()
         }
         Load::Ready(list) => div()
@@ -1001,6 +1243,9 @@ fn changes_panel(r: &RepoView, ov: Option<&RepoOverview>, cx: &mut Context<PageT
         .child(div().id("repo-files").flex_1().min_h(px(120.)).max_h(px(340.)).overflow_y_scroll().py(px(4.)).child(files))
         .child(
             div()
+                .id("repo-commit-box")
+                .key_context(crate::git::COMMIT_CONTEXT)
+                .on_action(cx.listener(|t, _: &crate::git::SubmitCommit, w, cx| t.repo_commit_now(w, cx)))
                 .flex()
                 .flex_col()
                 .gap(px(8.))
@@ -1033,25 +1278,80 @@ fn changes_panel(r: &RepoView, ov: Option<&RepoOverview>, cx: &mut Context<PageT
                 )
                 .child(div().id("repo-description").relative().child(Textarea::new(&r.description).disabled(none || op)).child(probe("repo-description")))
                 .child(
-                    kit::disabled(kit::button("repo-commit", label, Kind::Primary, kit::NORMAL).w_full(), !can)
+                    kit::hint(kit::disabled(kit::button("repo-commit", label, Kind::Primary, kit::NORMAL).w_full(), !can), "Ctrl+Enter")
                         .when(can, |b| b.on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.repo_commit_now(w, cx)))),
                 ),
         )
+}
+
+/// A commit row of History / Compare: message, author · time; a click inspects it.
+fn commit_row(id: String, cm: &CommitEntry, unpushed: bool, cx: &mut Context<PageTab>) -> gpui::Stateful<Div> {
+    let (sha, title, meta) = (cm.sha.clone(), cm.message.clone(), format!("{} · {} · {}", cm.sha, cm.author, cm.when));
+    div()
+        .id(gpui::ElementId::Name(id.clone().into()))
+        .group(id.clone())
+        .pl(px(14.))
+        .pr(px(10.))
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .when(unpushed, |d| d.border_l_2().border_color(c(theme::ACCENT)).pl(px(12.)))
+        .hover(|s| s.bg(c(theme::PANEL_RAISED)))
+        .child(
+            kit::hint(
+                div()
+                    .id(gpui::ElementId::Name(format!("repo-commit-main:{}", cm.sha).into()))
+                    .relative()
+                    .flex_1()
+                    .min_w_0()
+                    .py(px(7.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .cursor_pointer()
+                    .child(div().truncate().text_size(px(12.5)).child(cm.message.clone()))
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(6.))
+                            .text_size(px(11.))
+                            .text_color(c(theme::TEXT_FAINT))
+                            .when(unpushed, |d| d.child(div().font_weight(FontWeight::BOLD).text_color(c(theme::INFO)).child("↑")))
+                            .child(format!("{} · {}", cm.author, cm.when)),
+                    )
+                    .child(probe(format!("repo-commit-main:{}", cm.sha)))
+                    .on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.repo_inspect(sha.clone(), title.clone(), meta.clone(), w, cx))),
+                format!("{}\n\n{} · {}", cm.message, cm.sha, cm.author),
+            ),
+        )
+}
+
+/// `.repo-tab`: History / Compare.
+fn repo_tab(id: &'static str, label: &'static str, on: bool, compare: bool, cx: &mut Context<PageTab>) -> impl IntoElement {
+    div()
+        .id(id)
+        .relative()
+        .px(px(10.))
+        .py(px(4.))
+        .rounded(px(6.))
+        .text_size(px(12.))
+        .font_weight(FontWeight::SEMIBOLD)
+        .cursor_pointer()
+        .map(|d| if on { d.bg(c(theme::PANEL_RAISED)).text_color(c(theme::TEXT)) } else { d.text_color(c(theme::TEXT_FAINT)).hover(|s| s.text_color(c(theme::TEXT_DIM))) })
+        .child(label)
+        .child(probe(id))
+        .on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.repo_set_compare(compare, None, w, cx)))
 }
 
 fn history_panel(r: &RepoView, ov: Option<&RepoOverview>, cx: &mut Context<PageTab>) -> impl IntoElement {
     let busy = r.busy.is_some();
     let ahead = ov.map_or(0, |o| o.ahead);
     let tracked = ov.is_some_and(|o| o.upstream.is_some() && !o.upstream_gone);
+    let branch = ov.and_then(|o| o.branch.clone()).unwrap_or_else(|| "HEAD".into());
+    let target = r.compare_target();
     let head = panel_head()
-        .child(
-            div()
-                .flex()
-                .gap(px(2.))
-                .child(div().px(px(10.)).py(px(4.)).rounded(px(6.)).bg(c(theme::PANEL_RAISED)).text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).child("HISTORY"))
-                .child(div().px(px(10.)).py(px(4.)).text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(c(theme::TEXT_FAINT)).child("COMPARE")),
-        )
-        .when(tracked && ahead > 0, |d| {
+        .child(div().flex().gap(px(2.)).child(repo_tab("repo-tab-history", "HISTORY", !r.compare_tab, false, cx)).child(repo_tab("repo-tab-compare", "COMPARE", r.compare_tab, true, cx)))
+        .when(!r.compare_tab && tracked && ahead > 0, |d| {
             d.child(
                 div()
                     .ml_auto()
@@ -1067,50 +1367,65 @@ fn history_panel(r: &RepoView, ov: Option<&RepoOverview>, cx: &mut Context<PageT
                     .text_color(c(theme::INFO))
                     .child(format!("↑ {ahead} not pushed")),
             )
-        });
-    let list = match &r.history {
-        Load::Ready(list) if list.is_empty() => empty("No commits yet.").into_any_element(),
-        Load::Ready(list) => div()
-            .flex()
-            .flex_col()
-            .children(list.iter().enumerate().map(|(i, cm)| {
-                let unpushed = tracked && i < ahead;
-                let group = format!("repo-commit:{}", cm.sha);
-                let (sha, msg) = (cm.sha.clone(), cm.message.clone());
+        })
+        .when_some(target.clone().filter(|_| r.compare_tab), |d, t| {
+            d.child(
                 div()
-                    .id(gpui::ElementId::Name(group.clone().into()))
-                    .group(group.clone())
-                    .pl(px(14.))
-                    .pr(px(10.))
+                    .ml_auto()
+                    .min_w_0()
                     .flex()
                     .items_center()
-                    .gap(px(6.))
-                    .when(unpushed, |d| d.border_l_2().border_color(c(theme::ACCENT)).pl(px(12.)))
-                    .hover(|s| s.bg(c(theme::PANEL_RAISED)))
+                    .gap(px(8.))
+                    .child(div().flex_none().text_size(px(11.5)).text_color(c(theme::TEXT_FAINT)).child(format!("{branch} vs")))
                     .child(
-                        kit::hint(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .py(px(7.))
-                                .flex()
-                                .flex_col()
-                                .gap(px(2.))
-                                .child(div().truncate().text_size(px(12.5)).child(cm.message.clone()))
-                                .child(
-                                    div()
-                                        .flex()
-                                        .gap(px(6.))
-                                        .text_size(px(11.))
-                                        .text_color(c(theme::TEXT_FAINT))
-                                        .when(unpushed, |d| d.child(div().font_weight(FontWeight::BOLD).text_color(c(theme::INFO)).child("↑")))
-                                        .child(format!("{} · {}", cm.author, cm.when)),
-                                )
-                                .id(gpui::ElementId::Name(format!("repo-commit-main:{}", cm.sha).into())),
-                            format!("{}\n\n{} · {}", cm.message, cm.sha, cm.author),
-                        ),
-                    )
-                    .map(|d| {
+                        div()
+                            .id("repo-compare-pick")
+                            .relative()
+                            .min_w(px(180.))
+                            .max_w(px(260.))
+                            .h(px(28.))
+                            .px(px(10.))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(6.))
+                            .rounded(px(6.))
+                            .border_1()
+                            .border_color(c(theme::BORDER_STRONG))
+                            .bg(c(theme::BG))
+                            .text_size(px(12.))
+                            .cursor_pointer()
+                            .hover(|s| s.border_color(c(theme::ACCENT)))
+                            .child(div().min_w_0().truncate().font_family(theme::MONO_FONT).child(t))
+                            .child(icon("chevron-down", 11., c(theme::TEXT_FAINT)))
+                            .child(probe("repo-compare-pick"))
+                            .on_click(cx.listener(|t, _: &ClickEvent, w, cx| {
+                                if let Some(r) = t.repo_view() {
+                                    r.compare_picker = !r.compare_picker;
+                                    if r.compare_picker {
+                                        r.compare_filter.update(cx, |i, cx| i.set_value("", w, cx));
+                                        let h = r.compare_filter.read(cx).focus_handle(cx);
+                                        w.focus(&h, cx);
+                                    }
+                                }
+                                cx.notify();
+                            })),
+                    ),
+            )
+        });
+    let list = if r.compare_tab {
+        compare_list(r, ov, cx)
+    } else {
+        match &r.history {
+            Load::Ready(list) if list.is_empty() => empty("No commits yet.").into_any_element(),
+            Load::Ready(list) => div()
+                .flex()
+                .flex_col()
+                .children(list.iter().enumerate().map(|(i, cm)| {
+                    let unpushed = tracked && i < ahead;
+                    let group = format!("repo-commit:{}", cm.sha);
+                    let (sha, msg) = (cm.sha.clone(), cm.message.clone());
+                    commit_row(group.clone(), cm, unpushed, cx).map(|d| {
                         if i == 0 && unpushed {
                             d.child(kit::hint(kit::icon_button("repo-undo", "undo", 28., 13., false), "Undo this commit (keeps its changes)").when(!busy, |b| {
                                 b.on_click(cx.listener(|t, _: &ClickEvent, w, cx| {
@@ -1141,12 +1456,148 @@ fn history_panel(r: &RepoView, ov: Option<&RepoOverview>, cx: &mut Context<PageT
                             )
                         }
                     })
-            }))
-            .into_any_element(),
-        Load::Failed(e) => empty(e.clone()).into_any_element(),
-        _ => div().px(px(14.)).py(px(9.)).child(div().w(gpui::relative(0.8)).h(px(12.)).rounded(px(4.)).bg(c(theme::PANEL_RAISED))).into_any_element(),
+                }))
+                .into_any_element(),
+            Load::Failed(e) => empty(e.clone()).into_any_element(),
+            _ => div().px(px(14.)).py(px(9.)).child(div().w(gpui::relative(0.8)).h(px(12.)).rounded(px(4.)).bg(c(theme::PANEL_RAISED))).into_any_element(),
+        }
     };
-    panel().h_full().child(head).child(div().id("repo-commits").flex_1().max_h(px(520.)).overflow_y_scroll().py(px(4.)).child(list))
+    let picker = (r.compare_tab && r.compare_picker).then(|| compare_picker(r, cx));
+    panel()
+        .h_full()
+        .relative()
+        .overflow_hidden()
+        .child(head)
+        .child(div().id("repo-commits").flex_1().max_h(px(520.)).overflow_y_scroll().py(px(4.)).child(list))
+        .children(picker)
+}
+
+/// Compare: commits only on the target (cherry-pickable) and only on HEAD.
+fn compare_list(r: &RepoView, ov: Option<&RepoOverview>, cx: &mut Context<PageTab>) -> AnyElement {
+    let busy = r.busy.is_some() || ov.is_some_and(|o| o.operation.is_some());
+    let branch = ov.and_then(|o| o.branch.clone()).unwrap_or_else(|| "HEAD".into());
+    let Some(target) = r.compare_target() else { return empty("No other branch to compare with yet.").into_any_element() };
+    let c_ = match &r.comparison {
+        Load::Ready(b) if b.0 == target => &b.1,
+        Load::Failed(e) => return empty(e.clone()).into_any_element(),
+        _ => return div().px(px(14.)).py(px(9.)).child(div().w(gpui::relative(0.7)).h(px(12.)).rounded(px(4.)).bg(c(theme::PANEL_RAISED))).into_any_element(),
+    };
+    let group = |text: String| {
+        div().px(px(14.)).pt(px(10.)).pb(px(4.)).text_size(px(10.5)).font_weight(FontWeight::SEMIBOLD).text_color(c(theme::TEXT_FAINT)).child(text.to_uppercase())
+    };
+    let (n_ahead, n_behind) = (c_.ahead.len(), c_.behind.len());
+    let (range, title) = (format!("{target}...HEAD"), format!("{branch} vs {target}"));
+    let summary = div()
+        .px(px(14.))
+        .py(px(9.))
+        .flex()
+        .items_center()
+        .gap(px(10.))
+        .border_b_1()
+        .border_color(c(theme::BORDER))
+        .text_size(px(12.))
+        .text_color(c(theme::TEXT_DIM))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_wrap()
+                .gap(px(4.))
+                .child(strong(n_ahead.to_string()))
+                .child(format!("{} only on {branch} ·", if n_ahead == 1 { "commit" } else { "commits" }))
+                .child(strong(n_behind.to_string()))
+                .child(format!("only on {target}")),
+        )
+        .child(
+            kit::hint(kit::disabled(kit::button("repo-compare-diff", "View diff", Kind::Secondary, kit::MINI), n_ahead == 0), format!("Everything {branch} changed since it left {target}"))
+                .when(n_ahead > 0, |b| b.on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.repo_inspect(range.clone(), title.clone(), range.clone(), w, cx)))),
+        );
+    let mut out = div().flex().flex_col().child(summary);
+    if n_behind > 0 {
+        out = out.child(group(format!("Only on {target}")));
+    }
+    for cm in &c_.behind {
+        let (sha, msg) = (cm.sha.clone(), cm.message.clone());
+        let row = format!("repo-behind:{}", cm.sha);
+        out = out.child(
+            commit_row(row.clone(), cm, false, cx).child(
+                div().flex_none().opacity(0.).group_hover(row, |s| s.opacity(1.)).child(
+                    kit::hint(kit::disabled(kit::button(format!("repo-pick:{}", cm.sha), "Cherry-pick", Kind::Secondary, kit::MINI), busy), format!("Apply this commit on top of {branch}"))
+                        .when(!busy, |b| b.on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.repo_cherry_pick(sha.clone(), msg.clone(), w, cx)))),
+                ),
+            ),
+        );
+    }
+    if n_ahead > 0 {
+        out = out.child(group(format!("Only on {branch}")));
+    }
+    for cm in &c_.ahead {
+        out = out.child(commit_row(format!("repo-ahead:{}", cm.sha), cm, false, cx));
+    }
+    out.into_any_element()
+}
+
+/// The Compare ref picker: a filter and the refs (searchable `Select`).
+fn compare_picker(r: &RepoView, cx: &mut Context<PageTab>) -> AnyElement {
+    let q = r.compare_filter.read(cx).value().trim().to_lowercase();
+    let current = r.compare_target();
+    let opts: Vec<String> = r.compare_options().into_iter().filter(|o| q.is_empty() || o.to_lowercase().contains(&q)).collect();
+    div()
+        .occlude()
+        .absolute()
+        .top(px(40.))
+        .right(px(10.))
+        .w(px(280.))
+        .rounded(px(8.))
+        .border_1()
+        .border_color(c(theme::BORDER_STRONG))
+        .bg(c(theme::PANEL_RAISED))
+        .shadow(theme::shadow(12., 32., 0.5))
+        .overflow_hidden()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .px(px(10.))
+                .border_b_1()
+                .border_color(c(theme::BORDER))
+                .child(icon("search", 12., c(theme::TEXT_FAINT)))
+                .child(div().id("repo-compare-filter").relative().flex_1().child(Input::new(&r.compare_filter).appearance(false)).child(probe("repo-compare-filter"))),
+        )
+        .child(
+            div()
+                .id("repo-compare-list")
+                .max_h(px(280.))
+                .overflow_y_scroll()
+                .p(px(4.))
+                .when(opts.is_empty(), |d| d.child(div().px(px(10.)).py(px(7.)).text_size(px(12.)).text_color(c(theme::TEXT_FAINT)).child("No branch matches")))
+                .children(opts.into_iter().map(|o| {
+                    let on = current.as_ref() == Some(&o);
+                    let id = format!("repo-compare-opt:{o}");
+                    let pick = o.clone();
+                    div()
+                        .id(gpui::ElementId::Name(id.clone().into()))
+                        .relative()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .px(px(10.))
+                        .py(px(6.))
+                        .rounded(px(6.))
+                        .text_size(px(12.5))
+                        .font_family(theme::MONO_FONT)
+                        .text_color(if on { c(theme::TEXT) } else { c(theme::TEXT_DIM) })
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme::accent_soft()).text_color(c(theme::TEXT)))
+                        .child(div().flex_1().min_w_0().truncate().child(o))
+                        .when(on, |d| d.child(icon("tick", 11., c(theme::ACCENT))))
+                        .child(probe(id))
+                        .on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.repo_set_compare(true, Some(pick.clone()), w, cx)))
+                })),
+        )
+        .into_any_element()
 }
 
 fn branches_panel(r: &RepoView, ov: Option<&RepoOverview>, cx: &mut Context<PageTab>) -> impl IntoElement {
@@ -1154,7 +1605,10 @@ fn branches_panel(r: &RepoView, ov: Option<&RepoOverview>, cx: &mut Context<Page
     let q = r.filter.read(cx).value().trim().to_lowercase();
     let matches = |b: &&&BranchInfo| q.is_empty() || b.name.to_lowercase().contains(&q);
     let all: Vec<&BranchInfo> = ov.map(|o| o.branches.iter().collect()).unwrap_or_default();
-    let locals: Vec<&BranchInfo> = all.iter().copied().filter(|b| !b.remote_only).collect();
+    // Deleted on origin (PR most likely merged): folded away unless checked out.
+    let stale_of = |b: &BranchInfo| b.gone && !b.current && b.worktree.is_none();
+    let locals: Vec<&BranchInfo> = all.iter().copied().filter(|b| !b.remote_only && !stale_of(b)).collect();
+    let stale: Vec<&BranchInfo> = all.iter().copied().filter(|b| !b.remote_only && stale_of(b)).collect();
     let remotes: Vec<&BranchInfo> = all.iter().copied().filter(|b| b.remote_only).collect();
     let pill = |text: String, color: gpui::Rgba, border: gpui::Rgba| {
         div().flex_none().h(px(18.)).px(px(7.)).flex().items_center().rounded(px(9.)).border_1().border_color(border).text_size(px(10.5)).font_weight(FontWeight::MEDIUM).text_color(color).child(text)
@@ -1162,7 +1616,7 @@ fn branches_panel(r: &RepoView, ov: Option<&RepoOverview>, cx: &mut Context<Page
     let row = |b: &BranchInfo, cx: &mut Context<PageTab>| {
         let group = format!("repo-branch:{}", b.name);
         let free = !b.current && b.worktree.is_none();
-        let (n1, n2) = (b.name.clone(), b.name.clone());
+        let (n1, n2, gone) = (b.name.clone(), b.name.clone(), b.gone);
         let owner = b.worktree.as_ref().and_then(|w| ov.and_then(|o| o.worktrees.iter().find(|x| &x.path == w)).and_then(|x| x.workspace.clone()));
         div()
             .id(gpui::ElementId::Name(group.clone().into()))
@@ -1201,7 +1655,7 @@ fn branches_panel(r: &RepoView, ov: Option<&RepoOverview>, cx: &mut Context<Page
                     })
                     .when(free && !b.remote_only, |d| {
                         d.child(kit::icon_button(format!("repo-delete:{}", b.name), "trash", 24., 13., true).when(!busy, |bt| {
-                            bt.on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.repo_delete(n2.clone(), w, cx)))
+                            bt.on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.repo_delete(n2.clone(), gone, w, cx)))
                         }))
                     }),
             )
@@ -1210,29 +1664,52 @@ fn branches_panel(r: &RepoView, ov: Option<&RepoOverview>, cx: &mut Context<Page
     for b in locals.iter().filter(matches) {
         list = list.child(row(b, cx));
     }
+    let toggle = |id: &'static str, text: String, cx: &mut Context<PageTab>, f: fn(&mut RepoView)| {
+        div()
+            .id(id)
+            .relative()
+            .px(px(14.))
+            .py(px(8.))
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .text_size(px(11.5))
+            .text_color(c(theme::TEXT_FAINT))
+            .cursor_pointer()
+            .hover(|s| s.text_color(c(theme::TEXT)))
+            .child(icon("chevron-right", 10., c(theme::TEXT_FAINT)))
+            .child(text)
+            .child(probe(id))
+            .on_click(cx.listener(move |t, _: &ClickEvent, _, cx| {
+                if let Some(r) = t.repo_view() {
+                    f(r);
+                }
+                cx.notify();
+            }))
+    };
+    let branches = |n: usize| if n == 1 { "1 branch".to_string() } else { format!("{n} branches") };
+    if !stale.is_empty() {
+        let show = r.show_stale;
+        list = list.child(toggle(
+            "repo-stale-toggle",
+            format!("{} {} deleted on origin", if show { "Hide" } else { "Show" }, branches(stale.len())),
+            cx,
+            |r| r.show_stale = !r.show_stale,
+        ));
+        if show || !q.is_empty() {
+            for b in stale.iter().filter(matches) {
+                list = list.child(row(b, cx));
+            }
+        }
+    }
     if !remotes.is_empty() {
         let show = r.show_remote;
-        list = list.child(
-            div()
-                .id("repo-remote-toggle")
-                .px(px(14.))
-                .py(px(8.))
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .text_size(px(11.5))
-                .text_color(c(theme::TEXT_FAINT))
-                .cursor_pointer()
-                .hover(|s| s.text_color(c(theme::TEXT)))
-                .child(icon("chevron-right", 10., c(theme::TEXT_FAINT)))
-                .child(format!("{} {} only on origin", if show { "Hide" } else { "Show" }, plural(remotes.len(), "branch").replace("branchs", "branches")))
-                .on_click(cx.listener(|t, _: &ClickEvent, _, cx| {
-                    if let Some(r) = t.repo_view() {
-                        r.show_remote = !r.show_remote;
-                    }
-                    cx.notify();
-                })),
-        );
+        list = list.child(toggle(
+            "repo-remote-toggle",
+            format!("{} {} only on origin", if show { "Hide" } else { "Show" }, branches(remotes.len())),
+            cx,
+            |r| r.show_remote = !r.show_remote,
+        ));
         if show || !q.is_empty() {
             for b in remotes.iter().filter(matches) {
                 list = list.child(row(b, cx));

@@ -787,10 +787,36 @@ rewrote it; *Replan → Interview me first* asked, the answer went back, the sum
 `--model …`, `--permission-mode acceptEdits` and the task; the repo page committed a change from its
 summary box.
 
-Not done: tracker sources (Shortcut/Linear) in New workspace, the commit modal's side-by-side diff
-(a file opens its diff tab instead), the repo page's Compare tab and cherry-pick, Ralph on a repository
-(a toast points to the workspace), agent sessions from the repo page (a terminal opens), Review
-feedback / Investigate on the workspace page, the race comparison section, Ctrl+Enter to commit.
+**Repo page and commit parity.** The commit modal is the React one's two panes: the repos on the
+left (the focused file highlighted, the first file focused on open), the focused file's diff on the
+right (`git/diff_pane.rs`: gpui-component's diff view with the review tab's ‹ n/m › and split /
+unified bar), "⌘/Ctrl + Enter to commit" in the footer. Ctrl+Enter commits from any input in the
+modal and in the repo page's commit box (`SubmitCommit`, bound in `OrbitCommit > Input` ahead of the
+textarea's own newline). The repo page gained the **Compare** tab (`{branch} vs` a searchable ref
+picker, defaulting to `origin/<default>` off the default branch; "n commits only on … · n only on …",
+*View diff* of `target...HEAD`; commits only on the target with **Cherry-pick** on hover, which
+reports a paused pick on conflicts; commits only on HEAD), commit inspection (a History or Compare
+row, or *View diff*, opens `git/inspect.rs`: the commit's or range's files and the diff), the New
+session menu (Terminal, Claude Code, Open Code, OMP in `@repo`), *Start an agent session* on an empty
+Changes list, *Merge* beside an open non-draft PR (the merge flow on `@repo`), *Clone repository* for
+an uncloned repo (tools hidden as in React), branches deleted on origin folded behind "Show n
+branches deleted on origin", the switcher listing origin-only branches (`origin`, `in <ws>` pills),
+*Create … from origin/<base>* and Enter to switch or create, and *Finish branch* asking first and
+pulling before the delete. Probes: `repo-tab-history|compare`, `repo-compare-pick`,
+`repo-compare-filter`, `repo-compare-opt:<ref>`, `repo-compare-diff`, `repo-pick:<sha>`,
+`repo-commit-main:<sha>`, `repo-stale-toggle`, `repo-remote-toggle`, `repo-create-branch-base`,
+`repo-agent`, `repo-pr-merge`, `repo-clone`, `inspect-file:<path>`; the commit modal's `commit-diff:`
+now focuses the file. Verified on a scratch root (bare remotes, a workspace with two worktrees):
+Compare against `origin/feat/teammate` listed its two commits; cherry-picking the first applied it,
+the second paused with `main.txt` conflicted and the banner; *View diff* and a History row opened
+the inspect modal on `origin/main...HEAD` and the commit; Ctrl+Enter committed the repo page's box
+and both repos of the modal (no newline added to a message); Enter in the switcher created `topic`;
+*Clone repository* cloned `site`.
+
+Not done: tracker sources (Shortcut/Linear) in New workspace, Ralph on a repository (a toast points
+to the workspace), the open PR cell opens GitHub rather than the PR review tab, Review feedback /
+Investigate on the workspace page, the race comparison section. Commit inspection is a modal, not a
+review tab (the review tabs need a workspace).
 
 ## Stage: settings, Ralph, integrations, usage, artifacts, updates, crash log
 
