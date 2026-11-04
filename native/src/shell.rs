@@ -166,6 +166,38 @@ fn resizer(pane: Pane, lit: bool, cx: &mut Context<OrbitApp>) -> impl IntoElemen
 }
 
 /// `fmtTokens`.
+/// "in 2h 14m (Wed 18:00)" for a reset time in unix seconds.
+fn resets_in(unix: u64) -> String {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let m = unix.saturating_sub(now).div_ceil(60);
+    let span = if m < 60 {
+        format!("{m}m")
+    } else if m < 60 * 24 {
+        format!("{}h {}m", m / 60, m % 60)
+    } else {
+        format!("{}d {}h", m / 1440, (m % 1440) / 60)
+    };
+    let at = chrono::DateTime::from_timestamp(unix as i64, 0)
+        .map(|t| format!(" ({})", t.with_timezone(&chrono::Local).format("%a %H:%M")))
+        .unwrap_or_default();
+    format!("in {span}{at}")
+}
+
+/// A model chip's hover: its totals, then its sessions (most recent first).
+fn model_tip(m: &orbit_core::usage::ModelUsage) -> String {
+    let mut out = format!("{} · {} in / {} out · {} cache · ${:.2}", m.model, tokens(m.input_tokens), tokens(m.output_tokens), tokens(m.cache_tokens), m.cost_usd);
+    let mut sessions: Vec<_> = m.sessions.iter().collect();
+    sessions.sort_by_key(|s| std::cmp::Reverse(s.last_active));
+    for s in sessions.iter().take(8) {
+        let title = if s.title.is_empty() { "(untitled)" } else { &s.title };
+        out.push_str(&format!("\n{title} · {} in / {} out · ${:.2}", tokens(s.input_tokens), tokens(s.output_tokens), s.cost_usd));
+    }
+    if sessions.len() > 8 {
+        out.push_str(&format!("\n+{} more", sessions.len() - 8));
+    }
+    out
+}
+
 fn tokens(n: u64) -> String {
     match n {
         1_000_000_000.. => format!("{:.1}B", n as f64 / 1e9),
@@ -1318,8 +1350,11 @@ impl OrbitApp {
                 .items_center()
                 .gap(px(12.))
                 .overflow_hidden()
-                .children(u.by_model.iter().map(|m| {
+                .children(u.by_model.iter().enumerate().map(|(i, m)| {
+                    let tip = model_tip(m);
                     div()
+                        .id(("usage-model", i))
+                        .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
                         .flex_none()
                         .px(px(9.))
                         .py(px(1.))
@@ -1340,8 +1375,9 @@ impl OrbitApp {
             Some(_) => div().text_color(c(theme::TEXT_FAINT)).child("no AI usage yet").into_any_element(),
             None => div().text_color(c(theme::TEXT_FAINT)).child("loading…").into_any_element(),
         };
-        let chip = |label: &'static str, w: &orbit_core::agent_hooks::RateWindow| {
+        let chip = |label: &'static str, name: &'static str, w: &orbit_core::agent_hooks::RateWindow| {
             let pct = w.used_percentage.clamp(0., 100.);
+            let tip = format!("Claude {name} limit: {pct:.0}% used · resets {}", resets_in(w.resets_at));
             let level = if pct >= 90. {
                 theme::DANGER
             } else if pct >= 80. {
@@ -1350,6 +1386,8 @@ impl OrbitApp {
                 theme::ACCENT
             };
             div()
+                .id(label)
+                .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
                 .flex()
                 .items_center()
                 .gap(px(6.))
@@ -1364,8 +1402,17 @@ impl OrbitApp {
                 .flex()
                 .items_center()
                 .gap(px(12.))
-                .children(l.five_hour.as_ref().map(|w| chip("5h", w)))
-                .children(l.seven_day.as_ref().map(|w| chip("Week", w)))
+                .child(match l.five_hour.as_ref() {
+                    Some(w) => chip("5h", "5-hour", w).into_any_element(),
+                    // Claude Code leaves the 5-hour window out until it has usage.
+                    None => div()
+                        .id("5h")
+                        .tooltip(|window, cx| Tooltip::new("Claude 5-hour limit: no usage in the current window").build(window, cx))
+                        .text_color(c(theme::TEXT_FAINT))
+                        .child("5h —")
+                        .into_any_element(),
+                })
+                .children(l.seven_day.as_ref().map(|w| chip("Week", "weekly", w)))
                 .into_any_element(),
             None => div().text_color(c(theme::TEXT_FAINT)).child("Limits —").into_any_element(),
         };

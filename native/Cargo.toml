@@ -7,6 +7,8 @@ publish = false
 description = "Orbit: a desktop workspace for shipping features across repositories with AI agents"
 
 [dependencies]
+# Local time for the usage bar's reset times; already in the lock via gpui-component.
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 # Orbit's backend.
 orbit-core = { path = "../crates/orbit-core" }
 # gpui-component pins its GPUI snapshot (crates.io `gpui-pre`); use the same one.
