@@ -27,3 +27,6 @@ dist-ssr
 
 # Native (GPUI) app build output
 native/target/
+
+# Agent worktrees
+.claude/worktrees/
