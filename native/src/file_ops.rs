@@ -66,6 +66,7 @@ fn attach(app: &mut OrbitApp, window: &mut Window, cx: &mut Context<OrbitApp>) {
             let kind = if *error { ToastKind::Error } else { ToastKind::Success };
             app.toast(kind, title.clone(), detail.clone().map(Into::into), cx);
         }
+        TreeRequest::Renamed { from, to } => app.file_renamed(from, to, window, cx),
     })
     .detach();
     let (tx, mut rx) = futures::channel::mpsc::unbounded::<FsChange>();

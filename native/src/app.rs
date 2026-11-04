@@ -402,9 +402,26 @@ impl OrbitApp {
                 return None;
             }
         };
+        let editor = self.new_editor(path.clone(), text, window, cx);
+        let tab = Tab { kind: TabKind::Editor(editor.clone()), preview };
+        let reuse = preview.then(|| self.tabs.iter().position(|t| t.preview && !t.dirty(cx))).flatten();
+        let ix = match reuse {
+            Some(ix) => {
+                self.tabs[ix] = tab;
+                ix
+            }
+            None => self.insert_tab(tab),
+        };
+        eprintln!("opened {} in {} ms", path.display(), started.elapsed().as_millis());
+        self.activate(ix, window, cx);
+        Some(editor)
+    }
+
+    /// An editor for `path` with the app's handling of its events, not yet in a tab.
+    fn new_editor(&mut self, path: PathBuf, text: String, window: &mut Window, cx: &mut Context<Self>) -> Entity<EditorTab> {
         let repo = self.repo_of(&path);
         let lsp = &mut self.lsp;
-        let editor = cx.new(|cx| EditorTab::new(path.clone(), text, repo, lsp, window, cx));
+        let editor = cx.new(|cx| EditorTab::new(path, text, repo, lsp, window, cx));
         let sub = cx.subscribe_in(&editor, window, |this, editor, event, window, cx| match event {
             EditorEvent::DirtyChanged => {
                 // An edited preview tab stays open.
@@ -429,18 +446,39 @@ impl OrbitApp {
             }
         });
         self._subscriptions.push(sub);
-        let tab = Tab { kind: TabKind::Editor(editor.clone()), preview };
-        let reuse = preview.then(|| self.tabs.iter().position(|t| t.preview && !t.dirty(cx))).flatten();
-        let ix = match reuse {
-            Some(ix) => {
-                self.tabs[ix] = tab;
-                ix
+        editor
+    }
+
+    /// After a rename in the tree: editors of the file, or of files under the
+    /// folder, reopen at the new path in the same tab, keeping unsaved text and cursor.
+    pub fn file_renamed(&mut self, from: &Path, to: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        for ix in 0..self.tabs.len() {
+            let TabKind::Editor(old) = &self.tabs[ix].kind else { continue };
+            let old = old.clone();
+            let Ok(rest) = old.read(cx).path.strip_prefix(from).map(Path::to_path_buf) else { continue };
+            let path = if rest.as_os_str().is_empty() { to.to_path_buf() } else { to.join(rest) };
+            let Ok(text) = editor::read_text(&path) else { continue };
+            let (dirty, buffer, cursor) = {
+                let e = old.read(cx);
+                let state = e.state.read(cx);
+                (e.is_dirty(), state.text().to_string(), state.cursor_position())
+            };
+            let editor = self.new_editor(path, text, window, cx);
+            editor.update(cx, |e, cx| {
+                e.state.update(cx, |s, cx| {
+                    // As an edit, so the tab is dirty against the file on disk.
+                    if dirty {
+                        s.replace_all(buffer, window, cx);
+                    }
+                    s.set_cursor_position(cursor, window, cx);
+                });
+            });
+            self.tabs[ix].kind = TabKind::Editor(editor);
+            if self.active == Some(ix) {
+                self.activate(ix, window, cx);
             }
-            None => self.insert_tab(tab),
-        };
-        eprintln!("opened {} in {} ms", path.display(), started.elapsed().as_millis());
-        self.activate(ix, window, cx);
-        Some(editor)
+        }
+        cx.notify();
     }
 
     pub fn open_diff(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Option<Entity<DiffTab>> {

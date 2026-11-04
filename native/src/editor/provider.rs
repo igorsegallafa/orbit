@@ -31,6 +31,17 @@ pub struct LspDoc {
     pub apply_edit: RefCell<Option<EditHook>>,
 }
 
+// The server forgets the document with its last editor (a closed tab, a renamed file).
+impl Drop for LspDoc {
+    fn drop(&mut self) {
+        if self.version.get() > 0 {
+            if let Some(server) = self.server() {
+                server.notify("textDocument/didClose", json!({ "textDocument": { "uri": self.uri.as_str() } }));
+            }
+        }
+    }
+}
+
 impl LspDoc {
     pub fn new(uri: lsp_types::Uri, language_id: &'static str) -> Self {
         Self {

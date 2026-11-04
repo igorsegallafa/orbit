@@ -54,6 +54,8 @@ pub enum FileTreeEvent {
 pub enum TreeRequest {
     ContextMenu { path: PathBuf, position: Point<Pixels> },
     Notify { error: bool, title: String, detail: Option<String> },
+    /// A file or folder was renamed (open editors follow it).
+    Renamed { from: PathBuf, to: PathBuf },
 }
 
 struct Entry {
@@ -612,8 +614,10 @@ impl FileTree {
             }
         }
         self.pending_reveal = Some(created.clone());
-        if matches!(kind, PromptKind::NewFile(_)) {
-            cx.emit(FileTreeEvent::OpenFile { path: created, preview: false });
+        match &kind {
+            PromptKind::NewFile(_) => cx.emit(FileTreeEvent::OpenFile { path: created, preview: false }),
+            PromptKind::Rename(from) => cx.emit(TreeRequest::Renamed { from: from.clone(), to: created }),
+            PromptKind::NewFolder(_) => {}
         }
         cx.notify();
     }
