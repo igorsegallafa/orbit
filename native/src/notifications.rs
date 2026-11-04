@@ -17,7 +17,7 @@ const COALESCE: Duration = Duration::from_millis(800);
 const BATCH_TAG: &str = "orbit:batch";
 const LOG_MAX: usize = 20;
 /// The Windows AppUserModelID.
-const APP_ID: &str = "com.nsx001220.orbit.native";
+const APP_ID: &str = "com.nsx001220.orbit";
 
 static ENABLED: AtomicBool = AtomicBool::new(true);
 
