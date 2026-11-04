@@ -299,9 +299,8 @@ impl PageTab {
     pub fn start_create_prs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(p) = self.ws_page() else { return };
         let Some(m) = p.meta.clone() else { return };
-        let repos = p.statuses.ready().map(|st| st.iter().map(|s| (s.repo.clone(), s.pr_commits)).collect()).unwrap_or_default();
-        let title = m.card.as_ref().map(|c| c.title.clone()).unwrap_or_else(|| m.branch.clone());
-        self.open_create_prs(m.name, m.base, title, repos, window, cx);
+        let title = m.card.as_ref().map(|c| c.title.clone());
+        self.open_create_prs(m.name, m.base, title, m.repos, window, cx);
     }
 
     pub fn open_prs_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {

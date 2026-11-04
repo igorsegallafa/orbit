@@ -82,7 +82,7 @@ impl ReviewTab {
             .create
             .iter()
             .filter(|r| r.include)
-            .map(|r| PrSpec { repo: r.repo.clone(), title: r.title.read(cx).value().to_string(), body: r.body.read(cx).value().to_string() })
+            .map(|r| PrSpec { repo: r.repo.clone(), title: r.title.read(cx).value().to_string(), body: r.body.read(cx).value().to_string(), draft: false })
             .collect();
         if specs.is_empty() {
             self.message = Some("Pick at least one repository".into());

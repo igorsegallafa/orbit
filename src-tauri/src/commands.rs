@@ -584,17 +584,17 @@ pub async fn ws_rebase_abort(workspace: String, repo: String) -> Result<(), Stri
     blocking(move || git::rebase_abort(&worktree_of(&workspace, &repo)?)).await
 }
 
-/// Create a PR for one repo's branch into the workspace base. Persists
-/// the PR ref in the workspace meta. Returns the PR URL.
+/// Creates one repo's PR (pushing its branch first when needed) and saves
+/// it in the workspace meta. The modal runs one per repo, side by side.
 #[tauri::command]
-pub async fn ws_create_pr(
-    workspace: String,
-    repo: String,
-    base: String,
-    title: String,
-    body: String,
-) -> Result<String, String> {
-    blocking(move || crate::prs::create(&workspace, &repo, &base, &title, &body)).await
+pub async fn ws_create_pr(workspace: String, base: String, spec: crate::prs::PrSpec) -> Result<crate::workspace::PrRef, String> {
+    blocking(move || crate::prs::create(&workspace, &base, &spec)).await
+}
+
+/// What opening each repo's PR would do: commits ahead, pushed, PR open.
+#[tauri::command]
+pub async fn ws_pr_plan(workspace: String, base: String) -> Result<Vec<crate::prs::PrPlan>, String> {
+    blocking(move || crate::prs::plan(&workspace, &base)).await
 }
 
 /// AI-drafted PR title + description for one repo (reads the repo's own

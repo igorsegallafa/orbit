@@ -997,15 +997,14 @@ export function RepoPage({
         <PrsModal
           workspace={scope}
           base={defaultBranch}
-          repos={[{ repo, prCommits: 1 }]}
-          defaultTitle={branch}
+          repos={[repo]}
           onOpenPrs={(list) => {
             setPrCreateOpen(false);
             load();
             onOpenPrList(list);
           }}
+          onCreated={load}
           onClose={() => setPrCreateOpen(false)}
-          onError={onError}
         />
       )}
 
