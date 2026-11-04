@@ -859,16 +859,19 @@ export function WorkspaceDetailPage({
         <PrsModal
           workspace={workspace.name}
           base={workspace.base}
-          repos={(statuses ?? []).map((s) => ({ repo: s.repo, prCommits: s.prCommits }))}
-          defaultTitle={workspace.card?.title ?? workspace.branch}
+          repos={workspace.repos}
+          cardTitle={workspace.card?.title}
           onOpenPrs={(prs) => {
             setPrCreateOpen(false);
             loadPrs();
             loadChecks();
             onOpenPrList(prs);
           }}
+          onCreated={() => {
+            loadPrs();
+            loadChecks();
+          }}
           onClose={() => setPrCreateOpen(false)}
-          onError={onError}
         />
       )}
 
