@@ -8,6 +8,7 @@ use crate::commands::{self, RunCommand};
 use crate::icons::orbit_icon;
 use crate::overlay::MenuItem;
 use crate::probe::probe;
+use crate::scope::{self, Scope};
 use crate::sessions::{self, InboxKind, AGENTS};
 use crate::state::SIDEBAR;
 use crate::theme::{self, c, size};
@@ -19,7 +20,9 @@ use gpui::{
 use gpui_component::tooltip::Tooltip;
 use gpui_component::TitleBar;
 use orbit_core::git::{ChangeEntry, CommitEntry};
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -48,6 +51,20 @@ pub struct NewSessionMenu {
     pub extra: Option<String>,
 }
 
+/// The titlebar's workspace select, open: its filter and highlighted row.
+#[derive(Default)]
+pub struct WsSwitcher {
+    pub query: String,
+    pub highlighted: usize,
+}
+
+/// A row of the workspace select.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SwitchItem {
+    Scope(Scope),
+    NewWorkspace,
+}
+
 /// Frame state that isn't layout (layout is saved in `state::Layout`).
 #[derive(Default)]
 pub struct Chrome {
@@ -55,6 +72,9 @@ pub struct Chrome {
     pub git: GitPanel,
     pub inbox_open: bool,
     pub new_session: Option<NewSessionMenu>,
+    pub ws_switcher: Option<WsSwitcher>,
+    /// The select's left edge, for the popover.
+    pub ws_switcher_x: Rc<Cell<f32>>,
 }
 
 const HOME_SCOPE: &str = "dir:~";
@@ -226,6 +246,7 @@ impl OrbitApp {
                         cx,
                         |a, w, cx| a.navigate(false, w, cx),
                     ))
+                    .child(self.render_ws_select(cx))
                     .child(div().flex_1())
                     .children(self.titlebar_items.iter().cloned())
                     .child(
@@ -265,10 +286,262 @@ impl OrbitApp {
             )
     }
 
+    /// The workspace select's button: the active scope, after back/forward.
+    fn render_ws_select(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let open = self.chrome.ws_switcher.is_some();
+        let ws = self.workspace();
+        let name: SharedString = ws.map_or(scope::GLOBAL_LABEL.into(), |w| w.meta.name.clone().into());
+        let cell = self.chrome.ws_switcher_x.clone();
+        div()
+            .id("tb-workspace")
+            .group("tb-workspace")
+            .relative()
+            .ml(px(6.))
+            .h(px(size::TITLEBAR_BTN_H))
+            .max_w(px(260.))
+            .min_w_0()
+            .px(px(8.))
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(6.))
+            .rounded(px(6.))
+            .cursor_pointer()
+            .text_size(px(12.5))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(c(if ws.is_some() { theme::TEXT_DIM } else { theme::TEXT_FAINT }))
+            .hover(|s| s.bg(c(theme::PANEL_RAISED)).text_color(c(theme::TEXT)))
+            .when(open, |d| d.bg(c(theme::PANEL_RAISED)).text_color(c(theme::TEXT)))
+            .child(gpui::canvas(move |b, _, _| cell.set(f32::from(b.origin.x)), |_, _, _, _| {}).absolute().inset_0())
+            .child(orbit_icon(if ws.is_some() { "satellite" } else { "home" }, 13., c(theme::TEXT_FAINT)).group_hover("tb-workspace", |s| s.text_color(c(theme::TEXT_DIM))))
+            .child(div().min_w_0().truncate().child(name))
+            .child(orbit_icon("chevron", 9., c(theme::TEXT_FAINT)).with_transformation(gpui::Transformation::rotate(gpui::percentage(0.25))))
+            .child(probe("tb-workspace"))
+            .tooltip(|window, cx| Tooltip::new("Switch workspace (Ctrl+Alt+W)").build(window, cx))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|a, _, w, cx| {
+                    cx.stop_propagation();
+                    a.toggle_workspace_switcher(w, cx);
+                }),
+            )
+    }
+
+    pub fn toggle_workspace_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.chrome.ws_switcher.is_some() {
+            self.close_popovers(window, cx);
+        } else {
+            self.open_workspace_switcher(window, cx);
+        }
+    }
+
+    pub fn open_workspace_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.chrome.inbox_open = false;
+        self.chrome.new_session = None;
+        self.chrome.ws_switcher = Some(WsSwitcher::default());
+        self.chrome.ws_switcher.as_mut().unwrap().highlighted = self.default_switch_row();
+        window.focus(&self.overlay_focus, cx);
+        window.prevent_default();
+        cx.notify();
+    }
+
+    /// The select's rows for its filter: the global scope, the workspaces
+    /// by name, and "New workspace…" last.
+    pub fn switch_items(&self) -> Vec<SwitchItem> {
+        let query = self.chrome.ws_switcher.as_ref().map_or("", |s| s.query.as_str());
+        let mut names: Vec<&str> = self.workspaces.iter().map(|w| w.meta.name.as_str()).collect();
+        names.sort_unstable();
+        let mut items: Vec<SwitchItem> = vec![];
+        if scope::matches(query, scope::GLOBAL_LABEL) {
+            items.push(SwitchItem::Scope(None));
+        }
+        items.extend(names.into_iter().filter(|n| scope::matches(query, n)).map(|n| SwitchItem::Scope(Some(n.to_string()))));
+        items.push(SwitchItem::NewWorkspace);
+        items
+    }
+
+    /// The active scope's row, else the first.
+    fn default_switch_row(&self) -> usize {
+        let current = SwitchItem::Scope(self.scope());
+        self.switch_items().iter().position(|i| *i == current).unwrap_or(0)
+    }
+
+    pub fn pick_switch_item(&mut self, item: SwitchItem, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_popovers(window, cx);
+        match item {
+            SwitchItem::Scope(s) => self.switch_scope(s, window, cx),
+            SwitchItem::NewWorkspace => {
+                commands::run("workspace.new", self, window, cx);
+            }
+        }
+    }
+
+    /// Keys while the select is open: type to filter, ↑/↓, Enter, Esc.
+    fn on_switcher_key(&mut self, ev: &gpui::KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let items = self.switch_items();
+        let Some(sw) = self.chrome.ws_switcher.as_mut() else { return };
+        let ks = &ev.keystroke;
+        let m = &ks.modifiers;
+        let n = items.len();
+        match ks.key.as_str() {
+            "escape" => {
+                self.close_popovers(window, cx);
+            }
+            "enter" => {
+                if let Some(item) = items.get(sw.highlighted).cloned() {
+                    self.pick_switch_item(item, window, cx);
+                }
+            }
+            "up" => sw.highlighted = (sw.highlighted + n - 1) % n,
+            "down" | "tab" => sw.highlighted = (sw.highlighted + 1) % n,
+            "backspace" => {
+                if m.control {
+                    sw.query.clear();
+                } else {
+                    sw.query.pop();
+                }
+                self.refilter();
+            }
+            _ if m.control || m.alt || m.platform => return,
+            _ => match ks.key_char.as_deref() {
+                Some(t) if !t.is_empty() && !t.chars().any(char::is_control) => {
+                    sw.query.push_str(t);
+                    self.refilter();
+                }
+                _ => return,
+            },
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    /// After the filter changed: the first match (the active scope's row when cleared).
+    fn refilter(&mut self) {
+        let empty = self.chrome.ws_switcher.as_ref().is_none_or(|s| s.query.is_empty());
+        let row = if empty { self.default_switch_row() } else { 0 };
+        if let Some(sw) = self.chrome.ws_switcher.as_mut() {
+            sw.highlighted = row;
+        }
+    }
+
+    fn render_ws_switcher(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let sw = self.chrome.ws_switcher.as_ref()?;
+        let current = self.scope();
+        // Open tabs per scope, sessions included.
+        let mut counts: std::collections::HashMap<Scope, usize> = Default::default();
+        for t in &self.tabs {
+            if let Some(s) = self.tab_scope(t, cx) {
+                *counts.entry(s).or_default() += 1;
+            }
+        }
+        let items = self.switch_items();
+        let new_at = items.len() - 1;
+        let rows = items.into_iter().enumerate().map(|(ix, item)| {
+            let lit = ix == sw.highlighted;
+            let (icon, label, branch, on, count, probe_id) = match &item {
+                SwitchItem::Scope(s) => {
+                    let ws = s.as_ref().and_then(|n| self.workspaces.iter().find(|w| &w.meta.name == n));
+                    let label: SharedString = s.clone().unwrap_or_else(|| scope::GLOBAL_LABEL.into()).into();
+                    (
+                        if s.is_some() { "satellite" } else { "home" },
+                        label.clone(),
+                        ws.map(|w| w.meta.branch.clone()).filter(|b| !b.is_empty()),
+                        *s == current,
+                        counts.get(s).copied().unwrap_or(0),
+                        format!("wsw:{label}"),
+                    )
+                }
+                SwitchItem::NewWorkspace => ("plus", "New workspace…".into(), None, false, 0, "wsw:New workspace…".to_string()),
+            };
+            let row = div()
+                .id(("wsw-row", ix))
+                .relative()
+                .h(px(size::MENU_ITEM))
+                .px(px(10.))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .rounded(px(5.))
+                .cursor_pointer()
+                .whitespace_nowrap()
+                .text_size(px(size::TAB_FONT))
+                .text_color(c(if on { theme::ACCENT } else { theme::TEXT }))
+                .when(on, |d| d.font_weight(FontWeight::SEMIBOLD))
+                .when(lit, |d| d.bg(c(theme::ACCENT_SOFT)))
+                .hover(|s| s.bg(c(theme::ACCENT_SOFT)))
+                .child(orbit_icon(icon, 13., c(if on { theme::ACCENT } else { theme::TEXT_FAINT })))
+                .child(div().flex_none().max_w(px(170.)).truncate().child(label))
+                .children(branch.map(|b| div().min_w_0().truncate().font_weight(FontWeight::NORMAL).text_size(px(11.)).text_color(c(theme::TEXT_FAINT)).child(b)))
+                .child(div().flex_1())
+                .when(count > 0, |d| d.child(div().flex_none().text_size(px(11.)).font_weight(FontWeight::NORMAL).text_color(c(theme::TEXT_FAINT)).child(count.to_string())))
+                .child(div().w(px(12.)).flex_none().when(on, |d| d.child(orbit_icon("check", 12., c(theme::ACCENT)))))
+                .child(probe(probe_id))
+                .on_mouse_down(MouseButton::Left, cx.listener(move |a, _, w, cx| {
+                    cx.stop_propagation();
+                    a.pick_switch_item(item.clone(), w, cx);
+                }));
+            if ix == new_at {
+                div().child(div().h(px(1.)).my(px(4.)).bg(c(theme::BORDER))).child(row).into_any_element()
+            } else {
+                row.into_any_element()
+            }
+        });
+        let query = sw.query.clone();
+        let filter = div()
+            .h(px(32.))
+            .px(px(10.))
+            .mb(px(4.))
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .border_b_1()
+            .border_color(c(theme::BORDER))
+            .text_size(px(size::TAB_FONT))
+            .child(orbit_icon("search", 13., c(theme::TEXT_FAINT)))
+            .child(if query.is_empty() {
+                div().text_color(c(theme::TEXT_FAINT)).child("Switch workspace…")
+            } else {
+                div().text_color(c(theme::TEXT)).child(query)
+            })
+            .child(div().w(px(1.)).h(px(14.)).bg(c(theme::ACCENT)))
+            .child(div().flex_1())
+            .child(div().text_size(px(10.5)).text_color(c(theme::TEXT_FAINT)).child("Ctrl+Alt+W"));
+        Some(
+            div()
+                .id("wsw-backdrop")
+                .track_focus(&self.overlay_focus)
+                .absolute()
+                .inset_0()
+                .on_key_down(cx.listener(Self::on_switcher_key))
+                .on_mouse_down(MouseButton::Left, cx.listener(|a, _, w, cx| {
+                    a.close_popovers(w, cx);
+                }))
+                .child(
+                    div()
+                        .id("ws-switcher")
+                        .occlude()
+                        .absolute()
+                        .top(px(size::TITLEBAR + 2.))
+                        .left(px(self.chrome.ws_switcher_x.get().max(8.)))
+                        .w(px(320.))
+                        .p(px(size::MENU_PAD))
+                        .bg(c(theme::PANEL_RAISED))
+                        .border_1()
+                        .border_color(c(theme::BORDER_STRONG))
+                        .rounded(px(8.))
+                        .shadow(theme::shadow(12., 32., 0.5))
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(filter)
+                        .child(div().id("wsw-list").max_h(px(380.)).overflow_y_scroll().children(rows)),
+                ),
+        )
+    }
+
     pub fn toggle_inbox(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.chrome.inbox_open = !self.chrome.inbox_open;
         if self.chrome.inbox_open {
             self.chrome.new_session = None;
+            self.chrome.ws_switcher = None;
             window.focus(&self.overlay_focus, cx);
         } else {
             self.restore_focus(window, cx);
@@ -278,10 +551,11 @@ impl OrbitApp {
 
     /// Closes the inbox or the New Session menu; whether one was open.
     pub(crate) fn close_popovers(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let open = self.chrome.inbox_open || self.chrome.new_session.is_some();
+        let open = self.chrome.inbox_open || self.chrome.new_session.is_some() || self.chrome.ws_switcher.is_some();
         if open {
             self.chrome.inbox_open = false;
             self.chrome.new_session = None;
+            self.chrome.ws_switcher = None;
             self.restore_focus(window, cx);
             cx.notify();
         }
@@ -295,6 +569,7 @@ impl OrbitApp {
             None => self.focus_workspace(cx).map(|w| (w.meta.name.clone(), w.meta.name.clone(), "workspace")),
         };
         self.chrome.inbox_open = false;
+        self.chrome.ws_switcher = None;
         self.chrome.new_session = Some(NewSessionMenu { origin, focus, picked: None, extra: None });
         window.focus(&self.overlay_focus, cx);
         window.prevent_default();
@@ -1179,6 +1454,7 @@ impl Render for OrbitApp {
             .children(self.render_palette(cx))
             .children(self.render_inbox(cx))
             .children(self.render_new_session_menu(window, cx))
+            .children(self.render_ws_switcher(cx))
             .children(self.render_menu(window, cx))
             .children(self.render_dialog(cx))
     }

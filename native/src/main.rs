@@ -18,6 +18,7 @@ mod palette;
 mod probe;
 mod review;
 mod run;
+mod scope;
 mod script;
 mod search;
 mod sessions;
