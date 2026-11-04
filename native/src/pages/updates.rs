@@ -5,21 +5,14 @@ use crate::app::OrbitApp;
 use crate::toast::ToastKind;
 use gpui::{App, AppContext, Context, Global, WeakEntity, Window};
 use std::fmt::Write as _;
-use std::sync::OnceLock;
 use std::time::Duration;
 
 pub const RELEASES_URL: &str = "https://github.com/igorsegallafa/orbit/releases/latest";
 const INTERVAL: Duration = Duration::from_secs(60 * 60);
 
-/// The product version (the repo's `package.json`, as the Tauri app's).
+/// The product version (`native/Cargo.toml`).
 pub fn version() -> &'static str {
-    static V: OnceLock<String> = OnceLock::new();
-    V.get_or_init(|| {
-        serde_json::from_str::<serde_json::Value>(include_str!("../../../package.json"))
-            .ok()
-            .and_then(|v| v["version"].as_str().map(str::to_string))
-            .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
-    })
+    env!("CARGO_PKG_VERSION")
 }
 
 #[derive(Clone, Debug, PartialEq)]

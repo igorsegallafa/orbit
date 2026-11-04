@@ -4,9 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 publish = false
-description = "Orbit's backend logic, shared by the Tauri app and the native app"
-# A member of src-tauri's workspace (shared Cargo.lock and target dir).
-workspace = "../../src-tauri"
+description = "Orbit's backend logic (no UI)"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

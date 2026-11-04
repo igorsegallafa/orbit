@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Starts orbit-native with self-test arguments, waits, and prints the PSS of
-# its process tree (same method as Orbit's scripts/memory.sh: PSS from
-# /proc/<pid>/smaps_rollup plus SwapPss, summed over the app and its descendants), with
-# language servers counted apart since they cost the same in any editor.
+# its process tree (PSS from /proc/<pid>/smaps_rollup plus SwapPss, summed over
+# the app and its descendants), with language servers counted apart since they
+# cost the same in any editor.
 #   scripts/measure.sh <wait-seconds> [orbit-native args...]
 set -euo pipefail
 wait_s=$1; shift
-bin=$(dirname "$0")/../target/release/orbit-native
+bin=$(dirname "$0")/../../target/release/orbit-native
 "$bin" "$@" --exit-after $((wait_s + 3)) >/dev/null 2>&1 &
 root=$!
 sleep "$wait_s"
