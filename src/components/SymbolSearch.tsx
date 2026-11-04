@@ -10,7 +10,7 @@ interface Props {
 }
 
 /** LSP SymbolKind → short tag shown next to each hit. */
-const KIND: Record<number, string> = {
+export const SYMBOL_KIND: Record<number, string> = {
   2: "module", 3: "namespace", 4: "package", 5: "class", 6: "method", 7: "property", 8: "field", 9: "constructor",
   10: "enum", 11: "interface", 12: "function", 13: "variable", 14: "constant", 22: "enum member", 23: "struct",
   24: "event", 25: "operator", 26: "type param",
@@ -87,7 +87,7 @@ export function SymbolSearch({ model, onClose }: Props) {
                 onMouseEnter={() => setActive(i)}
                 onClick={() => open(h)}
               >
-                <span className="symbol-kind">{KIND[h.kind] ?? "symbol"}</span>
+                <span className="symbol-kind">{SYMBOL_KIND[h.kind] ?? "symbol"}</span>
                 <span className="symbol-name">{h.name}</span>
                 {h.container && <span className="symbol-container">{h.container}</span>}
                 <span className="symbol-file">

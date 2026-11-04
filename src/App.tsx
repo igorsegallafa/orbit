@@ -22,7 +22,9 @@ import { ReviewPane } from "./components/ReviewPane";
 import { CommitReviewPane } from "./components/CommitReviewPane";
 import { PrReviewPane } from "./components/PrReviewPane";
 import { PrCheckoutModal, workspaceForPrs } from "./components/PrCheckoutModal";
-import { SearchEverywhereModal } from "./components/SearchEverywhereModal";
+import { SearchEverywhereModal, SearchTab } from "./components/SearchEverywhereModal";
+import { useCommands } from "./lib/commands";
+import { togglePanel } from "./lib/runStore";
 import { UsageBar } from "./components/UsageBar";
 import { TooltipHost, tooltip } from "./components/Tooltip";
 import { WindowControls, isMac } from "./components/WindowControls";
@@ -184,7 +186,8 @@ function App() {
   const [sidebarHidden, setSidebarHidden] = useState(() => localStorage.getItem("orbit.sidebar-hidden") === "1");
   const [dockHidden, setDockHidden] = useState(() => localStorage.getItem("orbit.dock-hidden") === "1");
   const [dockWidth, setDockWidth] = useState(() => loadStored(DOCK_KEY, 240, 180, 460));
-  const [searchOpen, setSearchOpen] = useState(false);
+  /** Search Everywhere: closed, or open on a tab. */
+  const [searchOpen, setSearchOpen] = useState<SearchTab | false>(false);
   const [findOpen, setFindOpen] = useState(false);
   /** New-session menu; `scope` preselects where (a sidebar folder row). */
   const [plusMenu, setPlusMenu] = useState<{ x: number; y: number; scope?: string } | null>(null);
@@ -282,7 +285,7 @@ function App() {
         const now = Date.now();
         if (now - lastShift < 350) {
           lastShift = 0;
-          setSearchOpen((open) => !open);
+          setSearchOpen((open) => (open ? false : "all"));
         } else {
           lastShift = now;
         }
@@ -1048,6 +1051,23 @@ function App() {
     onError: (msg: string) => setError(msg),
   });
 
+  // Actions for Search Everywhere / Ctrl+Shift+A.
+  const hasFiles = () => tabs.some(isEditorTab);
+  useCommands([
+    { id: "app.findInFiles", title: "Find in Files", keys: "Ctrl+Shift+F", enabled: () => !!focusWorkspace, run: () => setFindOpen(true) },
+    { id: "app.newSession", title: "New Session…", keys: "Ctrl+Shift+T", run: () => setPlusMenu({ x: window.innerWidth / 2 - 130, y: 72 }) },
+    { id: "app.closeAllFiles", title: "Close All Files", enabled: hasFiles, run: () => closeFileTabs(() => true) },
+    { id: "app.closeSavedFiles", title: "Close Saved Files", enabled: hasFiles, run: () => closeFileTabs((f) => !dirtyTabs[tabId(f)]) },
+    { id: "app.closeTab", title: "Close Tab", keys: "Ctrl+W", enabled: () => !!active, run: () => active && dismissTab(tabId(active)) },
+    { id: "app.toggleSidebar", title: "Toggle Sidebar", run: toggleSidebar },
+    { id: "app.toggleDock", title: "Toggle Files Panel", run: toggleDock },
+    { id: "app.togglePanel", title: "Toggle Build/Run Panel", run: togglePanel },
+    { id: "app.back", title: "Go Back", keys: "Alt+←", run: () => goNavRef.current("back") },
+    { id: "app.forward", title: "Go Forward", keys: "Alt+→", run: () => goNavRef.current("forward") },
+    { id: "app.dashboard", title: "Open Dashboard", run: () => { setActiveTab(null); setNavPage({ kind: "dashboard" }); } },
+    { id: "app.settings", title: "Open Settings", run: () => { setActiveTab(null); setNavPage({ kind: "settings" }); } },
+  ]);
+
   /** Where the new-session menu points first: `scope` if given, else the
    *  workspace, repo or folder in focus. */
   const sessionFocus = (scope?: string): { scope: string; label: string; kind: "workspace" | "repo" | "folder" } | null => {
@@ -1082,6 +1102,12 @@ function App() {
       if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.code === "KeyF" && focusWsRef.current) {
         e.preventDefault();
         setFindOpen(true);
+      }
+      // Ctrl/Cmd+Shift+A: actions (Search Everywhere on its Actions tab).
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.code === "KeyA" && focusWsRef.current) {
+        e.preventDefault();
+        e.stopPropagation();
+        setSearchOpen("actions");
       }
       // Ctrl/Cmd+Shift+T: new session, from anywhere (even over a terminal).
       if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.code === "KeyT") {
@@ -1792,9 +1818,11 @@ function App() {
       {searchOpen && focusWorkspace && (
         <SearchEverywhereModal
           workspace={focusWorkspace}
-          onOpenFile={(repo, path) => {
-            setNavPage({ kind: "dashboard" });
-            openTab({ kind: "editor", workspace: focusWorkspace.name, repo, path });
+          initialTab={searchOpen}
+          onOpenFile={(repo, path) => openFileTab(focusWorkspace.name, repo, path)}
+          onOpenAt={(repo, path, line, col, length) => {
+            openFileTab(focusWorkspace.name, repo, path);
+            revealInEditor({ workspace: focusWorkspace.name, repo, path, line, col, length });
           }}
           onClose={() => setSearchOpen(false)}
         />

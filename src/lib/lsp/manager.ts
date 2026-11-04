@@ -523,6 +523,23 @@ export async function searchSymbols(model: monaco.editor.ITextModel, query: stri
   });
 }
 
+/** Symbols across a workspace: every language server running for its repos
+ *  answers (servers start when a file of theirs is opened). */
+export async function searchWorkspaceSymbols(workspace: string, query: string): Promise<{ hits: SymbolHit[]; servers: number }> {
+  const clients = [...entries.values()].filter((e) => e.workspace === workspace && e.client?.state === "ready").map((e) => e.client!);
+  const lists = await Promise.all(
+    clients.map(async (client) => {
+      const result: any[] = (await client.request("workspace/symbol", { query }).catch(() => [])) ?? [];
+      return result.slice(0, 100).map((s): SymbolHit => {
+        const uri = monaco.Uri.parse(s.location.uri);
+        const start = s.location.range?.start ?? { line: 0, character: 0 };
+        return { name: s.name, kind: s.kind, container: s.containerName ?? "", ctx: locate(uri), file: uri.fsPath, line: start.line + 1, column: start.character + 1 };
+      });
+    }),
+  );
+  return { hits: lists.flat(), servers: clients.length };
+}
+
 /** Opens a symbol hit (or any repo file position) as an Orbit tab. */
 export function openLocation(ctx: DocContext, line: number, column: number) {
   openFile?.(ctx, line, column);

@@ -6,6 +6,7 @@ import { Workspace } from "../types/config";
 import { HammerIcon, PlayIcon, StopIcon } from "./Icons";
 import { Select } from "./Select";
 import { tooltip } from "./Tooltip";
+import { useCommands } from "../lib/commands";
 import {
   RunSetup,
   RunTarget,
@@ -93,6 +94,13 @@ export function RunWidget({ workspace }: Props) {
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
   }, []);
+
+  const ready = () => !!target && !!setup && !!config;
+  useCommands([
+    { id: "run.build", title: `Build${config ? ` '${config.name}'` : ""}`, keys: "Ctrl+F9", enabled: () => ready() && !building, run: () => actions.current.build() },
+    { id: "run.run", title: `Run${config ? ` '${config.name}'` : ""}`, keys: "Shift+F10", enabled: () => ready() && !!config?.program && !building, run: () => actions.current.run() },
+    { id: "run.stop", title: "Stop", keys: "Ctrl+F2", enabled: () => building || running, run: stop },
+  ]);
 
   if (!workspace || !target || !setup || !config) return null;
   const hint = (text: string) => ({
