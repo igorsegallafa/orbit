@@ -4,6 +4,7 @@
 //! changed file opens as a diff tab (`diff_view.rs`), where notes are left and
 //! answered inline.
 mod changes;
+mod commit;
 pub mod notes;
 mod prs;
 mod send;
@@ -30,6 +31,7 @@ use std::time::Duration;
 pub enum Page {
     Changes,
     PullRequests,
+    Commit,
 }
 
 impl Page {
@@ -37,6 +39,7 @@ impl Page {
         match self {
             Page::Changes => "changes",
             Page::PullRequests => "prs",
+            Page::Commit => "commit",
         }
     }
 }
@@ -76,6 +79,8 @@ pub struct ReviewTab {
     changes_busy: bool,
     pub show_done: bool,
     pub message: Option<String>,
+    pub chg: changes::ChangesView,
+    pub commit: Option<commit::CommitView>,
     // Pull requests
     pub prs: Load<Vec<PullRequest>>,
     pub status: Load<Vec<WsPrStatus>>,
@@ -112,6 +117,8 @@ impl ReviewTab {
             changes_busy: false,
             show_done: false,
             message: None,
+            chg: changes::ChangesView::new(&ws.meta.name, cx),
+            commit: None,
             prs: Load::Idle,
             status: Load::Idle,
             checks: Load::Idle,
@@ -124,19 +131,24 @@ impl ReviewTab {
         match page {
             Page::Changes => tab.refresh_changes(cx),
             Page::PullRequests => tab.refresh_prs(window, cx),
+            Page::Commit => {}
         }
         tab
     }
 
     pub fn title(&self) -> SharedString {
         match self.page {
-            Page::Changes => format!("Changes · {}", self.workspace).into(),
+            Page::Changes => format!("Review · {}", self.workspace).into(),
             Page::PullRequests => format!("Pull requests · {}", self.workspace).into(),
+            Page::Commit => self.commit.as_ref().map_or_else(|| "Commit".into(), |v| v.commit.message.lines().next().unwrap_or_default().to_string().into()),
         }
     }
 
     pub fn key(&self) -> String {
-        format!("review:{}:{}", self.page.slug(), self.workspace)
+        match &self.commit {
+            Some(v) => format!("review:commit:{}:{}:{}", self.workspace, v.repo, v.commit.sha),
+            None => format!("review:{}:{}", self.page.slug(), self.workspace),
+        }
     }
 
     fn poll(&mut self, cx: &mut Context<Self>) {
@@ -149,6 +161,7 @@ impl ReviewTab {
         match self.page {
             Page::Changes => self.refresh_changes(cx),
             Page::PullRequests => self.refresh_prs(window, cx),
+            Page::Commit => {}
         }
     }
 
@@ -171,6 +184,7 @@ impl Render for ReviewTab {
         let body = match self.page {
             Page::Changes => self.render_changes(window, cx).into_any_element(),
             Page::PullRequests => self.render_prs(window, cx).into_any_element(),
+            Page::Commit => self.render_commit(cx).into_any_element(),
         };
         div().track_focus(&self.focus).size_full().flex().flex_col().bg(c(theme::BG)).font_family(theme::UI_FONT).child(body)
     }
@@ -197,6 +211,36 @@ pub fn open(app: &mut OrbitApp, page: Page, window: &mut Window, cx: &mut Contex
     focus_next_frame(handle, window);
 }
 
+/// Opens a commit's review tab (the dock's commit list calls this).
+pub fn open_commit(app: &mut OrbitApp, repo: &str, commit: orbit_core::git::CommitEntry, window: &mut Window, cx: &mut Context<OrbitApp>) {
+    let Some(ws) = app.workspace().cloned() else { return };
+    let key = format!("review:commit:{}:{repo}:{}", ws.meta.name, commit.sha);
+    if let Some(ix) = app.tab_index(&key, cx) {
+        return app.activate(ix, window, cx);
+    }
+    let weak = cx.entity().downgrade();
+    let repo_dir = ws.dir.join(repo);
+    let repo = repo.to_string();
+    let view = cx.new(|cx| {
+        let mut t = ReviewTab::new(weak, &ws, Page::Commit, window, cx);
+        t.commit = Some(commit::CommitView::new(repo, repo_dir, commit, cx));
+        t.load_commit(cx);
+        t
+    });
+    cx.observe(&view, |_, _, cx| cx.notify()).detach();
+    let ix = app.insert_tab(Tab { kind: TabKind::Review(view), preview: false });
+    app.activate(ix, window, cx);
+}
+
+/// The newest commit of the workspace's first repo that has one.
+fn review_last_commit(app: &mut OrbitApp, window: &mut Window, cx: &mut Context<OrbitApp>) {
+    let Some(ws) = app.workspace().cloned() else { return };
+    let found = ws.meta.repos.iter().find_map(|r| orbit_core::git::commits(&ws.dir.join(r), 1).ok()?.into_iter().next().map(|c| (r.clone(), c)));
+    if let Some((repo, commit)) = found {
+        open_commit(app, &repo, commit, window, cx);
+    }
+}
+
 /// A tab opened from a click is focused once it has been drawn: a handle
 /// focused before that loses the focus to the click's target.
 fn focus_next_frame(handle: FocusHandle, window: &mut Window) {
@@ -212,6 +256,14 @@ pub fn open_diff_at(app: &mut OrbitApp, path: PathBuf, line: Option<u32>, window
     focus_next_frame(d.read(cx).state.focus_handle(cx), window);
 }
 
+/// The active tab when it is a Changes review.
+fn active_changes(app: &OrbitApp, cx: &App) -> Option<Entity<ReviewTab>> {
+    match &app.active_tab()?.kind {
+        TabKind::Review(t) if t.read(cx).page == Page::Changes => Some(t.clone()),
+        _ => None,
+    }
+}
+
 fn active_diff(app: &OrbitApp) -> Option<Entity<DiffTab>> {
     match &app.active_tab()?.kind {
         TabKind::Diff(d) => Some(d.clone()),
@@ -225,6 +277,7 @@ pub fn init(cx: &mut App) {
     let in_diff = |a: &OrbitApp, _: &App| active_diff(a).is_some();
     for command in [
         Command::new("review.changes", "Review Changes").when(has_ws).run(|a, w, cx| open(a, Page::Changes, w, cx)),
+        Command::new("review.lastCommit", "Review Last Commit").when(has_ws).run(review_last_commit),
         Command::new("review.pullRequests", "Pull Requests and Checks").when(has_ws).run(|a, w, cx| open(a, Page::PullRequests, w, cx)),
         Command::new("diff.nextChange", "Next Change").keys(["f7"]).when(in_diff).run(|a, _, cx| {
             if let Some(d) = active_diff(a) {
@@ -242,10 +295,12 @@ pub fn init(cx: &mut App) {
             }
         }),
         Command::new("review.commentSelection", "Add Review Note on Selected Lines")
-            .when(move |a, cx| active_diff(a).is_some_and(|d| d.read(cx).review.is_some()))
+            .when(move |a, cx| active_diff(a).is_some_and(|d| d.read(cx).review.is_some()) || active_changes(a, cx).is_some())
             .run(|a, w, cx| {
                 if let Some(d) = active_diff(a) {
                     d.update(cx, |d, cx| d.comment_on_selection(w, cx));
+                } else if let Some(t) = active_changes(a, cx) {
+                    t.update(cx, |t, cx| t.comment_on_selection(w, cx));
                 }
             }),
     ] {
@@ -344,6 +399,11 @@ impl ReviewTab {
                     for n in &f.notes {
                         let _ = writeln!(out, "    [{}] {}/{}:{}-{} {:?}", if n.done { "x" } else { " " }, n.repo, n.path, n.start, n.end, n.body);
                     }
+                }
+            }
+            Page::Commit => {
+                if let Some(v) = &self.commit {
+                    let _ = writeln!(out, "  commit {} {}/{}: {} selected {:?}", v.commit.sha, self.workspace, v.repo, load_label(&v.files), v.selected);
                 }
             }
             Page::PullRequests => {

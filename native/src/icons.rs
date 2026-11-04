@@ -18,15 +18,22 @@ impl AssetSource for Assets {
         if let Some(name) = path.strip_prefix("filetypes/").and_then(|p| p.strip_suffix(".svg")) {
             return Ok(glyph(name).map(|body| Cow::Owned(svg_doc(body).into_bytes())));
         }
+        if let Some(bytes) = ToolIcons.load(path)? {
+            return Ok(Some(bytes));
+        }
         self.0.load(path)
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         let mut all = self.0.list(path)?;
+        all.extend(ToolIcons.list(path)?);
         all.extend(GLYPHS.iter().map(|(n, _)| SharedString::from(format!("filetypes/{n}.svg"))).filter(|p| p.starts_with(path)));
         Ok(all)
     }
 }
+
+// Lucide icons beyond gpui-kit's default bundle (tools views).
+gpui_kit_assets::icon_assets!(ToolIcons, [Pencil, Trash]);
 
 fn svg_doc(body: &str) -> String {
     format!(

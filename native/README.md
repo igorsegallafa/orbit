@@ -557,12 +557,23 @@ tests: the check aggregate, PR number and benign-error parsing, the log tail, an
 PR created and saved, one "No commits between" skipped, one failure reported only when no PR
 exists).
 
+**Parity pass.** The Changes tab ("Review · <workspace>") is laid out as `ChangesReview.tsx`: a
+280 px side list (CHANGES per repo with status badges, NOTES with done checkboxes) and one scrolling
+column of every changed file's diff (one multi-file `DiffState`, paths `repo/path`), each under its
+own header (chevron, badge, path, repo, +n −n, *Viewed*). Viewed files fold and are kept per
+workspace in `<config>/review-viewed.json`. Notes show as cards under their lines; the `+` beside a
+line (or `review.commentSelection`) opens the composer. A commit opens as its own review tab
+(`CommitReviewPane.tsx`: files left, the file's diff right, `review::open_commit`, or
+`review.lastCommit`). Diff tabs share `ReviewPane.tsx`'s file bar: path, ‹ n/m › and ⇄ / ↕.
+
 Keys: `F7` / `Shift+F7` next/previous change in a diff tab. Commands: `review.changes`,
-`review.pullRequests`, `review.commentSelection`, `diff.nextChange`, `diff.previousChange`,
-`diff.toggleMode`. Self-test probes: `review-changes`, `review-prs` (sidebar),
-`review-file:<repo>/<path>`, `review-note:<n>[:done|:delete]`, `review-fix`, `review-send-pr`,
-`review-refresh`, `review-show-done`, `review-clear-done`, `note:<n>:done|reply|edit|delete` (cards in
-a diff tab, in line order), `composer:submit|cancel|input`, `diff-mode`, `diff-show-done`,
+`review.pullRequests`, `review.lastCommit`, `review.commentSelection`, `diff.nextChange`,
+`diff.previousChange`, `diff.toggleMode`. Self-test probes: `review-changes`, `review-prs` (sidebar),
+`review-file:<repo>/<path>`, `review-note:<n>[:done]`, `chg-viewed:<repo>/<path>`,
+`chg-toggle:<repo>/<path>`, `commit-file:<path>`, `review-fix`, `review-send-pr`,
+`review-show-done`, `review-clear-done`, `note:<n>:done|reply|edit|delete` (cards in
+a diff tab, in line order), `composer:submit|cancel|input`, `diff-split`, `diff-unified`,
+`diff-prev`, `diff-next`, `diff-show-done`,
 `prs-refresh`, `pr:<repo>#<n>`, `check:<repo>#<n>:<k>:logs|rerun`, `create:<repo>:include|draft`,
 `create-prs`, `log-close`. The dump lists each review tab (files, notes, PRs, status, checks, create
 rows, log) and each diff tab's notes with their anchored lines and the composer.

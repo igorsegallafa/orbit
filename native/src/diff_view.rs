@@ -56,7 +56,19 @@ fn git(dir: &Path, args: &[&str]) -> Result<(bool, String, String)> {
 
 /// The patch of `rel` (in `dir`) against HEAD; an untracked file is all added.
 pub fn git_patch(dir: &Path, rel: &str) -> Result<String> {
-    let (ok, patch, err) = git(dir, &["diff", "--no-color", "--no-ext-diff", FULL_CONTEXT, "HEAD", "--", rel])?;
+    git_patch_in(dir, rel, None)
+}
+
+/// [`git_patch`] with the file's path under `prefix/` (its repo), so several
+/// repos' files can share one diff view.
+pub fn git_patch_in(dir: &Path, rel: &str, prefix: Option<&str>) -> Result<String> {
+    let prefixes = prefix.map(|p| [format!("--src-prefix=a/{p}/"), format!("--dst-prefix=b/{p}/")]);
+    let pre: Vec<&str> = prefixes.iter().flatten().map(String::as_str).collect();
+    let args = |head: &[&'static str], tail: &[&str]| -> Vec<String> {
+        head.iter().map(|s| s.to_string()).chain(pre.iter().map(|s| s.to_string())).chain(tail.iter().map(|s| s.to_string())).collect()
+    };
+    let run = |a: Vec<String>| git(dir, &a.iter().map(String::as_str).collect::<Vec<_>>());
+    let (ok, patch, err) = run(args(&["diff", "--no-color", "--no-ext-diff", FULL_CONTEXT], &["HEAD", "--", rel]))?;
     if !ok {
         bail!("{}", err.trim());
     }
@@ -68,12 +80,33 @@ pub fn git_patch(dir: &Path, rel: &str) -> Result<String> {
         return Ok(patch);
     }
     // Exits 1 when the files differ, which is the point.
-    let (_, patch, _) = git(dir, &["diff", "--no-index", "--no-color", FULL_CONTEXT, "--", "/dev/null", rel])?;
+    let (_, patch, _) = run(args(&["diff", "--no-index", "--no-color", FULL_CONTEXT], &["--", "/dev/null", rel]))?;
+    Ok(patch)
+}
+
+/// A diff state that colors code with the active theme.
+pub fn highlighted_state(files: Vec<DiffFile>, mode: DiffMode, cx: &mut App) -> Entity<DiffState> {
+    let highlight_theme = cx.theme().highlight_theme.clone();
+    cx.new(|cx| {
+        DiffState::new(files, cx).with_mode(mode).with_syntax_highlighter(move |language, text| {
+            let mut highlighter = SyntaxHighlighter::new(language);
+            highlighter.update(None, &Rope::from(text), None);
+            highlighter.styles(&(0..text.len()), &*highlight_theme)
+        })
+    })
+}
+
+/// The patch of `rel` in commit `sha` (against its parent; a root commit adds all).
+pub fn commit_patch(dir: &Path, sha: &str, rel: &str) -> Result<String> {
+    let (ok, patch, err) = git(dir, &["show", "--format=", "--no-color", "--no-ext-diff", FULL_CONTEXT, sha, "--", rel])?;
+    if !ok {
+        bail!("{}", err.trim());
+    }
     Ok(patch)
 }
 
 /// The first added line of a patch: where "comment" goes without a selection.
-fn first_added_line(patch: &str) -> Option<u32> {
+pub fn first_added_line(patch: &str) -> Option<u32> {
     let mut line = 0u32;
     for l in patch.lines() {
         if let Some(head) = l.strip_prefix("@@ ") {
@@ -94,6 +127,7 @@ fn first_added_line(patch: &str) -> Option<u32> {
 pub struct LoadedDiff {
     files: Vec<DiffFile>,
     first_added: Option<u32>,
+    changes: usize,
     review: Option<(RepoFile, String, Vec<Note>, Option<SystemTime>)>,
     stamp: Option<SystemTime>,
 }
@@ -154,6 +188,8 @@ pub struct DiffTab {
     pub composer: Option<Composer>,
     pub message: Option<String>,
     first_added: Option<u32>,
+    changes: usize,
+    change_ix: Option<usize>,
     file_stamp: Option<SystemTime>,
     refreshing: bool,
     _poll: Task<()>,
@@ -185,11 +221,11 @@ impl DiffTab {
             let notes = rnotes::list(&at.workspace).map(|f| file_notes(&f.notes, &at)).unwrap_or_default();
             (at, text, notes, stamp)
         });
-        Ok(LoadedDiff { files, first_added: first_added_line(&patch), review, stamp: mtime(path) })
+        Ok(LoadedDiff { files, first_added: first_added_line(&patch), changes: ui::change_blocks(&patch), review, stamp: mtime(path) })
     }
 
     pub fn new(path: PathBuf, loaded: LoadedDiff, split: bool, cx: &mut Context<Self>) -> Self {
-        let LoadedDiff { files, first_added, review, stamp } = loaded;
+        let LoadedDiff { files, first_added, changes, review, stamp } = loaded;
         let (additions, deletions) = counts(&files);
         let highlight_theme = cx.theme().highlight_theme.clone();
         let mode = if split { DiffMode::Split } else { DiffMode::Unified };
@@ -219,6 +255,8 @@ impl DiffTab {
             composer: None,
             message: None,
             first_added,
+            changes,
+            change_ix: None,
             file_stamp: stamp,
             refreshing: false,
             _poll: poll,
@@ -237,6 +275,14 @@ impl DiffTab {
 
     /// F7 / Shift+F7.
     pub fn next_change(&mut self, forward: bool, cx: &mut Context<Self>) {
+        if self.changes > 0 {
+            self.change_ix = Some(match (self.change_ix, forward) {
+                (None, _) => 0,
+                (Some(i), true) => (i + 1).min(self.changes - 1),
+                (Some(i), false) => i.saturating_sub(1),
+            });
+            cx.notify();
+        }
         self.state.update(cx, |s, cx| if forward { s.next_change(cx) } else { s.previous_change(cx) });
     }
 
@@ -276,6 +322,8 @@ impl DiffTab {
     fn apply(&mut self, loaded: LoadedDiff, cx: &mut Context<Self>) {
         (self.additions, self.deletions) = counts(&loaded.files);
         self.first_added = loaded.first_added;
+        self.changes = loaded.changes;
+        self.change_ix = None;
         self.state.update(cx, |s, cx| s.set_files(loaded.files, cx));
         if let (Some(r), Some((_, text, notes, stamp))) = (self.review.as_mut(), loaded.review) {
             (r.text, r.notes, r.notes_stamp) = (text, notes, stamp);
@@ -572,46 +620,59 @@ impl Render for DiffTab {
                 .id(id)
                 .relative()
                 .cursor_pointer()
-                .px_2()
-                .rounded_sm()
-                .hover(|s| s.bg(c(theme::PANEL_HOVER)))
+                .text_size(px(11.))
+                .text_color(c(theme::ACCENT))
+                .hover(|s| s.underline())
                 .child(label)
                 .child(probe(id))
         };
+        let label = match &self.review {
+            Some(r) => format!("{}/{}", r.at.repo, r.at.rel),
+            None => self.path.to_string_lossy().to_string(),
+        };
+        let extra = div()
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .text_size(px(11.5))
+            .text_color(c(theme::TEXT_DIM))
+            .when_some(self.message.clone(), |d, m| d.child(div().text_color(c(theme::WARN)).child(m)))
+            .child(div().text_color(c(theme::OK)).child(format!("+{}", self.additions)))
+            .child(div().text_color(c(theme::DANGER)).child(format!("−{}", self.deletions)))
+            .when_some(note_counts, |d, (open, all, show_done)| {
+                d.child(format!("{open} open note{}", if open == 1 { "" } else { "s" })).when(all > open, |d| {
+                    d.child(
+                        toolbar_btn("diff-show-done", if show_done { "Hide resolved".into() } else { "Show resolved".into() })
+                            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.toggle_done_shown(cx))),
+                    )
+                })
+            });
+        let (w1, w2, w3) = (weak.clone(), weak.clone(), weak.clone());
+        let bar = ui::diff_filebar(ui::DiffBar {
+            label,
+            nav: (self.changes > 0).then_some((self.change_ix, self.changes)),
+            split,
+            prev: Box::new(move |_, cx| {
+                let _ = w1.update(cx, |t, cx| t.next_change(false, cx));
+            }),
+            next: Box::new(move |_, cx| {
+                let _ = w2.update(cx, |t, cx| t.next_change(true, cx));
+            }),
+            set_split: Box::new(move |on, _, cx| {
+                let _ = w3.update(cx, |t, cx| {
+                    if (t.mode(cx) == DiffMode::Split) != on {
+                        t.toggle_mode(cx);
+                    }
+                });
+            }),
+            extra: Some(extra.into_any_element()),
+        });
         div()
             .size_full()
             .flex()
             .flex_col()
             .bg(c(theme::BG))
-            .child(
-                div()
-                    .h(px(26.))
-                    .flex_none()
-                    .px_3()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .text_xs()
-                    .text_color(c(theme::TEXT_DIM))
-                    .border_b_1()
-                    .border_color(c(theme::BORDER))
-                    .child(div().flex_1().truncate().child(self.path.to_string_lossy().to_string()))
-                    .when_some(self.message.clone(), |d, m| d.child(div().text_color(c(theme::WARN)).child(m)))
-                    .child(div().text_color(c(theme::OK)).child(format!("+{}", self.additions)))
-                    .child(div().text_color(c(theme::DANGER)).child(format!("−{}", self.deletions)))
-                    .when_some(note_counts, |d, (open, all, show_done)| {
-                        d.child(format!("{open} open note{}", if open == 1 { "" } else { "s" })).when(all > open, |d| {
-                            d.child(
-                                toolbar_btn("diff-show-done", if show_done { "Hide resolved".into() } else { "Show resolved".into() })
-                                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.toggle_done_shown(cx))),
-                            )
-                        })
-                    })
-                    .child(
-                        toolbar_btn("diff-mode", if split { "Unified".into() } else { "Split".into() })
-                            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.toggle_mode(cx))),
-                    ),
-            )
+            .child(bar)
             .child(div().flex_1().min_h_0().child(diff))
     }
 }
