@@ -19,6 +19,7 @@ mod probe;
 mod review;
 mod run;
 mod scope;
+mod scroll;
 mod script;
 mod search;
 mod sessions;
