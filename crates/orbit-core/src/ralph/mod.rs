@@ -5,8 +5,9 @@ mod plan_run;
 pub mod prd;
 mod prompts;
 mod supervisor;
+mod watchdog;
 
-use crate::agent::runner::{self, Line};
+use crate::agent::runner::{self, Ended, Line, Outcome};
 use crate::agent::{agent_cmd, Access, GrillRound};
 use crate::config::{AiSettings, Config};
 use prd::Prd;
@@ -20,6 +21,8 @@ use std::time::{Duration, Instant};
 use crate::agent::stream::{self, Event};
 use supervisor::{Iteration, RalphEnv};
 pub use supervisor::{Limits, StopReason};
+pub use watchdog::Activity;
+use watchdog::{Check, Tracker};
 use crate::events::Events;
 
 const MAX_EVENTS_IN_MEMORY: usize = 600;
@@ -40,6 +43,14 @@ pub struct RunConfig {
     pub push: bool,
     #[serde(default = "default_iteration_timeout")]
     pub iteration_timeout_min: u64,
+    /// Minutes without a stream event before the iteration's process tree
+    /// is killed (0 = off; fractions allowed).
+    #[serde(default = "default_idle_timeout")]
+    pub idle_timeout_min: f64,
+    /// Seconds a finished agent (its result printed) may stay alive before
+    /// its tree is killed (0 = off).
+    #[serde(default = "default_exit_grace")]
+    pub exit_grace_sec: u64,
     /// Appended to the iteration prompt for this run only.
     #[serde(default)]
     pub extra_instructions: String,
@@ -49,7 +60,19 @@ fn yes() -> bool {
     true
 }
 fn default_iteration_timeout() -> u64 {
-    60
+    120
+}
+fn default_idle_timeout() -> f64 {
+    15.0
+}
+fn default_exit_grace() -> u64 {
+    120
+}
+
+impl Default for RunConfig {
+    fn default() -> Self {
+        default_config()
+    }
 }
 
 /// Live state of a run, kept in memory while Orbit is open (history is on
@@ -74,6 +97,10 @@ pub struct RunState {
     /// iteration: proof of what ran, not just what was asked for.
     pub model: Option<String>,
     pub config: RunConfig,
+    /// The live iteration's activity (reset between iterations).
+    pub activity: Activity,
+    /// Commits no remote has, counted when the run stops.
+    pub unpushed: u32,
     pub events: VecDeque<Value>,
     #[serde(skip)]
     stop: bool,
@@ -180,6 +207,85 @@ fn save_summary(key: &str) {
     }
 }
 
+/// Per-line bookkeeping shared by both run kinds: the activity the UI
+/// shows, emitted on `ralph-activity` when it changes or every few seconds.
+struct Live {
+    app: Events,
+    key: String,
+    root: String,
+    tracker: Tracker,
+    emitted_at: u64,
+}
+
+impl Live {
+    fn new(app: &Events, key: &str, root: &str) -> Self {
+        Live { app: app.clone(), key: key.to_string(), root: root.to_string(), tracker: Tracker::default(), emitted_at: 0 }
+    }
+
+    fn line(&mut self, text: &str) {
+        let root = &self.root;
+        let changed = self.tracker.line(text, |s| relativize(s, root));
+        let t = now();
+        let activity = Activity { last_event_at: Some(t), tool: self.tracker.tool(), background: self.tracker.background() };
+        if let Some(st) = runs().lock().unwrap().get_mut(&self.key) {
+            st.activity = activity.clone();
+        }
+        if changed || t >= self.emitted_at + 5 {
+            self.emitted_at = t;
+            let _ = self.app.emit("ralph-activity", json!({ "key": self.key, "activity": activity }));
+        }
+    }
+}
+
+fn iteration_timeout(cfg: &RunConfig) -> Duration {
+    Duration::from_secs(cfg.iteration_timeout_min.max(1) * 60)
+}
+
+/// The iteration was killed or cut short instead of exiting on its own.
+fn cut_short(o: &Outcome) -> bool {
+    o.cancelled || o.ended != Ended::Exited
+}
+
+/// Feed events for why the runner killed an iteration.
+fn record_ending(app: &Events, key: &str, n: u32, o: &Outcome, cfg: &RunConfig) {
+    let ev = match o.ended {
+        Ended::Idle => json!({"kind": "iteration_idle", "n": n, "idleMin": cfg.idle_timeout_min}),
+        Ended::ExitGrace => json!({"kind": "iteration_exit_grace", "n": n, "graceSec": cfg.exit_grace_sec}),
+        Ended::Timeout => json!({"kind": "iteration_timeout", "n": n, "timeoutMin": cfg.iteration_timeout_min}),
+        Ended::Exited => return,
+    };
+    record(app, key, ev, |_| {});
+}
+
+/// Outcome of a cut-short iteration from what it left behind.
+fn reconciled(app: &Events, key: &str, id: &str, c: &Check, cancelled: bool) -> Iteration {
+    record(
+        app,
+        key,
+        json!({"kind": "reconcile", "id": id, "committed": c.committed, "clean": c.clean, "messageOk": c.message_ok, "passed": c.passed()}),
+        |_| {},
+    );
+    if c.passed() {
+        Iteration::Recovered
+    } else if cancelled {
+        Iteration::Cancelled
+    } else {
+        Iteration::Stalled
+    }
+}
+
+/// The agent command, or a test stub script in its place.
+fn agent_command(stub: &Option<PathBuf>, real: impl FnOnce() -> std::process::Command) -> std::process::Command {
+    match stub {
+        Some(script) => {
+            let mut c = crate::proc::cmd("sh");
+            c.arg(script).stdin(std::process::Stdio::null());
+            c
+        }
+        None => real(),
+    }
+}
+
 struct RealEnv {
     app: Events,
     key: String,
@@ -191,6 +297,8 @@ struct RealEnv {
     cfg: RunConfig,
     started: Instant,
     last_pushed: Option<String>,
+    /// Tests: a script run instead of the agent.
+    stub: Option<PathBuf>,
 }
 
 impl RealEnv {
@@ -224,6 +332,23 @@ impl RealEnv {
     fn prd(&self) -> Option<Prd> {
         prd::read(&self.dir).ok().flatten()
     }
+
+    /// A cut-short iteration whose story is committed cleanly passes; its
+    /// prd.json box is ticked here when the agent didn't get to it.
+    fn reconcile(&self, story: Option<&str>, head_before: &Option<String>, message: &str, is_error: bool, cancelled: bool) -> Iteration {
+        let Some(id) = story else { return if cancelled { Iteration::Cancelled } else { Iteration::Stalled } };
+        let c = watchdog::check(&self.dir, head_before, id, &[".orbit/", "scripts/ralph/"], message, is_error);
+        let it = reconciled(&self.app, &self.key, id, &c, cancelled);
+        if it == Iteration::Recovered {
+            if let Some(mut p) = self.prd() {
+                if let Some(s) = p.user_stories.iter_mut().find(|s| s.id == id && !s.passes) {
+                    s.passes = true;
+                    let _ = prd::write(&self.dir, &p);
+                }
+            }
+        }
+        it
+    }
 }
 
 impl RalphEnv for RealEnv {
@@ -239,32 +364,37 @@ impl RalphEnv for RealEnv {
                 st.iteration = n;
                 st.current_story = story.as_ref().map(|(id, _)| id.clone());
                 st.limit_until = None;
+                st.activity = Activity { last_event_at: Some(now()), ..Default::default() };
             },
         );
 
-        let (template, _) = iteration_template(&self.workspace);
-        let prompt = prompts::render_iteration(
-            &template,
-            &prd::prd_path(&self.dir).to_string_lossy(),
-            &prd::progress_path(&self.dir).to_string_lossy(),
-            &self.branch,
-            &self.repo,
-            &self.cfg.extra_instructions,
-        );
-        let stream_json = self.ai.agent_bin() == "claude";
-        let cmd = agent_cmd(&self.ai, &prompt, Access::Full, stream_json);
+        let cmd = agent_command(&self.stub, || {
+            let (template, _) = iteration_template(&self.workspace);
+            let prompt = prompts::render_iteration(
+                &template,
+                &prd::prd_path(&self.dir).to_string_lossy(),
+                &prd::progress_path(&self.dir).to_string_lossy(),
+                &self.branch,
+                &self.repo,
+                &self.cfg.extra_instructions,
+            );
+            agent_cmd(&self.ai, &prompt, Access::Full, self.ai.agent_bin() == "claude")
+        });
         let run_dir = snapshot(&self.key).map(|s| s.dir).unwrap_or_default();
         let mut raw_log = std::fs::File::create(run_dir.join(format!("iter-{n}.log"))).ok();
         let mut result: Option<Event> = None;
+        let mut last_text = String::new();
         let mut tail: VecDeque<String> = VecDeque::new();
         let (app, key) = (self.app.clone(), self.key.clone());
         let root = self.dir.to_string_lossy().to_string();
+        let mut live = Live::new(&app, &key, &root);
 
-        let outcome = runner::run_streaming(
+        let outcome = runner::run_watched(
             cmd,
             &self.dir,
-            Duration::from_secs(self.cfg.iteration_timeout_min.max(1) * 60),
+            iteration_timeout(&self.cfg),
             Some(&format!("ralph:{}", self.key)),
+            watchdog::watch(&self.cfg),
             |line| {
                 let (text, is_err) = match &line {
                     Line::Out(l) => (l.as_str(), false),
@@ -277,14 +407,24 @@ impl RalphEnv for RealEnv {
                 if tail.len() > 10 {
                     tail.pop_front();
                 }
+                if !is_err {
+                    live.line(text);
+                }
                 let events = if is_err { vec![] } else { stream::parse_line(text) };
                 if events.is_empty() && !text.trim_start().starts_with('{') && !text.trim().is_empty() {
                     record(&app, &key, json!({"kind": "log", "text": text, "stderr": is_err}), |_| {});
                 }
+                let mut finished = false;
                 for e in events {
                     match &e {
-                        Event::Result { .. } => result = Some(e),
-                        Event::Text { text } => record(&app, &key, json!({"kind": "text", "text": text}), |_| {}),
+                        Event::Result { .. } => {
+                            finished = true;
+                            result = Some(e)
+                        }
+                        Event::Text { text } => {
+                            last_text = text.clone();
+                            record(&app, &key, json!({"kind": "text", "text": text}), |_| {})
+                        }
                         Event::Tool { name, summary } => {
                             let summary = relativize(summary, &root);
                             record(&app, &key, json!({"kind": "tool", "name": name, "summary": summary}), |_| {})
@@ -293,6 +433,7 @@ impl RalphEnv for RealEnv {
                         Event::Session { .. } | Event::Cost { .. } | Event::Thinking { .. } => {}
                     }
                 }
+                finished
             },
         );
 
@@ -305,7 +446,11 @@ impl RalphEnv for RealEnv {
         let tail_text = tail.iter().cloned().collect::<Vec<_>>().join("\n");
         let iteration = match &outcome {
             Err(e) => Iteration::Failed(e.clone()),
-            Ok(o) if o.cancelled => Iteration::Cancelled,
+            Ok(o) if cut_short(o) => {
+                record_ending(&self.app, &self.key, n, o, &self.cfg);
+                let message = if res_text.trim().is_empty() { &last_text } else { &res_text };
+                self.reconcile(story.as_ref().map(|(id, _)| id.as_str()), &head_before, message, res_error, o.cancelled)
+            }
             Ok(o) => {
                 let limited = if result.is_some() {
                     res_error && supervisor::looks_like_limit(&res_text)
@@ -349,6 +494,7 @@ impl RalphEnv for RealEnv {
                 st.cost_usd += cost.unwrap_or(0.0);
                 st.passed = passed;
                 st.total = total;
+                st.activity = Activity::default();
             },
         );
         if iteration != Iteration::Limit && iteration != Iteration::Cancelled {
@@ -426,6 +572,8 @@ fn default_config() -> RunConfig {
         // Off until asked: a run pushing on its own surprises people.
         push: false,
         iteration_timeout_min: default_iteration_timeout(),
+        idle_timeout_min: default_idle_timeout(),
+        exit_grace_sec: default_exit_grace(),
         extra_instructions: String::new(),
     }
 }
@@ -599,6 +747,8 @@ pub fn start(app: Events, workspace: String, repo: String, config: RunConfig) ->
                 limit_until: None,
                 model: None,
                 config: config.clone(),
+                activity: Activity::default(),
+                unpushed: 0,
                 events: VecDeque::new(),
                 stop: false,
                 pause: false,
@@ -619,23 +769,60 @@ pub fn start(app: Events, workspace: String, repo: String, config: RunConfig) ->
         ai,
         cfg: config.clone(),
         started: Instant::now(),
+        stub: None,
     };
     std::thread::spawn(move || {
         let summary = supervisor::supervise(&config.limits, &mut env);
-        record(
-            &app,
-            &key,
-            json!({"kind": "stopped", "reason": summary.reason, "iterations": summary.iterations, "limitWaits": summary.limit_waits}),
-            |st| {
-                st.running = false;
-                st.finished_at = Some(now());
-                st.reason = Some(summary.reason.clone());
-                st.limit_until = None;
-            },
-        );
-        save_summary(&key);
+        finish(&app, &key, &summary, watchdog::unpushed(&env.dir));
     });
     Ok(())
+}
+
+/// Records the run's end, with how many commits it left unpushed.
+fn finish(app: &Events, key: &str, summary: &supervisor::Summary, unpushed: u32) {
+    record(
+        app,
+        key,
+        json!({"kind": "stopped", "reason": summary.reason, "iterations": summary.iterations, "limitWaits": summary.limit_waits, "unpushed": unpushed}),
+        |st| {
+            st.running = false;
+            st.finished_at = Some(now());
+            st.reason = Some(summary.reason.clone());
+            st.limit_until = None;
+            st.activity = Activity::default();
+            st.unpushed = unpushed;
+        },
+    );
+    save_summary(key);
+}
+
+/// Pushes what a stopped run left unpushed (its "N commits not pushed"
+/// button); returns how many are still unpushed.
+pub fn push(workspace: String, repo: String) -> Result<u32, String> {
+    let key = run_key(&workspace, &repo);
+    let dirs = if repo == plan_run::PLAN_REPO { plan_run::repo_dirs(&workspace)? } else { vec![(repo.clone(), repo_dir(&workspace, &repo)?)] };
+    let events = Events::new(crate::events::NoEvents);
+    let mut errors = Vec::new();
+    for (name, dir) in &dirs {
+        if watchdog::unpushed(dir) == 0 {
+            continue;
+        }
+        let r = crate::proc::run("git", &["push", "-u", "origin", "HEAD"], Some(dir));
+        if let Err(e) = &r {
+            errors.push(format!("{name}: {e}"));
+        }
+        record(&events, &key, json!({"kind": "push", "ok": r.is_ok(), "repo": name, "message": r.err().unwrap_or_default()}), |_| {});
+    }
+    let left: u32 = dirs.iter().map(|(_, d)| watchdog::unpushed(d)).sum();
+    if let Some(st) = runs().lock().unwrap().get_mut(&key) {
+        st.unpushed = left;
+    }
+    save_summary(&key);
+    if errors.is_empty() {
+        Ok(left)
+    } else {
+        Err(errors.join("; "))
+    }
 }
 
 /// Ralph over the feature plan: the plan's tasks (as a PRD) and the run.
@@ -746,7 +933,9 @@ mod tests {
         .unwrap();
         assert_eq!(c.limits.max_iterations, 3);
         assert!(c.push);
-        assert_eq!(c.iteration_timeout_min, 60);
+        assert_eq!(c.iteration_timeout_min, 120);
+        assert_eq!(c.idle_timeout_min, 15.0);
+        assert_eq!(c.exit_grace_sec, 120);
     }
 
     #[test]
@@ -754,6 +943,87 @@ mod tests {
         let p = prompts::render_iteration(prompts::ITERATION, "/w/prd.json", "/w/progress.txt", "feat/x", "web", "Use pnpm");
         assert!(p.contains("`/w/prd.json`") && p.contains("branch `feat/x`"));
         assert!(p.ends_with("Use pnpm"));
+        assert!(p.contains("never on `pgrep -f"));
+        let plain = prompts::render_iteration(prompts::ITERATION, "a", "b", "c", "d", "");
+        assert!(plain.ends_with(watchdog::BACKGROUND_RULES));
         assert!(!p.contains('{') || p.contains("<promise>"));
+    }
+
+
+    /// Stub agents are shell scripts, and the checks use process groups.
+    #[cfg(unix)]
+    mod guard {
+        use super::*;
+
+        use crate::events::NoEvents;
+        use watchdog::fixture::{self, git, quick, RESULT_DONE};
+
+        /// A repo PRD with one story, run by `agent`.
+        fn prd_env(name: &str, cfg: RunConfig, agent: &str) -> (PathBuf, RealEnv) {
+            let root = fixture::scratch(name);
+            let repo = root.join("app");
+            fixture::repo(&repo, &root.join("remote.git"));
+            let story = prd::Story {
+                id: "US-001".into(),
+                title: "First".into(),
+                description: String::new(),
+                acceptance_criteria: vec![],
+                priority: 1,
+                passes: false,
+                notes: String::new(),
+                extra: Default::default(),
+            };
+            let p = Prd { project: "p".into(), branch_name: "feat/x".into(), description: String::new(), user_stories: vec![story], extra: Default::default() };
+            prd::write(&repo, &p).unwrap();
+            let run_dir = root.join("run");
+            std::fs::create_dir_all(&run_dir).unwrap();
+            let key = run_key(&format!("guard-{name}"), "app");
+            fixture::start_run(&key, &run_dir, &cfg);
+            let env = RealEnv {
+                app: Events::new(NoEvents),
+                key,
+                last_pushed: Some(git(&repo, &["rev-parse", "HEAD"]).trim().to_string()),
+                dir: repo,
+                branch: "feat/x".into(),
+                repo: "app".into(),
+                workspace: format!("guard-{name}"),
+                ai: AiSettings::default(),
+                cfg,
+                started: Instant::now(),
+                stub: Some(fixture::stub(&root, agent)),
+            };
+            (root, env)
+        }
+
+        const COMMIT_US1: &str = "git commit --allow-empty -qm 'feat: [US-001] - First'";
+
+        #[test]
+        fn a_hung_prd_iteration_with_its_commit_ticks_prd_json() {
+            let cfg = RunConfig { idle_timeout_min: 10.0, ..quick() };
+            let (root, mut env) = prd_env("prd-grace", cfg, &format!("{COMMIT_US1}\n{RESULT_DONE}\nsleep infinity &\nwait"));
+            assert_eq!(env.run_iteration(1), Iteration::Recovered);
+            assert!(env.story_passed("US-001"));
+            assert_eq!(git(&root.join("remote.git"), &["rev-parse", "feat/x"]), git(&env.dir, &["rev-parse", "HEAD"]));
+            assert!(fixture::group_empty(&fixture::pgid(&root)));
+        }
+
+        #[test]
+        fn stopping_a_hung_iteration_keeps_its_committed_story() {
+            let cfg = RunConfig { idle_timeout_min: 10.0, exit_grace_sec: 0, ..quick() };
+            let (root, mut env) = prd_env("prd-stop", cfg, &format!("{COMMIT_US1}\n{RESULT_DONE}\nsleep infinity &\nwait"));
+            let pid = root.join("pid");
+            std::thread::spawn(move || {
+                while !pid.exists() {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                std::thread::sleep(Duration::from_millis(500));
+                stop("guard-prd-stop".into(), "app".into()).unwrap();
+            });
+            let s = supervisor::supervise(&Limits { max_iterations: 5, ..Default::default() }, &mut env);
+            // Its only story passed, so the run completes instead of stopping.
+            assert_eq!((s.reason, s.iterations), (StopReason::Complete, 1));
+            assert!(env.story_passed("US-001"));
+            assert!(fixture::group_empty(&fixture::pgid(&root)));
+        }
     }
 }

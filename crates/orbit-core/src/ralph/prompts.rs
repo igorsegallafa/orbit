@@ -131,10 +131,7 @@ pub fn render_plan_iteration(repo: &str, branch: &str, context: &str, task_id: &
         .replace("{task_body}", task_body)
         .replace("{progress_path}", progress)
         .replace("{plan_path}", plan);
-    if !extra.trim().is_empty() {
-        out.push_str("\n\n## Additional Instructions For This Run\n\n");
-        out.push_str(extra.trim());
-    }
+    append_rules(&mut out, extra);
     out
 }
 
@@ -144,11 +141,18 @@ pub fn render_iteration(template: &str, prd: &str, progress: &str, branch: &str,
         .replace("{progress_path}", progress)
         .replace("{branch}", branch)
         .replace("{repo}", repo);
+    append_rules(&mut out, extra);
+    out
+}
+
+/// The fixed background-process rules, then the run's extra instructions.
+fn append_rules(out: &mut String, extra: &str) {
+    out.push_str("\n\n");
+    out.push_str(super::watchdog::BACKGROUND_RULES);
     if !extra.trim().is_empty() {
         out.push_str("\n\n## Additional Instructions For This Run\n\n");
         out.push_str(extra.trim());
     }
-    out
 }
 
 pub fn interview(brief: &str, repo: &str, history: &str, cap_note: &str) -> String {
