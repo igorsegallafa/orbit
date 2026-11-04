@@ -1,7 +1,6 @@
 name: Native app
 
-# The GPUI app in native/. Informational while the Tauri app is the product:
-# failures show on the PR but don't block it, and nothing is released from here.
+# Orbit (native/) and its backend crate (crates/orbit-core) on PRs and main.
 on:
   pull_request:
   push:
@@ -15,7 +14,6 @@ concurrency:
 jobs:
   linux:
     runs-on: ubuntu-latest
-    continue-on-error: true
     defaults:
       run:
         working-directory: native
@@ -34,15 +32,19 @@ jobs:
 
       - uses: swatinem/rust-cache@v2
         with:
-          workspaces: "./native -> target"
+          workspaces: |
+            ./native -> target
+            ./native/tools/sign -> target
           shared-key: native-linux
 
       - run: cargo build --locked
-      - run: cargo clippy --locked --all-targets -- -D warnings
-      - run: cargo test --locked
+      - run: cargo clippy --locked --all-targets -p orbit-native -p orbit-core -- -D warnings
+      - run: cargo test --locked -p orbit-native -p orbit-core
+      - name: Release signer
+        run: cargo clippy --locked --manifest-path tools/sign/Cargo.toml -- -D warnings
 
       # The tarball and AppImage, kept for a week to try a PR's build. Built on
-      # ubuntu-latest here; a release should build on the oldest supported Ubuntu (glibc).
+      # ubuntu-latest here; the release builds on ubuntu-22.04 (glibc).
       - name: Package
         env:
           APPIMAGE_EXTRACT_AND_RUN: 1
@@ -54,14 +56,14 @@ jobs:
           APPIMAGETOOL="$RUNNER_TEMP/appimagetool" scripts/package-linux.sh --no-build
       - uses: actions/upload-artifact@v4
         with:
-          name: orbit-native-linux
+          name: orbit-linux
           path: |
             native/dist/*.tar.gz
             native/dist/*.AppImage
           retention-days: 7
 
   # Does it compile where the team builds? (Windows uses GPUI's DirectX renderer,
-  # macOS Metal; neither is run or tested yet.)
+  # macOS Metal.)
   check:
     strategy:
       fail-fast: false
@@ -73,7 +75,6 @@ jobs:
           - platform: macos-latest
             features: "--features gpui_platform/runtime_shaders"
     runs-on: ${{ matrix.platform }}
-    continue-on-error: true
     defaults:
       run:
         working-directory: native

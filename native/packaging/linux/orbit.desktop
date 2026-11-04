@@ -1,11 +1,11 @@
 [Desktop Entry]
 Type=Application
-Name=Orbit (native)
+Name=Orbit
 GenericName=Workspace manager
 Comment=Workspaces, agents and code review across repositories
-Exec=orbit-native
-Icon=orbit-native
+Exec=orbit
+Icon=orbit
 Terminal=false
 Categories=Development;IDE;
-StartupWMClass=orbit-native
+StartupWMClass=orbit
 StartupNotify=true

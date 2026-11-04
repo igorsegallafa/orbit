@@ -1,7 +1,8 @@
 name: Release
 
-# Publishing a release on GitHub (tag v1.2.3) builds the app and attaches
-# the installers and the updater's latest.json to that release.
+# Publishing a release on GitHub (tag v1.2.3) builds Orbit (native/) for each
+# OS, signs the downloads and attaches them with the updater's latest.json.
+# The tag is the version: build.rs bakes ORBIT_VERSION into the binary.
 on:
   release:
     types: [published]
@@ -15,61 +16,117 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: windows-latest
-            args: ""
-          # Apple Silicon. Ad-hoc signed (tauri.macos.conf.json): no Apple
-          # Developer ID yet, so the first launch needs "Open Anyway";
-          # updates install without it.
-          - platform: macos-latest
-            args: "--target aarch64-apple-darwin"
-            rust-targets: aarch64-apple-darwin
-          # Linux: AppImage (auto-updates), .deb and .rpm. Built on the
-          # oldest supported Ubuntu so the glibc it links runs on more distros.
-          - platform: ubuntu-22.04
-            args: ""
+          # AppImage + tarball. Built on the oldest supported Ubuntu so the
+          # glibc it links runs on more distros.
+          - os: linux
+            runner: ubuntu-22.04
+            features: ""
+          # NSIS installer + a zip of Orbit.exe (the updater's download).
+          - os: windows
+            runner: windows-latest
+            features: ""
+          # Apple Silicon, ad-hoc signed (no Developer ID yet). Shaders are
+          # compiled at run time: no Metal toolchain needed on the runner.
+          - os: macos
+            runner: macos-latest
+            features: "--features gpui_platform/runtime_shaders"
 
-    runs-on: ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: native
 
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v5
-        with:
-          node-version: lts/*
-          cache: npm
+      - name: Set version from tag
+        run: echo "ORBIT_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libfontconfig-dev libfreetype-dev libx11-xcb-dev libxcb1-dev libvulkan-dev
 
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.rust-targets }}
 
       # Tag runs can't see each other's caches, only main's: cache.yml keeps
       # one there under this key, and releases only read it.
       - uses: swatinem/rust-cache@v2
         with:
-          workspaces: "./src-tauri -> target"
-          shared-key: tauri-release
+          workspaces: "./native -> target"
+          shared-key: native-release-${{ matrix.os }}
           save-if: false
 
-      - name: Install frontend dependencies
-        run: npm ci
+      - name: Build
+        run: cargo build --release --locked ${{ matrix.features }}
 
-      # The release tag is the source of truth for the version: v1.2.3 -> 1.2.3.
-      - name: Set version from tag
-        shell: bash
-        run: npm version "${GITHUB_REF_NAME#v}" --no-git-tag-version --allow-same-version
-
-      - uses: tauri-apps/tauri-action@v0
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPIMAGE_EXTRACT_AND_RUN: 1
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/appimagetool" \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x "$RUNNER_TEMP/appimagetool"
+          APPIMAGETOOL="$RUNNER_TEMP/appimagetool" scripts/package-linux.sh --no-build
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          command -v makensis >/dev/null || [[ -x "/c/Program Files (x86)/NSIS/makensis.exe" ]] || choco install nsis -y --no-progress
+          scripts/package-windows.sh
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: scripts/package-macos.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: orbit-${{ matrix.os }}
+          path: |
+            native/dist/Orbit-*
+          if-no-files-found: error
+
+  # Signs every download with the updater key (the Tauri app's minisign key,
+  # same secrets) and publishes them with latest.json. The manifest keeps the
+  # Tauri updater's URL and format, so installed Tauri builds update to this.
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./native/tools/sign -> target"
+          shared-key: orbit-sign
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: orbit-*
+          path: out
+          merge-multiple: true
+
+      - name: Sign
+        env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        with:
-          tauriScript: npm run tauri
-          releaseId: ${{ github.event.release.id }}
-          args: ${{ matrix.args }}
+        run: cargo run --release --locked --manifest-path native/tools/sign/Cargo.toml -- "${GITHUB_REF_NAME#v}" out/Orbit-*
+
+      - name: Write latest.json
+        env:
+          NOTES: ${{ github.event.release.body }}
+        run: |
+          native/scripts/release-manifest.sh "$GITHUB_REF_NAME" out \
+            "https://github.com/${{ github.repository }}/releases/download/$GITHUB_REF_NAME" "$NOTES" > out/latest.json
+          cat out/latest.json
+
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "$GITHUB_REF_NAME" out/* --clobber --repo "${{ github.repository }}"

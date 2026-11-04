@@ -954,9 +954,9 @@ sidebar (*WORKSPACE*: Ralph, AI usage, CI artifacts; *ORBIT*: Integrations, Sett
 - **AI usage** (`workspace.usage`): per model tokens and cost, sessions on click, the Claude 5h/7d
   windows; every 30 s. **CI artifacts** (`workspace.artifacts`): latest run per workflow of each
   repo's branch; Download extracts into `~/Downloads/Orbit/<workspace>/` and opens the folder.
-- **Updates**: `orbit_core::updates::check` reads the updater's `latest.json` (curl) and compares it
-  with `package.json`'s version; at start and hourly, a toast once per new version, and Settings →
-  Updates (*Check for updates*, *Open release page*). No install: that is the packaging stage.
+- **Updates**: `orbit_core::updates::check` reads the release's `latest.json` (curl) and compares it
+  with the app's version; at start and hourly, a toast once per new version, and Settings →
+  Updates. Installing is described in *Release and in-app update*.
 - **Crash log**: a panic hook appends the message, place, version and backtrace to
   `<config dir>/native-crash.log` and leaves a marker; the next start toasts "Orbit closed after a
   crash" with the log's path. `ORBIT_TEST_PANIC=<ms>` panics on purpose.
@@ -1122,11 +1122,11 @@ start. PSS + SwapPss per process tree, max of 3 runs, MB. "App" is the UI proces
 
 ### Packaging (Linux)
 
-- `packaging/linux/orbit-native.desktop` (app id `orbit-native`, so Wayland matches the window to
-  it) and the Tauri app's icons from `src-tauri/icons` (32–512 px, nothing duplicated).
-- `scripts/package-linux.sh [--no-build]` writes `dist/orbit-native-<version>-linux-<arch>.tar.gz`
-  (`bin/`, `share/`, `install.sh`) and, when `appimagetool` is found (`$APPIMAGETOOL` or `PATH`),
-  `dist/orbit-native-<version>-<arch>.AppImage`. The version is `package.json`'s.
+- `packaging/linux/orbit.desktop` (app id `orbit`, so Wayland matches the window to it) and the
+  icons in `packaging/icons` (32–512 px, `.ico`, `.icns`).
+- `scripts/package-linux.sh [--no-build]` writes `dist/Orbit-<version>-linux-<arch>.tar.gz`
+  (`bin/orbit`, `share/`, `install.sh`) and, when `appimagetool` is found (`$APPIMAGETOOL` or `PATH`),
+  `dist/Orbit-<version>-<arch>.AppImage`. The version is `ORBIT_VERSION`, else `Cargo.toml`'s.
   `install.sh` installs into `~/.local` (or `PREFIX`), points the entry's `Exec` at the binary and
   refreshes the desktop and icon caches; `--uninstall` removes it. Checked: the tarball, the
   `.desktop` (`desktop-file-validate`), install and uninstall into a scratch prefix. The AppImage
@@ -1135,9 +1135,9 @@ start. PSS + SwapPss per process tree, max of 3 runs, MB. "App" is the UI proces
   loaded at run time), so the AppImage needs no bundled libraries. As with the Tauri release, build
   it on the oldest Ubuntu to support (glibc).
 
-**CI** (`.github/workflows/native.yml`, on PRs, pushes to main and by hand; `continue-on-error`,
-so it never blocks a PR; `release.yml` is untouched): Linux on `ubuntu-latest` runs `cargo
-build`, `clippy -D warnings`, `test` and the packaging, and uploads the tarball and AppImage for a
+**CI** (`.github/workflows/native.yml`, on PRs, pushes to main and by hand; it blocks a PR):
+Linux on `ubuntu-latest` runs `cargo
+build`, `clippy -D warnings` and `test` (the app and `orbit-core`), the packaging, and uploads the tarball and AppImage for a
 week; Windows and macOS run `cargo check --all-targets` (macOS with
 `gpui_platform/runtime_shaders`, so the runner needs no Metal toolchain). Caches use
 `swatinem/rust-cache` with `native/target`, one key per OS.
@@ -1148,17 +1148,54 @@ both pass `clippy --all-targets -D warnings`. One fix was needed: the terminal's
 selection (`write_to_primary` / `read_from_primary`) exists on Linux only, so copy-on-select and
 middle-click paste are Linux-only now. Nothing has been *run* on Windows or macOS yet.
 
-**Updater (plan, not built).** `orbit_core::updates::check` already compares `latest.json` with
-the running version and Settings → Updates offers the release page. Installing:
+### Release and in-app update
 
-1. The release workflow adds native artifacts (Linux tarball and AppImage; later a Windows zip and
-   a macOS `.app`) and a `latest-native.json` with per-platform URLs, signed with the existing
-   minisign key (`TAURI_SIGNING_PRIVATE_KEY`), so the public key in `tauri.conf.json` verifies it.
-2. The app downloads to a cache folder, verifies the signature (`minisign-verify`), then swaps
-   itself: the AppImage replaces `$APPIMAGE` by rename, a tarball install replaces
-   `bin/orbit-native` the same way (Linux keeps the running inode), Windows renames the running
-   exe aside first (the `self-replace` crate does both); then it offers *Restart*.
-3. Until then, updating is installing the new tarball or AppImage.
+**Version.** `build.rs` sets `ORBIT_VERSION` at compile time: the env var when given (the release
+sets it from the tag, `v1.2.3` → `1.2.3`), else `Cargo.toml`'s version. `orbit --version` prints it.
+
+**Release** (`.github/workflows/release.yml`, on publishing a GitHub release): one `build` job per
+OS, then `publish`.
+
+| OS | Runner | Downloads | The updater uses |
+|---|---|---|---|
+| Linux x86_64 | ubuntu-22.04 (glibc floor) | `Orbit-<v>-x86_64.AppImage`, `Orbit-<v>-linux-x86_64.tar.gz` | the AppImage, or the tarball's `bin/orbit` |
+| Windows x86_64 | windows-latest | `Orbit-<v>-windows-x86_64-setup.exe` (NSIS, per user, no admin), `Orbit-<v>-windows-x86_64.zip` | the zip's `Orbit.exe` |
+| macOS aarch64 | macos-latest | `Orbit-<v>-macos-aarch64.dmg`, `Orbit-<v>-macos-aarch64.app.tar.gz` | the `.app.tar.gz` |
+
+Windows: the installer is for a first install (Start menu entry, uninstaller), and the zip is what
+the app swaps in, so an update needs no installer run and no UAC. macOS is ad-hoc signed (no
+Developer ID or notarization secrets): the first launch needs right-click → Open.
+Scripts: `scripts/package-{linux,windows,macos}.sh`, `packaging/windows/installer.nsi`.
+
+`publish` signs every download with `tools/sign` (minisign, the same key and secrets the Tauri app
+used: `TAURI_SIGNING_PRIVATE_KEY` and its password; the trusted comment names the version), writes
+`latest.json` with `scripts/release-manifest.sh` and uploads it all to the release. `latest.json`
+keeps the Tauri updater's URL and format: Orbit reads `linux-x86_64-appimage|tar`,
+`windows-x86_64-zip` and `darwin-aarch64-app`, and the bare `<os>-<arch>` / `-nsis` keys are what an
+installed Tauri build reads, so it updates itself to this app (AppImage: rewritten in place;
+Windows: the NSIS installer runs with its `/P /R` flags into the same `%LOCALAPPDATA%\Orbit`;
+macOS: the bundle is replaced). Tauri `.deb`/`.rpm`/`.msi` installs can't take these files and
+report a failed update: reinstall.
+
+**In-app update** (`orbit_core::updates`, `src/pages/updates.rs`). `Target::detect` finds what to
+replace: `$APPIMAGE`, the executable (tarball install, Windows) or the `.app` (macOS); a
+`target/{debug,release}` build doesn't update. *Update* in the toast or *Install update* in
+Settings downloads next to the install (curl, with progress), checks the signature against the
+public key in `updates::PUBLIC_KEY` (and that it was signed for that version), unpacks (tar; the
+system `tar.exe` on Windows), and replaces: a rename over the file on Linux (the running process
+keeps its inode), the running exe renamed to `Orbit.exe.old` first on Windows (removed at the next
+start), a directory swap on macOS. Then *Restart to update* starts the new version and quits.
+`orbit --update` does the same without a window. Test hooks: `ORBIT_UPDATE_URL`,
+`ORBIT_UPDATE_PUBKEY`.
+
+**Verified** (Linux, scratch folders, a test key pair, a local HTTP server): unit tests for version
+order, the manifest, the install detection, signatures (good, tampered, other key, other version),
+the replace (file, Windows rename dance, bundle) and unpacking; `orbit-sign` + `release-manifest.sh`
+made the release; a 0.1.0 build updated a fake AppImage and a tarball install to the 9.9.9 build,
+which then printed `Orbit 9.9.9`; a tampered download and a wrong key were refused with the install
+untouched; and in the app (self-test steps) Settings → *Install update* → *Restart to update*
+relaunched into 9.9.9. Not run here: appimagetool (the AppImage was the bare binary), the Windows
+and macOS packaging and swap, and the Tauri → native path: CI and a real release check those.
 
 ### Fixes in this stage
 
@@ -1193,8 +1230,7 @@ Prioritized. "Must-have" means the owner's daily flow would miss it.
 
 1. **Run it on Windows and macOS.** It compiles for both, but GPUI's DirectX and Metal renderers,
    ConPTY terminals, paths and the agent hooks have never run. The team builds on Windows.
-2. **Release and update.** Native artifacts in `release.yml` (with the glibc floor), the signed
-   manifest and self-replace (plan above). Today an update is a manual reinstall.
+2. ~~**Release and update.**~~ Done (*Release and in-app update*); Windows and macOS untested.
 3. **Agent workflow gaps.** OS notifications for sessions that need input; the Plan modal and
    PLAN.md progress (the owner's sessions start from a plan prompt), initial prompt injection;
    minimized agent tabs and session rename; the live agent feed.
@@ -1250,7 +1286,7 @@ Ordered by dependency, with rough sizes (one focused agent-day ≈ 1 unit).
    settings, …*); left: writing/editing a Ralph PRD and its prompt, the themes, per-OS build
    commands in the repo form, installing updates.
 10. ~~**Packaging**~~: done (see *Stage: packaging*): the Vulkan-only renderer, `.desktop`, icons,
-    tarball and AppImage, native CI; the updater is a plan. What is left before the native app can
+    tarball and AppImage, native CI; the updater is done (*Release and in-app update*). What is left before the native app can
     replace the Tauri app is in *Gap list*.
 
 ## Feature parity checklist
@@ -1363,7 +1399,7 @@ Status of everything the React app does: **done**, **partial** (with what's miss
 
 ### Settings / themes
 - [x] done: Settings page with its filtered section list and every section: Repositories, Groups, AI, Languages, Appearance, Health, Updates (`SettingsPage.tsx`, `AiSection.tsx`, `AppearanceSection.tsx`, `HealthSection.tsx`, `UpdatesSection.tsx`). Appearance shows Orbit Dark only.
-- [x] done: update check at start, hourly and on demand, with a toast once per version (`src/lib/updater.ts`); no install yet (packaging)
+- [x] done: update check at start, hourly and on demand, with a toast once per version (`src/lib/updater.ts`), and installing it (*Release and in-app update*)
 - [ ] partial: themes. All seven of `src/lib/theme.ts` as live tokens (`theme::set`), saved, defaulting to the Tauri app's choice; the Appearance picker belongs to the settings page.
 
 ### Notifications

@@ -18,42 +18,38 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: windows-latest
-            args: ""
-          - platform: macos-latest
-            args: "--target aarch64-apple-darwin"
-            rust-targets: aarch64-apple-darwin
-          - platform: ubuntu-22.04
-            args: ""
+          - os: linux
+            runner: ubuntu-22.04
+            features: ""
+          - os: windows
+            runner: windows-latest
+            features: ""
+          - os: macos
+            runner: macos-latest
+            features: "--features gpui_platform/runtime_shaders"
 
-    runs-on: ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        working-directory: native
 
     steps:
       - uses: actions/checkout@v5
-
-      - uses: actions/setup-node@v5
-        with:
-          node-version: lts/*
-          cache: npm
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libfontconfig-dev libfreetype-dev libx11-xcb-dev libxcb1-dev libvulkan-dev
 
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.rust-targets }}
 
       - uses: swatinem/rust-cache@v2
         with:
-          workspaces: "./src-tauri -> target"
-          shared-key: tauri-release
+          workspaces: "./native -> target"
+          shared-key: native-release-${{ matrix.os }}
 
-      - name: Install frontend dependencies
-        run: npm ci
-
-      # Same release build the Release workflow runs, minus installers and signing.
+      # Same release build the Release workflow runs, minus packaging and signing.
       - name: Build
-        run: npm run tauri build -- --no-bundle ${{ matrix.args }}
+        run: cargo build --release --locked ${{ matrix.features }}
