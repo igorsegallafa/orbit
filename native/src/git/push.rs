@@ -217,7 +217,7 @@ impl PageTab {
         let mut foot = footer();
         if !done {
             foot = foot.child(cancel_button("Cancel", cx)).child(
-                crate::git::btn("push-submit", if f.running { "Pushing…".to_string() } else { format!("Push {}", plural(to_push, "repo")) }, Tone::Primary)
+                crate::git::btn_busy("push-submit", if f.running { "Pushing…".to_string() } else { format!("Push {}", plural(to_push, "repo")) }, Tone::Primary, f.running)
                     .on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.push_all(w, cx))),
             );
         } else {
