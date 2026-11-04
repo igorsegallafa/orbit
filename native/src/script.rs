@@ -289,6 +289,9 @@ pub fn dump(app: &OrbitApp, log: &str, cx: &gpui::App) -> String {
             if let Some(b) = e.cpp_banner_text() {
                 let _ = writeln!(out, "clangd banner: {b}");
             }
+            if let Some(md) = e.markdown_text(cx) {
+                let _ = write!(out, "{md}");
+            }
             let menu = state.completion_menu_state();
             if menu.open {
                 let labels: Vec<_> = menu.items.iter().take(10).map(|i| i.label.as_str()).collect();

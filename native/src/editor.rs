@@ -2,7 +2,9 @@
 //! save, dirty state and a language server: definition, hover, diagnostics,
 //! completion, signature help, code actions, references, symbols,
 //! formatting and rename. Plus go to line, problem navigation, the
-//! breadcrumb and status bar, and clangd's missing compile database banner.
+//! breadcrumb and status bar, clangd's missing compile database banner, and
+//! the Markdown preview.
+pub mod markdown;
 mod picker;
 mod provider;
 
@@ -122,6 +124,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-.", CodeActions, Some("Input")),
         KeyBinding::new("alt-enter", CodeActions, Some("Input")),
     ]);
+    markdown::register(cx);
 }
 
 /// Reads Settings → Languages' diagnostics filter at start (Settings updates it later).
@@ -250,6 +253,8 @@ pub struct EditorTab {
     /// The code actions the picker lists, in its item order.
     code_actions: Vec<lsp_types::CodeAction>,
     cpp: Option<CppBanner>,
+    /// `.md` files: the preview and which side is shown.
+    markdown: Option<markdown::Preview>,
     _subscriptions: Vec<Subscription>,
     _attach: Task<()>,
     _poll: Task<()>,
@@ -262,7 +267,10 @@ impl EventEmitter<EditorEvent> for EditorTab {}
 
 impl Focusable for EditorTab {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
-        self.state.read(cx).focus_handle(cx)
+        match &self.markdown {
+            Some(md) if md.mode == markdown::Mode::Preview => md.focus_handle(cx),
+            _ => self.state.read(cx).focus_handle(cx),
+        }
     }
 }
 
@@ -325,6 +333,7 @@ impl EditorTab {
         let language = lsp::file_language(&path);
         let crlf = text.contains("\r\n");
         let tab_size = detect_indent(&text);
+        let markdown = markdown::is_markdown(&path).then(|| markdown::Preview::new(&text, cx));
         let state = cx.new(|cx| {
             EditorState::new(window, cx)
                 .language(language.highlight)
@@ -410,6 +419,7 @@ impl EditorTab {
             signature: None,
             code_actions: vec![],
             cpp: None,
+            markdown,
             _subscriptions: subscriptions,
             _attach: Task::ready(()),
             _poll: Task::ready(()),
@@ -516,6 +526,7 @@ impl EditorTab {
             cx.emit(EditorEvent::DirtyChanged);
         }
         self.message = None;
+        self.schedule_markdown(cx);
         cx.notify();
     }
 
@@ -561,6 +572,7 @@ impl EditorTab {
             doc.sync(&self.saved);
         }
         self.message = Some("Reloaded from disk".into());
+        self.schedule_markdown(cx);
         cx.notify();
         true
     }
@@ -598,6 +610,9 @@ impl EditorTab {
 
     /// Moves the cursor to `range` (0-based) and focuses the editor.
     pub fn reveal(&mut self, range: lsp_types::Range, window: &mut Window, cx: &mut Context<Self>) {
+        if self.markdown_mode() == Some(markdown::Mode::Preview) {
+            self.set_markdown_mode(markdown::Mode::Editor, window, cx);
+        }
         self.state.update(cx, |s, cx| s.set_cursor_position(range.start, window, cx));
     }
 
@@ -1470,11 +1485,11 @@ impl EditorTab {
                     .children(self.last_error.clone().map(|e| div().text_color(c(theme::DANGER)).child(e)))
                     .children(self.message.clone()),
             )
-            .child(
+            .when(self.markdown_mode() != Some(markdown::Mode::Preview), |d| d.child(
                 button("status-cursor")
                     .child(if selected > 0 { format!("Ln {line}, Col {col} ({selected} selected)") } else { format!("Ln {line}, Col {col}") })
                     .on_click(cx.listener(|this, _, window, cx| this.go_to_line(&GoToLine, window, cx))),
-            )
+            ))
             .child(item().child(if self.crlf { "CRLF" } else { "LF" }))
             .child(item().child(self.indent_label()))
             .child(item().child(self.language.name))
@@ -1630,6 +1645,8 @@ impl Render for EditorTab {
                 cx,
             )
         });
+        let preview = self.render_markdown(cx);
+        let previewing = preview.is_some();
         div()
             .key_context("OrbitEditor")
             .on_action(cx.listener(Self::save))
@@ -1676,14 +1693,17 @@ impl Render for EditorTab {
                             .hover(|s| s.bg(c(theme::PANEL_RAISED)).text_color(c(theme::TEXT)))
                             .child("Diff")
                             .on_mouse_down(MouseButton::Left, cx.listener(|_, _, _, cx| cx.emit(EditorEvent::OpenDiff))),
-                    ),
+                    )
+                    .children(self.render_markdown_toggle(cx)),
             )
             .children(self.render_cpp_banner(cx))
+            .children(preview)
             .child(
                 div()
                     .relative()
                     .flex_1()
                     .min_h_0()
+                    .when(previewing, |d| d.hidden())
                     // Breakpoint strip clicks (after the editor moved the caret).
                     .on_mouse_down(MouseButton::Left, cx.listener(crate::debug::gutter::on_mouse_down))
                     .child(Editor::new(&self.state).size_full().bordered(false))
