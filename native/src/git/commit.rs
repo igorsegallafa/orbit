@@ -8,6 +8,8 @@ use crate::overlay::{ButtonStyle, Dialog, DialogButton};
 use crate::review::ui::{self, Tone};
 use crate::review::Load;
 use crate::theme::{self, c};
+use crate::workspace_ui::icons::icon;
+use crate::workspace_ui::kit;
 use crate::toast::ToastKind;
 use crate::workspace_ui::{plural, spawn, Modal, PageTab};
 use gpui::{div, prelude::*, px, App, ClickEvent, Context, Entity, Window};
@@ -344,7 +346,7 @@ impl PageTab {
         card(720., "Commit changes", Some("Pick the files that go in, write or draft each message. Unselected changes stay uncommitted.".into()))
             .child(
                 div().flex().justify_end().child(
-                    ui::button("commit-draft-all", "✦ Draft all with AI", Tone::Plain)
+                    kit::button_icon("commit-draft-all", Some(("spark", 13.)), "Draft all with AI", kit::Kind::Secondary, kit::TOOL)
                         .when(busy || pending.is_empty(), |d| d.opacity(0.5))
                         .on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.commit_draft_all(w, cx))),
                 ),
@@ -353,7 +355,7 @@ impl PageTab {
             .child(body)
             .child(
                 footer().child(cancel_button("Cancel", cx)).child(
-                    ui::button("commit-submit", label, if can_commit { Tone::Primary } else { Tone::Plain })
+                    crate::git::btn("commit-submit", label, if can_commit { Tone::Primary } else { Tone::Plain })
                         .on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.commit_submit(w, cx))),
                 ),
             )
@@ -365,7 +367,6 @@ impl PageTab {
         let done = r.state == RepoState::Done;
         let locked = done || committing;
         let repo = r.repo.clone();
-        let check = if total > 0 && count == total { "✓" } else if count > 0 { "–" } else { " " };
         let state = match &r.state {
             RepoState::Drafting => "drafting…",
             RepoState::Committing => "committing…",
@@ -379,7 +380,17 @@ impl PageTab {
             .gap_2()
             .text_sm()
             .child(
-                ui::button(format!("commit-open:{repo}"), if r.open { "▾" } else { "▸" }, Tone::Plain).on_click(cx.listener({
+                div()
+                    .id(gpui::ElementId::Name(format!("commit-open:{repo}").into()))
+                    .relative()
+                    .size(px(18.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .child(icon("disclosure", 11., c(theme::TEXT_FAINT)).when(r.open, |s| s.with_transformation(gpui::Transformation::rotate(gpui::percentage(0.25)))))
+                    .child(crate::probe::probe(format!("commit-open:{repo}")))
+                    .on_click(cx.listener({
                     let repo = repo.clone();
                     move |t, _: &ClickEvent, _, cx| {
                         if let Some(r) = t.commit_flow().and_then(|f| f.repo_mut(&repo)) {
@@ -389,7 +400,7 @@ impl PageTab {
                     }
                 })),
             )
-            .child(ui::button(format!("commit-repo:{repo}"), check, Tone::Plain).w(px(22.)).on_click(cx.listener({
+            .child(div().id(gpui::ElementId::Name(format!("commit-repo:{repo}").into())).relative().cursor_pointer().child(kit::check(total > 0 && count == total, count > 0 && count < total)).child(crate::probe::probe(format!("commit-repo:{repo}"))).on_click(cx.listener({
                 let repo = repo.clone();
                 move |t, _: &ClickEvent, _, cx| {
                     if !locked {
@@ -397,7 +408,7 @@ impl PageTab {
                     }
                 }
             })))
-            .child(div().font_family(theme::MONO_FONT).child(repo.clone()))
+            .child(div().font_family(theme::MONO_FONT).font_weight(gpui::FontWeight::BOLD).child(repo.clone()))
             .child(div().text_xs().text_color(c(theme::TEXT_FAINT)).child(match &r.files {
                 Load::Ready(_) => format!("{count} of {}", plural(total, "file")),
                 Load::Failed(_) => "unreadable".into(),
@@ -406,13 +417,13 @@ impl PageTab {
             .child(div().flex_1().text_xs().text_color(c(theme::TEXT_DIM)).child(state))
             .when(!locked && total > 0, |d| {
                 let (repo, paths) = (repo.clone(), r.files.ready().into_iter().flatten().map(|f| f.path.clone()).collect::<Vec<_>>());
-                d.child(ui::button(format!("commit-discard-all:{repo}"), "Discard all", Tone::Danger).on_click(cx.listener(move |t, _: &ClickEvent, w, cx| {
+                d.child(crate::git::btn(format!("commit-discard-all:{repo}"), "Discard all", Tone::Danger).on_click(cx.listener(move |t, _: &ClickEvent, w, cx| {
                     t.commit_discard(repo.clone(), paths.clone(), format!("every change in {repo}"), w, cx)
                 })))
             })
             .when(!locked, |d| {
                 let repo = repo.clone();
-                d.child(ui::button(format!("commit-draft:{repo}"), "✦", Tone::Plain).on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.commit_draft(repo.clone(), w, cx))))
+                d.child(kit::hint(kit::icon_button(format!("commit-draft:{repo}"), "spark", 24., 12., false).border_color(gpui::transparent_black()), "Draft with AI").on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.commit_draft(repo.clone(), w, cx))))
             });
         let files = r.open.then(|| match &r.files {
             Load::Ready(list) => div().pl_6().flex().flex_col().children(list.iter().map(|f| {
@@ -429,7 +440,7 @@ impl PageTab {
                     .items_center()
                     .gap_2()
                     .text_xs()
-                    .child(ui::button(format!("commit-file:{id}"), if on { "✓" } else { " " }, Tone::Plain).w(px(20.)).on_click(cx.listener(
+                    .child(div().id(gpui::ElementId::Name(format!("commit-file:{id}").into())).relative().cursor_pointer().child(kit::check(on, false)).child(crate::probe::probe(format!("commit-file:{id}"))).on_click(cx.listener(
                         move |t, _: &ClickEvent, _, cx| {
                             if !locked {
                                 t.commit_toggle_file(&repo1, &path1, cx)
@@ -450,7 +461,7 @@ impl PageTab {
                     .when(f.added > 0, |d| d.child(div().text_color(c(theme::OK)).child(format!("+{}", f.added))))
                     .when(f.deleted > 0, |d| d.child(div().text_color(c(theme::DANGER)).child(format!("−{}", f.deleted))))
                     .when(!locked, |d| {
-                        d.child(ui::button(format!("commit-discard:{id}"), "↺", Tone::Plain).on_click(cx.listener(move |t, _: &ClickEvent, w, cx| {
+                        d.child(kit::hint(kit::icon_button(format!("commit-discard:{id}"), "undo", 24., 12., true).border_color(gpui::transparent_black()), "Discard changes").on_click(cx.listener(move |t, _: &ClickEvent, w, cx| {
                             let label = path3.rsplit('/').next().unwrap_or(&path3).to_string();
                             t.commit_discard(repo3.clone(), vec![path3.clone()], label, w, cx)
                         })))
@@ -460,10 +471,11 @@ impl PageTab {
             _ => div().pl_6().text_xs().text_color(c(theme::TEXT_FAINT)).child("Loading…"),
         });
         div()
-            .p_2()
-            .rounded(px(6.))
+            .p(px(10.))
+            .rounded(px(8.))
             .border_1()
             .border_color(c(theme::BORDER))
+            .bg(c(theme::PANEL_RAISED))
             .when(done, |d| d.opacity(0.6))
             .flex()
             .flex_col()

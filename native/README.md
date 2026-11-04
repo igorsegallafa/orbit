@@ -342,7 +342,7 @@ Caveats found:
 | `src/workspace.rs` | workspace list from `orbit_core::workspace` |
 | `src/run/` | Build/Run: the store and commands (`mod.rs`: configurations, build, run terminal, problems as diagnostics), titlebar widget (`widget.rs`), bottom panel (`panel.rs`), compiler message parser (`problems.rs`), saved selection and breakpoints (`saved.rs`), self-test steps (`script.rs`) |
 | `src/debug/` | the DAP session (`mod.rs`: launch sequence, stops, frames, variables, console, breakpoints), the DAP client over `orbit_core::dap` (`client.rs`), editor breakpoints and paused line (`gutter.rs`), the Debug tab (`view.rs`) |
-| `src/workspace_ui/` | page tabs (`mod.rs`: `PageTab`, its in-tab modal, commands, sidebar entries, dump) · `dashboard.rs` · `workspace_page.rs` (delivery flow, repos, PRs) · `repo_page.rs` (a repo's base clone) · `forms.rs` (new workspace, add repositories) |
+| `src/workspace_ui/` | page tabs (`mod.rs`: `PageTab`, its in-tab modal, commands, dump) · `dashboard.rs` · `workspace_page.rs` (header tools, delivery flow, repos, PRs) · `plan.rs` (Plan · progress, Plan modal) · `race.rs` · `repo_page.rs` (a repo's base clone) · `forms.rs` (new workspace, add repositories) · `kit.rs` (buttons, badges, checkbox, modal shell) · `icons.rs` (Icons.tsx) |
 | `src/git/` | the git flows shown over a page: `commit.rs`, `push.rs`, `rebase.rs`, `merge.rs`, the branch drift banner (`drift.rs`); shared modal pieces in `mod.rs` |
 | `src/pages/` | tool tabs (`TabKind::Tool`; `mod.rs`: `PageTab`, `PageView`, `Host`, commands, sidebar entries, dump) · `settings.rs` (sections, AI, Languages, Appearance, Health, Updates) · `repos.rs` (Repositories, Folders, Groups) · `integrations.rs` · `ralph.rs` · `usage.rs` · `artifacts.rs` · `updates.rs` (update check) · `crash.rs` (panic hook) · `ui.rs` |
 | `src/script.rs` | self-test mode and dumps |
@@ -713,21 +713,27 @@ as a modal inside the page tab (an occluding scrim), so switching tabs keeps the
 test (`creates_adds_linked_repos_commits_and_pushes`) creates a workspace from a local bare origin,
 adds a linked repo, diffs, commits and pushes, and fetches.
 
-Self-test probes: sidebar `side-dashboard`, `side-workspace`; dashboard `dash-new`,
-`dash-refresh`, `dash-ws:<name>`, `dash-repo:<name>`; workspace page `ws-commit`, `ws-push`,
-`ws-rebase`, `ws-merge`, `ws-changes`, `ws-prs`, `ws-add-repos`, `ws-refresh`, `ws-remove`,
-`ws-done-remove`, `flow-changes|push|prs|checks`, `ws-repo:<repo>`, `ws-pull:<repo>`,
-`ws-repo-page:<repo>`, `ws-pr:<repo>#<n>`, `drift-switch`, `drift-stash`, `drift-cancel`; modals
-`modal-cancel`, `commit-open:<repo>`, `commit-repo:<repo>`, `commit-file:<repo>/<path>`,
-`commit-diff:<repo>/<path>`, `commit-discard:<repo>/<path>`, `commit-discard-all:<repo>`,
-`commit-draft:<repo>`, `commit-draft-all`, `commit-msg:<repo>` (the message box), `commit-submit`,
-`push-submit`, `push-force:<repo>`, `push-anyway:<repo>`, `push-create-prs`, `rebase-submit`,
-`rebase-ai:<repo>`, `rebase-abort:<repo>`, `merge-submit`, `create-source-manual|branch`,
-`create-name`, `create-branch`, `create-base`, `create-group:<g>`, `create-repo:<repo>`,
-`create-submit`, `add-repo:<repo>`, `add-repos-submit`; repo page `repo-fetch`, `repo-pull`,
-`repo-pull-rebase`, `repo-push`, `repo-commit`, `repo-stash`, `repo-new-ws`, `repo-op-ai|continue|abort`,
-`repo-switch:<branch>`, `repo-delete:<branch>`, `repo-branch-name`, `repo-create-branch`, `repo-undo`,
-`repo-revert:<sha>`, `repo-stash-pop:<ix>`, `repo-stash-drop:<ix>`, `repo-prune`. The dump lists each
+Self-test probes: dashboard `dash-new-head`, `dash-new`, `dash-ws:<name>`,
+`dash-ralph-btn|dash-editor|dash-folder:<name>`; workspace page `ws-code-review`, `ws-plan`,
+`ws-replan`, `ws-ralph`, `ws-race`, `ws-rebase`, `ws-add-repos`, `ws-refresh`, `ws-remove`,
+`ws-done-remove`, `flow-changes|push|prs|checks` (the cards) and `flow-…-btn` (their buttons),
+`plan-ralph`, `plan-open`, `plan-task:<ix>`, `ws-repo:<repo>`, `ws-pull:<repo>`, `ws-pr:<repo>#<n>`,
+`ws-pr-merge|ws-pr-gh:<repo>#<n>`, `ws-prs-create|commit|push`, `drift-switch`, `drift-stash`,
+`drift-cancel`; modals `modal-cancel`, `commit-open:<repo>`, `commit-repo:<repo>`,
+`commit-file:<repo>/<path>`, `commit-diff:<repo>/<path>`, `commit-discard:<repo>/<path>`,
+`commit-discard-all:<repo>`, `commit-draft:<repo>`, `commit-draft-all`, `commit-msg:<repo>`,
+`commit-submit`, `push-submit`, `push-force:<repo>`, `push-anyway:<repo>`, `push-create-prs`,
+`rebase-submit`, `rebase-ai:<repo>`, `rebase-abort:<repo>`, `merge-submit`, `prs-include|prs-draft|prs-title:<repo>`,
+`prs-submit`, `plan-goal`, `plan-interview|draft|terminal|blank`, `plan-opt:<ix>`, `plan-answer`,
+`plan-next`, `plan-ready`, `plan-draft-summary`, `plan-stop`, `race-task`, `race-agent|race-model|race-remove:<ix>`,
+`race-add`, `race-start`, `create-source-manual|branch|shortcut|linear`, `create-name`, `create-branch`,
+`create-base`, `create-group:<g>`, `create-repo:<repo>`, `create-submit`, `add-repo:<repo>`,
+`add-repos-submit`; repo page `repo-new-ws`, `repo-ralph`, `repo-session`, `repo-editor`, `repo-folder`,
+`repo-fetch`, `repo-branch` (opens the switcher: `repo-branch-name`, `repo-create-branch`,
+`repo-switch:<branch>`), `repo-sync` (fetch, pull, push or publish), `repo-pr`, `repo-op-ai|continue|abort`,
+`repo-open-ws`, `repo-summary`, `repo-draft`, `repo-commit`, `repo-stash`, `repo-discard-all`,
+`repo-discard:<path>`, `repo-undo`, `repo-revert:<sha>`, `repo-delete:<branch>`, `repo-stash-pop:<ix>`,
+`repo-stash-drop:<ix>`, `repo-prune`, `repo-ws:<name>`. The dump lists each
 page (`--- page …`: statuses, PRs, checks, the derived flow, drift; the dashboard's cards and repos;
 the repo overview) and the open modal's rows.
 
@@ -761,10 +767,30 @@ cloned from local bare remotes (`api` linked, `worktree: false`), a stub `gh` an
   flow, upstream `origin/topic`), Switch to main, Delete `topic` (confirmed).
 - Remove workspace `other`: confirmed, removed, and its tab closed.
 
-Not done: tracker sources (Shortcut/Linear) in New workspace, the
-commit modal's side-by-side diff (a file opens its diff tab instead), compare / cherry-pick on the
-repo page, Ctrl+Enter to commit, Race, Plan, the dashboard's context menu. Ralph, artifacts and
-usage are their own tabs (settings stage), and "Open in editor" / "Open folder" are commands.
+**Parity pass** (the pages against the Tauri app's screenshots): the pages, cards, buttons and
+modals follow App.css (`.dash-*`, `.ws-head`, `.flow-*`, `.plan-progress`, `.repo-*`, `.modal`) with
+Orbit's own icons (`workspace_ui/icons.rs`, from `Icons.tsx`) and the controls of `workspace_ui/kit.rs`.
+New: the dashboard's card actions and right-click menu; the workspace header tools (Code Review, Plan /
+Create plan, Replan, Ralph, Race, Rebase, + / refresh / remove with tooltips); the *Plan · progress* card
+(PLAN.md's checklist, writable, re-read every 5 s); the **Plan** modal (`plan.rs`: interview rounds,
+summary, draft, plan in a terminal, write it myself, live agent feed, Stop); the **Race** modal (`race.rs`:
+variant workspaces through `workspace::create_variant`, one prompted session each through
+`sessions::new_prompted_session`); the **Create pull requests** modal (`git/prs.rs`); the PR list with
+expandable checks and re-run; the repo page's layout (branch / sync / PR bar, banners, Changes with the
+commit box, History, Branches, Workspaces and stashes).
+
+Verified on a scratch root with a stub `claude` (headless runs answer an interview round, then a
+plan): New workspace `demo`; *Create plan → Draft it now* wrote PLAN.md and opened it; ticking a task
+rewrote it; *Replan → Interview me first* asked, the answer went back, the summary drafted a new plan
+(the old one kept in `.orbit/plans`); *Plan in a terminal* opened a `plan` session with the prompt;
+*Race* with two Claude agents made `demo--claude` and `demo--claude-2`, each with a session given
+`--model …`, `--permission-mode acceptEdits` and the task; the repo page committed a change from its
+summary box.
+
+Not done: tracker sources (Shortcut/Linear) in New workspace, the commit modal's side-by-side diff
+(a file opens its diff tab instead), the repo page's Compare tab and cherry-pick, Ralph on a repository
+(a toast points to the workspace), agent sessions from the repo page (a terminal opens), Review
+feedback / Investigate on the workspace page, the race comparison section, Ctrl+Enter to commit.
 
 ## Stage: settings, Ralph, integrations, usage, artifacts, updates, crash log
 

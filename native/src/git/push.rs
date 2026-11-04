@@ -4,7 +4,7 @@
 //! whose PR was closed are left out unless pushed on request. Afterwards it
 //! offers the pull-request flow for the repos without an open PR.
 use super::{card, cancel_button, footer, status_row, Flow, Mark};
-use crate::review::ui::{self, Tone};
+use crate::review::ui::Tone;
 use crate::toast::ToastKind;
 use crate::workspace_ui::{plural, spawn, PageTab};
 use gpui::{div, prelude::*, ClickEvent, Context, Window};
@@ -186,13 +186,13 @@ impl PageTab {
                 .when(r.dropped, |d| {
                     let repo = repo.clone();
                     d.child(
-                        ui::button(format!("push-anyway:{repo}"), "Push anyway", Tone::Plain)
+                        crate::git::btn(format!("push-anyway:{repo}"), "Push anyway", Tone::Plain)
                             .on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.push_run(vec![repo.clone()], false, w, cx))),
                     )
                 })
                 .when(r.status == PushStatus::Rejected, |d| {
                     d.child(
-                        ui::button(format!("push-force:{repo}"), "Force push", Tone::Danger)
+                        crate::git::btn(format!("push-force:{repo}"), "Force push", Tone::Danger)
                             .on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.push_run(vec![repo.clone()], true, w, cx))),
                     )
                 });
@@ -214,14 +214,14 @@ impl PageTab {
         let mut foot = footer();
         if !done {
             foot = foot.child(cancel_button("Cancel", cx)).child(
-                ui::button("push-submit", if f.running { "Pushing…".to_string() } else { format!("Push {}", plural(to_push, "repo")) }, Tone::Primary)
+                crate::git::btn("push-submit", if f.running { "Pushing…".to_string() } else { format!("Push {}", plural(to_push, "repo")) }, Tone::Primary)
                     .on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.push_all(w, cx))),
             );
         } else {
             foot = foot.child(cancel_button("Close", cx));
             if !without_pr.is_empty() && orbit_core::workspace::repo_scope(&f.scope).is_none() {
                 let label = if without_pr.len() == pushed.len() { "Create pull requests →".to_string() } else { format!("Create PR for {} →", without_pr.join(", ")) };
-                foot = foot.child(ui::button("push-create-prs", label, Tone::Primary).on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.push_to_prs(w, cx))));
+                foot = foot.child(crate::git::btn("push-create-prs", label, Tone::Primary).on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.push_to_prs(w, cx))));
             }
         }
         card(480., "Push to origin", Some("Each repo pushes its feature branch and sets the upstream. Nothing is force-pushed unless you ask for it.".into()))

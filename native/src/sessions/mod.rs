@@ -395,6 +395,47 @@ pub fn new_session_in(app: &mut OrbitApp, scope: String, cmd: Option<&str>, inpu
     open(app, meta, args, None, input, window, cx);
 }
 
+/// An agent session in workspace `ws` seeded with `prompt` (`openPromptedSession`
+/// in App.tsx): claude and omp take it as an argument, others get it typed in.
+#[allow(clippy::too_many_arguments)]
+pub fn new_prompted_session(
+    app: &mut OrbitApp,
+    ws: &str,
+    agent: &str,
+    model: &str,
+    prompt: &str,
+    name: Option<&str>,
+    auto_edit: bool,
+    window: &mut Window,
+    cx: &mut Context<OrbitApp>,
+) {
+    let argv = agent == "claude" || agent == "omp";
+    let agent_session_id = (agent == "claude").then(new_uuid);
+    let mut args: Vec<String> = agent_session_id.iter().flat_map(|id| ["--session-id".to_string(), id.clone()]).collect();
+    if !model.is_empty() {
+        args.extend(["--model".to_string(), model.to_string()]);
+    }
+    if auto_edit && agent == "claude" {
+        args.extend(["--permission-mode".to_string(), "acceptEdits".to_string()]);
+    }
+    if argv {
+        args.push(prompt.to_string());
+    }
+    let taken: Vec<String> = store(cx).read(cx).open.iter().map(|(m, _)| m.session_name.clone()).collect();
+    let meta = SessionMeta {
+        id: new_key(),
+        workspace: ws.to_string(),
+        label: agent.to_string(),
+        session_name: name.map_or_else(|| codename(taken.iter().map(String::as_str)), str::to_string),
+        cmd: Some(agent.to_string()),
+        args: args.clone(),
+        repo: None,
+        agent_session_id,
+        cwd: None,
+    };
+    open(app, meta, args, None, (!argv).then(|| prompt.to_string()), window, cx);
+}
+
 /// A shell session started in `dir` (the file tree's Open in Terminal).
 pub fn new_shell_in(app: &mut OrbitApp, dir: &std::path::Path, window: &mut Window, cx: &mut Context<OrbitApp>) {
     let taken: Vec<String> = store(cx).read(cx).open.iter().map(|(m, _)| m.session_name.clone()).collect();

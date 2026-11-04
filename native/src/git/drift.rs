@@ -3,7 +3,7 @@
 //! switches it. This banner switches them back; uncommitted work is stashed
 //! only after asking, and Orbit re-applies it when that branch comes back.
 //! Repos set to auto-switch go back on their own when the page opens.
-use crate::review::ui::{self, Tone};
+use crate::review::ui::Tone;
 use crate::theme::{self, c};
 use crate::toast::ToastKind;
 use crate::workspace_ui::{spawn, Page, PageTab};
@@ -128,12 +128,14 @@ impl PageTab {
         });
         Some(
             div()
-                .mx_4()
-                .mt_3()
-                .p_3()
+                .mb(px(16.))
+                .px(px(12.))
+                .py(px(10.))
+                .bg(crate::workspace_ui::kit::alpha(c(theme::WARN), 0.07))
+                .text_size(px(12.5))
                 .rounded(px(8.))
                 .border_1()
-                .border_color(c(theme::WARN))
+                .border_color(crate::workspace_ui::kit::alpha(c(theme::WARN), 0.35))
                 .flex()
                 .flex_col()
                 .gap_1()
@@ -147,7 +149,7 @@ impl PageTab {
                             "{lead} on this workspace's branch. Commit, push, rebase and PRs are blocked for {them} until switched back."
                         )))
                         .when(!switchable.is_empty() && pending.is_empty(), |d| {
-                            d.child(ui::button("drift-switch", switch_label, Tone::Primary).on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.sync_drift(false, w, cx))))
+                            d.child(crate::git::btn("drift-switch", switch_label, Tone::Primary).on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.sync_drift(false, w, cx))))
                         }),
                 )
                 .children(rows)
@@ -163,13 +165,13 @@ impl PageTab {
                             .child(div().flex_1().text_color(c(theme::TEXT)).child(format!(
                                 "{names} {verb} uncommitted changes. Stash them and switch? They come back when Orbit switches to that branch again."
                             )))
-                            .child(ui::button("drift-cancel", "Cancel", Tone::Plain).on_click(cx.listener(|t, _: &ClickEvent, _, cx| {
+                            .child(crate::git::btn("drift-cancel", "Cancel", Tone::Plain).on_click(cx.listener(|t, _: &ClickEvent, _, cx| {
                                 if let Some((_, _, d)) = t.drift_parts() {
                                     d.dirty.clear();
                                 }
                                 cx.notify();
                             })))
-                            .child(ui::button("drift-stash", "Stash and switch", Tone::Primary).on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.sync_drift(true, w, cx)))),
+                            .child(crate::git::btn("drift-stash", "Stash and switch", Tone::Primary).on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.sync_drift(true, w, cx)))),
                     )
                 }),
         )

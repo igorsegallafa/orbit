@@ -2,7 +2,7 @@
 //! a time, so a failure (review required, conflicts) stops the rest instead
 //! of leaving a feature half merged.
 use super::{card, cancel_button, footer, status_row, Flow, Mark};
-use crate::review::ui::{self, Tone};
+use crate::review::ui::Tone;
 use crate::toast::ToastKind;
 use crate::workspace_ui::{plural, spawn, PageTab};
 use gpui::{div, prelude::*, ClickEvent, Context, Window};
@@ -109,7 +109,7 @@ impl PageTab {
             footer().child(cancel_button("Close", cx))
         } else {
             footer().child(cancel_button("Cancel", cx)).child(
-                ui::button("merge-submit", if f.running { "Merging…".to_string() } else { format!("Merge {}", plural(f.prs.len(), "PR")) }, Tone::Primary)
+                crate::git::btn("merge-submit", if f.running { "Merging…".to_string() } else { format!("Merge {}", plural(f.prs.len(), "PR")) }, Tone::Primary)
                     .on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.merge_start(w, cx))),
             )
         };

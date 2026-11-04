@@ -6,10 +6,12 @@
 pub mod commit;
 pub mod drift;
 pub mod merge;
+pub mod prs;
 pub mod push;
 pub mod rebase;
 
-use crate::review::ui::{self, Tone};
+use crate::review::ui::Tone;
+use crate::workspace_ui::kit::{self, Kind};
 use crate::theme::{self, c};
 use crate::workspace_ui::PageTab;
 use gpui::{div, prelude::*, px, AnyElement, App, ClickEvent, Context, Div, Rgba, SharedString, Stateful};
@@ -19,6 +21,7 @@ pub enum Flow {
     Push(push::PushFlow),
     Rebase(rebase::RebaseFlow),
     Merge(merge::MergeFlow),
+    Prs(prs::PrsFlow),
 }
 
 impl Flow {
@@ -29,6 +32,7 @@ impl Flow {
             Flow::Push(f) => f.running,
             Flow::Rebase(f) => f.busy(),
             Flow::Merge(f) => f.running,
+            Flow::Prs(f) => f.creating,
         }
     }
 
@@ -38,6 +42,7 @@ impl Flow {
             Flow::Push(f) => f.dump(out),
             Flow::Rebase(f) => f.dump(out),
             Flow::Merge(f) => f.dump(out),
+            Flow::Prs(f) => f.dump(out, cx),
         }
     }
 }
@@ -50,6 +55,7 @@ impl PageTab {
                 Flow::Push(f) => self.render_push(f, cx).into_any_element(),
                 Flow::Rebase(f) => self.render_rebase(f, cx).into_any_element(),
                 Flow::Merge(f) => self.render_merge(f, cx).into_any_element(),
+                Flow::Prs(f) => self.render_prs(f, cx).into_any_element(),
             },
             _ => div().into_any_element(),
         }
@@ -67,37 +73,58 @@ impl PageTab {
 /// The dimmed backdrop with the modal card centered on it.
 pub fn scrim(card: AnyElement) -> Div {
     // Occluded: clicks never reach the page under it.
-    div().occlude().absolute().top_0().left_0().size_full().bg(theme::scrim()).flex().items_start().justify_center().pt(px(48.)).child(card)
+    div().occlude().absolute().top_0().left_0().size_full().bg(theme::scrim()).flex().items_center().justify_center().child(card)
 }
 
-/// A modal card: title, hint, body and footer buttons.
+/// A modal card (`.modal`): title, hint, body and footer buttons.
 pub fn card(width: f32, title: impl Into<SharedString>, hint: Option<SharedString>) -> Stateful<Div> {
     div()
         .id("modal-card")
+        .occlude()
         .w(px(width))
-        .max_h(px(620.))
+        .max_h(px(760.))
         .overflow_y_scroll()
-        .p_4()
+        .px(px(16.))
+        .pt(px(16.))
         .flex()
         .flex_col()
-        .gap_2()
-        .rounded(theme::radius())
+        .gap(px(10.))
+        .rounded(px(12.))
         .border_1()
         .border_color(c(theme::BORDER_STRONG))
         .bg(c(theme::PANEL))
-        .shadow(theme::shadow(8., 24., 0.4))
+        .shadow(theme::shadow(20., 60., 0.55))
         .text_color(c(theme::TEXT))
-        .child(div().text_base().font_weight(gpui::FontWeight::SEMIBOLD).child(title.into()))
-        .when_some(hint, |d, h| d.child(div().text_xs().text_color(c(theme::TEXT_DIM)).child(h)))
+        .text_size(px(13.))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .child(div().text_size(px(15.)).font_weight(gpui::FontWeight::SEMIBOLD).child(title.into()))
+                .when_some(hint, |d, h| d.child(div().text_size(px(12.5)).line_height(px(18.)).text_color(c(theme::TEXT_DIM)).child(h))),
+        )
 }
 
+/// `.modal-footer`: right-aligned buttons over a top border, flush with the card.
 pub fn footer() -> Div {
-    div().pt_2().flex().items_center().justify_end().gap_2()
+    div().mt(px(6.)).mx(px(-16.)).px(px(16.)).py(px(12.)).border_t_1().border_color(c(theme::BORDER)).flex().items_center().justify_end().gap(px(8.))
+}
+
+/// A flow's button: footer actions (`*-submit`) at control height, the rest mini.
+pub fn btn(id: impl Into<SharedString>, label: impl Into<SharedString>, tone: Tone) -> Stateful<Div> {
+    let id: SharedString = id.into();
+    let size = if id.ends_with("-submit") || id.as_ref() == "push-create-prs" { kit::NORMAL } else { kit::MINI };
+    match tone {
+        Tone::Primary => kit::button(id, label, Kind::Primary, size),
+        Tone::Plain => kit::button(id, label, Kind::Secondary, size),
+        Tone::Danger => kit::button(id, label, Kind::Secondary, size).text_color(c(theme::DANGER)),
+    }
 }
 
 /// The modal's Cancel / Close button.
 pub fn cancel_button(label: &'static str, cx: &mut Context<PageTab>) -> impl IntoElement {
-    ui::button("modal-cancel", label, Tone::Plain).on_click(cx.listener(|t, _: &ClickEvent, _, cx| {
+    kit::button("modal-cancel", label, Kind::Secondary, kit::NORMAL).on_click(cx.listener(|t, _: &ClickEvent, _, cx| {
         if matches!(t.modal, Some(crate::workspace_ui::Modal::Flow(_))) {
             t.cancel_flow(cx)
         } else {
@@ -133,16 +160,35 @@ pub fn status_row(mark: Mark, repo: impl Into<SharedString>, detail: impl Into<S
     div()
         .flex()
         .items_center()
-        .gap_2()
-        .py(px(3.))
-        .text_sm()
-        .child(div().w(px(14.)).flex_none().text_color(color).child(g))
-        .child(div().flex_none().font_family(theme::MONO_FONT).text_xs().child(repo.into()))
+        .gap(px(10.))
+        .px(px(12.))
+        .py(px(10.))
+        .rounded(px(8.))
+        .border_1()
+        .border_color(c(theme::BORDER))
+        .bg(c(theme::PANEL_RAISED))
+        .text_size(px(13.))
+        .child(
+            div()
+                .flex_none()
+                .size(px(20.))
+                .rounded_full()
+                .border_1()
+                .when(mark == Mark::Pending, |d| d.border_dashed())
+                .border_color(if mark == Mark::Pending { c(theme::TEXT_FAINT) } else { color })
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(11.))
+                .text_color(color)
+                .child(if mark == Mark::Pending { "" } else { g }),
+        )
+        .child(div().flex_none().font_family(theme::MONO_FONT).font_weight(gpui::FontWeight::BOLD).child(repo.into()))
         .child(
             div()
                 .flex_1()
                 .min_w_0()
-                .text_xs()
+                .text_size(px(12.5))
                 .text_color(if mark == Mark::Error { c(theme::DANGER) } else { c(theme::TEXT_DIM) })
                 .child(detail.into()),
         )

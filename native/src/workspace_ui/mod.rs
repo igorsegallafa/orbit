@@ -5,6 +5,10 @@
 //! merge) are in `crate::git`; each page tab shows them as an in-tab modal.
 pub mod dashboard;
 pub mod forms;
+pub mod icons;
+pub mod kit;
+pub mod plan;
+pub mod race;
 pub mod repo_page;
 pub mod workspace_page;
 
@@ -15,7 +19,9 @@ use crate::review::Load;
 use crate::theme::{self, c};
 use crate::toast::ToastKind;
 use gpui::{div, prelude::*, px, App, Context, FocusHandle, Focusable, SharedString, Task, WeakEntity, Window};
+use std::cell::Cell;
 use std::fmt::Write as _;
+use std::rc::Rc;
 use std::time::Duration;
 
 pub enum Page {
@@ -29,6 +35,8 @@ pub enum Modal {
     Create(Box<forms::CreateForm>),
     AddRepos(forms::AddReposForm),
     Flow(Flow),
+    Plan(Box<plan::PlanForm>),
+    Race(Box<race::RaceForm>),
 }
 
 /// Work for the tab to run later.
@@ -40,8 +48,11 @@ pub struct PageTab {
     /// Runs once the workspace has been read (a command opened the page with it).
     pub pending: Option<Deferred>,
     pub app: WeakEntity<OrbitApp>,
+    /// The page body's width on the last frame (the dashboard's grid columns).
+    pub width: Rc<Cell<f32>>,
     focus: FocusHandle,
     _poll: Task<()>,
+    _plan_poll: Task<()>,
 }
 
 impl PageTab {
@@ -53,7 +64,29 @@ impl PageTab {
                 break;
             }
         });
-        let mut tab = Self { page, modal: None, pending: None, app, focus: cx.focus_handle(), _poll: poll };
+        // Agents tick PLAN.md as they work: re-read it every 5 s.
+        let plan_poll = cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| loop {
+            cx.background_executor().timer(Duration::from_secs(5)).await;
+            if this.update_in(cx, |t, w, cx| t.load_plan(w, cx)).is_err() {
+                break;
+            }
+        });
+        let mut tab = Self {
+            page,
+            modal: None,
+            pending: None,
+            app,
+            width: Rc::new(Cell::new(1200.)),
+            focus: cx.focus_handle(),
+            _poll: poll,
+            _plan_poll: plan_poll,
+        };
+        if let Page::Repo(r) = &tab.page {
+            let (a, b, c) = (r.new_branch.clone(), r.filter.clone(), r.summary.clone());
+            watch(&a, window, cx);
+            watch(&b, window, cx);
+            watch(&c, window, cx);
+        }
         tab.reload(false, window, cx);
         tab
     }
@@ -151,6 +184,8 @@ impl Render for PageTab {
             Some(Modal::Create(_)) => Some(self.render_create(cx).into_any_element()),
             Some(Modal::AddRepos(_)) => Some(self.render_add_repos(cx).into_any_element()),
             Some(Modal::Flow(_)) => Some(self.render_flow(cx).into_any_element()),
+            Some(Modal::Plan(_)) => Some(self.render_plan(cx).into_any_element()),
+            Some(Modal::Race(_)) => Some(self.render_race(cx).into_any_element()),
         };
         div()
             .track_focus(&self.focus)
@@ -160,6 +195,9 @@ impl Render for PageTab {
             .flex_col()
             .bg(c(theme::BG))
             .font_family(theme::UI_FONT)
+            .text_size(px(theme::size::FONT))
+            .line_height(gpui::relative(1.36))
+            .text_color(c(theme::TEXT))
             .child(body)
             .when_some(modal, |d, m| d.child(git::scrim(m)))
     }
@@ -203,6 +241,52 @@ pub fn open(app: &mut OrbitApp, id: PageId, window: &mut Window, cx: &mut Contex
     app.activate(ix, window, cx);
     window.on_next_frame(move |window, cx| window.focus(&handle, cx));
     view
+}
+
+/// Re-renders the tab as `input` changes (the page reads its value).
+pub fn watch<T: gpui::EventEmitter<gpui_component::input::InputEvent>>(input: &gpui::Entity<T>, window: &mut Window, cx: &mut Context<PageTab>) {
+    cx.subscribe_in(input, window, |_, _, ev: &gpui_component::input::InputEvent, _, cx| {
+        if matches!(ev, gpui_component::input::InputEvent::Change) {
+            cx.notify();
+        }
+    })
+    .detach();
+}
+
+/// Records the width of the element it is placed in (absolutely, full size).
+pub fn measure(cell: Rc<Cell<f32>>) -> impl IntoElement {
+    gpui::canvas(
+        move |bounds, window, _| {
+            let w = f32::from(bounds.size.width);
+            if (cell.get() - w).abs() > 0.5 {
+                cell.set(w);
+                window.refresh();
+            }
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
+}
+
+/// Selects workspace `name` and opens its page.
+pub fn open_workspace(app: &mut OrbitApp, name: &str, window: &mut Window, cx: &mut Context<OrbitApp>) {
+    if let Some(ix) = app.workspaces.iter().position(|ws| ws.meta.name == name) {
+        app.select_workspace(ix, cx);
+    }
+    open(app, PageId::Workspace(name.to_string()), window, cx);
+}
+
+/// Runs command `id` with workspace `name` selected.
+pub fn run_for(app: &mut OrbitApp, name: &str, id: &str, window: &mut Window, cx: &mut Context<OrbitApp>) {
+    if let Some(ix) = app.workspaces.iter().position(|ws| ws.meta.name == name) {
+        if app.selected != Some(ix) {
+            app.select_workspace(ix, cx);
+        }
+    }
+    commands::run(id, app, window, cx);
 }
 
 /// The selected workspace's page, with `modal` opened over it.
@@ -293,6 +377,8 @@ pub fn dump(app: &OrbitApp, cx: &App) -> String {
                 Some(Modal::Create(f)) => f.dump(&mut out, cx),
                 Some(Modal::AddRepos(f)) => f.dump(&mut out),
                 Some(Modal::Flow(f)) => f.dump(&mut out, cx),
+                Some(Modal::Plan(f)) => f.dump(&mut out, cx),
+                Some(Modal::Race(f)) => f.dump(&mut out, cx),
                 None => {}
             }
         }

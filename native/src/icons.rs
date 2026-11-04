@@ -21,6 +21,9 @@ impl AssetSource for Assets {
         if let Some(bytes) = ToolIcons.load(path)? {
             return Ok(Some(bytes));
         }
+        if let Some(doc) = path.strip_prefix("wsui/").and_then(|p| p.strip_suffix(".svg")).and_then(crate::workspace_ui::icons::load) {
+            return Ok(Some(Cow::Owned(doc.into_bytes())));
+        }
         if let Some(name) = path.strip_prefix("orbit/").and_then(|p| p.strip_suffix(".svg")) {
             return Ok(orbit_icons::ICONS.iter().find(|(n, _)| *n == name).map(|(_, doc)| Cow::Borrowed(doc.as_bytes())));
         }
