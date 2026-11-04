@@ -5,8 +5,9 @@
 //! or for a linked (branch-only) repo, the branch checked out in its base
 //! clone with a link to it in the workspace folder. Both close at once and
 //! report in a toast, as the slow part (clone, fetch, worktrees) runs.
+use super::kit;
 use super::{plural, spawn, Modal, PageId, PageTab};
-use crate::review::ui::{self, Tone};
+use crate::review::ui;
 use crate::theme::{self, c};
 use crate::toast::ToastKind;
 use gpui::{div, prelude::*, px, App, ClickEvent, Context, Entity, Window};
@@ -159,20 +160,58 @@ fn choices(cfg: &Config) -> Vec<RepoChoice> {
     cfg.services.iter().map(|s| RepoChoice { name: s.name.clone(), worktree: s.worktree }).collect()
 }
 
-/// A checkbox row for a repo, with the linked-clone note.
+/// A checkbox row in the repositories list (`.wizard-repo`).
 fn repo_check(probe: String, r: &RepoChoice, on: bool) -> gpui::Stateful<gpui::Div> {
-    ui::row(probe)
+    let _ = r.worktree;
+    div()
+        .id(gpui::ElementId::Name(probe.clone().into()))
+        .relative()
+        .h(px(34.))
+        .px(px(14.))
         .flex()
         .items_center()
-        .gap_2()
-        .text_sm()
-        .child(div().w(px(14.)).text_color(c(theme::ACCENT)).child(if on { "✓" } else { "○" }))
-        .child(div().font_family(theme::MONO_FONT).text_color(c(theme::TEXT)).child(r.name.clone()))
-        .when(!r.worktree, |d| d.child(div().text_xs().text_color(c(theme::TEXT_FAINT)).child("linked: switches its base clone's branch")))
+        .gap(px(12.))
+        .text_size(px(13.))
+        .text_color(c(theme::TEXT))
+        .cursor_pointer()
+        .hover(|s| s.bg(c(theme::PANEL_RAISED)))
+        .child(kit::check(on, false))
+        .child(r.name.clone())
+        .child(crate::probe::probe(probe))
 }
 
+/// A form label (`.form label`).
 fn field(label: &'static str) -> gpui::Div {
-    div().pt_1().text_xs().text_color(c(theme::TEXT_DIM)).child(label)
+    div().text_size(px(12.5)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(c(theme::TEXT)).child(label)
+}
+
+/// The repositories box with its "n selected" count.
+fn repos_box(count: usize, rows: impl IntoIterator<Item = gpui::AnyElement>) -> gpui::Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(8.))
+        .child(
+            div()
+                .flex()
+                .justify_between()
+                .child(field("Repositories"))
+                .child(div().text_size(px(11.5)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(c(theme::ACCENT)).child(format!("{count} selected"))),
+        )
+        .child(
+            div()
+                .id("repos-box")
+                .max_h(px(280.))
+                .overflow_y_scroll()
+                .py(px(4.))
+                .rounded(px(8.))
+                .border_1()
+                .border_color(c(theme::BORDER))
+                .bg(c(theme::BG))
+                .flex()
+                .flex_col()
+                .children(rows),
+        )
 }
 
 impl PageTab {
@@ -211,6 +250,11 @@ impl PageTab {
             connected,
             picker: CardPicker { query, cards: None, picked: None, generation: 0 },
         })));
+        if let Some(Modal::Create(f)) = &self.modal {
+            let (n, b) = (f.name.clone(), f.branch.clone());
+            super::watch(&n, window, cx);
+            super::watch(&b, window, cx);
+        }
         self.load_base_options(window, cx);
         cx.notify();
     }
@@ -403,68 +447,123 @@ impl PageTab {
         let from_branch = f.source == Source::Branch;
         let source = |s: Source, label: &'static str, cx: &mut Context<Self>| {
             let off = s.tracker().is_some_and(|k| !f.connected.contains(&k));
-            let tone = if f.source == s { Tone::Primary } else { Tone::Plain };
-            crate::git::btn(format!("create-source-{}", s.key()), if off { format!("{label} (not connected)") } else { label.to_string() }, tone)
+            let on = f.source == s;
+            div()
+                .id(gpui::ElementId::Name(format!("create-source-{}", s.key()).into()))
+                .relative()
+                .flex_1()
+                .h(px(34.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(8.))
+                .border_1()
+                .border_color(if on { c(theme::ACCENT) } else { c(theme::BORDER_STRONG) })
+                .bg(if on { theme::accent_soft() } else { c(theme::PANEL_RAISED) })
+                .text_size(px(13.))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(if on { c(theme::TEXT) } else { c(theme::TEXT_DIM) })
+                .when(off, |d| d.opacity(0.5))
+                .cursor_pointer()
+                .hover(|st| st.border_color(c(theme::ACCENT)))
+                .child(label)
+                .child(crate::probe::probe(format!("create-source-{}", s.key())))
+                .when(off, |d| kit::hint(d, "Not connected: set it up in Integrations"))
                 .on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.create_source(s, w, cx)))
         };
         let branch_hint = if from_branch {
             "Sets up a branch that already exists on origin, in every cloned repository that has it.".to_string()
         } else {
             let b = f.effective_branch(cx);
-            if b.is_empty() { String::new() } else { format!("Branch: {b}") }
+            if b.is_empty() || !f.branch.read(cx).value().trim().is_empty() { String::new() } else { format!("Branch: {b}") }
         };
+        let input = |id: &'static str, state: &Entity<InputState>| div().id(id).relative().child(Input::new(state)).child(crate::probe::probe(id));
         let mut body = div()
+            .id("create-body")
             .flex()
             .flex_col()
-            .gap_1()
+            .gap(px(14.))
+            .px(px(20.))
+            .py(px(18.))
+            .overflow_y_scroll()
             .child(
                 div()
                     .flex()
-                    .flex_wrap()
-                    .gap_1()
+                    .gap(px(8.))
                     .child(source(Source::Manual, "Manual", cx))
                     .child(source(Source::Branch, "Existing branch", cx))
                     .child(source(Source::Shortcut, "Shortcut", cx))
                     .child(source(Source::Linear, "Linear", cx)),
             )
             .when(f.source.tracker().is_some(), |d| d.child(self.render_cards(f, cx)))
-            .child(field("Workspace name"))
-            .child(div().id("create-name").relative().child(Input::new(&f.name)).child(crate::probe::probe("create-name")))
-            .child(field("Branch"))
-            .child(div().id("create-branch").relative().child(Input::new(&f.branch)).child(crate::probe::probe("create-branch")))
-            .child(div().text_xs().text_color(c(theme::TEXT_FAINT)).child(branch_hint));
+            .child(div().flex().flex_col().gap(px(8.)).child(field("Workspace name")).child(input("create-name", &f.name)));
+        if from_branch {
+            body = body.child(div().flex().flex_col().gap(px(8.)).child(field("Branch")).child(input("create-branch", &f.branch)));
+        } else {
+            body = body.child(
+                div()
+                    .flex()
+                    .gap(px(14.))
+                    .child(div().flex_1().flex().flex_col().gap(px(8.)).child(field("Branch")).child(input("create-branch", &f.branch)))
+                    .child(
+                        div().flex_1().flex().flex_col().gap(px(8.)).child(field("Base branch")).child(
+                            div()
+                                .id("create-base")
+                                .relative()
+                                .h(px(34.))
+                                .px(px(10.))
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .rounded(px(6.))
+                                .border_1()
+                                .border_color(c(theme::BORDER_STRONG))
+                                .bg(c(theme::BG))
+                                .text_size(px(13.))
+                                .cursor_pointer()
+                                .hover(|s| s.border_color(c(theme::ACCENT)))
+                                .child(f.base.clone())
+                                .child(div().text_size(px(9.)).text_color(c(theme::TEXT_FAINT)).child("▾"))
+                                .child(crate::probe::probe("create-base"))
+                                .on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.create_pick_base(w, cx))),
+                        ),
+                    ),
+            );
+        }
+        body = body.when(!branch_hint.is_empty(), |d| d.child(div().mt(px(-6.)).text_size(px(11.5)).text_color(c(theme::TEXT_FAINT)).child(branch_hint)));
         if !from_branch {
             body = body
-                .child(field("Base branch"))
-                .child(div().flex().child(
-                    crate::git::btn("create-base", format!("{} ▾", f.base), Tone::Plain).on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.create_pick_base(w, cx))),
-                ))
-                .child(field("Repositories").child(format!(" · {} selected", f.selected.len())))
                 .when(!f.groups.is_empty(), |d| {
-                    d.child(div().flex().flex_wrap().gap_1().children(f.groups.iter().map(|(g, members)| {
+                    d.child(div().flex().flex_wrap().gap(px(6.)).children(f.groups.iter().map(|(g, members)| {
                         let all_in = !members.is_empty() && members.iter().all(|m| f.selected.contains(m));
                         let g2 = g.clone();
-                        crate::git::btn(format!("create-group:{g}"), g.clone(), if all_in { Tone::Primary } else { Tone::Plain })
+                        kit::button(format!("create-group:{g}"), g.clone(), if all_in { kit::Kind::Primary } else { kit::Kind::Secondary }, kit::MINI)
                             .on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.create_toggle_group(&g2, w, cx)))
                     })))
                 })
-                .child(div().flex().flex_col().children(f.repos.iter().map(|r| {
-                    let name = r.name.clone();
-                    repo_check(format!("create-repo:{}", r.name), r, f.selected.contains(&r.name))
-                        .on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.create_toggle(&name, w, cx)))
-                })))
-                .when(f.repos.is_empty(), |d| d.child(div().text_xs().text_color(c(theme::TEXT_FAINT)).child("No repositories configured. Add some in Settings first.")));
+                .child(repos_box(
+                    f.selected.len(),
+                    f.repos.iter().map(|r| {
+                        let name = r.name.clone();
+                        repo_check(format!("create-repo:{}", r.name), r, f.selected.contains(&r.name))
+                            .on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.create_toggle(&name, w, cx)))
+                            .into_any_element()
+                    }),
+                ))
+                .when(f.repos.is_empty(), |d| d.child(div().text_size(px(12.)).text_color(c(theme::TEXT_FAINT)).child("No repositories configured. Add some in Settings first.")));
         }
-        crate::git::card(520., "New workspace", None)
-            .child(body)
-            .when_some(f.error.clone(), |d, e| d.child(div().text_xs().text_color(c(theme::DANGER)).child(e)))
+        let ready = !f.effective_name(cx).is_empty() && (from_branch || (!f.selected.is_empty() && !f.effective_branch(cx).is_empty()));
+        kit::modal("create-modal", 500.)
+            .child(kit::modal_header("New workspace"))
+            .child(body.when_some(f.error.clone(), |d, e| d.child(div().text_size(px(12.)).text_color(c(theme::DANGER)).child(e))))
             .child(
-                crate::git::footer()
+                kit::modal_footer()
                     .child(crate::git::cancel_button("Cancel", cx))
-                    .child(crate::git::btn("create-submit", "Create workspace", Tone::Primary).on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.create_submit(w, cx)))),
+                    .child(kit::disabled(kit::button("create-submit", "Create workspace", kit::Kind::Primary, kit::NORMAL), !ready).on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.create_submit(w, cx)))),
             )
             .into_any_element()
     }
+
 
     fn render_cards(&self, f: &CreateForm, cx: &mut Context<Self>) -> impl IntoElement {
         let p = &f.picker;
@@ -535,28 +634,42 @@ impl PageTab {
 
     pub(super) fn render_add_repos(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(Modal::AddRepos(f)) = &self.modal else { return div().into_any_element() };
-        let list = div().flex().flex_col().children(f.available.iter().map(|r| {
+        let rows = f.available.iter().map(|r| {
             let name = r.name.clone();
-            repo_check(format!("add-repo:{}", r.name), r, f.selected.contains(&r.name)).on_click(cx.listener(move |t, _: &ClickEvent, _, cx| {
-                if let Some(Modal::AddRepos(f)) = &mut t.modal {
-                    if !f.selected.remove(&name) {
-                        f.selected.insert(name.clone());
+            repo_check(format!("add-repo:{}", r.name), r, f.selected.contains(&r.name))
+                .on_click(cx.listener(move |t, _: &ClickEvent, _, cx| {
+                    if let Some(Modal::AddRepos(f)) = &mut t.modal {
+                        if !f.selected.remove(&name) {
+                            f.selected.insert(name.clone());
+                        }
                     }
-                }
-                cx.notify();
-            }))
-        }));
-        crate::git::card(460., "Add repositories", Some(format!("{} selected · on {}", f.selected.len(), f.branch).into()))
-            .child(list)
-            .when(f.available.is_empty(), |d| d.child(div().text_xs().text_color(c(theme::TEXT_FAINT)).child("Every configured repository is already in this workspace.")))
+                    cx.notify();
+                }))
+                .into_any_element()
+        });
+        let body = div()
+            .px(px(20.))
+            .py(px(18.))
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(repos_box(f.selected.len(), rows))
+            .when(f.available.is_empty(), |d| d.child(div().text_size(px(12.)).text_color(c(theme::TEXT_FAINT)).child("Every configured repository is already in this workspace.")));
+        kit::modal("add-repos-modal", 500.)
+            .child(kit::modal_header("Add repositories"))
+            .child(body)
             .child(
-                crate::git::footer()
+                kit::modal_footer()
                     .child(crate::git::cancel_button("Cancel", cx))
-                    .child(crate::git::btn("add-repos-submit", "Add to workspace", Tone::Primary).on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.add_repos_submit(w, cx)))),
+                    .child(
+                        kit::disabled(kit::button("add-repos-submit", "Add to workspace", kit::Kind::Primary, kit::NORMAL), f.selected.is_empty())
+                            .on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.add_repos_submit(w, cx))),
+                    ),
             )
             .into_any_element()
     }
 }
+
 
 #[cfg(test)]
 mod tests {

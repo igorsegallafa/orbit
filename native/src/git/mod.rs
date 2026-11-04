@@ -6,6 +6,7 @@
 pub mod commit;
 pub mod drift;
 pub mod merge;
+pub mod prs;
 pub mod push;
 pub mod rebase;
 
@@ -20,6 +21,7 @@ pub enum Flow {
     Push(push::PushFlow),
     Rebase(rebase::RebaseFlow),
     Merge(merge::MergeFlow),
+    Prs(prs::PrsFlow),
 }
 
 impl Flow {
@@ -30,6 +32,7 @@ impl Flow {
             Flow::Push(f) => f.running,
             Flow::Rebase(f) => f.busy(),
             Flow::Merge(f) => f.running,
+            Flow::Prs(f) => f.creating,
         }
     }
 
@@ -39,6 +42,7 @@ impl Flow {
             Flow::Push(f) => f.dump(out),
             Flow::Rebase(f) => f.dump(out),
             Flow::Merge(f) => f.dump(out),
+            Flow::Prs(f) => f.dump(out, cx),
         }
     }
 }
@@ -51,6 +55,7 @@ impl PageTab {
                 Flow::Push(f) => self.render_push(f, cx).into_any_element(),
                 Flow::Rebase(f) => self.render_rebase(f, cx).into_any_element(),
                 Flow::Merge(f) => self.render_merge(f, cx).into_any_element(),
+                Flow::Prs(f) => self.render_prs(f, cx).into_any_element(),
             },
             _ => div().into_any_element(),
         }
