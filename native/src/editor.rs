@@ -1,7 +1,7 @@
 //! Editor tab: gpui-component's code editor (tree-sitter highlighting) with
 //! save, dirty state and a language server for definition, hover and
 //! diagnostics.
-use crate::lsp::{self, path_to_uri, uri_to_path, LspRegistry, LspServer};
+use crate::lsp::{self, path_to_uri, uri_to_path, LspRegistry, LspServer, RepoKey};
 use crate::theme::{self, c};
 use anyhow::{bail, Context as _, Result};
 use gpui::{
@@ -144,12 +144,12 @@ pub fn read_text(path: &Path) -> Result<String> {
 }
 
 impl EditorTab {
-    /// `repo`: the repo the file belongs to (its name and the folder as the
-    /// workspace has it), which scopes the language server.
+    /// `repo`: the repo the file belongs to (workspace and repo name, and the
+    /// folder as the workspace has it), which scopes the language server.
     pub fn new(
         path: PathBuf,
         text: String,
-        repo: Option<(String, PathBuf)>,
+        repo: Option<(RepoKey, PathBuf)>,
         registry: &mut LspRegistry,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -165,7 +165,7 @@ impl EditorTab {
         let saved = state.read(cx).text().clone();
         let file_name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
         let (title, display_path) = match &repo {
-            Some((name, root)) => {
+            Some((RepoKey { repo: name, .. }, root)) => {
                 let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().to_string();
                 (format!("{name}/{file_name}"), format!("{name}/{rel}"))
             }
@@ -176,44 +176,33 @@ impl EditorTab {
         let mut provider = None;
         let mut lsp_status: SharedString = "".into();
         let mut attach = Task::ready(());
-        if let (Some((server_language, language_id)), Some((_, root)), Some(uri)) = (language.lsp, &repo, path_to_uri(&path)) {
-            match registry.server(root, server_language, cx) {
-                Some(server) => {
-                    let d = Rc::new(LspDoc { uri, language_id, server: RefCell::new(None), version: Cell::new(0) });
-                    let p = Rc::new(DocProvider(d.clone()));
-                    let this = cx.weak_entity();
-                    let own_path = path.clone();
-                    state.update(cx, |s, _| {
-                        let lsp = s.lsp_mut();
-                        lsp.definition_provider = Some(p.clone());
-                        lsp.hover_provider = Some(p.clone());
-                        // Definitions in other files open (or focus) their own tab.
-                        lsp.show_document = Some(Rc::new(move |params, _, cx| {
-                            let Some(target) = uri_to_path(&params.uri) else { return false };
-                            if target == own_path {
-                                return false;
-                            }
-                            let range = params.selection;
-                            this.update(cx, |_, cx| cx.emit(EditorEvent::OpenLocation { path: target, range })).is_ok()
-                        }));
-                    });
-                    lsp_status = format!("{server_language}: starting").into();
-                    attach = cx.spawn(async move |this, cx| {
-                        let server = server.await;
-                        let _ = this.update(cx, |this, cx| this.attach(server, cx));
-                    });
-                    doc = Some(d);
-                    provider = Some(p);
-                }
-                None => {
-                    lsp_status = registry
-                        .errors
-                        .get(&(root.clone(), server_language))
-                        .cloned()
-                        .unwrap_or_default()
-                        .into();
-                }
-            }
+        if let (Some((server_language, language_id)), Some((key, _)), Some(uri)) = (language.lsp, &repo, path_to_uri(&path)) {
+            let server = registry.server(key, server_language, cx);
+            let d = Rc::new(LspDoc { uri, language_id, server: RefCell::new(None), version: Cell::new(0) });
+            let p = Rc::new(DocProvider(d.clone()));
+            let this = cx.weak_entity();
+            let own_path = path.clone();
+            state.update(cx, |s, _| {
+                let lsp = s.lsp_mut();
+                lsp.definition_provider = Some(p.clone());
+                lsp.hover_provider = Some(p.clone());
+                // Definitions in other files open (or focus) their own tab.
+                lsp.show_document = Some(Rc::new(move |params, _, cx| {
+                    let Some(target) = uri_to_path(&params.uri) else { return false };
+                    if target == own_path {
+                        return false;
+                    }
+                    let range = params.selection;
+                    this.update(cx, |_, cx| cx.emit(EditorEvent::OpenLocation { path: target, range })).is_ok()
+                }));
+            });
+            lsp_status = format!("{server_language}: starting").into();
+            attach = cx.spawn(async move |this, cx| {
+                let server = server.await;
+                let _ = this.update(cx, |this, cx| this.attach(server, cx));
+            });
+            doc = Some(d);
+            provider = Some(p);
         }
 
         let subscriptions = vec![cx.subscribe(&state, |this, _, event: &InputEvent, cx| {
@@ -238,12 +227,15 @@ impl EditorTab {
         }
     }
 
-    fn attach(&mut self, server: Option<Arc<LspServer>>, cx: &mut Context<Self>) {
+    fn attach(&mut self, server: Result<Arc<LspServer>, String>, cx: &mut Context<Self>) {
         let Some(doc) = &self.doc else { return };
-        let Some(server) = server else {
-            self.lsp_status = "language server failed to start".into();
-            cx.notify();
-            return;
+        let server = match server {
+            Ok(server) => server,
+            Err(e) => {
+                self.lsp_status = e.into();
+                cx.notify();
+                return;
+            }
         };
         // didOpen carries the text as it is now, edits made while starting included.
         doc.version.set(1);

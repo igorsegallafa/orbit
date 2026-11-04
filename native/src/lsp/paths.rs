@@ -36,34 +36,6 @@ pub fn map_uris(value: Value, from: &Path, to: &Path) -> Value {
     }
 }
 
-/// `p` with symlinks resolved, or `p` itself when that fails.
-pub fn real_path(p: &Path) -> PathBuf {
-    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
-}
-
-/// The compilation database clangd should use: at the root, in `build/`, or
-/// in one level of the usual CMake binary dirs (build/<preset>, out/build/…,
-/// cmake-build-*), newest first. Same rules as `src-tauri/src/lsp.rs`.
-pub fn find_compile_commands(root: &Path) -> Option<PathBuf> {
-    let direct = [root.join("compile_commands.json"), root.join("build").join("compile_commands.json")];
-    let mut found: Vec<PathBuf> = direct.into_iter().filter(|p| p.is_file()).collect();
-    for e in std::fs::read_dir(root).into_iter().flatten().flatten() {
-        if e.file_name().to_string_lossy().starts_with("cmake-build-") {
-            found.extend(Some(e.path().join("compile_commands.json")).filter(|p| p.is_file()));
-        }
-    }
-    for parent in [root.join("build"), root.join("out"), root.join("out").join("build")] {
-        for e in std::fs::read_dir(&parent).into_iter().flatten().flatten() {
-            let p = e.path().join("compile_commands.json");
-            if p.is_file() {
-                found.push(p);
-            }
-        }
-    }
-    found.sort_by_key(|p| std::cmp::Reverse(std::fs::metadata(p).and_then(|m| m.modified()).ok()));
-    found.into_iter().next()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

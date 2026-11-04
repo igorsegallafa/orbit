@@ -4,7 +4,7 @@
 use crate::diff_view::DiffTab;
 use crate::editor::{self, EditorEvent, EditorTab};
 use crate::file_tree::{FileTree, FileTreeEvent};
-use crate::lsp::{uri_to_path, LspRegistry, Notification};
+use crate::lsp::{uri_to_path, LspRegistry, Notification, RepoKey};
 use crate::terminal::{self, TerminalView};
 use crate::theme::{self, c};
 use crate::workspace::{self, Workspace};
@@ -124,10 +124,11 @@ impl OrbitApp {
         self.workspace().map(|w| w.dir.clone()).unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from("/")))
     }
 
-    /// The selected workspace's repo holding `path`: its name and its folder in the workspace.
-    fn repo_of(&self, path: &Path) -> Option<(String, PathBuf)> {
+    /// The selected workspace's repo holding `path`, and its folder in the workspace.
+    fn repo_of(&self, path: &Path) -> Option<(RepoKey, PathBuf)> {
         let ws = self.workspace()?;
-        ws.meta.repos.iter().map(|r| (r.clone(), ws.dir.join(r))).find(|(_, root)| path.starts_with(root))
+        let (repo, root) = ws.meta.repos.iter().map(|r| (r, ws.dir.join(r))).find(|(_, root)| path.starts_with(root))?;
+        Some((RepoKey { workspace: ws.meta.name.clone(), repo: repo.clone() }, root))
     }
 
     pub fn active_tab(&self) -> Option<&Tab> {

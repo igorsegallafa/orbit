@@ -19,6 +19,8 @@ use std::time::Instant;
 fn main() {
     let started = Instant::now();
     let script = Script::from_args();
+    // A launcher's bare PATH would hide gh, clangd and the agents.
+    orbit_core::proc::refresh_path();
     if script.is_active() {
         terminal::CLIPBOARD_DISABLED.store(true, std::sync::atomic::Ordering::Relaxed);
     }
