@@ -1083,8 +1083,27 @@ function App() {
       );
     }
     if (tab.kind === "pr") {
+      const prWs = workspaceForPrs(tab.prs, workspaces);
       return (
-        <PrReviewPane prs={tab.prs} onError={setError} />
+        <PrReviewPane
+          prs={tab.prs}
+          workspace={prWs}
+          sessions={tabs.flatMap((t) =>
+            t.kind === "terminal" && prWs && t.terminal.workspace === prWs.name && t.terminal.cmd !== null ? [{ id: t.terminal.id, name: t.terminal.sessionName }] : [],
+          )}
+          onSendToSession={(id, prompt) => {
+            if (sendToTerminal(id, prompt)) setActiveTab(id);
+            else setError("That session isn't running any more");
+          }}
+          onNewSession={(prompt) =>
+            prWs &&
+            invoke<{ agent: string; model: string }>("get_ai_settings")
+              .then((ai) => openPromptedSession(prWs.name, ai.agent, ai.model, prompt, { name: "pr fixes", autoEdit: true }))
+              .catch((e) => setError(String(e)))
+          }
+          onCheckout={() => setCheckoutPrs(tab.prs)}
+          onError={setError}
+        />
       );
     }
     if (tab.kind === "feature") {

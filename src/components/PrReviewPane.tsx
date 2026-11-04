@@ -3,7 +3,7 @@ import { DiffEditor, type BeforeMount } from "@monaco-editor/react";
 import type { editor as Monaco } from "monaco-editor";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { PrDetail, PrFileDiff, PullRequest } from "../types/config";
+import { PrDetail, PrFileDiff, PullRequest, Workspace } from "../types/config";
 import { Draft, ReviewComment, ReviewData, ReviewEvent, ReviewThread, Side, timeAgo } from "../types/review";
 import { Skeleton } from "./Skeleton";
 import { tooltip } from "./Tooltip";
@@ -18,10 +18,19 @@ import { usePaneWidth } from "./PaneResizer";
 import { CheckBox } from "./CheckBox";
 import { CheckIcon, ChevronIcon, DocIcon, EyeIcon, RepoIcon } from "./Icons";
 import { defineMonacoThemes, useMonacoTheme } from "../lib/theme";
+import { NotesFile, notesPrompt } from "../lib/notes";
+import { ContextMenu } from "./ContextMenu";
+import type { AgentSession } from "./ChangesReview";
 
 interface Props {
   /** All PRs of the feature group (1 for single-repo PRs). */
   prs: PullRequest[];
+  /** The workspace with these PRs checked out, where an agent can fix the pending comments. */
+  workspace: Workspace | null;
+  sessions: AgentSession[];
+  onSendToSession: (id: string, prompt: string) => void;
+  onNewSession: (prompt: string) => void;
+  onCheckout: () => void;
   onError: (msg: string) => void;
 }
 
@@ -86,7 +95,7 @@ const DECISION: Record<string, { label: string; cls: string }> = {
  * threads on the right. Comments can be posted right away or collected in
  * a pending review (kept locally until submitted) and sent with a verdict.
  */
-export function PrReviewPane({ prs, onError }: Props) {
+export function PrReviewPane({ prs, workspace, sessions, onSendToSession, onNewSession, onCheckout, onError }: Props) {
   const monacoTheme = useMonacoTheme();
   const side = usePaneWidth("orbit.pr-review-side", 260, 200, 640);
   const [activeIdx, setActiveIdx] = useState(0);
@@ -98,6 +107,7 @@ export function PrReviewPane({ prs, onError }: Props) {
   const [composer, setComposer] = useState<{ side: Side; start: number; end: number } | null>(null);
   const [submitOpen, setSubmitOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [fixMenu, setFixMenu] = useState<{ x: number; y: number } | null>(null);
   const nav = useDiffNav();
 
   const pr = prs[activeIdx];
@@ -265,6 +275,23 @@ export function PrReviewPane({ prs, onError }: Props) {
       onError(String(e));
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  /** Copies the pending comments into the workspace's REVIEW.md, which the agent works through. */
+  const fixLocally = async (send: (prompt: string) => void) => {
+    if (!workspace) return;
+    try {
+      let file = await invoke<NotesFile>("notes_list", { workspace: workspace.name });
+      for (const d of drafts) {
+        const start = d.startLine ?? d.line;
+        const body = d.side === "LEFT" ? `(On lines removed by the PR, numbered as in the base branch.)\n${d.body}` : d.body;
+        if (file.notes.some((n) => !n.done && n.repo === pr.repo && n.path === d.path && n.start === start && n.end === d.line && n.body === body.trim())) continue;
+        file = await invoke<NotesFile>("notes_add", { workspace: workspace.name, repo: pr.repo, path: d.path, start, end: d.line, body, snippet: "" });
+      }
+      send(notesPrompt(file.file));
+    } catch (e) {
+      onError(String(e));
     }
   };
 
@@ -531,6 +558,18 @@ export function PrReviewPane({ prs, onError }: Props) {
                 </label>
               </>
             )}
+            {drafts.length > 0 && (
+              <button
+                className="btn-mini secondary rv-fix-btn"
+                {...tipProps(workspace ? "Have an agent fix the pending comments locally, without posting them" : "Check out the PR to fix its comments locally")}
+                onClick={(e) => {
+                  const r = e.currentTarget.getBoundingClientRect();
+                  setFixMenu({ x: r.left, y: r.bottom + 4 });
+                }}
+              >
+                Fix with agent ▾
+              </button>
+            )}
             <span className="rv-submit-anchor">
               <button className={`rv-review-btn ${drafts.length ? "has-pending" : ""}`} disabled={!detail} onClick={() => setSubmitOpen((v) => !v)}>
                 Review
@@ -551,6 +590,28 @@ export function PrReviewPane({ prs, onError }: Props) {
           </span>
         </div>
 
+        {fixMenu && (
+          <ContextMenu
+            x={fixMenu.x}
+            y={fixMenu.y}
+            items={
+              workspace
+                ? [
+                    ...sessions.map((s) => ({
+                      label: `Send to ${s.name}`,
+                      onSelect: () =>
+                        fixLocally((prompt) => {
+                          onSendToSession(s.id, prompt);
+                          toast.success(`Sent ${drafts.length} comment${drafts.length === 1 ? "" : "s"} to ${s.name}`);
+                        }),
+                    })),
+                    { label: "New agent session", onSelect: () => fixLocally(onNewSession) },
+                  ]
+                : [{ label: "Check out PR…", onSelect: onCheckout }]
+            }
+            onClose={() => setFixMenu(null)}
+          />
+        )}
         {selected === OVERVIEW ? (
           <Overview detail={detail} review={review} onOpenFile={setSelected} />
         ) : selected === null ? (

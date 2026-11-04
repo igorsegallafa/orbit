@@ -6127,6 +6127,7 @@ button.ws-badge:hover:not(:disabled) { border-color: currentColor; }
 /* filebar review button + popover */
 .rv-filebar .editor-filebar-actions { gap: 10px; }
 .rv-submit-anchor { position: relative; }
+.rv-fix-btn { height: 26px; padding: 0 10px; font-size: 12px; }
 .rv-review-btn { display: inline-flex; align-items: center; gap: 6px; height: 26px !important; padding: 0 12px; font-size: 12px; }
 .rv-review-count { min-width: 18px; padding: 0 6px; border-radius: 999px; background: color-mix(in srgb, var(--text) 25%, transparent); font-size: 11px; font-weight: 700; }
 .rv-submit {

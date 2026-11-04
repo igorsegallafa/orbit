@@ -298,7 +298,7 @@ export function DraftCard({
   );
 }
 
-/** New comment on a line or range: add to the pending review or post now. */
+/** New comment on a line or range: kept locally in the pending review, or posted now. */
 export function Composer({
   label,
   reviewInProgress,
@@ -315,7 +315,7 @@ export function Composer({
   const [busy, setBusy] = useState(false);
   const addToReview = { label: reviewInProgress ? "Add review comment" : "Start a review", onClick: onAddToReview };
   const now = {
-    label: "Comment now",
+    label: "Post to GitHub now",
     onClick: async (text: string) => {
       setBusy(true);
       await onCommentNow(text).finally(() => setBusy(false));
@@ -327,8 +327,8 @@ export function Composer({
       <Editor
         placeholder="Leave a comment"
         busy={busy}
-        primary={reviewInProgress ? addToReview : now}
-        secondary={reviewInProgress ? now : addToReview}
+        primary={addToReview}
+        secondary={now}
         onCancel={onCancel}
       />
     </div>
