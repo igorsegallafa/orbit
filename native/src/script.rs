@@ -306,6 +306,12 @@ pub fn dump(app: &OrbitApp, log: &str, cx: &gpui::App) -> String {
                 let titles: Vec<_> = actions.items.iter().take(10).map(|i| i.action.title.as_str()).collect();
                 let _ = writeln!(out, "code actions ({}): {}", actions.items.len(), titles.join(" | "));
             }
+            if let Some(h) = state.hover_popover() {
+                let _ = writeln!(out, "hover popover: {}", crate::editor::hover_text(&h.hover).replace('\n', "\n  | "));
+            }
+            if let Some(d) = state.diagnostic_popover() {
+                let _ = writeln!(out, "diagnostic popover: {}", d.message);
+            }
             let _ = writeln!(out, "diagnostics: {}", e.diagnostics.len());
             for d in e.diagnostics.iter().take(8) {
                 let _ = writeln!(out, "  {}:{} {:?} {}", d.range.start.line + 1, d.range.start.character + 1, d.severity, d.message.lines().next().unwrap_or_default());
@@ -643,7 +649,7 @@ fn send(window: AnyWindowHandle, event: PlatformInput, cx: &mut AsyncApp) {
     let _ = window.update(cx, |_, window, cx| window.dispatch_event(event, cx));
 }
 
-async fn ctrl_click(window: AnyWindowHandle, pos: Point<Pixels>, cx: &mut AsyncApp) {
+pub(crate) async fn ctrl_click(window: AnyWindowHandle, pos: Point<Pixels>, cx: &mut AsyncApp) {
     // Hovering with Ctrl held asks the server for the definition first,
     // which is what makes the symbol clickable.
     send(window, PlatformInput::MouseMove(MouseMoveEvent { position: pos, pressed_button: None, modifiers: ctrl() }), cx);

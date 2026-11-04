@@ -16,6 +16,7 @@
 //! | `toast:<text>` | show an info toast |
 //! | `wait:<ms>` | wait |
 //! | `dump:<label>` | append the full state dump to the log |
+//! | `hover:cursor` `ctrl-click:cursor` | move the mouse over (or Ctrl+click) the word at the active editor's cursor |
 use crate::app::OrbitApp;
 use crate::commands;
 use crate::probe;
@@ -24,6 +25,7 @@ use gpui::{
     px, AnyWindowHandle, AsyncApp, Focusable, Entity, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, NavigationDirection, PlatformInput, Pixels, Point, ScrollDelta, ScrollEvent,
 };
+use gpui_component::input::RopeExt as _;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -207,6 +209,23 @@ pub async fn run(steps: &[String], window: AnyWindowHandle, app: &Entity<OrbitAp
                 sleep(cx, 50).await;
             }
             "wait" => sleep(cx, arg.parse().unwrap_or(100)).await,
+            "hover" | "ctrl-click" => {
+                let at = app.read_with(cx, |a, cx| {
+                    let state = a.active_editor()?.read(cx).state.read(cx);
+                    state.range_to_bounds(&state.text().word_range(state.cursor())?).map(|b| b.center())
+                });
+                match at {
+                    Some(at) if verb == "ctrl-click" => crate::script::ctrl_click(window, at, cx).await,
+                    Some(at) => {
+                        send(window, PlatformInput::MouseMove(MouseMoveEvent { position: at, pressed_button: None, modifiers: Modifiers::default() }), cx);
+                        // The component waits 150 ms before it asks for hover.
+                        sleep(cx, 1500).await;
+                    }
+                    None => {
+                        let _ = writeln!(log, "  no word under the cursor on screen");
+                    }
+                }
+            }
             "dump" => {
                 let text = app.read_with(cx, |a, cx| crate::script::dump(a, "", cx));
                 let focus = focus_text(window, app, cx);
