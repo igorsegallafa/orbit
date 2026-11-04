@@ -5,7 +5,7 @@ use crate::diff_view::{commit_patch, git_patch, highlighted_state};
 use crate::lsp::file_language;
 use crate::review::ui;
 use crate::theme::{self, c};
-use gpui::{div, prelude::*, px, Context, Entity, SharedString, Window};
+use gpui::{div, prelude::*, px, App, Context, Entity, SharedString, Window};
 use gpui_component::diff::{Diff, DiffFile, DiffMode, DiffState};
 use std::path::{Path, PathBuf};
 
@@ -50,6 +50,7 @@ pub struct DiffPane {
     label: String,
     source: Option<Source>,
     state: Entity<DiffState>,
+    sel: crate::diff_select::Handle,
     changes: usize,
     change_ix: Option<usize>,
     error: Option<String>,
@@ -62,7 +63,12 @@ impl DiffPane {
         // The whole file, as Monaco's diff editor shows it.
         let state = highlighted_state(vec![], DiffMode::Unified, cx);
         state.update(cx, |s, cx| s.set_context_lines(None, cx));
-        Self { label: String::new(), source: None, state, changes: 0, change_ix: None, error: None, empty: empty.into() }
+        Self { label: String::new(), source: None, state, sel: crate::diff_select::new(), changes: 0, change_ix: None, error: None, empty: empty.into() }
+    }
+
+    /// The selection and last copy, for the self-test dump.
+    pub fn selection_dump(&self, cx: &App) -> String {
+        crate::diff_select::dump(&self.sel, &self.state, cx)
     }
 
     pub fn source(&self) -> Option<&Source> {
@@ -151,7 +157,13 @@ impl Render for DiffPane {
         });
         let body = match &self.error {
             Some(e) => div().p_4().text_size(px(12.)).text_color(c(theme::DANGER)).child(e.clone()).into_any_element(),
-            None => div().flex_1().min_h_0().child(Diff::new(&self.state).size_full().header_visible(false)).into_any_element(),
+            None => div()
+                .flex_1()
+                .min_h_0()
+                .relative()
+                .child(crate::diff_select::attach(Diff::new(&self.state).size_full().header_visible(false), &self.sel, &self.state, &[], None))
+                .child(crate::probe::probe("pane-diff"))
+                .into_any_element(),
         };
         root.child(bar).child(body)
     }

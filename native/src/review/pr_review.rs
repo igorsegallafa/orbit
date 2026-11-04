@@ -139,6 +139,7 @@ pub struct PrReviewPage {
     pub review: Option<ReviewData>,
     selected: Sel,
     pub diff: Load<Entity<DiffState>>,
+    pub sel: crate::diff_select::Handle,
     split: bool,
     saved: Saved,
     hide_viewed: bool,
@@ -172,6 +173,7 @@ impl PrReviewPage {
             review: None,
             selected: Sel::Overview,
             diff: Load::Idle,
+            sel: crate::diff_select::new(),
             split: false,
             saved: Saved::default(),
             hide_viewed: false,
@@ -260,10 +262,11 @@ impl PrReviewPage {
                     return;
                 }
                 let language = crate::lsp::file_language(Path::new(&path)).highlight;
-                let files = patch.and_then(|p| DiffFile::parse(&p).map_err(|e| e.message().to_string()));
+                let files = patch.and_then(|p| DiffFile::parse(&p).map(|f| (f, p)).map_err(|e| e.message().to_string()));
                 page.diff = match files {
-                    Ok(files) => {
+                    Ok((files, patch)) => {
                         let files: Vec<DiffFile> = files.into_iter().map(|f| f.with_language(language)).collect();
+                        page.sel.borrow_mut().set_files(&files, &patch, &[DiffSide::Original, DiffSide::Modified]);
                         let mode = if split { DiffMode::Split } else { DiffMode::Unified };
                         let theme = highlight_theme.clone();
                         Load::Ready(cx.new(|cx| {
@@ -1205,9 +1208,18 @@ impl PrReviewPage {
                 };
                 page.update(cx, |p, cx| p.render_zone(&side, line, window, cx))
             })
-            .on_add_annotation(move |range, window, cx| {
+;
+        // Old lines take notes in split view only, as in the Tauri app.
+        let sides: &[DiffSide] = if self.split { &[DiffSide::Original, DiffSide::Modified] } else { &[DiffSide::Modified] };
+        let diff = crate::diff_select::attach(
+            diff,
+            &self.sel,
+            &state,
+            sides,
+            Some(std::rc::Rc::new(move |range, window, cx| {
                 let _ = w2.update(cx, |p, cx| p.comment_on(range, window, cx));
-            });
+            })),
+        );
         div()
             .flex_1()
             .min_h_0()

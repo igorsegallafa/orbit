@@ -621,7 +621,7 @@ impl Render for DiffTab {
                 let _ = w2.update(cx, |t, cx| t.comment_on(range, window, cx));
             }));
         }
-        let diff = diff_select::attach(diff, &self.sel, &self.state, on_comment);
+        let diff = diff_select::attach(diff, &self.sel, &self.state, &[DiffSide::Modified], on_comment);
         let toolbar_btn = |id: &'static str, label: String| {
             div()
                 .id(id)

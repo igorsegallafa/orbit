@@ -30,6 +30,7 @@ impl InspectFlow {
             let _ = writeln!(out, "    {} {} +{} -{}", ui::status_letter(&f.status).0, f.path, f.added, f.deleted);
         }
         let _ = writeln!(out, "    selected {:?} diff {:?}", self.selected, self.pane.read(cx).source());
+        out.push_str(&self.pane.read(cx).selection_dump(cx));
     }
 }
 

@@ -658,6 +658,7 @@ impl ReviewTab {
             diff,
             &self.chg.sel,
             &self.chg.diff,
+            &[DiffSide::Modified],
             Some(std::rc::Rc::new(move |range, window, cx| {
                 let _ = w2.update(cx, |t, cx| t.comment_on(range, window, cx));
             })),

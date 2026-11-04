@@ -381,6 +381,7 @@ impl ReviewTab {
             Page::Commit => {
                 if let Some(v) = &self.commit {
                     let _ = writeln!(out, "  commit {} {}/{}: {} selected {:?}", v.commit.sha, self.workspace, v.repo, load_label(&v.files), v.selected);
+                    out.push_str(&crate::diff_select::dump(&v.sel, &v.diff, cx));
                 }
             }
             Page::PullRequests => {

@@ -158,9 +158,9 @@ fn plus(sel: &Handle, state: &Entity<DiffState>, marker: &DiffGutterMarker, cx: 
         .into_any_element()
 }
 
-/// The Diff with its `+` lane (when `on_comment` is given), text-selection
-/// line tracking and Ctrl+C, inside a full-size wrapper.
-pub fn attach(diff: Diff, sel: &Handle, state: &Entity<DiffState>, on_comment: Option<OnComment>) -> impl IntoElement {
+/// The Diff with its `+` lane on `sides` (when `on_comment` is given),
+/// text-selection line tracking and Ctrl+C, inside a full-size wrapper.
+pub fn attach(diff: Diff, sel: &Handle, state: &Entity<DiffState>, sides: &[DiffSide], on_comment: Option<OnComment>) -> impl IntoElement {
     let mut diff = diff.on_line_hover({
         let (sel, state) = (sel.clone(), state.clone());
         move |p, window, cx| {
@@ -182,7 +182,8 @@ pub fn attach(diff: Diff, sel: &Handle, state: &Entity<DiffState>, on_comment: O
     if on_comment.is_some() {
         let markers = sel.borrow().markers.clone();
         let (s2, st2) = (sel.clone(), state.clone());
-        diff = diff.gutter_markers(markers.iter().cloned()).render_gutter_marker(move |m, _, cx| plus(&s2, &st2, m, cx));
+        let markers = markers.iter().filter(|m| sides.contains(&m.position().side())).cloned();
+        diff = diff.gutter_markers(markers).render_gutter_marker(move |m, _, cx| plus(&s2, &st2, m, cx));
     }
     let release = {
         let (sel, state) = (sel.clone(), state.clone());

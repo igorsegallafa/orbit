@@ -15,7 +15,8 @@ pub struct CommitView {
     pub commit: CommitEntry,
     pub files: Load<Vec<ChangeEntry>>,
     pub selected: Option<String>,
-    diff: Entity<DiffState>,
+    pub diff: Entity<DiffState>,
+    pub sel: crate::diff_select::Handle,
     changes: usize,
     change_ix: Option<usize>,
     pub error: Option<String>,
@@ -26,7 +27,7 @@ impl CommitView {
         // The whole file, as Monaco's diff editor shows it.
         let diff = highlighted_state(vec![], DiffMode::Unified, cx);
         diff.update(cx, |s, cx| s.set_context_lines(None, cx));
-        Self { repo, repo_dir, commit, files: Load::Loading, selected: None, diff, changes: 0, change_ix: None, error: None }
+        Self { repo, repo_dir, commit, files: Load::Loading, selected: None, diff, sel: crate::diff_select::new(), changes: 0, change_ix: None, error: None }
     }
 }
 
@@ -170,7 +171,13 @@ impl ReviewTab {
                 .text_color(c(theme::TEXT_FAINT))
                 .child("Pick a file to see its diff in this commit")
                 .into_any_element(),
-            _ => div().flex_1().min_h_0().child(Diff::new(&v.diff).size_full().header_visible(false)).into_any_element(),
+            _ => div()
+                .flex_1()
+                .min_h_0()
+                .relative()
+                .child(crate::diff_select::attach(Diff::new(&v.diff).size_full().header_visible(false), &v.sel, &v.diff, &[], None))
+                .child(crate::probe::probe("commit-diff"))
+                .into_any_element(),
         };
         div().size_full().flex().child(side).child(div().flex_1().min_w_0().h_full().flex().flex_col().child(bar).child(body))
     }
