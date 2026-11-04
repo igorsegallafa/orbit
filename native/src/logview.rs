@@ -2,9 +2,12 @@
 //! colours (`ansi.rs`), wrap at the view's width, follow the end while
 //! output arrives unless scrolled up, and select with the mouse (drag, double
 //! click for a line) for Ctrl+C / Ctrl+Shift+C; Ctrl+A selects everything.
-//! A line can carry a link (a compiler message opens its file).
+//! A line can carry a link (a compiler message opens its file). The overlay
+//! scrollbar drags and pages; leaving the end stops following, reaching it
+//! follows again (`ListState`'s tail mode).
 use crate::ansi::{self, Color, Style};
 use crate::probe::probe;
+use crate::scrollbar;
 use crate::theme::{self, c, hsla};
 use gpui::{
     div, font, list, prelude::*, px, App, ClipboardItem, Context, FocusHandle, Focusable, FollowMode, FontStyle,
@@ -51,6 +54,8 @@ pub struct LogView {
     selecting: bool,
     /// The source lines already shown (see [`LogView::sync`]).
     seen: usize,
+    /// Lines added since the last frame, which have no height for the scrollbar yet.
+    unhinted: bool,
     pub last_copied: Option<String>,
 }
 
@@ -73,6 +78,7 @@ impl LogView {
             pressed: None,
             selecting: false,
             seen: 0,
+            unhinted: false,
             last_copied: None,
         }
     }
@@ -90,6 +96,7 @@ impl LogView {
         self.head = None;
         self.list.reset(0);
         self.list.set_follow_mode(FollowMode::Tail);
+        self.unhinted = false;
         cx.notify();
     }
 
@@ -101,6 +108,7 @@ impl LogView {
         self.lines.push(LogLine { raw: raw.to_string(), line, base, link, start, end });
         let n = self.lines.len();
         self.list.splice(n - 1..n - 1, 1);
+        self.unhinted = true;
         if self.lines.len() > self.max {
             let extra = self.lines.len() - self.max;
             self.lines.drain(..extra);
@@ -122,6 +130,7 @@ impl LogView {
         last.raw = raw.to_string();
         let n = self.lines.len();
         self.list.splice(n - 1..n, 1);
+        self.unhinted = true;
         cx.notify();
     }
 
@@ -370,11 +379,14 @@ impl LogView {
         let (a, b) = self.range().map_or((None, None), |(a, b)| (Some((a.line, a.ix)), Some((b.line, b.ix))));
         let colored = self.lines.iter().filter(|l| l.line.spans.iter().any(|s| s.style != Style::default())).count();
         format!(
-            "log {}: {} lines ({} coloured), following {}, selection {:?}..{:?}, copied {:?}",
+            "log {}: {} lines ({} coloured), following {}, top line {} scrolled {:.0} of {:.0} px, selection {:?}..{:?}, copied {:?}",
             self.id,
             self.lines.len(),
             colored,
             self.list.is_following_tail(),
+            self.list.logical_scroll_top().item_ix,
+            f32::from(-self.list.scroll_px_offset_for_scrollbar().y),
+            f32::from(self.list.max_offset_for_scrollbar().y),
             a,
             b,
             self.last_copied
@@ -391,19 +403,35 @@ impl Focusable for LogView {
 impl Render for LogView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let id = self.id.clone();
+        // The list measures only the lines it lays out: give the others a
+        // line's height, so the thumb is sized for the whole log.
+        if std::mem::take(&mut self.unhinted) {
+            self.list = self.list.clone().with_uniform_item_height(px(LINE_HEIGHT));
+        }
+        let pager = self.list.clone();
         div()
             .id(id.clone())
             .relative()
             .size_full()
+            // Outside the list: its padding is past the end the scrollbar can
+            // drag to, so the end would never count as reached.
+            .py_1()
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key_down))
+            .capture_any_mouse_down(cx.listener(move |_, ev: &MouseDownEvent, _, cx| {
+                if ev.button == MouseButton::Left && scrollbar::page(&pager, ev.position) {
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, window, cx| this.release(window, cx)))
             .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| this.selecting = false))
             .font_family(theme::MONO_FONT)
             .text_size(px(FONT_SIZE))
             .line_height(px(LINE_HEIGHT))
             .text_color(c(theme::TEXT))
-            .child(list(self.list.clone(), cx.processor(|this, ix, _, cx| this.render_line(ix, cx))).size_full().py_1())
+            .child(list(self.list.clone(), cx.processor(|this, ix, _, cx| this.render_line(ix, cx))).size_full())
+            .child(scrollbar::vertical(&id, &self.list))
             .child(probe(id.to_string()))
     }
 }

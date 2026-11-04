@@ -27,6 +27,7 @@ mod review;
 mod run;
 mod scope;
 mod scroll;
+mod scrollbar;
 mod script;
 mod search;
 mod sessions;
