@@ -209,6 +209,7 @@ pub fn dump(app: &OrbitApp, log: &str, cx: &gpui::App) -> String {
         app.minimized.len(),
         app.ws_collapsed,
     );
+    let _ = writeln!(out, "--- shortcuts inhibit: {}", crate::terminal::inhibit::status());
     let scope_name = |s: &crate::scope::Scope| s.clone().unwrap_or_else(|| "global".into());
     let strip = app.strip_tabs(cx);
     let _ = writeln!(
@@ -289,6 +290,9 @@ pub fn dump(app: &OrbitApp, log: &str, cx: &gpui::App) -> String {
             if let Some(b) = e.cpp_banner_text() {
                 let _ = writeln!(out, "clangd banner: {b}");
             }
+            if let Some(md) = e.markdown_text(cx) {
+                let _ = write!(out, "{md}");
+            }
             let menu = state.completion_menu_state();
             if menu.open {
                 let labels: Vec<_> = menu.items.iter().take(10).map(|i| i.label.as_str()).collect();
@@ -355,9 +359,10 @@ fn dump_sessions(out: &mut String, cx: &gpui::App) {
         });
         let _ = writeln!(
             out,
-            "  {} {} [{}] {} in {} args {:?}{}{}",
+            "  {} {}{} [{}] {} in {} args {:?}{}{}",
             meta.id,
             meta.session_name,
+            meta.codename.as_ref().map(|n| format!(" (codename {n})")).unwrap_or_default(),
             meta.label,
             status,
             meta.workspace,
@@ -372,7 +377,8 @@ fn dump_sessions(out: &mut String, cx: &gpui::App) {
     }
     let _ = writeln!(out, "--- recent:");
     for r in &store.recent {
-        let _ = writeln!(out, "  {} {} {} in {}", r.agent, r.resume_id, r.session_name, r.workspace);
+        let codename = r.codename.as_ref().map(|n| format!(" (codename {n})")).unwrap_or_default();
+        let _ = writeln!(out, "  {} {} {}{codename} in {}", r.agent, r.resume_id, r.session_name, r.workspace);
     }
     crate::notifications::dump(out, cx);
 }

@@ -41,6 +41,10 @@ async fn locate(window: AnyWindowHandle, name: &str, cx: &mut AsyncApp) -> Optio
     probe::clear();
     let _ = window.update(cx, |_, window, _| window.refresh());
     sleep(cx, 120).await;
+    // A hidden or occluded window gets no frame callbacks: lay it out here.
+    if probe::bounds(name.split('@').next().unwrap_or(name)).is_none() {
+        let _ = window.update(cx, |_, window, cx| window.draw(cx).clear(cx));
+    }
     let offset = name.rsplit_once('@').and_then(|(n, at)| {
         let (x, y) = at.split_once(',')?;
         Some((n, gpui::point(px(x.parse().ok()?), px(y.parse().ok()?))))
@@ -157,6 +161,13 @@ pub async fn run(steps: &[String], window: AnyWindowHandle, app: &Entity<OrbitAp
                         sleep(cx, 20).await;
                     }
                 }
+                sleep(cx, 150).await;
+            }
+            // `mods:alt` holds Alt, `mods:` releases every modifier.
+            "mods" => {
+                let modifiers = Modifiers { alt: arg.contains("alt"), shift: arg.contains("shift"), control: arg.contains("ctrl"), ..Default::default() };
+                let event = gpui::ModifiersChangedEvent { modifiers, capslock: Default::default() };
+                send(window, PlatformInput::ModifiersChanged(event), cx);
                 sleep(cx, 150).await;
             }
             "type" => {

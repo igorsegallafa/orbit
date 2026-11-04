@@ -108,7 +108,7 @@ Search Everywhere tabs `search-tab:<Label>`, Find's `find-toggle:case|word|regex
 `panel-close`, `toast-close:<id>`, `ws:<name>`) and are dispatched with `Window::dispatch_event`:
 `click:` `rclick:` `mclick:` `dblclick:` `sclick:` (Shift) `drag:<probe>:<dx>,<dy>`, and `<probe>@x,y` for a point
 from the probe's top-left; plus `key:<spec>`,
-`type:<text>`, `shift:<n>` (bare Shift taps as modifier events; `shift:2` is a double Shift), `mouse:back|forward`, `cmd:<command id>`, `open:<path>`, `preview:<path>`,
+`type:<text>`, `shift:<n>` (bare Shift taps as modifier events; `shift:2` is a double Shift), `mods:<alt|shift|ctrl…>` (hold those modifiers; `mods:` releases them), `mouse:back|forward`, `cmd:<command id>`, `open:<path>`, `preview:<path>`,
 `toast:<text>`, `wait:<ms>` and `dump:<label>` (the full dump, into the log, at that point).
 Build/Run/Debug adds (`src/run/script.rs`) `until:<text>[@secs]` (wait until the dump contains
 `text`, e.g. `until:build Ok@300`, `until:debug: Stopped@60`) and `gutter:<line>` (click the active
@@ -355,7 +355,7 @@ Caveats found:
 | `src/lsp/` | `mod.rs` file → language and the server registry · `server.rs` JSON-RPC client and URI mapping over `orbit_core::lsp` (which picks, starts and feeds the process) · `paths.rs` URIs and root rebase |
 | `src/diff_view.rs` | diff tab over `git diff HEAD` (untracked files too), F7 navigation, and REVIEW.md notes inline in a workspace repo |
 | `src/review/` | the review tabs (`mod.rs`: tab, commands, sidebar entries, dump) · `changes.rs` changed files and notes · `prs.rs` PRs, status, checks, logs, creation · `send.rs` notes to a PR review · `notes.rs` REVIEW.md and note anchoring · `ui.rs` small widgets |
-| `src/terminal/` | terminal view over `orbit_core::pty`: VT parse, status tracking, scrollback replay (`mod.rs`), grid layout and paint (`grid.rs`), keys and mouse reports (`input.rs`), kitty graphics (`graphics.rs`, `diacritics.rs`) |
+| `src/terminal/` | terminal view over `orbit_core::pty`: VT parse, status tracking, scrollback replay (`mod.rs`), grid layout and paint (`grid.rs`), keys and mouse reports (`input.rs`), kitty graphics (`graphics.rs`, `diacritics.rs`), GNOME shortcut inhibition (`inhibit.rs`) |
 | `src/sessions/` | sessions (`mod.rs`: keys, codenames, save/restore, inbox, recent, resume, actions), agent status heuristics and hooks (`status.rs`) |
 | `src/notifications.rs` | desktop notifications: suppression, coalescing, delivery, clicks |
 | `src/file_tree.rs` | virtualized tree with background folder loads, reveal, refresh after disk changes, name prompt and file operations (`orbit_core::files`) |
@@ -507,6 +507,13 @@ the program ended) and `pty-error` events for a failed start, as before.
   agent), `NewClaudeSession`, `NewOpencodeSession`, `NewOmpSession`, `NewShellSession`,
   `ResumeLastSession`, `NextSessionNeedingInput`, `MarkInboxRead`, `ClearInbox`. They are global
   handlers, so they work from any focus; none is bound to a key yet.
+- Rename (`src/sessions/rename.rs`, App.tsx `renameTab`): *Rename Session* in the tab menu, a
+  double click on a session tab, or *Rename session* in the sidebar row's menu edits the name in
+  place (`.tab-rename`). Enter or leaving the field saves, Esc cancels, an empty name restores the
+  codename; a name another session of the scope has is refused with a toast. The name replaces
+  `sessionName` (tab, sidebar, inbox, notifications) and the codename is kept as `codename`, both
+  saved in `native-sessions.json` and carried into Recent and resume; files without the field
+  read as unnamed. Probe: `session-rename` (the field).
 
 Verified by self-test runs with `ORBIT_CONFIG_DIR` in a scratch folder, `SHELL=/bin/bash` and the
 stub agent on `PATH` (no real agent was started):
@@ -557,6 +564,54 @@ Verified with a script printing a chunked PNG (`a=T,m=1`), a PNG file (`t=f`, `c
 placement with placeholders: captures show them in place, scrolled half off the top, and gone after
 `clear`. `yes | head -n 2000000` took 0.64 s (UI timers at most 9 ms late); 20 M lines took 6.4 s
 (12 ms); `cat` of a 23 MB file 1.3 s (5 ms).
+
+### Terminal keys over GNOME shortcuts
+
+Under Toshy (macOS-style keys) the physical Ctrl key arrives in GUI apps as Super, and the
+terminal maps Super+letter back to Ctrl+letter. GNOME Shell takes some of those first: Super+V
+and Super+M (notification list), Super+A (app grid), Super+S (quick settings), Super+N, Super+H,
+Super+D, Super+L (lock), Super+O, Super+P, Super+1…9. So Ctrl+V and Ctrl+A never reached Claude Code.
+
+`src/terminal/inhibit.rs` holds a `zwp_keyboard_shortcuts_inhibitor_v1` while a terminal has
+focus, so mutter passes those keys to Orbit. It is created on GPUI's own Wayland connection: the
+window's raw handle gives the `wl_display` and `wl_surface`, `wayland-backend`'s
+`Backend::from_foreign_display` wraps that display with a separate event queue, and GPUI's loop
+reads the socket while Orbit drains its queue. No GPUI patch is needed (a second connection could
+not name GPUI's surface).
+
+- Held while a terminal's focus handle has focus; released for other tabs and while Alt is down
+  (Alt+Tab is a regular, inhibitable binding), once GNOME has granted it. An Alt+Tab that arrives
+  together with Alt (Toshy's Cmd+Tab) is swallowed; the next Tab reaches GNOME. It is not
+  released when the window loses focus: the compositor applies it only to the focused surface,
+  and GNOME's prompt takes focus, so releasing then would dismiss the prompt.
+- What mutter still handles with an inhibitor active: `restore-shortcuts` (Super+Escape, which
+  is Ctrl+Escape under Toshy; it lifts the inhibitor until the window is focused again),
+  VT switching, and the locate-pointer and ISO-next-group keys. Everything else, the Super key
+  alone and Alt+Tab included, goes to the app.
+- GNOME Shell asks once ("Allow inhibiting shortcuts") and stores the answer in the permission
+  store (`gnome` / `shortcuts-inhibitor`, keyed by `orbit.desktop`, found through
+  `StartupWMClass=Orbit`). GNOME Settings → Apps → Orbit changes it. Without a matching desktop
+  file GNOME asks every time. A one-time toast explains the prompt (`shortcuts_explained` in the
+  state file).
+- Settings → Keyboard turns it off (`terminal_shortcuts`); the default is on in GNOME Wayland
+  sessions (`XDG_SESSION_TYPE=wayland`, `XDG_CURRENT_DESKTOP` containing GNOME).
+- X11: there is no inhibit protocol; mutter's passive key grabs can only be beaten by an active
+  keyboard grab, which would also take Alt+Tab and every other key. Not done: on X11 the
+  feature is off, and the dump says "not a Wayland session".
+
+Alternatives weighed: Toshy has no drop-in config (one `toshy_config.py` with editable slices),
+so an integration would mean editing the user's file; the window title marker `Orbit · terminal`
+stays for users who add it themselves. A "fix shortcuts" button that rewrites
+`org.gnome.shell.keybindings` / `org.gnome.desktop.wm.keybindings` would change them for every
+app and needs an undo; the inhibitor is scoped to terminal focus and GNOME's own consent.
+
+Verified: the dump's `--- shortcuts inhibit:` line. Against a private headless mutter
+(`dbus-run-session`, `mutter --headless --no-x11 --wayland-display=… --virtual-monitor`, whose
+default prompt allows): `inhibit_shortcuts` sent, the compositor answered `active`; `mods:alt`
+released it, `mods:` made a new one (active again); opening Settings released it, going back
+made a new one (active); a clean exit. In the real GNOME 51 session the global is advertised and
+the request reaches GNOME Shell, which prompted once; with the stored answer `DENIED` later runs
+get no prompt and no `active` event.
 
 ## Files and search stage
 
@@ -1369,7 +1424,7 @@ Status of everything the React app did: **done**, **partial** (with what's missi
 - [ ] partial: repo briefs on the dashboard and the sidebar, re-read every 30 s (`src/lib/useRepoBriefs.ts`); no background fetch timer
 
 ### Sessions / agents
-- [ ] partial: new session (shell, Claude Code, Open Code, OMP in the current scope) and codenames (`NewSessionMenu.tsx`, `src/lib/names.ts`). No "Open in" folder/repo picker, no rename.
+- [ ] partial: new session (shell, Claude Code, Open Code, OMP in the current scope) and codenames (`NewSessionMenu.tsx`, `src/lib/names.ts`), rename. No "Open in" folder/repo picker.
 - [x] done: agent status from spinner lines and Claude hooks, in tab titles and the sidebar (`src/lib/agentStatus.ts`, backend `agent_hooks.rs`)
 - [ ] partial: resume claude/opencode sessions (Recent per scope, restart with `--resume`). No initial prompt injection (`TerminalPane.tsx`), minimized agent tabs as `App.tsx`.
 - [ ] — Live agent feed (`AgentFeed.tsx`)
@@ -1392,7 +1447,7 @@ Status of everything the React app did: **done**, **partial** (with what's missi
 - [x] done: sessions and files groups with a divider, dirty dot, `Ctrl+W` closes the active file tab (refused when unsaved; `Ctrl+Shift+W` discards)
 - [x] done: definitions in other files open as editor tabs
 - [x] done: tab context menu as the React app (Close, Keep Open, Close Other Files, Close Files to the Right, Close Saved Files, Close All Files, Close Other Tabs, Close All Tabs; unsaved files stay open with a toast), middle click closes, unsaved-changes dialog (Save / Don't Save / Cancel)
-- [ ] — rename session tabs
+- [x] done: rename session tabs (double click or the tab menu; also the sidebar row's menu)
 
 ### Editor
 - [x] done: code editor with tree-sitter highlighting (C, C++, Rust, TS/TSX, JS, JSON), line numbers, undo/redo
@@ -1402,7 +1457,7 @@ Status of everything the React app did: **done**, **partial** (with what's missi
 - [x] done: clangd setup banner (missing compile DB, CMake with presets, restart clangd)
 - [x] done: symbol search in project (`Ctrl+T`) and in file (`Ctrl+Shift+O`) (`SymbolSearch.tsx`)
 - [x] done: reload when changed on disk (unmodified editors; the cursor keeps its line)
-- [ ] — Markdown editor/preview toggle
+- [x] done: Markdown editor/preview toggle for `.md` files (`MarkdownPreview.tsx`): the file bar's Editor / Preview buttons (and *Open Markdown Preview* in the palette) swap the editor for gpui-component's GFM view in the theme's colours, with highlighted code blocks; it follows the buffer and the disk (debounced) and keeps its scroll. Web links open in the browser, relative links (`../src/x.rs#L12`, `/root/path`) open in Orbit, `#heading` scrolls; images load from the file's folder, data URLs and the web (curl). `src/editor/markdown.rs`; the dump prints `markdown:` and the rendered text, probes `md-mode:editor|preview`, `md-preview`.
 
 ### LSP
 - [x] done: client over stdio, one server per (repo, language), started on demand by `orbit_core::lsp` with the Tauri app's server choice and config (`src/lib/lsp/client.ts`, `manager.ts`)

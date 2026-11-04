@@ -104,6 +104,7 @@ fn run() {
         gpui_component::init(cx);
         theme::init(cx, script.theme.as_deref().or(saved.theme.as_deref()));
         notifications::init(saved.notifications.unwrap_or(true), cx);
+        terminal::inhibit::init(saved.terminal_shortcuts, saved.shortcuts_explained);
         // Commands and keys, per stage.
         app::init(cx);
         file_tree::bind_keys(cx);

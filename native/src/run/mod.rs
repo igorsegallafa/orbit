@@ -588,6 +588,7 @@ impl RunStore {
             workspace: target.workspace,
             label: "run".into(),
             session_name: config.name.clone(),
+            codename: None,
             cmd: Some(program.clone()),
             args: config.args.clone(),
             repo: Some(target.repo),

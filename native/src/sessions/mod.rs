@@ -7,6 +7,7 @@
 //! turn or need the user land in the inbox.
 //!
 //! The actions below are the ids a command palette or keymap can bind.
+pub mod rename;
 pub mod status;
 
 use crate::app::{OrbitApp, Tab, TabKind};
@@ -56,7 +57,11 @@ pub struct SessionMeta {
     pub workspace: String,
     /// What was launched: "shell" | "claude" | "opencode" | "omp".
     pub label: String,
+    /// What the session is called: its codename, or the name the user gave it.
     pub session_name: String,
+    /// The generated codename while a user name is set (a cleared name restores it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codename: Option<String>,
     /// None: the user's shell.
     pub cmd: Option<String>,
     #[serde(default)]
@@ -82,6 +87,8 @@ pub struct RecentSession {
     #[serde(default)]
     pub repo: Option<String>,
     pub session_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codename: Option<String>,
     pub ended_at: u64,
 }
 
@@ -193,6 +200,18 @@ pub fn codename<'a>(taken: impl IntoIterator<Item = &'a str>) -> String {
     format!("session-{}", now_ms() % 10000)
 }
 
+/// Names the session `name`, keeping its codename aside; empty (or the
+/// codename itself) restores the codename.
+fn set_name(meta: &mut SessionMeta, name: &str) {
+    let codename = meta.codename.take().unwrap_or_else(|| meta.session_name.clone());
+    if name.is_empty() || name == codename {
+        meta.session_name = codename;
+    } else {
+        meta.session_name = name.to_string();
+        meta.codename = Some(codename);
+    }
+}
+
 /// Human label for a scope (`scopeLabel` in `src/lib/folderScope.ts`).
 pub fn scope_label(scope: &str) -> String {
     match scope.strip_prefix("dir:") {
@@ -263,6 +282,38 @@ impl SessionStore {
     pub fn clear_inbox(&mut self, cx: &mut Context<Self>) {
         self.inbox.clear();
         cx.notify();
+    }
+
+    /// Renames open session `key`; an empty name restores its codename.
+    pub fn rename(&mut self, key: &str, name: &str, cx: &mut Context<Self>) -> Result<(), String> {
+        let name = name.trim();
+        let Some(ix) = self.open.iter().position(|(m, _)| m.id == key) else { return Ok(()) };
+        let ws = self.open[ix].0.workspace.clone();
+        if !name.is_empty() && self.open.iter().any(|(m, _)| m.id != key && m.workspace == ws && m.session_name == name) {
+            return Err(format!("a session named '{name}' already exists in this workspace"));
+        }
+        let (meta, view) = &mut self.open[ix];
+        let old = meta.session_name.clone();
+        set_name(meta, name);
+        if meta.session_name == old {
+            return Ok(());
+        }
+        let meta = meta.clone();
+        if let Some(view) = view.upgrade() {
+            view.update(cx, |v, cx| {
+                v.meta = meta.clone();
+                cx.notify();
+            });
+        }
+        let prefix = format!("{old} ");
+        for i in self.inbox.iter_mut().filter(|i| i.key == key) {
+            if let Some(rest) = i.title.strip_prefix(&prefix) {
+                i.title = format!("{} {rest}", meta.session_name);
+            }
+        }
+        self.save();
+        cx.notify();
+        Ok(())
     }
 
     fn add_recent(&mut self, entry: RecentSession, cx: &mut Context<Self>) {
@@ -346,6 +397,7 @@ fn with_app(cx: &mut App, f: impl FnOnce(&mut OrbitApp, &mut Window, &mut Contex
 }
 
 fn register_actions(cx: &mut App) {
+    rename::bind_keys(cx);
     cx.on_action(|_: &NewAgentSession, cx| {
         let bin = orbit_core::config::Config::load().map(|c| c.ai.agent_bin()).unwrap_or_else(|_| "claude".into());
         with_app(cx, move |a, w, cx| new_session(a, Some(&bin), None, w, cx));
@@ -391,6 +443,7 @@ pub fn new_session_in(app: &mut OrbitApp, scope: String, cmd: Option<&str>, inpu
         workspace: scope,
         label,
         session_name: codename(taken.iter().map(String::as_str)),
+        codename: None,
         cmd: cmd.map(str::to_string),
         // A fixed id makes a claude session resumable.
         args: agent_session_id.iter().flat_map(|id| ["--session-id".to_string(), id.clone()]).collect(),
@@ -434,6 +487,7 @@ pub fn new_prompted_session(
         workspace: ws.to_string(),
         label: agent.to_string(),
         session_name: name.map_or_else(|| codename(taken.iter().map(String::as_str)), str::to_string),
+        codename: None,
         cmd: Some(agent.to_string()),
         args: args.clone(),
         repo: None,
@@ -451,6 +505,7 @@ pub fn new_shell_in(app: &mut OrbitApp, dir: &std::path::Path, window: &mut Wind
         workspace: scope(app),
         label: "shell".into(),
         session_name: codename(taken.iter().map(String::as_str)),
+        codename: None,
         cmd: None,
         args: vec![],
         repo: None,
@@ -570,6 +625,7 @@ pub fn closed(view: &Entity<TerminalView>, cx: &mut App) {
         workspace: m.workspace.clone(),
         repo: m.repo.clone(),
         session_name: m.session_name.clone(),
+        codename: m.codename.clone(),
         ended_at: now_ms(),
     };
     match meta.cmd.as_deref() {
@@ -608,6 +664,7 @@ pub fn resume(app: &mut OrbitApp, r: &RecentSession, window: &mut Window, cx: &m
         workspace: r.workspace.clone(),
         label: r.agent.clone(),
         session_name: r.session_name.clone(),
+        codename: r.codename.clone(),
         cmd: Some(r.agent.clone()),
         args: args.clone(),
         repo: r.repo.clone(),
@@ -725,5 +782,60 @@ mod tests {
         assert_eq!(saved.sessions[0].session_name, "swift-otter");
         assert_eq!(saved.sessions[0].agent_session_id.as_deref(), Some("x"));
         assert!(saved.sessions[0].repo.is_none());
+    }
+
+    fn meta(name: &str) -> SessionMeta {
+        SessionMeta {
+            id: "tm:1-abcde".into(),
+            workspace: "dir:~".into(),
+            label: "claude".into(),
+            session_name: name.into(),
+            codename: None,
+            cmd: Some("claude".into()),
+            args: vec![],
+            repo: None,
+            agent_session_id: Some("x".into()),
+            cwd: None,
+        }
+    }
+
+    #[test]
+    fn renaming_keeps_the_codename_aside() {
+        let mut m = meta("swift-otter");
+        set_name(&mut m, "auth fix");
+        assert_eq!((m.session_name.as_str(), m.codename.as_deref()), ("auth fix", Some("swift-otter")));
+        set_name(&mut m, "login bug");
+        assert_eq!((m.session_name.as_str(), m.codename.as_deref()), ("login bug", Some("swift-otter")));
+        set_name(&mut m, "");
+        assert_eq!((m.session_name.as_str(), m.codename.as_deref()), ("swift-otter", None));
+        set_name(&mut m, "x");
+        set_name(&mut m, "swift-otter");
+        assert_eq!((m.session_name.as_str(), m.codename.as_deref()), ("swift-otter", None));
+    }
+
+    #[test]
+    fn names_persist_and_old_state_has_none() {
+        let mut m = meta("swift-otter");
+        set_name(&mut m, "auth fix");
+        let recent = RecentSession {
+            resume_id: "x".into(),
+            agent: "claude".into(),
+            workspace: "dir:~".into(),
+            repo: None,
+            session_name: m.session_name.clone(),
+            codename: m.codename.clone(),
+            ended_at: 1,
+        };
+        let json = serde_json::to_string(&Saved { sessions: vec![m.clone()], recent: vec![recent.clone()] }).unwrap();
+        assert!(json.contains(r#""sessionName":"auth fix""#) && json.contains(r#""codename":"swift-otter""#), "{json}");
+        let back: Saved = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.sessions, vec![m]);
+        assert_eq!(back.recent, vec![recent]);
+        // Unnamed sessions don't write the field; old files without it read as unnamed.
+        let plain = serde_json::to_string(&meta("swift-otter")).unwrap();
+        assert!(!plain.contains("codename"), "{plain}");
+        let old = r#"{"sessions":[],"recent":[{"resumeId":"x","agent":"claude","workspace":"dir:~","sessionName":"swift-otter","endedAt":1}]}"#;
+        let old: Saved = serde_json::from_str(old).unwrap();
+        assert_eq!((old.recent[0].session_name.as_str(), old.recent[0].codename.as_ref()), ("swift-otter", None));
     }
 }
