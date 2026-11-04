@@ -18,6 +18,12 @@ export function fuzzyScore(s: string, q: string): number {
 }
 
 /** File paths ranked for a query: the file name counts more than its folders. */
+/** "game" should find `Game.cpp` before `gameserver.proto`. */
+function nameBonus(name: string, q: string): number {
+  if (name.split(".")[0] === q || name === q) return 500;
+  return name.startsWith(q) ? 100 : 0;
+}
+
 export function rankPaths<T>(items: T[], path: (t: T) => string, query: string, limit: number): T[] {
   const q = query.trim().toLowerCase();
   if (!q) return items.slice(0, limit);
@@ -26,10 +32,11 @@ export function rankPaths<T>(items: T[], path: (t: T) => string, query: string, 
       const p = path(it).toLowerCase();
       const name = p.slice(p.lastIndexOf("/") + 1);
       const s = fuzzyScore(p, q);
-      return { it, score: s && s + fuzzyScore(name, q) * 2 };
+      return { it, len: name.length, score: s && s + fuzzyScore(name, q) * 2 + nameBonus(name, q) };
     })
     .filter((r) => r.score > 0)
-    .sort((a, b) => b.score - a.score)
+    // Best score first; among equals, the shorter name.
+    .sort((a, b) => b.score - a.score || a.len - b.len)
     .slice(0, limit)
     .map((r) => r.it);
 }
