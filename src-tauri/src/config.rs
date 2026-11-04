@@ -179,6 +179,9 @@ pub struct AiSettings {
     /// Unset: claude uses Haiku, other agents use `model`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fast_model: Option<String>,
+    /// Claude sessions opened in Orbit start with `--remote-control`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub remote_control: bool,
 }
 
 fn default_agent() -> String {
@@ -213,6 +216,7 @@ impl Default for AiSettings {
             agent: default_agent(),
             model: default_model(),
             fast_model: None,
+            remote_control: false,
         }
     }
 }

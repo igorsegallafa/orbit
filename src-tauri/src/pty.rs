@@ -130,6 +130,9 @@ pub async fn pty_spawn(
         // Claude sessions report their lifecycle back to Orbit via hooks.
         if let (Some(c), Some(k)) = (&cmd, &key) {
             if is_claude(c) {
+                if crate::config::Config::load().is_ok_and(|cfg| cfg.ai.remote_control) {
+                    cmd_builder.arg("--remote-control");
+                }
                 for a in crate::agent_hooks::claude_args(k) {
                     cmd_builder.arg(a);
                 }

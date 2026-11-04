@@ -54,7 +54,7 @@ export function AiSection({ onError }: Props) {
         : agent === "omp"
           ? "aihub/glm-5.3"
           : "claude-sonnet-5-5";
-    const next = { agent, model: first, fast_model: null };
+    const next = { ...ai, agent, model: first, fast_model: null };
     setAi(next);
     invoke("set_ai_settings", { ai: next }).catch((e) => onError(String(e)));
   };
@@ -69,6 +69,13 @@ export function AiSection({ onError }: Props) {
   const changeFastModel = (model: string) => {
     if (!ai) return;
     const next = { ...ai, fast_model: model || null };
+    setAi(next);
+    invoke("set_ai_settings", { ai: next }).catch((e) => onError(String(e)));
+  };
+
+  const changeRemoteControl = (remote_control: boolean) => {
+    if (!ai) return;
+    const next = { ...ai, remote_control };
     setAi(next);
     invoke("set_ai_settings", { ai: next }).catch((e) => onError(String(e)));
   };
@@ -159,6 +166,22 @@ export function AiSection({ onError }: Props) {
             )}
           </div>
         </div>
+
+        {ai.agent === "claude" && (
+          <div className="settings-row">
+            <div className="settings-row-text">
+              <strong>Remote Control</strong>
+              <span>Claude sessions opened in Orbit can be continued from claude.ai or the Claude app. Applies to sessions started after the change.</span>
+            </div>
+            <span className="mode-toggle seg">
+              {[false, true].map((on) => (
+                <button key={String(on)} className={`mode-btn ${!!ai.remote_control === on ? "mode-active" : ""}`} onClick={() => changeRemoteControl(on)}>
+                  {on ? "On" : "Off"}
+                </button>
+              ))}
+            </span>
+          </div>
+        )}
 
         <div className="settings-row">
           <div className="settings-row-text">

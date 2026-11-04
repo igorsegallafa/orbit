@@ -72,6 +72,8 @@ export interface AiSettings {
   model: string;
   /** Model for commit messages and PR drafts; unset = agent default. */
   fast_model?: string | null;
+  /** Claude sessions opened in Orbit start with Remote Control on. */
+  remote_control?: boolean;
 }
 
 export interface GrillOption {
