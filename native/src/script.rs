@@ -110,7 +110,7 @@ impl Script {
                 "--exit-after" => s.exit_after = args.next().and_then(|v| v.parse().ok()),
                 "--dump" => s.dump = args.next().map(PathBuf::from),
                 "--state" => s.state = args.next().map(PathBuf::from),
-                "--do" => s.shell_steps.extend(args.next().unwrap_or_default().split(';').map(|x| x.trim().to_string()).filter(|x| !x.is_empty())),
+                "--do" => s.shell_steps.extend(split_steps(&args.next().unwrap_or_default())),
                 "--window-size" => {
                     s.window_size = args.next().and_then(|v| {
                         let (w, h) = v.split_once('x')?;
@@ -180,6 +180,11 @@ async fn wait_until(cx: &mut AsyncApp, secs: u64, mut cond: impl FnMut(&mut Asyn
         sleep(cx, 50).await;
     }
     None
+}
+
+/// `--do`'s steps: `;`-separated, `\;` for a `;` inside one (`type:A=1\;B=2`).
+fn split_steps(raw: &str) -> Vec<String> {
+    raw.replace("\\;", "\u{0}").split(';').map(|x| x.trim().replace('\u{0}', ";")).filter(|x| !x.is_empty()).collect()
 }
 
 /// The state after the script, as text.

@@ -45,7 +45,7 @@ project symbols, `Ctrl+G` go to line, `F8`/`Shift+F8` next/previous problem, `Ct
 completion (also as you type), `Ctrl+Shift+Space` parameter hints, `Ctrl+.`/`Alt+Enter` quick
 fixes, `F2` rename, `Ctrl+Shift+I`/`Shift+Alt+F` format · in a terminal `Ctrl+Shift+C`/`Ctrl+Shift+V` copy/paste, drag to select (double click: word,
 triple: line; `Shift` overrides an app's mouse mode), middle click pastes the primary selection.
-Build/Run/Debug: `Ctrl+F9` build, `Shift+F10` run, `Shift+F9` debug, `Ctrl+F2` stop, `Ctrl+F8`
+Build/Run/Debug: `Ctrl+F9` build, `Ctrl+Shift+F9` build all, `Shift+F10` run, `Shift+F9` debug, `Ctrl+F2` stop, `Ctrl+F8`
 toggle breakpoint, while paused `F9` resume, `F8` step over, `F7` step into, `Shift+F8` step out.
 Tabs: right click for the tab menu, middle click closes, double click keeps a preview tab.
 File tree: arrows, `Home`/`End`, `Enter` opens, `F2` rename, `Delete` to the Trash, right click for
@@ -115,7 +115,11 @@ Build/Run/Debug adds (`src/run/script.rs`) `until:<text>[@secs]` (wait until the
 editor's breakpoint strip at that line); its probes are `run-config`, `run-preset`, `run-build`,
 `run-run`, `run-debug`, `run-stop`, `panel-build|run|debug|problems`, `panel-clear`, `problem:<ix>`,
 `dbg-resume|pause|over|into|out|stop`, `dbg-eval` (the console input), `frame:<ix>`, `thread:<id>`,
-`var:<name>`. The git and workspace pages' probes are listed in *Stage: git and workspace flows*.
+`var:<name>`; `run-build-menu` (the build chevron), `run-build-split`, and in Edit Configurations
+`rc-item:<name>`, `rc-input:name|program|args|cwd|build|env-key:<n>|env-value:<n>`, `rc-target`,
+`rc-add|dup|remove`, `rc-env-add`, `rc-env-remove:<n>`, `rc-shared`, `rc-build-first`,
+`rc-cancel|apply|ok`. `move:<probe>` hovers a probe, `paste:<text>` inserts text in one go as a
+paste does, and `\;` puts a `;` inside a `--do` step. The git and workspace pages' probes are listed in *Stage: git and workspace flows*.
 
 ## Commands and keymap (the extension point)
 
@@ -805,6 +809,44 @@ not run (it needs GitHub).
   (`.orbit/run.json` + `run.local.json`), the CMake preset, Build `Ctrl+F9`, Run `Shift+F10`, Debug
   `Shift+F9`, Stop `Ctrl+F2` (cancels the build, Ctrl+C to the program, or ends the debug session).
   The choice is remembered per workspace in `<config dir>/native-run.json`, with the breakpoints.
+  The list groups Project (`run.json`), Local (`run.local.json`) and CMake targets, filters as you
+  type once it has more than 10 entries, and ends with **Edit Configurations…**.
+- **Discovered CMake targets** (`orbit_core::cmake_api`), as Rider lists them: every EXECUTABLE
+  target of the repo's build folder (the chosen or `${auto}` preset's) is a configuration, without
+  any `run.json`. Orbit writes the File API query `<buildDir>/.cmake/api/v1/query/client-orbit/query.json`
+  and reads `reply/index-*.json` → `codemodel-v2` → each target's type, name and artifact. Replies
+  are cached per build folder until a newer reply index appears; a configured folder with a missing
+  or stale reply (older than `CMakeCache.txt`) is configured again once, a CMake repo with nothing
+  saved and never configured is configured on load (Rider loads the project on open), and every
+  build reloads the list. Targets CMake generates and those under a `_deps` folder (FetchContent)
+  are left out. A discovered configuration runs the artifact in the artifact's folder (Rider's
+  default cwd), with no env. Saved configurations come first; one with the same name, or a CMake
+  one with the same target, replaces the discovered entry, and a saved CMake config with an empty
+  `program` or `cwd` gets the target's artifact and folder. Libraries and utilities are buildable
+  (Edit Configurations' Target list) but don't run.
+- **Edit Configurations** (`src/run/configs.rs`, also `run.editConfigurations` in the palette): a
+  Rider-like modal over the window (`git::scrim`, Esc or Cancel close it). Left: all configurations
+  grouped like the list, with add, duplicate and remove (saved ones only). Right: Name, Target (a
+  menu of the build's targets, executables first), Executable (empty: the target's artifact),
+  Program arguments (double quotes group), Working directory (empty: the artifact's folder;
+  Browse… opens the folder picker), Environment variables (name/value rows, add/remove; pasting
+  `K=V;K2=V2` into a name splits it into rows), **Store as project file** and **Before launch:
+  Build** (on by default; off, Run and Debug start the last build). OK / Apply save what changed
+  through `run::save_config`: checked → `.orbit/run.json` (shared, committed), unchecked (the
+  default, as in Rider) → `.orbit/run.local.json`, and the other file loses the entry. Editing a
+  discovered target saves an override. Saving keeps the entry's other fields and key order, the
+  file's line endings (aether-engine's files are CRLF), indent and final newline. Values expand
+  `${repo}`, `${buildDir}`, `${preset}`, `${exe}`, `$HOME`/`${VAR}` and a leading `~`, for Run (the
+  PTY's cwd and env) and Debug (the DAP launch's `cwd`, and `env` as a dict for gdb, a list for
+  lldb-dap). **`run.local.json` should be gitignored** in each repo (`.orbit/run.local.json`); Orbit
+  doesn't edit repos' `.gitignore`.
+- **Build All** (`run.buildAll`, `Ctrl+Shift+F9`): the build button is a split button — the hammer
+  builds the configuration's target (`Ctrl+F9`); its chevron half, or a right click on the hammer,
+  opens Build <target> / Build All. Build All runs `cmake --build <buildDir>` with no `--target`
+  (the `all` target: for aether-engine game, gameserver, shared, modelio and the tests), into the
+  same output panel, with Problems and Stop. Rider's Build Solution is `Ctrl+F9` and CLion's Build
+  Project `Ctrl+F9`; with `Ctrl+F9` taken by the configuration's build, Build All gets the Shift
+  variant.
 - **Bottom panel** (`layout.panel_height`, resizable, saved): Build output (virtualized, follows the
   end unless scrolled up; compiler lines are links), Run (the program on `orbit_core::pty` with the
   configuration's cwd, args and env), Problems (grouped by file, errors first), Debug. A build opens
@@ -845,6 +887,18 @@ tiny CMake project reached through a symlinked workspace repo:
   game` (`Build Ok`, 0.8 s, up to date); cancelling a running build gave `Build Cancelled`. Debugging
   the game was not completed: another build of the same tree was running at the same time and the
   link failed (`ld terminated with signal 7`), and the debug session correctly did not start.
+- Run configurations, discovered targets, Edit Configurations and Build All (self-tests in a
+  scratch `ORBIT_WORKSPACE_ROOT`): aether-engine lists `game` (Project, from `run.json`, keeping
+  its `client-runtime` cwd) then the discovered `game_test`, `gameserver`, `gameserver_test`,
+  `modelio_test`, `shaders`, `shared_test` (68 targets in the build folder, 7 executables; the
+  Diligent/SPIRV `_deps` ones are left out). On a scratch copy of its `.orbit` and presets, the
+  dialog added `__GL_SHADER_DISK_CACHE_PATH=$HOME/.cache/nvidia-aether-dev` to `game` (saved in
+  `run.json`, still CRLF, other fields in place) and a cwd to `gameserver` (a new CRLF
+  `run.local.json`); the real repo's files were untouched. A tiny CMake project (2 executables + 1
+  library, no `run.json`) was configured on load, its targets listed, Build All built `greet`,
+  `hello` and `tool`; the dialog set `hello`'s cwd, args and pasted `K=V;K2=V2` env, Run printed
+  `cwd=…/rundir cache=/home/igors/.cache/nvidia-aether-dev mode=from-orbit`, and Debug stopped at a
+  breakpoint with locals `cwd`, `cache` and `mode` showing the same values.
 
 ## Stage: git and workspace flows
 
@@ -1517,6 +1571,7 @@ Status of everything the React app did: **done**, **partial** (with what's missi
 ### Run / Build / Debug
 - [x] done: run widget with configurations (all repos of the workspace) and CMake presets, remembered per workspace, `Ctrl+F9`/`Shift+F10`/`Shift+F9`/`Ctrl+F2` (`RunWidget.tsx`, `src/lib/runStore.ts`)
 - [x] done: bottom panel: build output with `file:line` links, run terminal (cwd, args, env), problems (GCC/Clang/MSVC/ld, also as editor diagnostics with source `build`), debug (`BottomPanel.tsx`, `src/lib/problems.ts`)
+- [x] done: discovered CMake executables (File API), Edit Configurations (cwd, env, args, project/local file), Build All split button (`Ctrl+Shift+F9`)
 - [ ] — Multi-repo build modal (`BuildModal.tsx`)
 - [x] done: DAP debugger: session (gdb `-i dap` / lldb-dap), gutter breakpoints (click, `Ctrl+F8`, persisted), paused line, threads, call stack, lazy variables, console with evaluate, `F9`/`F8`/`F7`/`Shift+F8`, symlink path mapping (`src/lib/dap/*`, `DebugView.tsx`). lldb-dap is wired but untested (not installed here).
 

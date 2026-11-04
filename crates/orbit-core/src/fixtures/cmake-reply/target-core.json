@@ -1,0 +1,1 @@
+{ "name": "core", "type": "STATIC_LIBRARY", "paths": { "source": "src/core", "build": "src/core" }, "artifacts": [ { "path": "src/core/libcore.a" } ] }

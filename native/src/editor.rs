@@ -1386,7 +1386,12 @@ impl EditorTab {
     fn render_cpp_banner(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let b = self.cpp.as_ref().filter(|b| !b.dismissed)?;
         let repo = self.repo.as_ref().map(|(k, _)| k.repo.clone()).unwrap_or_default();
-        let button = |id: &'static str, label: String| {
+        let button = |id: &'static str, label: String, primary: bool| {
+            let (bg, hover, fg) = if primary {
+                (c(theme::ACCENT), c(theme::ACCENT_HOVER), c(theme::ON_ACCENT))
+            } else {
+                (c(theme::BG), c(theme::PANEL_RAISED), c(theme::TEXT))
+            };
             div()
                 .id(id)
                 .flex_none()
@@ -1398,14 +1403,14 @@ impl EditorTab {
                 .cursor_pointer()
                 .text_size(px(11.5))
                 .font_weight(gpui::FontWeight::MEDIUM)
-                .bg(c(theme::ACCENT))
-                .text_color(c(theme::ON_ACCENT))
-                .hover(|s| s.bg(c(theme::ACCENT_HOVER)))
+                .bg(bg)
+                .text_color(fg)
+                .hover(move |s| s.bg(hover))
                 .child(label)
         };
         let action: gpui::AnyElement = match &b.run {
             CmakeRun::Running => div().text_color(c(theme::TEXT_FAINT)).child("Running CMake…").into_any_element(),
-            CmakeRun::Done => button("cpp-restart", "Restart clangd".into())
+            CmakeRun::Done => button("cpp-restart", "Restart clangd".into(), true)
                 .on_click(cx.listener(|this, _, _, cx| this.restart(cx)))
                 .into_any_element(),
             run if b.setup.cmake && (b.setup.cmake_installed || b.setup.vcvars.is_some()) => {
@@ -1416,12 +1421,9 @@ impl EditorTab {
                     .items_center()
                     .when_some(preset.clone(), |d, p| {
                         d.child(
-                            button("cpp-preset", format!("{p} ▾"))
-                                .bg(c(theme::BG))
-                                .text_color(c(theme::TEXT))
+                            button("cpp-preset", format!("{p} ▾"), false)
                                 .border_1()
                                 .border_color(c(theme::BORDER_STRONG))
-                                .hover(|s| s.bg(c(theme::PANEL_RAISED)))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     if let Some(b) = &mut this.cpp {
                                         b.preset = (b.preset + 1) % b.setup.presets.len().max(1);
@@ -1431,7 +1433,7 @@ impl EditorTab {
                         )
                     })
                     .child(
-                        button("cpp-generate", "Generate with CMake".into())
+                        button("cpp-generate", "Generate with CMake".into(), true)
                             .on_click(cx.listener(|this, _, window, cx| this.generate_compile_commands(&GenerateCompileCommands, window, cx))),
                     )
                     .when_some(if let CmakeRun::Failed(e) = run { Some(e.clone()) } else { None }, |d, e| {

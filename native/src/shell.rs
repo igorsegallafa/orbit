@@ -1489,6 +1489,7 @@ impl Render for OrbitApp {
                     }),
             )
             .when(focus && !on_settings, |d| d.child(self.render_status(cx)))
+            .children(crate::run::render_dialog(window, cx))
             .children(self.render_drag_layer(cx))
             .children(over(self.render_toasts(cx)))
             .children(over(self.render_palette(cx)))

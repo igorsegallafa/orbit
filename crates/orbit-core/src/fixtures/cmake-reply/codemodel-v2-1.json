@@ -1,0 +1,17 @@
+{
+  "kind": "codemodel",
+  "paths": { "source": "/src/demo", "build": "/src/demo/build/dev" },
+  "configurations": [
+    {
+      "name": "Debug",
+      "directories": [ { "source": ".", "build": "." } ],
+      "targets": [
+        { "name": "hello", "id": "hello::@1", "directoryIndex": 0, "projectIndex": 0, "jsonFile": "target-hello.json" },
+        { "name": "tool", "id": "tool::@1", "directoryIndex": 0, "projectIndex": 0, "jsonFile": "target-tool.json" },
+        { "name": "core", "id": "core::@1", "directoryIndex": 0, "projectIndex": 0, "jsonFile": "target-core.json" },
+        { "name": "dep_demo", "id": "dep_demo::@2", "directoryIndex": 0, "projectIndex": 0, "jsonFile": "target-dep.json" },
+        { "name": "ALL_BUILD", "id": "ALL_BUILD::@1", "directoryIndex": 0, "projectIndex": 0, "jsonFile": "target-all.json" }
+      ]
+    }
+  ]
+}

@@ -4,6 +4,8 @@
 //! |---|---|
 //! | `until:<text>[@secs]` | waits (default 60 s) until the state dump contains `text` |
 //! | `gutter:<line>` | clicks the active editor's breakpoint strip at a 1-based line |
+//! | `move:<probe>` | moves the mouse over a probe's centre (hover) |
+//! | `paste:<text>` | inserts `text` into the focused input at once, as a paste does |
 use crate::app::OrbitApp;
 use gpui::{AnyWindowHandle, AsyncApp, Entity, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, PlatformInput};
 use std::fmt::Write as _;
@@ -30,6 +32,30 @@ pub async fn step(verb: &str, arg: &str, window: AnyWindowHandle, app: &Entity<O
                 }
                 cx.background_executor().timer(Duration::from_millis(200)).await;
             }
+            true
+        }
+        "move" => {
+            // The mouse over a probe's centre (hover states for captures).
+            let Some(b) = crate::probe::bounds(arg) else {
+                let _ = writeln!(log, "  no probe {arg}");
+                return true;
+            };
+            let position = b.center();
+            let ev = PlatformInput::MouseMove(gpui::MouseMoveEvent { position, pressed_button: None, modifiers: Modifiers::default() });
+            let _ = window.update(cx, |_, window, cx| {
+                window.dispatch_event(ev, cx);
+                window.refresh();
+            });
+            cx.background_executor().timer(Duration::from_millis(300)).await;
+            let _ = window.update(cx, |_, window, _| window.refresh());
+            true
+        }
+        "paste" => {
+            // One keystroke carrying the whole text: the focused input gets it
+            // in one insert, as from a paste (without the clipboard).
+            let ks = gpui::Keystroke { key: "v".into(), key_char: Some(arg.to_string()), ..Default::default() };
+            let _ = window.update(cx, |_, window, cx| window.dispatch_keystroke(ks, cx));
+            cx.background_executor().timer(Duration::from_millis(200)).await;
             true
         }
         "gutter" => {

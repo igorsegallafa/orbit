@@ -3,6 +3,7 @@
 //! `orbit_core::run`), the current build with its output and problems, and
 //! the running program's terminal. One build and one run at a time, as in
 //! Rider. The title bar widget is `widget.rs`, the bottom panel `panel.rs`.
+pub mod configs;
 pub mod problems;
 pub mod saved;
 pub mod script;
@@ -42,6 +43,10 @@ pub struct Setup {
     pub linked_root: PathBuf,
     pub configs: Vec<ResolvedRun>,
     pub presets: Vec<String>,
+    /// The repo's build folder (the chosen or automatic preset's): Build All builds it.
+    pub build_dir: Option<String>,
+    /// Its CMake targets (Edit Configurations' Target list).
+    pub targets: Vec<orbit_core::cmake_api::CmakeTarget>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -76,6 +81,8 @@ pub struct BuildProblem {
 pub struct Build {
     pub key: String,
     pub target: RunTarget,
+    /// Build All: every target of the repo's build folder.
+    pub all: bool,
     pub status: BuildStatus,
     pub lines: Vec<OutputLine>,
     pub problems: Vec<BuildProblem>,
@@ -114,6 +121,8 @@ pub struct RunStore {
     pub run: Option<RunProc>,
     pub view: PanelView,
     pub panel: Option<Entity<panel::Panel>>,
+    /// Edit Configurations, while open.
+    pub dialog: Option<Entity<configs::RunConfigs>>,
     _load: Task<()>,
     _build: Task<()>,
     _run_after: Task<()>,
@@ -152,6 +161,7 @@ pub fn init(cx: &mut App) {
         run: None,
         view: PanelView::Build,
         panel: None,
+        dialog: None,
         _load: Task::ready(()),
         _build: Task::ready(()),
         _run_after: Task::ready(()),
@@ -171,6 +181,21 @@ pub fn init(cx: &mut App) {
                 s.start_build(cx);
             });
         }),
+        Command::new("run.buildAll", "Build All")
+            .keys(["ctrl-shift-f9"])
+            .when(move |a, cx| ready(a, cx) && store(cx).read(cx).can_build_all())
+            .run(|a, _, cx| {
+                a.layout.panel_open = true;
+                store(cx).update(cx, |s, cx| {
+                    s.start_build_all(cx);
+                });
+            }),
+        Command::new("run.editConfigurations", "Edit Run Configurations…")
+            .when(|_, cx| !store(cx).read(cx).setups.is_empty())
+            .run(|_, window, cx| {
+                open_configurations(window, cx);
+                cx.notify();
+            }),
         Command::new("run.run", "Run").keys(["shift-f10"]).when(move |a, cx| ready(a, cx) && has_program(cx)).run(|a, _, cx| {
             a.layout.panel_open = true;
             store(cx).update(cx, |s, cx| s.build_and_run(cx));
@@ -242,6 +267,26 @@ pub fn attach(app: &mut OrbitApp, window: &mut Window, cx: &mut Context<OrbitApp
     app.titlebar_items.push(widget.into());
     let panel = cx.new(|cx| panel::Panel::new(weak, window, cx));
     store(cx).update(cx, |s, _| s.panel = Some(panel));
+}
+
+/// Opens Edit Configurations on the selected configuration.
+pub fn open_configurations(window: &mut Window, cx: &mut App) {
+    let s = store(cx);
+    if s.read(cx).dialog.is_some() {
+        return;
+    }
+    let (app, target) = (s.read(cx).app.clone(), s.read(cx).target.clone());
+    let dialog = cx.new(|cx| configs::RunConfigs::new(app, target, window, cx));
+    s.update(cx, |s, cx| {
+        s.dialog = Some(dialog);
+        cx.notify();
+    });
+}
+
+/// Edit Configurations over the window, while open (the shell draws it).
+pub fn render_dialog(window: &Window, cx: &App) -> Option<AnyElement> {
+    let dialog = store(cx).read(cx).dialog.clone()?;
+    Some(crate::git::scrim(dialog.into_any_element(), window))
 }
 
 /// The bottom panel (`BottomPanel.tsx`), in the shell's slot.
@@ -349,6 +394,14 @@ impl RunStore {
         self.run.as_ref().is_some_and(|r| !r.exited)
     }
 
+    pub fn can_build_all(&self) -> bool {
+        self.target.as_ref().and_then(|t| self.setup(&t.repo)).is_some_and(|s| s.build_dir.is_some())
+    }
+
+    pub fn workspace_name(&self) -> Option<String> {
+        self.loaded_for.as_ref().map(|l| l.0.clone())
+    }
+
     pub fn setup(&self, repo: &str) -> Option<&Setup> {
         self.setups.iter().find(|(r, _)| r == repo).map(|(_, s)| s)
     }
@@ -411,6 +464,8 @@ impl RunStore {
                             linked_root: s.linked_root.into(),
                             configs: s.configs,
                             presets: s.presets,
+                            build_dir: s.build_dir,
+                            targets: s.targets,
                         };
                         (repo.clone(), setup)
                     })
@@ -435,6 +490,22 @@ impl RunStore {
         });
     }
 
+    /// Edit Configurations saved: reload, following a renamed selection
+    /// (`renamed`: repo, old name, new name).
+    pub fn configs_saved(&mut self, renamed: Option<(String, String, String)>, cx: &mut Context<Self>) {
+        let mut target = self.target.clone();
+        if let (Some(t), Some((repo, old, new))) = (target.as_mut(), renamed) {
+            if t.repo == repo && t.name == old {
+                t.name = new;
+                let saved = t.clone();
+                saved::update(|s| {
+                    s.selection.insert(saved.workspace.clone(), saved);
+                });
+            }
+        }
+        self.reload(target, cx);
+    }
+
     /// Picks a configuration (and preset) and remembers it for the workspace.
     pub fn choose(&mut self, next: RunTarget, cx: &mut Context<Self>) {
         let saved = next.clone();
@@ -454,11 +525,33 @@ impl RunStore {
 
     /// Builds the selected configuration; the receiver gets whether it succeeded.
     pub fn start_build(&mut self, cx: &mut Context<Self>) -> Option<oneshot::Receiver<bool>> {
+        self.build_inner(false, cx)
+    }
+
+    /// Builds every target of the selected configuration's repo.
+    pub fn start_build_all(&mut self, cx: &mut Context<Self>) -> Option<oneshot::Receiver<bool>> {
+        self.build_inner(true, cx)
+    }
+
+    /// Before Run or Debug: the build, or a ready answer when the
+    /// configuration doesn't build first ("Before launch: Build" off).
+    pub fn prepare_launch(&mut self, cx: &mut Context<Self>) -> Option<oneshot::Receiver<bool>> {
+        let (_, config, _) = self.selected()?;
+        if config.build_before_launch {
+            return self.start_build(cx);
+        }
+        let (tx, rx) = oneshot::channel();
+        let _ = tx.send(true);
+        Some(rx)
+    }
+
+    fn build_inner(&mut self, all: bool, cx: &mut Context<Self>) -> Option<oneshot::Receiver<bool>> {
         if self.is_building() {
             return None;
         }
         let (target, config, (root, linked_root)) = self.selected()?;
-        let key = format!("{}/{}/{}", target.workspace, target.repo, target.name);
+        let base_dir = if all { self.setup(&target.repo)?.build_dir.clone() } else { config.build_dir.clone() };
+        let key = format!("{}/{}/{}", target.workspace, target.repo, if all { "*all*" } else { target.name.as_str() });
         let (tx, mut rx) = mpsc::unbounded::<(Stream, String)>();
         let events = Events::new(move |event: &str, payload: Value| {
             if event == "run-output" {
@@ -473,13 +566,14 @@ impl RunStore {
         self.build = Some(Build {
             key: key.clone(),
             target: target.clone(),
+            all,
             status: BuildStatus::Running,
             lines: vec![],
             problems: vec![],
             keys: HashMap::new(),
             started: Instant::now(),
             elapsed: None,
-            base_dir: config.build_dir.clone(),
+            base_dir,
             root,
             linked_root,
         });
@@ -487,7 +581,10 @@ impl RunStore {
         cx.defer(apply_problems);
         let (done_tx, done_rx) = oneshot::channel();
         let (ws, repo, name, preset, k) = (target.workspace, target.repo, target.name, target.preset, key.clone());
-        let work = cx.background_spawn(async move { orbit_core::run::build(&events, &ws, &repo, &name, preset.as_deref(), &k) });
+        let work = cx.background_spawn(async move {
+            let what = if all { orbit_core::run::BuildWhat::All } else { orbit_core::run::BuildWhat::Config(&name) };
+            orbit_core::run::build(&events, &ws, &repo, what, preset.as_deref(), &k)
+        });
         self._build = cx.spawn(async move |this, cx| {
             // Output arrives line by line; the panel redraws at most every 100 ms.
             while let Some(first) = rx.next().await {
@@ -556,6 +653,10 @@ impl RunStore {
         if status == BuildStatus::Failed && has_problems {
             self.reveal(PanelView::Problems, cx);
         }
+        // A build may have configured: CMake's targets can have changed.
+        if status != BuildStatus::Cancelled {
+            self.reload(self.target.clone(), cx);
+        }
         cx.notify();
         status == BuildStatus::Ok
     }
@@ -572,7 +673,7 @@ impl RunStore {
         if self.is_running() {
             self.stop_program(cx);
         }
-        let Some(built) = self.start_build(cx) else { return };
+        let Some(built) = self.prepare_launch(cx) else { return };
         self._run_after = cx.spawn(async move |this, cx| {
             if built.await.unwrap_or(false) {
                 let _ = this.update(cx, |s, cx| s.start_program(config, cx));
@@ -650,20 +751,27 @@ impl RunStore {
         let configs: Vec<String> = self
             .setups
             .iter()
-            .flat_map(|(repo, s)| s.configs.iter().map(move |c| format!("{repo}/{} [{}]", c.name, c.preset.clone().unwrap_or_default())))
+            .flat_map(|(repo, s)| s.configs.iter().map(move |c| format!("{repo}/{} [{}, {:?}]", c.name, c.preset.clone().unwrap_or_default(), c.origin)))
             .collect();
         let _ = writeln!(out, "--- run: target {:?}, configs {configs:?}, panel view {:?}", self.target.as_ref().map(|t| (&t.repo, &t.name, &t.preset)), self.view);
         if let Some(c) = self.config() {
-            let _ = writeln!(out, "  config: build `{}` | program {:?} | cwd {} | debugger {:?}", c.build_label, c.program, c.cwd, c.debugger);
+            let _ = writeln!(
+                out,
+                "  config: build `{}` | program {:?} | cwd {} | env {:?} | debugger {:?} | build first {}",
+                c.build_label, c.program, c.cwd, c.env, c.debugger, c.build_before_launch
+            );
         }
         if let Some((_, s)) = self.setups.iter().find(|(r, _)| self.target.as_ref().is_some_and(|t| &t.repo == r)) {
             let _ = writeln!(out, "  presets: {:?}", s.presets);
+            let targets: Vec<String> = s.targets.iter().map(|t| format!("{}:{}", t.name, t.kind)).collect();
+            let _ = writeln!(out, "  targets of {}: {targets:?}", s.build_dir.as_deref().unwrap_or("-"));
         }
         if let Some(b) = &self.build {
             let (errors, warnings) = b.counts();
             let _ = writeln!(
                 out,
-                "  build {:?} {} lines, {errors} errors, {warnings} warnings{}",
+                "  build{} {:?} {} lines, {errors} errors, {warnings} warnings{}",
+                if b.all { " all" } else { "" },
                 b.status,
                 b.lines.len(),
                 b.elapsed.map(|d| format!(", {:.1}s", d.as_secs_f32())).unwrap_or_default()
@@ -685,6 +793,9 @@ impl RunStore {
                     p.open.as_ref().map_or("-".into(), |o| o.display().to_string())
                 );
             }
+        }
+        if let Some(d) = &self.dialog {
+            out.push_str(&d.read(cx).dump(cx));
         }
         if let Some(r) = &self.run {
             let v = r.view.read(cx);

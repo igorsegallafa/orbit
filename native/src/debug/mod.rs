@@ -203,7 +203,7 @@ impl DebugStore {
         self.status = DebugStatus::Starting;
         self.target = Some(target);
         cx.notify();
-        let Some(built) = runs.update(cx, |r, cx| r.start_build(cx)) else {
+        let Some(built) = runs.update(cx, |r, cx| r.prepare_launch(cx)) else {
             self.status = DebugStatus::Idle;
             return;
         };

@@ -1,23 +1,39 @@
 //! Rider-style run widget for the title bar (`RunWidget.tsx`): pick a run
-//! configuration and CMake preset, then Build, Run, Debug or Stop.
+//! configuration and CMake preset, then Build (or Build All), Run, Debug or
+//! Stop. The configuration list groups the saved configurations before the
+//! discovered CMake targets, filters as you type once it is long, and ends
+//! with Edit Configurations….
 use super::{store, RunTarget};
 use crate::app::OrbitApp;
 use crate::commands;
 use crate::debug;
 use crate::probe::probe;
 use crate::theme::{self, c};
-use gpui::{anchored, deferred, div, Anchor, prelude::*, px, Context, FontWeight, MouseButton, SharedString, Subscription, WeakEntity, Window};
+use gpui::{anchored, deferred, div, Anchor, prelude::*, px, Context, FocusHandle, FontWeight, KeyDownEvent, MouseButton, SharedString, Subscription, WeakEntity, Window};
 use gpui_component::tooltip::Tooltip;
+use orbit_core::run::Origin;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Open {
     Config,
     Preset,
+    Build,
+}
+
+/// A list with more configurations than this shows the type-to-filter line.
+const FILTER_FROM: usize = 10;
+
+enum Row {
+    Header(String),
+    Option { label: String, selected: bool, next: RunTarget },
+    Command { label: String, hint: Option<String>, command: &'static str },
 }
 
 pub struct RunWidget {
     app: WeakEntity<OrbitApp>,
     open: Option<Open>,
+    filter: String,
+    focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -31,35 +47,51 @@ impl RunWidget {
                 store(cx).update(cx, |s, cx| s.sync_workspace(ws, cx));
             }));
         }
-        Self { app, open: None, _subscriptions: subs }
+        Self { app, open: None, filter: String::new(), focus: cx.focus_handle(), _subscriptions: subs }
     }
 
     fn run(&self, id: &'static str, window: &mut Window, cx: &mut Context<Self>) {
         let _ = self.app.update(cx, |a, cx| commands::run(id, a, window, cx));
     }
 
-    /// The open list's options: (label, selected, target).
-    fn options(&self, which: Open, cx: &Context<Self>) -> Vec<(String, bool, RunTarget)> {
+    fn config_count(cx: &Context<Self>) -> usize {
+        store(cx).read(cx).setups.iter().map(|(_, s)| s.configs.len()).sum()
+    }
+
+    /// The open list's rows.
+    fn rows(&self, which: Open, cx: &Context<Self>) -> Vec<Row> {
         let s = store(cx).read(cx);
         let Some(target) = s.target.clone() else { return vec![] };
         match which {
             Open::Config => {
                 let multi = s.setups.len() > 1;
-                s.setups
-                    .iter()
-                    .flat_map(|(repo, setup)| setup.configs.iter().map(move |c| (repo.clone(), c.name.clone())))
-                    .map(|(repo, name)| {
-                        let current = repo == target.repo && name == target.name;
-                        let label = if multi { format!("{repo} · {name}") } else { name.clone() };
-                        let next = RunTarget {
-                            workspace: target.workspace.clone(),
-                            preset: if repo == target.repo { target.preset.clone() } else { None },
-                            repo,
-                            name,
-                        };
-                        (label, current, next)
-                    })
-                    .collect()
+                let filter = self.filter.to_lowercase();
+                let mut rows = Vec::new();
+                for (repo, setup) in &s.setups {
+                    for (group, title) in [(Origin::Project, "Project"), (Origin::Local, "Local"), (Origin::Discovered, "CMake targets")] {
+                        let members: Vec<_> = setup
+                            .configs
+                            .iter()
+                            .filter(|c| c.origin == group && (filter.is_empty() || c.name.to_lowercase().contains(&filter)))
+                            .collect();
+                        if members.is_empty() {
+                            continue;
+                        }
+                        rows.push(Row::Header(if multi { format!("{repo} · {title}") } else { title.to_string() }));
+                        for c in members {
+                            let current = *repo == target.repo && c.name == target.name;
+                            let next = RunTarget {
+                                workspace: target.workspace.clone(),
+                                preset: if *repo == target.repo { target.preset.clone() } else { None },
+                                repo: repo.clone(),
+                                name: c.name.clone(),
+                            };
+                            rows.push(Row::Option { label: c.name.clone(), selected: current, next });
+                        }
+                    }
+                }
+                rows.push(Row::Command { label: "Edit Configurations…".into(), hint: None, command: "run.editConfigurations" });
+                rows
             }
             Open::Preset => {
                 let current = s.config().and_then(|c| c.preset.clone());
@@ -68,28 +100,65 @@ impl RunWidget {
                         setup
                             .presets
                             .iter()
-                            .map(|p| (p.clone(), Some(p) == current.as_ref(), RunTarget { preset: Some(p.clone()), ..target.clone() }))
+                            .map(|p| Row::Option { label: p.clone(), selected: Some(p) == current.as_ref(), next: RunTarget { preset: Some(p.clone()), ..target.clone() } })
                             .collect()
                     })
                     .unwrap_or_default()
             }
+            Open::Build => {
+                let Some(config) = s.config() else { return vec![] };
+                let mut rows = vec![Row::Command {
+                    label: if config.target.is_empty() { format!("Build {}", config.name) } else { format!("Build {}", config.target) },
+                    hint: Some("Ctrl+F9".into()),
+                    command: "run.build",
+                }];
+                if s.can_build_all() {
+                    rows.push(Row::Command { label: "Build All".into(), hint: Some("Ctrl+Shift+F9".into()), command: "run.buildAll" });
+                }
+                rows
+            }
         }
+    }
+
+    fn close(&mut self, cx: &mut Context<Self>) {
+        self.open = None;
+        self.filter.clear();
+        cx.notify();
     }
 
     /// `.select-list` under a trigger.
     fn render_list(&self, which: Open, cx: &mut Context<Self>) -> impl IntoElement {
-        let width = if which == Open::Config { 240. } else { 260. };
-        let rows = self.options(which, cx).into_iter().enumerate().map(|(ix, (label, selected, next))| {
+        let width = match which {
+            Open::Config => 260.,
+            Open::Preset => 260.,
+            Open::Build => 220.,
+        };
+        let filtering = which == Open::Config && Self::config_count(cx) > FILTER_FROM;
+        let filter = self.filter.clone();
+        let item = |id: (&'static str, usize)| {
             div()
-                .id(("run-option", ix))
+                .id(id)
                 .relative()
                 .h(px(28.))
                 .px(px(10.))
                 .flex()
                 .items_center()
+                .gap(px(8.))
                 .rounded(px(5.))
                 .text_size(px(12.5))
                 .cursor_pointer()
+        };
+        let rows = self.rows(which, cx).into_iter().enumerate().map(|(ix, row)| match row {
+            Row::Header(title) => div()
+                .px(px(10.))
+                .pt(px(if ix == 0 { 4. } else { 8. }))
+                .pb(px(3.))
+                .text_size(px(10.5))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(c(theme::TEXT_FAINT))
+                .child(title.to_uppercase())
+                .into_any_element(),
+            Row::Option { label, selected, next } => item(("run-option", ix))
                 .text_color(if selected { theme::hsla(theme::INFO).blend(theme::hsla(theme::TEXT).opacity(0.6)) } else { theme::hsla(theme::TEXT) })
                 .when(selected, |d| d.bg(c(theme::PANEL)))
                 .hover(|s| s.bg(c(theme::PANEL)))
@@ -100,12 +169,47 @@ impl RunWidget {
                     MouseButton::Left,
                     cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
-                        this.open = None;
+                        this.close(cx);
                         let next = next.clone();
                         store(cx).update(cx, |s, cx| s.choose(next, cx));
-                        cx.notify();
                     }),
                 )
+                .into_any_element(),
+            Row::Command { label, hint, command } => div()
+                .when(which == Open::Config, |d| d.mt(px(4.)).pt(px(4.)).border_t_1().border_color(c(theme::BORDER)))
+                .child(
+                    item(("run-command", ix))
+                        .text_color(c(theme::TEXT))
+                        .hover(|s| s.bg(c(theme::PANEL)))
+                        .child(div().flex_1().truncate().child(label.clone()))
+                        .children(hint.map(|h| div().flex_none().text_size(px(11.)).text_color(c(theme::TEXT_FAINT)).child(h)))
+                        .child(probe(format!("menu:{label}")))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.close(cx);
+                                this.run(command, window, cx);
+                            }),
+                        ),
+                )
+                .into_any_element(),
+        });
+        let filter_line = filtering.then(|| {
+            div()
+                .mx(px(4.))
+                .mb(px(4.))
+                .px(px(8.))
+                .h(px(26.))
+                .flex()
+                .items_center()
+                .rounded(px(5.))
+                .border_1()
+                .border_color(c(theme::BORDER))
+                .bg(c(theme::BG))
+                .text_size(px(12.))
+                .text_color(c(if filter.is_empty() { theme::TEXT_FAINT } else { theme::TEXT }))
+                .child(if filter.is_empty() { "Type to filter".to_string() } else { filter.clone() })
         });
         div().absolute().left_0().top(px(30.)).child(
             deferred(
@@ -114,8 +218,6 @@ impl RunWidget {
                         .id("run-list")
                         .occlude()
                         .w(px(width))
-                        .max_h(px(240.))
-                        .overflow_y_scroll()
                         .p(px(4.))
                         .rounded(px(8.))
                         .border_1()
@@ -123,15 +225,45 @@ impl RunWidget {
                         .bg(c(theme::PANEL_RAISED))
                         .shadow(theme::shadow(12., 40., 0.55))
                         .font_family(theme::UI_FONT)
-                        .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                            this.open = None;
-                            cx.notify();
-                        }))
-                        .children(rows),
+                        .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close(cx)))
+                        .children(filter_line)
+                        .child(div().id("run-list-rows").max_h(px(360.)).overflow_y_scroll().children(rows)),
                 ),
             )
             .with_priority(2),
         )
+    }
+
+    /// Typing filters the configuration list; Esc closes any list.
+    fn on_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
+        if self.open.is_none() {
+            return;
+        }
+        let k = &ev.keystroke;
+        match k.key.as_str() {
+            "escape" => self.close(cx),
+            "backspace" if self.open == Some(Open::Config) => {
+                self.filter.pop();
+            }
+            _ if self.open == Some(Open::Config) && !k.modifiers.control && !k.modifiers.alt && !k.modifiers.platform => {
+                match k.key_char.as_deref() {
+                    Some(ch) if !ch.chars().any(char::is_control) => self.filter.push_str(ch),
+                    _ => return,
+                }
+            }
+            _ => return,
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn toggle(&mut self, which: Open, window: &mut Window, cx: &mut Context<Self>) {
+        self.filter.clear();
+        self.open = if self.open == Some(which) { None } else { Some(which) };
+        if self.open.is_some() {
+            self.focus.focus(window, cx);
+        }
+        cx.notify();
     }
 
     /// A dropdown trigger (`.run-select .select-trigger`).
@@ -165,14 +297,94 @@ impl RunWidget {
                     .child(probe(id))
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(move |this, _, _, cx| {
+                        cx.listener(move |this, _, window, cx| {
                             cx.stop_propagation();
-                            this.open = if this.open == Some(which) { None } else { Some(which) };
-                            cx.notify();
+                            this.toggle(which, window, cx);
                         }),
                     ),
             )
             .when(open, |d| d.child(self.render_list(which, cx)))
+    }
+
+    /// The build split button (Rider's): the hammer builds the configuration,
+    /// the chevron half (or a right click on the hammer) opens Build
+    /// <target> / Build All. One bordered group, a divider between halves.
+    fn build_split(&self, building: bool, hint: SharedString, cx: &mut Context<Self>) -> impl IntoElement {
+        let open = self.open == Some(Open::Build);
+        let enabled = !building;
+        let hammer = div()
+            .id("run-build")
+            .relative()
+            .w(px(28.))
+            .h_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .when(enabled, |d| d.cursor_pointer().hover(|s| s.bg(c(theme::PANEL_HOVER))))
+            .child(crate::icons::ui_icon(if building { "spinner" } else { "hammer" }, 14., c(theme::TEXT_DIM)))
+            .child(probe("run-build"))
+            .tooltip(move |window, cx| Tooltip::new(hint.clone()).build(window, cx))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    if enabled {
+                        this.run("run.build", window, cx);
+                    }
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    if enabled {
+                        this.toggle(Open::Build, window, cx);
+                    }
+                }),
+            );
+        let chevron = div()
+            .id("run-build-menu")
+            .relative()
+            .w(px(18.))
+            .h_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .border_l_1()
+            .border_color(c(theme::BORDER))
+            .when(open, |d| d.bg(c(theme::PANEL_HOVER)))
+            .when(enabled, |d| d.cursor_pointer().hover(|s| s.bg(c(theme::PANEL_HOVER))))
+            .child(crate::workspace_ui::icons::icon("chevron-down", 12., c(if open { theme::TEXT } else { theme::TEXT_DIM })))
+            .child(probe("run-build-menu"))
+            .when(!open, |d| d.tooltip(|window, cx| Tooltip::new("Build options: Build <target>, Build All (Ctrl+Shift+F9)").build(window, cx)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    if enabled {
+                        this.toggle(Open::Build, window, cx);
+                    }
+                }),
+            );
+        div()
+            .relative()
+            .flex_none()
+            .child(
+                div()
+                    .id("run-build-split")
+                    .relative()
+                    .h(px(26.))
+                    .flex()
+                    .overflow_hidden()
+                    .rounded(px(5.))
+                    .border_1()
+                    .border_color(c(if open { theme::BORDER_STRONG } else { theme::BORDER }))
+                    .when(!enabled, |d| d.opacity(0.35))
+                    .child(hammer)
+                    .child(chevron)
+                    .child(probe("run-build-split")),
+            )
+            .when(open, |d| d.child(self.render_list(Open::Build, cx)))
     }
 }
 
@@ -229,6 +441,8 @@ impl Render for RunWidget {
         let stoppable = building || running || live;
         div()
             .id("run-widget")
+            .track_focus(&self.focus)
+            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| this.on_key(ev, cx)))
             .flex()
             .items_center()
             .gap(px(2.))
@@ -237,16 +451,7 @@ impl Render for RunWidget {
             .when(presets > 0 && config.kind == "cmake", |d| {
                 d.child(self.select("run-preset", Open::Preset, config.preset.clone().unwrap_or_else(|| "preset".into()), true, cx))
             })
-            .child(button(
-                "run-build",
-                if building { "spinner" } else { "hammer" },
-                14.,
-                theme::TEXT_DIM,
-                !building,
-                format!("Build (Ctrl+F9)\n{}", config.build_label).into(),
-                "run.build",
-                cx,
-            ))
+            .child(self.build_split(building, format!("Build (Ctrl+F9)\n{}\nRight click: Build All", config.build_label).into(), cx))
             .child(button(
                 "run-run",
                 "play-fill",
