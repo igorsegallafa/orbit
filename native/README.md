@@ -1402,7 +1402,7 @@ Status of everything the React app did: **done**, **partial** (with what's missi
 - [x] done: clangd setup banner (missing compile DB, CMake with presets, restart clangd)
 - [x] done: symbol search in project (`Ctrl+T`) and in file (`Ctrl+Shift+O`) (`SymbolSearch.tsx`)
 - [x] done: reload when changed on disk (unmodified editors; the cursor keeps its line)
-- [ ] — Markdown editor/preview toggle
+- [x] done: Markdown editor/preview toggle for `.md` files (`MarkdownPreview.tsx`): the file bar's Editor / Preview buttons (and *Open Markdown Preview* in the palette) swap the editor for gpui-component's GFM view in the theme's colours, with highlighted code blocks; it follows the buffer and the disk (debounced) and keeps its scroll. Web links open in the browser, relative links (`../src/x.rs#L12`, `/root/path`) open in Orbit, `#heading` scrolls; images load from the file's folder, data URLs and the web (curl). `src/editor/markdown.rs`; the dump prints `markdown:` and the rendered text, probes `md-mode:editor|preview`, `md-preview`.
 
 ### LSP
 - [x] done: client over stdio, one server per (repo, language), started on demand by `orbit_core::lsp` with the Tauri app's server choice and config (`src/lib/lsp/client.ts`, `manager.ts`)
