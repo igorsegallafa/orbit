@@ -248,6 +248,12 @@ impl SessionStore {
         cx.notify();
     }
 
+    /// An item from outside the sessions (a Ralph run ending); `key` is what a click opens.
+    pub fn notify(&mut self, key: String, done: bool, title: String, detail: String, cx: &mut Context<Self>) {
+        let kind = if done { InboxKind::Done } else { InboxKind::Waiting };
+        self.push_inbox(InboxItem { key, kind, title, detail, at: now_ms(), read: false }, cx);
+    }
+
     pub fn mark_all_read(&mut self, cx: &mut Context<Self>) {
         self.inbox.iter_mut().for_each(|i| i.read = true);
         cx.notify();
@@ -632,6 +638,9 @@ pub fn activate(app: &mut OrbitApp, key: &str, window: &mut Window, cx: &mut Con
     let ix = app.tabs.iter().position(|t| matches!(&t.kind, TabKind::Terminal(v) if v.read(cx).meta.id == key));
     if let Some(ix) = ix {
         app.activate(ix, window, cx);
+        store(cx).update(cx, |s, cx| s.settle(key, cx));
+    } else if let Some(scope) = key.strip_prefix("ralph:") {
+        crate::pages::open_ralph(app, scope, window, cx);
         store(cx).update(cx, |s, cx| s.settle(key, cx));
     }
 }

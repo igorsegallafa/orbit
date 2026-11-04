@@ -3,6 +3,8 @@
 # argv, posts the hooks Orbit's --settings file routes (prompt submitted, a
 # permission prompt, turn finished) and waits for an answer like the real one.
 # Use: PATH="$PWD/scripts/stub-agent:$PATH" ./target/release/orbit-native …
+# Print mode (`-p`): the prompt comes on stdin, see claude-print.
+for a in "$@"; do [ "$a" = "-p" ] && exec python3 "$(dirname "$0")/claude-print" "$@"; done
 args="$*"
 settings=""
 while [ $# -gt 0 ]; do

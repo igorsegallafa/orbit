@@ -193,9 +193,14 @@ pub fn open_integrations(app: &mut OrbitApp, window: &mut Window, cx: &mut Conte
     open(app, "page:integrations".into(), integrations::IntegrationsPage::new, window, cx);
 }
 
+pub use ralph::open_ralph;
+
 /// Opens the selected workspace's Ralph page.
-pub fn open_ralph(app: &mut OrbitApp, window: &mut Window, cx: &mut Context<OrbitApp>) {
-    open_for_workspace(app, "ralph", window, cx);
+fn open_selected_ralph(app: &mut OrbitApp, window: &mut Window, cx: &mut Context<OrbitApp>) {
+    let Some(name) = app.workspace().map(|w| w.meta.name.clone()) else {
+        return app.toast(ToastKind::Info, "Pick a workspace first", None, cx);
+    };
+    open_ralph(app, &name, window, cx);
 }
 
 /// Workspace pages need a selected workspace.
@@ -205,7 +210,6 @@ fn open_for_workspace(app: &mut OrbitApp, kind: &'static str, window: &mut Windo
     };
     let key = format!("page:{kind}:{}", ws.meta.name);
     match kind {
-        "ralph" => open(app, key, |h, w, cx| ralph::RalphPage::new(h, ws, w, cx), window, cx),
         "usage" => open(app, key, |h, w, cx| usage::UsagePage::new(h, ws, w, cx), window, cx),
         _ => open(app, key, |h, w, cx| artifacts::ArtifactsPage::new(h, ws, w, cx), window, cx),
     }
@@ -224,7 +228,7 @@ pub fn init(cx: &mut App) {
             open_settings(a, Section::Updates, w, cx);
             updates::check(true, cx);
         }),
-        Command::new("ralph.open", "Ralph").when(has_ws).run(open_ralph),
+        Command::new("ralph.open", "Ralph").when(has_ws).run(open_selected_ralph),
         Command::new("workspace.usage", "AI Usage").when(has_ws).run(|a, w, cx| open_for_workspace(a, "usage", w, cx)),
         Command::new("workspace.artifacts", "CI Artifacts").when(has_ws).run(|a, w, cx| open_for_workspace(a, "artifacts", w, cx)),
         Command::new("workspace.openInEditor", "Open in External Editor…").when(has_ws).run(open_repo_in_editor),

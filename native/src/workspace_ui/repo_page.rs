@@ -707,7 +707,7 @@ fn header(r: &RepoView, ov: Option<&RepoOverview>, cx: &mut Context<PageTab>) ->
                     "Ralph",
                     Kind::Secondary,
                     "Write a PRD and let the agent implement it story by story on this branch".into(),
-                    |t, w, cx| t.toast(ToastKind::Info, "Ralph runs from a workspace", Some("Create a workspace with this repo, then open Ralph there.".into()), w, cx),
+                    |t, w, cx| if let Some(scope) = t.repo_view().map(|r| format!("@{}", r.name)) { t.with_app(w, cx, move |a, w, cx| crate::pages::open_ralph(a, &scope, w, cx)) },
                     cx,
                 ))
                 .child(
