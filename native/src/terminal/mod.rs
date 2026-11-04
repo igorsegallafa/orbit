@@ -423,8 +423,11 @@ impl TerminalView {
             return;
         }
         if m.control && m.shift && ks.key == "v" || m.shift && ks.key == "insert" {
-            if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
-                self.paste(&text);
+            match cx.read_from_clipboard().and_then(|c| c.text()) {
+                Some(text) => self.paste(&text),
+                // An image only: ^V is how Claude Code (and others) learn to read
+                // the clipboard themselves.
+                None => self.write(b"\x16"),
             }
             cx.stop_propagation();
             return;
