@@ -4515,11 +4515,15 @@ dependencies = [
  "memchr",
  "notify-rust",
  "orbit-core",
+ "raw-window-handle",
  "regex",
  "serde",
  "serde_json",
  "serde_yaml",
  "url",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols",
 ]
 
 [[package]]

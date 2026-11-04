@@ -8,6 +8,7 @@
 mod diacritics;
 mod graphics;
 mod grid;
+pub mod inhibit;
 mod input;
 
 pub use grid::{FRAMES, FRAME_US_MAX, FRAME_US_TOTAL};
@@ -300,6 +301,8 @@ impl TerminalView {
                 cx.drop_image(image, None);
             }
         });
+        let focus = cx.focus_handle();
+        inhibit::register(&focus);
         Self {
             shared,
             meta,
@@ -308,7 +311,7 @@ impl TerminalView {
             busy_since: None,
             title,
             exited,
-            focus: cx.focus_handle(),
+            focus,
             scroll_remainder: 0.,
             selecting: false,
             last_motion_cell: None,
@@ -456,9 +459,16 @@ impl TerminalView {
         self.last_copied = Some(text);
     }
 
-    fn on_key_down(&mut self, ev: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let ks = &ev.keystroke;
         let m = ks.modifiers;
+        // A switcher press that beat the inhibitor's release (Alt and Tab at once, as
+        // Toshy's Cmd+Tab sends them): the next Tab reaches GNOME.
+        if m.alt && (ks.key == "tab" || ks.key == "`") && inhibit::releases_for_alt() {
+            inhibit::set_alt(true, window, cx);
+            cx.stop_propagation();
+            return;
+        }
         if m.control && m.shift && ks.key == "c" {
             self.copy(false, cx);
             cx.stop_propagation();
@@ -642,6 +652,7 @@ impl Render for TerminalView {
             .bg(c(theme::BG))
             .cursor_text()
             .on_key_down(cx.listener(Self::on_key_down))
+            .on_modifiers_changed(|ev: &gpui::ModifiersChangedEvent, window, cx| inhibit::set_alt(ev.modifiers.alt, window, cx))
             .on_scroll(cx.listener(Self::on_scroll))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_down(MouseButton::Middle, cx.listener(Self::on_mouse_down))

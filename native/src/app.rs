@@ -1091,6 +1091,8 @@ impl OrbitApp {
             layout: self.layout.clone(),
             theme: Some(crate::theme::pref()),
             notifications: (!crate::notifications::enabled()).then_some(false),
+            terminal_shortcuts: crate::terminal::inhibit::saved(),
+            shortcuts_explained: crate::terminal::inhibit::explained(),
             ws_collapsed: self.ws_collapsed.iter().cloned().collect(),
         }
     }
