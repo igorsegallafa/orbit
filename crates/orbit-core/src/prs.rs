@@ -43,12 +43,162 @@ pub fn owner_repo(workspace: &str, repo: &str) -> Result<String, String> {
 // ---------- create ----------
 
 /// Per-repo PR content as decided in the PR modal.
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, Default)]
 pub struct PrSpec {
     pub repo: String,
     pub title: String,
     #[serde(default)]
     pub body: String,
+    /// Opens it as a draft PR (`gh pr create --draft`).
+    #[serde(default)]
+    pub draft: bool,
+}
+
+/// A readable PR title from a branch: `feat/add-items-skills` → "Add items skills".
+pub fn title_from_branch(branch: &str) -> String {
+    let last = branch.rsplit('/').next().unwrap_or(branch).replace(['-', '_'], " ");
+    let words: Vec<&str> = last.split_whitespace().collect();
+    let joined = words.join(" ");
+    let mut chars = joined.chars();
+    match chars.next() {
+        Some(f) => f.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+/// What opening a repo's PR would do.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum PlanState {
+    /// The pushed branch has commits the base lacks.
+    Ready,
+    /// Has commits origin lacks: they are pushed before the PR is opened.
+    NeedsPush,
+    /// Nothing the base doesn't already have.
+    NoCommits,
+    /// A PR is already open for the branch.
+    HasPr,
+    /// Can't open one (see `reason`).
+    Blocked,
+}
+
+/// An open PR found for a repo's branch.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenPr {
+    pub number: u64,
+    pub url: String,
+    pub is_draft: bool,
+}
+
+/// One repo of the Create PRs modal, checked before anything is sent.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PrPlan {
+    pub repo: String,
+    pub branch: String,
+    pub base: String,
+    /// Commits the PR would carry.
+    pub commits: usize,
+    /// Of those, the ones origin doesn't have yet.
+    pub unpushed: usize,
+    /// origin has the branch.
+    pub pushed: bool,
+    pub state: PlanState,
+    /// Why it is not Ready, for the row's hint.
+    pub reason: String,
+    pub pr: Option<OpenPr>,
+}
+
+/// State and reason from a branch's facts, once the repo is known to be on
+/// its branch with a GitHub origin and no open PR.
+pub fn classify(f: &git::BranchFacts, branch: &str, base: &str) -> (PlanState, String) {
+    if f.local == 0 && f.remote == 0 {
+        return (PlanState::NoCommits, format!("No commits ahead of {base}"));
+    }
+    if f.integrated {
+        return (PlanState::NoCommits, format!("Already in {base}"));
+    }
+    if f.unpushed > 0 && f.behind > 0 {
+        return (PlanState::Blocked, format!("Diverged from origin/{branch}: pull or force-push first"));
+    }
+    if f.unpushed > 0 {
+        let what = if f.pushed { format!("{} new commit{}", f.unpushed, if f.unpushed == 1 { "" } else { "s" }) } else { "the branch".into() };
+        return (PlanState::NeedsPush, format!("Pushes {what} to origin first"));
+    }
+    (PlanState::Ready, String::new())
+}
+
+/// (repo, folder, branch) of every repo the scope can open PRs for.
+fn targets_of(workspace: &str) -> Result<Vec<(String, PathBuf, String)>, String> {
+    Ok(match workspace::repo_scope(workspace) {
+        Some(repo) => {
+            let dir = workspace::clone_dir_of(repo)?;
+            let branch = git::current_branch(&dir).unwrap_or_default();
+            vec![(repo.to_string(), dir, branch)]
+        }
+        None => {
+            let ws_dir = workspace::ws_dir(workspace)?;
+            let meta = workspace::load_meta(&ws_dir)?;
+            meta.repos.iter().map(|r| (r.clone(), ws_dir.join(r), meta.branch_of(r).to_string())).collect()
+        }
+    })
+}
+
+fn plan_repo(repo: &str, dir: &Path, branch: &str, base: &str) -> PrPlan {
+    let mut p = PrPlan {
+        repo: repo.to_string(),
+        branch: branch.to_string(),
+        base: base.to_string(),
+        commits: 0,
+        unpushed: 0,
+        pushed: false,
+        state: PlanState::Blocked,
+        reason: String::new(),
+        pr: None,
+    };
+    if !dir.exists() {
+        p.reason = "Worktree not found".into();
+        return p;
+    }
+    p.base = git::base_branch(dir, base);
+    match git::current_branch(dir) {
+        Some(b) if b == branch => {}
+        other => {
+            p.reason = format!("On {}, not {branch}", other.map(|b| format!("'{b}'")).unwrap_or_else(|| "a detached HEAD".into()));
+            return p;
+        }
+    }
+    let Some(owner_repo) = remote_of(dir) else {
+        p.reason = "origin is not a GitHub repository".into();
+        return p;
+    };
+    let facts = git::branch_facts(dir, base);
+    p.commits = facts.local.max(facts.remote);
+    p.unpushed = facts.unpushed;
+    p.pushed = facts.pushed;
+    if facts.pushed {
+        let open = github::prs_for_branch(repo, &owner_repo, branch).unwrap_or_default();
+        if let Some(pr) = open.into_iter().next() {
+            p.state = PlanState::HasPr;
+            p.reason = format!("PR #{} is already open", pr.number);
+            p.pr = Some(OpenPr { number: pr.number, url: pr.url, is_draft: pr.is_draft });
+            return p;
+        }
+    }
+    (p.state, p.reason) = classify(&facts, branch, &p.base);
+    p
+}
+
+/// Checks every repo of the scope in parallel: commits ahead of `base`,
+/// pushed or not, PR already open.
+pub fn plan(workspace: &str, base: &str) -> Result<Vec<PrPlan>, String> {
+    let targets = targets_of(workspace)?;
+    Ok(std::thread::scope(|scope| {
+        let handles: Vec<_> =
+            targets.iter().map(|(repo, dir, branch)| scope.spawn(move || plan_repo(repo, dir, branch, base))).collect();
+        handles.into_iter().filter_map(|h| h.join().ok()).collect()
+    }))
 }
 
 /// "https://github.com/owner/repo/pull/123" → 123
@@ -64,14 +214,28 @@ pub fn is_benign_create_error(e: &str) -> bool {
         || e.contains("nothing to compare")
 }
 
-/// Opens a PR for one repo's branch into `base`. Does not save it.
-pub fn create_for_repo(workspace: &str, repo: &str, base: &str, title: &str, body: &str) -> Result<PrRef, String> {
+/// `gh pr create` arguments for a spec.
+fn create_args<'a>(owner_repo: &'a str, base: &'a str, branch: &'a str, spec: &'a PrSpec) -> Vec<&'a str> {
+    let mut args = vec!["pr", "create", "-R", owner_repo, "--base", base, "--head", branch, "--title", &spec.title, "--body", &spec.body];
+    if spec.draft {
+        args.push("--draft");
+    }
+    args
+}
+
+/// Opens a PR for one repo's branch into `base`, pushing the branch first
+/// when origin lacks some of its commits. Does not save it.
+pub fn create_for_repo(workspace: &str, base: &str, spec: &PrSpec) -> Result<PrRef, String> {
+    let repo = spec.repo.as_str();
     let dir = worktree_on_branch(workspace, repo)?;
     let owner_repo = remote_of(&dir).ok_or_else(|| format!("{repo}: cannot resolve origin remote"))?;
     let branch = git::current_branch(&dir).ok_or_else(|| format!("{repo}: detached HEAD"))?;
+    if git::branch_facts(&dir, base).unpushed > 0 {
+        git::push(&dir, &branch, false).map_err(|e| format!("{repo}: push failed: {e}"))?;
+    }
     let base = git::base_branch(&dir, base);
     let out = crate::proc::cmd("gh")
-        .args(["pr", "create", "-R", &owner_repo, "--base", &base, "--head", &branch, "--title", title, "--body", body])
+        .args(create_args(&owner_repo, &base, &branch, spec))
         .current_dir(&dir)
         .output()
         .map_err(|e| format!("failed to run gh: {e}"))?;
@@ -83,12 +247,24 @@ pub fn create_for_repo(workspace: &str, repo: &str, base: &str, title: &str, bod
     Ok(PrRef { repo: repo.to_string(), number, url })
 }
 
-/// Opens one repo's PR and saves it in the workspace meta. Returns its URL.
-pub fn create(workspace: &str, repo: &str, base: &str, title: &str, body: &str) -> Result<String, String> {
-    let r = create_for_repo(workspace, repo, base, title, body)?;
-    let url = r.url.clone();
-    workspace::save_pr_refs(workspace, &[r])?;
-    Ok(url)
+/// Serializes meta writes of PRs created side by side.
+static SAVE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn save_refs(workspace: &str, refs: &[PrRef]) -> Result<(), String> {
+    // A repo view has no meta: it finds its PRs by the clone's branch.
+    if refs.is_empty() || workspace::repo_scope(workspace).is_some() {
+        return Ok(());
+    }
+    let _g = SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    workspace::save_pr_refs(workspace, refs)
+}
+
+/// Opens one repo's PR and saves it in the workspace meta. Safe to run for
+/// several repos at once (the modal shows each one's progress).
+pub fn create(workspace: &str, base: &str, spec: &PrSpec) -> Result<PrRef, String> {
+    let r = create_for_repo(workspace, base, spec)?;
+    save_refs(workspace, std::slice::from_ref(&r))?;
+    Ok(r)
 }
 
 /// Opens PRs per spec, in parallel, and returns every open PR of the
@@ -98,7 +274,7 @@ pub fn create_all(workspace: &str, base: &str, specs: &[PrSpec]) -> Result<Vec<P
     let created: Vec<Result<PrRef, String>> = std::thread::scope(|scope| {
         let handles: Vec<_> = specs
             .iter()
-            .map(|spec| scope.spawn(move || create_for_repo(workspace, &spec.repo, base, &spec.title, &spec.body)))
+            .map(|spec| scope.spawn(move || create_for_repo(workspace, base, spec)))
             .collect();
         handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err("thread panicked".into()))).collect()
     });
@@ -111,10 +287,7 @@ pub fn create_all(workspace: &str, base: &str, specs: &[PrSpec]) -> Result<Vec<P
             Err(_) => {}
         }
     }
-    // A repo view has no meta: it finds its PRs by the clone's branch.
-    if !refs.is_empty() && workspace::repo_scope(workspace).is_none() {
-        workspace::save_pr_refs(workspace, &refs)?;
-    }
+    save_refs(workspace, &refs)?;
     let prs = list(workspace)?;
     if prs.is_empty() && !errors.is_empty() {
         return Err(errors.join("\n"));
@@ -436,7 +609,7 @@ esac
         let path = std::env::var_os("PATH").unwrap_or_default();
         std::env::set_var("PATH", std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(&path))).unwrap());
 
-        let spec = |repo: &str| PrSpec { repo: repo.into(), title: "Add x".into(), body: "why".into() };
+        let spec = |repo: &str| PrSpec { repo: repo.into(), title: "Add x".into(), body: "why".into(), draft: false };
         let result = create_all("feat-x", "main", &[spec("web"), spec("empty"), spec("broken")]);
         let checks_link = "https://github.com/o/web/actions/runs/5/job/6";
         let logs = check_logs(checks_link);
@@ -451,6 +624,118 @@ esac
         assert!(log.contains("pr create -R o/web --base main --head feat/x --title Add x --body why"), "{log}");
         let logs = logs.unwrap();
         assert!(logs.starts_with("failed step: Run tests\nlog 101\n"), "{logs}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn derives_readable_titles_from_branches() {
+        assert_eq!(title_from_branch("feat/add-items-skills"), "Add items skills");
+        assert_eq!(title_from_branch("fix_login--flow"), "Fix login flow");
+        assert_eq!(title_from_branch("users/me/ralph/x"), "X");
+        assert_eq!(title_from_branch(""), "");
+    }
+
+    #[test]
+    fn classifies_branches_and_passes_the_draft_flag() {
+        use git::BranchFacts;
+        let f = |local, remote, pushed, unpushed, behind, integrated| BranchFacts { local, remote, pushed, unpushed, behind, integrated };
+        let state = |facts: BranchFacts| classify(&facts, "feat/x", "main");
+        assert_eq!(state(f(0, 0, true, 0, 0, false)), (PlanState::NoCommits, "No commits ahead of main".into()));
+        assert_eq!(state(f(2, 2, true, 0, 0, true)).0, PlanState::NoCommits);
+        assert_eq!(state(f(2, 2, true, 0, 0, false)), (PlanState::Ready, String::new()));
+        assert_eq!(state(f(0, 3, true, 0, 3, false)).0, PlanState::Ready);
+        assert_eq!(state(f(3, 0, false, 3, 0, false)), (PlanState::NeedsPush, "Pushes the branch to origin first".into()));
+        assert_eq!(state(f(3, 2, true, 1, 0, false)), (PlanState::NeedsPush, "Pushes 1 new commit to origin first".into()));
+        assert_eq!(state(f(3, 3, true, 1, 1, false)).0, PlanState::Blocked);
+
+        let spec = PrSpec { repo: "web".into(), title: "T".into(), body: "B".into(), draft: true };
+        assert_eq!(create_args("o/web", "main", "feat/x", &spec).last(), Some(&"--draft"));
+        assert!(!create_args("o/web", "main", "feat/x", &PrSpec { draft: false, ..spec }).contains(&"--draft"));
+    }
+
+    /// Repos pushing to local bare remotes (origin's fetch URL is GitHub's,
+    /// never contacted) and a stub `gh`: the plan of each, then a draft PR
+    /// that pushes its branch first.
+    #[cfg(unix)]
+    #[test]
+    fn plans_repos_and_creates_a_draft_pr_after_pushing() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = std::env::temp_dir().join(format!("orbit-prs-plan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::env::set_var("ORBIT_WORKSPACE_ROOT", root.join("ws-root"));
+        std::env::set_var("ORBIT_CONFIG_DIR", root.join("cfg"));
+        Config::default().save().unwrap();
+        let ws = root.join("ws-root/workspaces/feat-x");
+        let repos = ["ready", "local", "empty", "open", "off"];
+        for repo in repos {
+            let (dir, bare) = (ws.join(repo), root.join(format!("bare/{repo}.git")));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::create_dir_all(&bare).unwrap();
+            git(&bare, &["init", "--bare"]);
+            git(&dir, &["init"]);
+            git(&dir, &["commit", "--allow-empty", "-m", "init"]);
+            git(&dir, &["remote", "add", "origin", &format!("https://github.com/o/{repo}.git")]);
+            git(&dir, &["remote", "set-url", "--push", "origin", bare.to_str().unwrap()]);
+            git(&dir, &["push", "origin", "main"]);
+            git(&dir, &["checkout", "-b", if repo == "off" { "other" } else { "feat/x" }]);
+            if repo != "empty" {
+                std::fs::write(dir.join("work.txt"), repo).unwrap();
+                git(&dir, &["add", "work.txt"]);
+                git(&dir, &["commit", "-m", "work"]);
+            }
+            if matches!(repo, "ready" | "open") {
+                git(&dir, &["push", "-u", "origin", "feat/x"]);
+            }
+        }
+        std::fs::write(ws.join(".workspace.yaml"), "name: feat-x\nbranch: feat/x\nbase: main\nrepos: [ready, local, empty, open, off]\n").unwrap();
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let gh = bin.join("gh");
+        std::fs::write(
+            &gh,
+            r#"#!/bin/sh
+echo "$@" >> "$(dirname "$0")/gh.log"
+case "$1 $2 $4" in
+  "pr list o/open") echo '[{"number":7,"title":"x","headRefName":"feat/x","baseRefName":"main","author":{"login":"me"},"isDraft":true,"url":"https://github.com/o/open/pull/7","updatedAt":"2026-01-01T00:00:00Z"}]' ;;
+  "pr list "*) echo '[]' ;;
+  "pr create "*) echo "https://github.com/$4/pull/9" ;;
+  *) exit 1 ;;
+esac
+"#,
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        std::env::set_var("PATH", std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(&path))).unwrap());
+
+        let plans = plan("feat-x", "main");
+        let spec = PrSpec { repo: "local".into(), title: "Add x".into(), body: "why".into(), draft: true };
+        let created = create("feat-x", "main", &spec);
+        let after = plan("feat-x", "main");
+        let meta = workspace::load_meta(&ws);
+        std::env::set_var("PATH", path);
+
+        let plans = plans.unwrap();
+        let row = |plans: &[PrPlan], repo: &str| plans.iter().find(|p| p.repo == repo).cloned().unwrap();
+        let ready = row(&plans, "ready");
+        assert_eq!((ready.state, ready.commits, ready.pushed, ready.base.as_str()), (PlanState::Ready, 1, true, "main"));
+        let local = row(&plans, "local");
+        assert_eq!((local.state, local.commits, local.unpushed, local.pushed), (PlanState::NeedsPush, 1, 1, false));
+        assert_eq!(row(&plans, "empty").state, PlanState::NoCommits);
+        let open = row(&plans, "open");
+        assert_eq!((open.state, open.pr), (PlanState::HasPr, Some(OpenPr { number: 7, url: "https://github.com/o/open/pull/7".into(), is_draft: true })));
+        let off = row(&plans, "off");
+        assert_eq!((off.state, off.reason.as_str()), (PlanState::Blocked, "On 'other', not feat/x"));
+
+        assert_eq!(created.unwrap().number, 9);
+        assert_eq!(row(&after.unwrap(), "local").state, PlanState::Ready);
+        assert!(crate::proc::run("git", &["rev-parse", "--verify", "refs/heads/feat/x"], Some(&root.join("bare/local.git"))).is_ok());
+        let log = std::fs::read_to_string(bin.join("gh.log")).unwrap();
+        assert!(log.contains("pr create -R o/local --base main --head feat/x --title Add x --body why --draft"), "{log}");
+        assert_eq!(meta.unwrap().pr_refs.iter().map(|r| (r.repo.as_str(), r.number)).collect::<Vec<_>>(), [("local", 9)]);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

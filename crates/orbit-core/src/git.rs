@@ -516,6 +516,44 @@ pub fn remote_branch_feature_commits(path: &Path, base: &str) -> usize {
     parse_count(out)
 }
 
+/// Where a branch stands against origin/<base> and origin/<branch>, for
+/// deciding whether a PR can be opened.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BranchFacts {
+    /// Commits of HEAD that origin/<base> lacks.
+    pub local: usize,
+    /// Commits of origin/<branch> that origin/<base> lacks.
+    pub remote: usize,
+    /// origin/<branch> exists.
+    pub pushed: bool,
+    /// Commits of HEAD missing from origin/<branch> (all of `local` when unpushed).
+    pub unpushed: usize,
+    /// Commits of origin/<branch> missing from HEAD.
+    pub behind: usize,
+    /// HEAD's work is already in the base (squash-merged).
+    pub integrated: bool,
+}
+
+/// `BranchFacts` of the checked-out branch, from local refs (no fetch).
+pub fn branch_facts(path: &Path, base: &str) -> BranchFacts {
+    let target = base_ref(path, base);
+    let count = |args: &[&str]| count_rev_list(path, args, &[]);
+    let local = count(&["rev-list", "--count", "HEAD", "--not", &target]);
+    let remote_branch = current_branch(path).map(|b| format!("origin/{b}")).filter(|rb| ref_exists(path, rb));
+    let (pushed, unpushed, behind) = match &remote_branch {
+        Some(rb) => (true, count(&["rev-list", "--count", "HEAD", "--not", rb]), count(&["rev-list", "--count", rb, "--not", "HEAD"])),
+        None => (false, local, 0),
+    };
+    BranchFacts {
+        local,
+        remote: remote_branch_feature_commits(path, base),
+        pushed,
+        unpushed,
+        behind,
+        integrated: local > 0 && is_integrated(path, "HEAD", base),
+    }
+}
+
 fn ref_exists(path: &Path, r: &str) -> bool {
     crate::proc::cmd("git")
         .args(["rev-parse", "--verify", "--quiet", &format!("{r}^{{}}")])

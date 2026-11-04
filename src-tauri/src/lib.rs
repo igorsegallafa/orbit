@@ -159,6 +159,7 @@ pub fn run() {
             commands::ws_rebase_abort,
             commands::ws_create_pr,
             commands::ws_create_prs,
+            commands::ws_pr_plan,
             commands::ws_pr_draft,
             commands::ws_prs,
             commands::ws_prs_flat,
