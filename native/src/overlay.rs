@@ -3,6 +3,7 @@
 //! (↑/↓/Enter/Esc) through the `OrbitOverlay` key context.
 use crate::app::OrbitApp;
 use crate::commands::Handler;
+use crate::motion;
 use crate::probe::probe;
 use crate::theme::{self, c, size};
 use gpui::{
@@ -185,7 +186,6 @@ impl OrbitApp {
                         .occlude()
                         .absolute()
                         .left(x)
-                        .top(y)
                         .min_w(px(size::MENU_MIN_W))
                         .p(px(size::MENU_PAD))
                         .bg(c(theme::PANEL_RAISED))
@@ -218,14 +218,15 @@ impl OrbitApp {
                                 .child(probe(format!("menu:{}", item.label)))
                                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                 .on_click(cx.listener(move |this, _, window, cx| this.pick_menu_item(ix, window, cx)))
-                        })),
+                        }))
+                        .map(|m| motion::drop_in(m, "context-menu-in", y, motion::MENU_IN)),
                 ),
         )
     }
 
     pub(crate) fn render_dialog(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let dialog = self.dialog.as_ref()?;
-        Some(
+        Some(motion::overlay_in(
             div()
                 .id("dialog-scrim")
                 .key_context(CONTEXT)
@@ -237,7 +238,7 @@ impl OrbitApp {
                 .items_center()
                 .justify_center()
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.answer_dialog(None, window, cx)))
-                .child(
+                .child(motion::modal_in(
                     div()
                         .id("dialog")
                         .occlude()
@@ -280,8 +281,10 @@ impl OrbitApp {
                                         .on_click(cx.listener(move |this, _, window, cx| this.answer_dialog(Some(ix), window, cx)))
                                 })),
                         ),
-                ),
-        )
+                    "dialog-in",
+                )),
+            "dialog-scrim-in",
+        ))
     }
 }
 

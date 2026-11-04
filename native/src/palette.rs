@@ -2,6 +2,7 @@
 //! Actions / Text; `Ctrl+Shift+A` is its Actions tab) and Find in Files.
 //! Sources and keys are in `search/`; looks follow `SearchEverywhereModal.tsx`
 //! and `FindInFiles.tsx`.
+use crate::motion;
 use crate::app::OrbitApp;
 use crate::commands;
 use crate::icons;
@@ -606,7 +607,7 @@ impl OrbitApp {
             // `.find-overlay`: the top of a centered full-size popup, so it only grows downward.
             scrim
                 .child(div().flex_1())
-                .child(
+                .child(motion::popover_in(
                     div()
                         .w_full()
                         .h(relative(0.7))
@@ -615,11 +616,15 @@ impl OrbitApp {
                         .justify_center()
                         .items_start()
                         .child(self.render_find(p, popup.when(!idle, |d| d.h_full()), list, idle, cx)),
-                )
+                    "search-modal-in",
+                    motion::SEARCH_IN,
+                ))
                 .child(div().flex_1())
         } else {
-            scrim.justify_center().child(self.render_everywhere(p, popup, list, cx))
+            let body = div().w_full().flex().flex_col().items_center().child(self.render_everywhere(p, popup, list, cx));
+            scrim.justify_center().child(motion::popover_in(body, "search-modal-in", motion::SEARCH_IN))
         })
+        .map(|s| motion::overlay_in(s, "palette-scrim-in"))
     }
 
     fn render_everywhere(
