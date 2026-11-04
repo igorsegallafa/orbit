@@ -113,3 +113,5 @@ pub fn init(cx: &mut App) {
 // tools tokens
 /// `--info` (Nord #81a1c1).
 pub const INFO: u32 = 0x81a1c1;
+/// `--purple` (Nord #b48ead).
+pub const PURPLE: u32 = 0xb48cff;

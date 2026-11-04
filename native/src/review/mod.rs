@@ -5,6 +5,10 @@
 //! answered inline.
 mod changes;
 mod commit;
+pub mod code_review;
+mod feature;
+mod pr_review;
+mod pr_ui;
 pub mod notes;
 mod prs;
 mod send;
@@ -26,6 +30,8 @@ use orbit_core::prs::WsCheck;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::time::Duration;
+
+pub use code_review::open_code_review;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Page {
@@ -278,6 +284,7 @@ pub fn init(cx: &mut App) {
     for command in [
         Command::new("review.changes", "Review Changes").when(has_ws).run(|a, w, cx| open(a, Page::Changes, w, cx)),
         Command::new("review.lastCommit", "Review Last Commit").when(has_ws).run(review_last_commit),
+        Command::new("review.codeReview", "Code Review").run(open_code_review),
         Command::new("review.pullRequests", "Pull Requests and Checks").when(has_ws).run(|a, w, cx| open(a, Page::PullRequests, w, cx)),
         Command::new("diff.nextChange", "Next Change").keys(["f7"]).when(in_diff).run(|a, _, cx| {
             if let Some(d) = active_diff(a) {

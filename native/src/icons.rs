@@ -84,6 +84,14 @@ const GLYPHS: &[(&str, &str)] = &[
     ("step-over", r#"<circle cx="12" cy="17" r="1"/><path d="M21 7v6h-6"/><path d="M3 17a9 9 0 0 1 9-9 9 9 0 0 1 6 2.3l3 2.7"/>"#),
     ("step-into", r#"<path d="M12 2v14"/><path d="m19 9-7 7-7-7"/><circle cx="12" cy="21" r="1"/>"#),
     ("step-out", r#"<path d="m5 9 7-7 7 7"/><path d="M12 16V2"/><circle cx="12" cy="21" r="1"/>"#),
+    // Code Review (Icons.tsx: GitIcon, CommitIcon, PushIcon, PullRequestIcon, RepoIcon, TrashIcon, CircleIcon).
+    ("git", r#"<line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>"#),
+    ("commit", r#"<circle cx="12" cy="12" r="9"/><path d="m8.5 12 2.5 2.5 4.5-5"/>"#),
+    ("push", r#"<path d="M12 15V4"/><path d="m7 9 5-5 5 5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/>"#),
+    ("pr", r#"<circle cx="6" cy="5" r="2.2"/><circle cx="18" cy="19" r="2.2"/><circle cx="6" cy="19" r="2.2"/><path d="M6 7.2v9.6"/><path d="M18 16.8V9a3 3 0 0 0-3-3h-3"/><path d="m13 3-3 3 3 3"/>"#),
+    ("repo", r#"<path d="M5 19.5V5a2 2 0 0 1 2-2h12v15H7a2 2 0 0 0-2 2 2 2 0 0 0 2 2h12"/><path d="M9 3v7l2-1.5L13 10V3"/>"#),
+    ("trash", r#"<path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M6 6l1 14h10l1-14"/>"#),
+    ("ring", r#"<circle cx="12" cy="12" r="8" stroke-width="2.6"/>"#),
 ];
 
 /// One of Orbit's own UI glyphs (`doc`, `terminal`, `diff`), tinted by the text colour.
