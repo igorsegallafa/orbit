@@ -698,7 +698,7 @@ fn header(r: &RepoView, ov: Option<&RepoOverview>, cx: &mut Context<PageTab>) ->
                 .items_center()
                 .gap(px(6.))
                 .child(
-                    kit::hint(kit::button_icon("repo-new-ws", Some(("plus", 14.)), "New workspace", Kind::Primary, kit::TOOL), format!("New workspace with {name}: a branch in its own worktree"))
+                    kit::hint(kit::button_icon_tinted("repo-new-ws", Some(("plus", 14.)), "New workspace", Kind::Secondary, kit::TOOL, Some(c(theme::ACCENT))), format!("New workspace with {name}: a branch in its own worktree"))
                         .on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.open_create(Some(vec![name.clone()]), w, cx))),
                 )
                 .child(tool(

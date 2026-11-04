@@ -510,6 +510,11 @@ mod tests {
             }
         }
         assert!(total > 0);
-        assert!(kill(id).is_err(), "removed when it ended");
+        // Exit is reported just before the session leaves the table.
+        let removed = (0..100).any(|_| {
+            std::thread::sleep(Duration::from_millis(50));
+            with_session(id, |_| ()).is_err()
+        });
+        assert!(removed, "removed when it ended");
     }
 }

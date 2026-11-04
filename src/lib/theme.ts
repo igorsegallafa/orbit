@@ -152,7 +152,7 @@ export const THEMES: Theme[] = [
       bg: "#2e3440", panel: "#292e39", panelRaised: "#343a47", panelHover: "#3b4252",
       border: "#3b4252", borderStrong: "#4c566a",
       text: "#eceff4", textDim: "#c0c8d6", textFaint: "#7b88a1",
-      accent: "#88c0d0", accentHover: "#8fbcbb", onAccent: "#2e3440",
+      accent: "#88c0d0", accentHover: "#a3d3df", onAccent: "#2e3440",
       danger: "#bf616a", ok: "#a3be8c", warn: "#ebcb8b", info: "#81a1c1", purple: "#b48ead",
     },
     syntax: {
