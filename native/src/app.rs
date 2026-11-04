@@ -1,32 +1,27 @@
-//! The window's root view: workspaces sidebar, file tree, tab strip and the
-//! active tab. Tabs keep the React app's order: sessions (terminals) first,
+//! The window's root view and its state: workspaces, tabs, panes, navigation
+//! history, overlays and what is restored on start. Rendering is in
+//! `shell.rs`. Tabs keep the React app's order: sessions (terminals) first,
 //! then files after a divider, with a VS Code-style preview tab.
+use crate::commands::{self, Command};
 use crate::diff_view::DiffTab;
 use crate::editor::{self, EditorEvent, EditorTab};
 use crate::file_tree::{FileTree, FileTreeEvent};
 use crate::lsp::{uri_to_path, LspRegistry, Notification, RepoKey};
+use crate::nav::NavHistory;
+use crate::overlay::{ButtonStyle, ContextMenu, Dialog, DialogButton, MenuItem};
+use crate::palette::Palette;
+use crate::state::{self, Layout, SavedState, SavedTab};
 use crate::terminal::{self, TerminalView};
-use crate::theme::{self, c};
+use crate::toast::{ToastKind, Toasts};
 use crate::workspace::{self, Workspace};
 use futures::StreamExt;
 use gpui::{
-    actions, div, font, prelude::*, px, App, Context, Entity, FocusHandle, Focusable, KeyBinding, MouseButton,
-    SharedString, Subscription, Window,
+    px, App, AnyView, AppContext, Context, Entity, FocusHandle, Focusable, Pixels, Point, SharedString, Subscription,
+    Task, Window,
 };
 use std::path::{Path, PathBuf};
-use std::time::Instant;
-
-actions!(orbit, [NewTerminal, CloseFileTab, CloseTab, NextTab, Quit]);
-
-pub fn bind_keys(cx: &mut App) {
-    cx.bind_keys([
-        KeyBinding::new("ctrl-shift-t", NewTerminal, None),
-        KeyBinding::new("ctrl-w", CloseFileTab, None),
-        KeyBinding::new("ctrl-shift-w", CloseTab, None),
-        KeyBinding::new("ctrl-tab", NextTab, None),
-        KeyBinding::new("ctrl-q", Quit, None),
-    ]);
-}
+use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 pub enum TabKind {
     Terminal(Entity<TerminalView>),
@@ -38,6 +33,15 @@ pub struct Tab {
     pub kind: TabKind,
     /// Opened with a single click: the next such file replaces it.
     pub preview: bool,
+}
+
+/// Where a history entry leads back to.
+#[derive(Clone, Debug, PartialEq)]
+pub enum NavTarget {
+    Editor(PathBuf),
+    Diff(PathBuf),
+    /// Closed terminals are skipped: reopening one would be a new session.
+    Terminal,
 }
 
 impl Tab {
@@ -64,6 +68,46 @@ impl Tab {
             TabKind::Diff(d) => d.read(cx).state.focus_handle(cx),
         }
     }
+
+    /// Stable identity: history entries, menus and dialogs refer to tabs by key.
+    pub fn key(&self, cx: &App) -> String {
+        match &self.kind {
+            TabKind::Terminal(t) => format!("term:{}", t.entity_id()),
+            TabKind::Editor(e) => format!("ed:{}", e.read(cx).path.display()),
+            TabKind::Diff(d) => format!("diff:{}", d.read(cx).path.display()),
+        }
+    }
+
+    fn nav_target(&self, cx: &App) -> NavTarget {
+        match &self.kind {
+            TabKind::Terminal(_) => NavTarget::Terminal,
+            TabKind::Editor(e) => NavTarget::Editor(e.read(cx).path.clone()),
+            TabKind::Diff(d) => NavTarget::Diff(d.read(cx).path.clone()),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Pane {
+    Sidebar,
+    Dock,
+    Panel,
+}
+
+pub struct PaneDrag {
+    pub pane: Pane,
+    pub start: Point<Pixels>,
+    pub size: f32,
+    /// The mouse moved since the press (a press alone may be a double click).
+    pub moved: bool,
+}
+
+/// Debounced writes of `SavedState`.
+#[derive(Default)]
+struct Persist {
+    path: Option<PathBuf>,
+    last: String,
+    task: Option<Task<()>>,
 }
 
 pub struct OrbitApp {
@@ -73,13 +117,107 @@ pub struct OrbitApp {
     pub tabs: Vec<Tab>,
     pub active: Option<usize>,
     pub lsp: LspRegistry,
-    /// A one-line message in the status bar (errors, refusals).
-    pub notice: Option<SharedString>,
+    /// Focused when no tab is, so app shortcuts always have a dispatch path.
+    pub focus: FocusHandle,
+    pub layout: Layout,
+    pub drag: Option<PaneDrag>,
+    pub nav: NavHistory<NavTarget>,
+    /// Set while back/forward switches tabs, so the switch isn't recorded.
+    applying_nav: bool,
+    pub toasts: Toasts,
+    pub menu: Option<ContextMenu>,
+    pub dialog: Option<Dialog>,
+    pub palette: Option<Palette>,
+    pub(crate) overlay_focus: FocusHandle,
+    /// Views shown at the right of the titlebar, before the files-panel
+    /// toggle: where the run widget and the inbox go.
+    pub titlebar_items: Vec<AnyView>,
+    persist: Persist,
     _subscriptions: Vec<Subscription>,
 }
 
+/// The app's commands and keys (JetBrains-style, as the React app).
+pub fn init(cx: &mut App) {
+    crate::overlay::bind_keys(cx);
+    let has_files = |a: &OrbitApp, _: &App| a.tabs.iter().any(Tab::is_file);
+    let active_is_file = |a: &OrbitApp, _: &App| a.active_tab().is_some_and(Tab::is_file);
+    let not_in_terminal = |a: &OrbitApp, _: &App| a.active_terminal().is_none();
+    for command in [
+        Command::new("app.newTerminal", "New Terminal").keys(["ctrl-shift-t"]).run(|a, w, cx| a.new_terminal(None, w, cx)),
+        Command::new("app.closeTab", "Close Tab")
+            .keys(["ctrl-w"])
+            .when(|a, _| a.active.is_some())
+            // Shells use Ctrl+W: the key closes file tabs only.
+            .key_when(active_is_file)
+            .run(|a, w, cx| a.close_active(false, w, cx)),
+        Command::new("app.closeTabDiscard", "Close Tab Without Saving")
+            .keys(["ctrl-shift-w"])
+            .when(|a, _| a.active.is_some())
+            .run(|a, w, cx| a.close_active(true, w, cx)),
+        Command::new("app.keepOpen", "Keep Tab Open").when(|a, _| a.active_tab().is_some_and(|t| t.preview)).run(|a, _, cx| {
+            if let Some(ix) = a.active {
+                a.keep_open(ix, cx);
+            }
+        }),
+        Command::new("app.closeOtherTabs", "Close Other Tabs").when(|a, _| a.active.is_some()).run(|a, w, cx| {
+            if let Some(ix) = a.active {
+                a.close_other_tabs(ix, w, cx);
+            }
+        }),
+        Command::new("app.closeAllTabs", "Close All Tabs").when(|a, _| !a.tabs.is_empty()).run(|a, w, cx| a.close_all_tabs(w, cx)),
+        Command::new("app.closeOtherFiles", "Close Other Files").when(active_is_file).run(|a, w, cx| {
+            if let Some(ix) = a.active {
+                a.close_files(FileSet::Others(ix), w, cx);
+            }
+        }),
+        Command::new("app.closeFilesToRight", "Close Files to the Right").when(active_is_file).run(|a, w, cx| {
+            if let Some(ix) = a.active {
+                a.close_files(FileSet::RightOf(ix), w, cx);
+            }
+        }),
+        Command::new("app.closeSavedFiles", "Close Saved Files").when(has_files).run(|a, w, cx| a.close_files(FileSet::Saved, w, cx)),
+        Command::new("app.closeAllFiles", "Close All Files").when(has_files).run(|a, w, cx| a.close_files(FileSet::All, w, cx)),
+        Command::new("app.nextTab", "Next Tab").keys(["ctrl-tab"]).when(|a, _| !a.tabs.is_empty()).run(|a, w, cx| a.cycle_tab(1, w, cx)),
+        Command::new("app.prevTab", "Previous Tab")
+            .keys(["ctrl-shift-tab"])
+            .when(|a, _| !a.tabs.is_empty())
+            .run(|a, w, cx| a.cycle_tab(-1, w, cx)),
+        // Shells move by word with Alt+←/→.
+        Command::new("app.back", "Go Back").keys(["alt-left"]).key_when(not_in_terminal).run(|a, w, cx| a.navigate(true, w, cx)),
+        Command::new("app.forward", "Go Forward").keys(["alt-right"]).key_when(not_in_terminal).run(|a, w, cx| a.navigate(false, w, cx)),
+        Command::new("app.toggleSidebar", "Toggle Sidebar").run(|a, _, cx| a.toggle_sidebar(cx)),
+        Command::new("app.toggleDock", "Toggle Files Panel").run(|a, _, cx| a.toggle_dock(cx)),
+        Command::new("app.togglePanel", "Toggle Build/Run Panel").run(|a, _, cx| a.toggle_panel(cx)),
+        Command::new("app.findAction", "Find Action…").keys(["ctrl-shift-a"]).run(|a, w, cx| a.open_palette(w, cx)),
+        Command::new("app.switchWorkspace", "Switch Workspace…").when(|a, _| !a.workspaces.is_empty()).run(|a, w, cx| {
+            a.open_workspace_menu(Point::new(px(160.), px(34.)), w, cx)
+        }),
+        // The editor's keys, here so they are listed; the editor stage may move them to editor.rs.
+        Command::new("editor.save", "Save File").keys(["ctrl-s"]).context("OrbitEditor").action(editor::Save),
+        Command::new("editor.goToDefinition", "Go to Definition")
+            .keys(["f12"])
+            .context("Input")
+            .action(gpui_component::input::GoToDefinition),
+        Command::new("app.quit", "Quit").keys(["ctrl-q"]).run(|a, _, cx| {
+            a.save_now(cx);
+            cx.quit()
+        }),
+    ] {
+        commands::register(cx, command);
+    }
+}
+
+/// Which file tabs a batch close picks.
+#[derive(Clone, Copy)]
+pub enum FileSet {
+    All,
+    Saved,
+    Others(usize),
+    RightOf(usize),
+}
+
 impl OrbitApp {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(state_path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let tree = cx.new(FileTree::new);
         let sub = cx.subscribe_in(&tree, window, |this, _, event, window, cx| match event {
             FileTreeEvent::OpenFile { path, preview } => {
@@ -96,6 +234,8 @@ impl OrbitApp {
             }
         })
         .detach();
+        let focus = cx.focus_handle();
+        window.focus(&focus, cx);
         Self {
             workspaces: workspace::list_workspaces(),
             selected: None,
@@ -103,7 +243,18 @@ impl OrbitApp {
             tabs: vec![],
             active: None,
             lsp: LspRegistry::new(tx),
-            notice: None,
+            focus,
+            layout: Layout::default(),
+            drag: None,
+            nav: NavHistory::default(),
+            applying_nav: false,
+            toasts: Toasts::default(),
+            menu: None,
+            dialog: None,
+            palette: None,
+            overlay_focus: cx.focus_handle(),
+            titlebar_items: vec![],
+            persist: Persist { path: state_path, ..Default::default() },
             _subscriptions: vec![sub],
         }
     }
@@ -149,6 +300,10 @@ impl OrbitApp {
         }
     }
 
+    pub fn tab_index(&self, key: &str, cx: &App) -> Option<usize> {
+        self.tabs.iter().position(|t| t.key(cx) == key)
+    }
+
     /// Adds a tab in its group (sessions before files) and returns its index.
     fn insert_tab(&mut self, tab: Tab) -> usize {
         let ix = if tab.is_file() { self.tabs.len() } else { self.tabs.iter().take_while(|t| !t.is_file()).count() };
@@ -159,21 +314,49 @@ impl OrbitApp {
         ix
     }
 
-    fn activate(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn activate(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.remember_cursor(cx);
         self.active = Some(ix);
         if let Some(tab) = self.tabs.get(ix) {
             window.focus(&tab.focus_handle(cx), cx);
+            if !self.applying_nav {
+                let (key, target) = (tab.key(cx), tab.nav_target(cx));
+                self.nav.visit(key, target);
+            }
         }
         cx.notify();
+    }
+
+    /// The shown editor's cursor goes into its history entry.
+    fn remember_cursor(&mut self, cx: &App) {
+        if let Some(tab) = self.active_tab() {
+            if let TabKind::Editor(e) = &tab.kind {
+                let key = tab.key(cx);
+                self.nav.set_position(&key, e.read(cx).cursor(cx));
+            }
+        }
+    }
+
+    /// Focus back to the active tab, or the app when there is none.
+    pub fn restore_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.active_tab() {
+            Some(tab) => window.focus(&tab.focus_handle(cx), cx),
+            None => window.focus(&self.focus, cx),
+        }
+    }
+
+    pub fn cycle_tab(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let n = self.tabs.len() as isize;
+        if n > 0 {
+            let next = self.active.map_or(0, |a| (a as isize + delta).rem_euclid(n));
+            self.activate(next as usize, window, cx);
+        }
     }
 
     pub fn new_terminal(&mut self, input: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         let pty = match terminal::Pty::spawn(&self.cwd()) {
             Ok(pty) => pty,
-            Err(e) => {
-                self.notice = Some(format!("terminal failed: {e}").into());
-                return;
-            }
+            Err(e) => return self.toast_error(format!("Terminal failed: {e}"), cx),
         };
         let view = cx.new(|cx| TerminalView::new(pty, input, cx));
         cx.observe(&view, |_, _, cx| cx.notify()).detach();
@@ -195,8 +378,7 @@ impl OrbitApp {
         let text = match editor::read_text(&path) {
             Ok(text) => text,
             Err(e) => {
-                self.notice = Some(format!("{}: {e:#}", path.display()).into());
-                cx.notify();
+                self.toast(ToastKind::Error, format!("Can't open {}", file_name(&path)), Some(format!("{e:#}").into()), cx);
                 return None;
             }
         };
@@ -242,11 +424,17 @@ impl OrbitApp {
     }
 
     pub fn open_diff(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Option<Entity<DiffTab>> {
+        if let Some(ix) = self.tabs.iter().position(|t| matches!(&t.kind, TabKind::Diff(d) if d.read(cx).path == path)) {
+            self.activate(ix, window, cx);
+            return match &self.tabs[ix].kind {
+                TabKind::Diff(d) => Some(d.clone()),
+                _ => None,
+            };
+        }
         let files = match DiffTab::load(&path) {
             Ok(files) => files,
             Err(e) => {
-                self.notice = Some(format!("diff of {}: {e:#}", path.display()).into());
-                cx.notify();
+                self.toast(ToastKind::Error, format!("No diff for {}", file_name(&path)), Some(format!("{e:#}").into()), cx);
                 return None;
             }
         };
@@ -256,12 +444,11 @@ impl OrbitApp {
         Some(view)
     }
 
+    /// Closes a tab. One with unsaved changes asks first, unless `force`.
     pub fn close_tab(&mut self, ix: usize, force: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.tabs.get(ix) else { return };
         if tab.dirty(cx) && !force {
-            self.notice = Some("Unsaved changes: Ctrl+S to save, Ctrl+Shift+W to close without saving".into());
-            cx.notify();
-            return;
+            return self.confirm_unsaved(ix, window, cx);
         }
         self.tabs.remove(ix);
         self.active = match self.active {
@@ -270,10 +457,364 @@ impl OrbitApp {
             Some(a) => Some(a.min(self.tabs.len() - 1)),
             None => None,
         };
-        if let Some(a) = self.active {
-            self.activate(a, window, cx);
+        match self.active {
+            Some(a) => self.activate(a, window, cx),
+            None => window.focus(&self.focus, cx),
         }
         cx.notify();
+    }
+
+    pub fn close_active(&mut self, force: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(ix) = self.active {
+            self.close_tab(ix, force, window, cx);
+        }
+    }
+
+    /// "Save changes to X?": Save, Don't Save or Cancel, as the React app.
+    fn confirm_unsaved(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let tab = &self.tabs[ix];
+        let (name, key) = (tab.title(cx), tab.key(cx));
+        let discard_key = key.clone();
+        let dialog = Dialog {
+            title: format!("Save changes to {name}?").into(),
+            message: "Your changes will be lost if you don't save them.".into(),
+            buttons: vec![
+                DialogButton { label: "Cancel".into(), style: ButtonStyle::Secondary, run: Rc::new(|_, _, _| {}) },
+                DialogButton {
+                    label: "Don't Save".into(),
+                    style: ButtonStyle::Secondary,
+                    run: Rc::new(move |a, w, cx| {
+                        if let Some(ix) = a.tab_index(&discard_key, cx) {
+                            a.close_tab(ix, true, w, cx);
+                        }
+                    }),
+                },
+                DialogButton {
+                    label: "Save".into(),
+                    style: ButtonStyle::Primary,
+                    run: Rc::new(move |a, w, cx| {
+                        let Some(ix) = a.tab_index(&key, cx) else { return };
+                        if let TabKind::Editor(e) = &a.tabs[ix].kind {
+                            let e = e.clone();
+                            e.update(cx, |e, cx| e.save(&editor::Save, w, cx));
+                            if e.read(cx).is_dirty() {
+                                let err = e.read(cx).last_error.clone().unwrap_or_else(|| "save failed".into());
+                                return a.toast(ToastKind::Error, "Not closed: the file wasn't saved", Some(err.into()), cx);
+                            }
+                        }
+                        a.close_tab(ix, true, w, cx);
+                    }),
+                },
+            ],
+            on_cancel: Rc::new(|_, _, _| {}),
+        };
+        self.open_dialog(dialog, window, cx);
+    }
+
+    /// Removes the tabs `which` picks, except ones with unsaved changes;
+    /// returns how many of those stayed. The active tab, if closed, becomes the last.
+    fn remove_tabs(&mut self, which: impl Fn(usize, &Tab) -> bool, window: &mut Window, cx: &mut Context<Self>) -> usize {
+        let active_key = self.active_tab().map(|t| t.key(cx));
+        let mut kept_dirty = 0;
+        let remove: Vec<bool> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(ix, t)| {
+                let picked = which(ix, t);
+                let dirty = picked && t.dirty(cx);
+                kept_dirty += dirty as usize;
+                picked && !dirty
+            })
+            .collect();
+        let mut flags = remove.into_iter();
+        self.tabs.retain(|_| !flags.next().unwrap_or(false));
+        let still = active_key.and_then(|k| self.tab_index(&k, cx));
+        self.active = still.or(self.tabs.len().checked_sub(1));
+        match self.active {
+            Some(a) if still.is_none() => self.activate(a, window, cx),
+            Some(_) => {}
+            None => window.focus(&self.focus, cx),
+        }
+        cx.notify();
+        kept_dirty
+    }
+
+    fn report_kept(&mut self, kept: usize, cx: &mut Context<Self>) {
+        if kept > 0 {
+            let s = if kept > 1 { "s" } else { "" };
+            self.toast(ToastKind::Info, format!("{kept} file{s} with unsaved changes kept open"), None, cx);
+        }
+    }
+
+    pub fn close_files(&mut self, set: FileSet, window: &mut Window, cx: &mut Context<Self>) {
+        // Positions among the file tabs, as the React menu counts them.
+        let files: Vec<usize> = (0..self.tabs.len()).filter(|&i| self.tabs[i].is_file()).collect();
+        let at = |ix: usize| files.iter().position(|&f| f == ix);
+        let pick: Vec<bool> = (0..self.tabs.len())
+            .map(|i| match (set, at(i)) {
+                (_, None) => false,
+                (FileSet::All, _) => true,
+                (FileSet::Saved, _) => !self.tabs[i].dirty(cx),
+                (FileSet::Others(keep), Some(_)) => i != keep,
+                (FileSet::RightOf(from), Some(p)) => at(from).is_some_and(|f| p > f),
+            })
+            .collect();
+        let kept = self.remove_tabs(|i, _| pick[i], window, cx);
+        self.report_kept(kept, cx);
+    }
+
+    pub fn close_other_tabs(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(key) = self.tabs.get(ix).map(|t| t.key(cx)) else { return };
+        let kept = self.remove_tabs(|i, _| i != ix, window, cx);
+        if let Some(ix) = self.tab_index(&key, cx) {
+            self.activate(ix, window, cx);
+        }
+        self.report_kept(kept, cx);
+    }
+
+    pub fn close_all_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let kept = self.remove_tabs(|_, _| true, window, cx);
+        self.report_kept(kept, cx);
+    }
+
+    pub fn keep_open(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if let Some(t) = self.tabs.get_mut(ix) {
+            t.preview = false;
+            cx.notify();
+        }
+    }
+
+    /// The tab's context menu, with the React app's items.
+    pub fn open_tab_menu(&mut self, ix: usize, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(ix) else { return };
+        let key = tab.key(cx);
+        let files: Vec<usize> = (0..self.tabs.len()).filter(|&i| self.tabs[i].is_file()).collect();
+        let at = files.iter().position(|&f| f == ix);
+        let with = |f: fn(&mut OrbitApp, usize, &mut Window, &mut Context<OrbitApp>)| {
+            let key = key.clone();
+            move |a: &mut OrbitApp, w: &mut Window, cx: &mut Context<OrbitApp>| {
+                if let Some(ix) = a.tab_index(&key, cx) {
+                    f(a, ix, w, cx)
+                }
+            }
+        };
+        let mut items = vec![MenuItem::new("Close", with(|a, ix, w, cx| a.close_tab(ix, false, w, cx)))];
+        if !files.is_empty() {
+            if tab.preview {
+                items.push(MenuItem::new("Keep Open", with(|a, ix, _, cx| a.keep_open(ix, cx))));
+            }
+            if at.is_some() && files.len() > 1 {
+                items.push(MenuItem::new("Close Other Files", with(|a, ix, w, cx| a.close_files(FileSet::Others(ix), w, cx))));
+            }
+            if at.is_some_and(|p| p + 1 < files.len()) {
+                items.push(MenuItem::new("Close Files to the Right", with(|a, ix, w, cx| a.close_files(FileSet::RightOf(ix), w, cx))));
+            }
+            items.push(MenuItem::new("Close Saved Files", |a, w, cx| a.close_files(FileSet::Saved, w, cx)));
+            items.push(MenuItem::new("Close All Files", |a, w, cx| a.close_files(FileSet::All, w, cx)));
+        }
+        items.push(MenuItem::new("Close Other Tabs", with(|a, ix, w, cx| a.close_other_tabs(ix, w, cx))));
+        items.push(MenuItem::new("Close All Tabs", |a, w, cx| a.close_all_tabs(w, cx)).danger());
+        self.open_menu(position, items, window, cx);
+    }
+
+    pub fn open_workspace_menu(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let items = self
+            .workspaces
+            .iter()
+            .enumerate()
+            .map(|(ix, ws)| {
+                let label = if self.selected == Some(ix) { format!("✓  {}", ws.meta.name) } else { format!("    {}", ws.meta.name) };
+                MenuItem::new(label, move |a: &mut OrbitApp, _: &mut Window, cx: &mut Context<OrbitApp>| a.select_workspace(ix, cx))
+            })
+            .collect();
+        self.open_menu(position, items, window, cx);
+    }
+
+    /// Back (or forward) in the history. Closed files reopen; closed terminals are skipped.
+    pub fn navigate(&mut self, back: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dialog.is_some() {
+            return;
+        }
+        self.remember_cursor(cx);
+        let open: Vec<String> = self.tabs.iter().map(|t| t.key(cx)).collect();
+        let Some(entry) = self.nav.step(back, |e| open.contains(&e.key) || e.target != NavTarget::Terminal) else {
+            cx.notify();
+            return;
+        };
+        self.applying_nav = true;
+        let editor = match (open.iter().position(|k| *k == entry.key), &entry.target) {
+            (Some(ix), _) => {
+                self.activate(ix, window, cx);
+                self.active_editor()
+            }
+            (None, NavTarget::Editor(path)) => self.open_file(path.clone(), false, window, cx),
+            (None, NavTarget::Diff(path)) => {
+                self.open_diff(path.clone(), window, cx);
+                None
+            }
+            (None, NavTarget::Terminal) => None,
+        };
+        self.applying_nav = false;
+        if let (Some(editor), Some((line, col))) = (editor, entry.position) {
+            let p = lsp_types::Position::new(line - 1, col - 1);
+            editor.update(cx, |e, cx| e.reveal(lsp_types::Range::new(p, p), window, cx));
+        }
+        cx.notify();
+    }
+
+    pub fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.layout.sidebar_hidden = !self.layout.sidebar_hidden;
+        cx.notify();
+    }
+
+    pub fn toggle_dock(&mut self, cx: &mut Context<Self>) {
+        self.layout.dock_hidden = !self.layout.dock_hidden;
+        cx.notify();
+    }
+
+    pub fn toggle_panel(&mut self, cx: &mut Context<Self>) {
+        self.layout.panel_open = !self.layout.panel_open;
+        cx.notify();
+    }
+
+    pub fn start_drag(&mut self, pane: Pane, start: Point<Pixels>, cx: &mut Context<Self>) {
+        let size = match pane {
+            Pane::Sidebar => self.layout.sidebar_width,
+            Pane::Dock => self.layout.dock_width,
+            Pane::Panel => self.layout.panel_height,
+        };
+        self.drag = Some(PaneDrag { pane, start, size, moved: false });
+        cx.notify();
+    }
+
+    pub fn drag_to(&mut self, position: Point<Pixels>, window: &Window, cx: &mut Context<Self>) {
+        let Some(d) = self.drag.as_mut() else { return };
+        d.moved = true;
+        let d = &*d;
+        let dx = f32::from(position.x - d.start.x);
+        let dy = f32::from(position.y - d.start.y);
+        match d.pane {
+            Pane::Sidebar => self.layout.sidebar_width = Layout::snap_sidebar(d.size + dx),
+            // The dock is on the right and the panel at the bottom: they grow the other way.
+            Pane::Dock => self.layout.dock_width = state::DOCK.clamp(d.size - dx),
+            Pane::Panel => {
+                let max = (f32::from(window.viewport_size().height) - 200.).max(state::PANEL.min);
+                self.layout.panel_height = state::PANEL.clamp(d.size - dy).min(max);
+            }
+        }
+        cx.notify();
+    }
+
+    pub fn end_drag(&mut self, cx: &mut Context<Self>) {
+        if self.drag.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Double click on a resizer: back to the default size.
+    pub fn reset_pane(&mut self, pane: Pane, cx: &mut Context<Self>) {
+        match pane {
+            Pane::Sidebar => self.layout.sidebar_width = state::SIDEBAR.default,
+            Pane::Dock => self.layout.dock_width = state::DOCK.default,
+            Pane::Panel => self.layout.panel_height = state::PANEL.default,
+        }
+        cx.notify();
+    }
+
+    pub fn snapshot(&self, cx: &App) -> SavedState {
+        let tabs: Vec<SavedTab> = self
+            .tabs
+            .iter()
+            .filter_map(|t| match &t.kind {
+                TabKind::Editor(e) => {
+                    let e = e.read(cx);
+                    Some(SavedTab::Editor { path: e.path.clone(), preview: t.preview, cursor: Some(e.cursor(cx)) })
+                }
+                TabKind::Diff(d) => Some(SavedTab::Diff { path: d.read(cx).path.clone() }),
+                // Sessions come back with the Sessions stage (scrollback restore).
+                TabKind::Terminal(_) => None,
+            })
+            .collect();
+        let active = self.active.and_then(|a| {
+            let ix = self.tabs[..a].iter().filter(|t| t.is_file()).count();
+            self.tabs[a].is_file().then_some(ix)
+        });
+        SavedState {
+            workspace: self.workspace().map(|w| w.meta.name.clone()),
+            tabs,
+            active,
+            layout: self.layout.clone(),
+        }
+    }
+
+    /// Writes the state a moment after it last changed.
+    pub(crate) fn schedule_save(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.persist.path.clone() else { return };
+        let Ok(json) = serde_json::to_string_pretty(&self.snapshot(cx)) else { return };
+        if json == self.persist.last {
+            return;
+        }
+        self.persist.last = json.clone();
+        self.persist.task = Some(cx.spawn(async move |_, cx| {
+            cx.background_executor().timer(Duration::from_millis(400)).await;
+            if let Err(e) = state::save(&path, &json) {
+                eprintln!("saving {}: {e}", path.display());
+            }
+        }));
+    }
+
+    pub fn save_now(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.persist.path.clone() else { return };
+        self.persist.task = None;
+        if let Ok(json) = serde_json::to_string_pretty(&self.snapshot(cx)) {
+            if let Err(e) = state::save(&path, &json) {
+                eprintln!("saving {}: {e}", path.display());
+            }
+            self.persist.last = json;
+        }
+    }
+
+    pub fn state_path(&self) -> Option<&Path> {
+        self.persist.path.as_deref()
+    }
+
+    /// Reopens what was open last time. Files that are gone are skipped.
+    pub fn restore(&mut self, saved: SavedState, window: &mut Window, cx: &mut Context<Self>) {
+        self.layout = saved.layout;
+        if let Some(ix) = saved.workspace.and_then(|name| self.workspaces.iter().position(|w| w.meta.name == name)) {
+            self.select_workspace(ix, cx);
+        }
+        self.applying_nav = true;
+        let mut opened = vec![];
+        let mut missing = 0;
+        for tab in &saved.tabs {
+            let ok = match tab {
+                SavedTab::Editor { path, preview, cursor } if path.is_file() => {
+                    let editor = self.open_file(path.clone(), *preview, window, cx);
+                    if let (Some(e), Some((line, col))) = (&editor, cursor) {
+                        let p = lsp_types::Position::new(line.saturating_sub(1), col.saturating_sub(1));
+                        e.update(cx, |e, cx| e.reveal(lsp_types::Range::new(p, p), window, cx));
+                    }
+                    editor.is_some()
+                }
+                SavedTab::Diff { path } if path.is_file() => self.open_diff(path.clone(), window, cx).is_some(),
+                _ => false,
+            };
+            opened.push(ok.then(|| self.active.and_then(|a| self.tabs.get(a)).map(|t| t.key(cx))).flatten());
+            missing += !ok as usize;
+        }
+        self.applying_nav = false;
+        let active = saved.active.and_then(|a| opened.get(a).cloned().flatten()).and_then(|k| self.tab_index(&k, cx));
+        if let Some(ix) = active.or(self.tabs.len().checked_sub(1)) {
+            self.activate(ix, window, cx);
+        }
+        if missing > 0 {
+            let s = if missing > 1 { "s" } else { "" };
+            self.toast(ToastKind::Info, format!("{missing} tab{s} from last time could not be reopened"), None, cx);
+        }
+        // What was just restored is what's on disk.
+        self.persist.last = serde_json::to_string_pretty(&self.snapshot(cx)).unwrap_or_default();
     }
 
     fn on_lsp_notification(&mut self, n: Notification, cx: &mut Context<Self>) {
@@ -290,224 +831,13 @@ impl OrbitApp {
             }
         }
     }
-
-    fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .id("workspaces")
-            .w(px(210.))
-            .flex_none()
-            .h_full()
-            .overflow_y_scroll()
-            .bg(c(theme::PANEL))
-            .border_r_1()
-            .border_color(c(theme::BORDER))
-            .flex()
-            .flex_col()
-            .child(section_header("WORKSPACES"))
-            .children(self.workspaces.iter().enumerate().map(|(ix, ws)| {
-                let selected = self.selected == Some(ix);
-                div()
-                    .id(("ws", ix))
-                    .mx_2()
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .flex()
-                    .flex_col()
-                    .when(selected, |d| d.bg(theme::accent_soft()))
-                    .hover(|s| s.bg(c(theme::PANEL_HOVER)))
-                    .child(div().text_sm().text_color(c(theme::TEXT)).child(ws.meta.name.clone()))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(c(theme::TEXT_FAINT))
-                            .child(format!("{} · {} repos", ws.meta.branch, ws.meta.repos.len())),
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| this.select_workspace(ix, cx)))
-            }))
-    }
-
-    fn render_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .id("tab-strip")
-            .h(px(34.))
-            .flex_none()
-            .flex()
-            .items_end()
-            .overflow_x_scroll()
-            .bg(c(theme::PANEL))
-            .border_b_1()
-            .border_color(c(theme::BORDER))
-            .children(self.tabs.iter().enumerate().map(|(ix, tab)| {
-                let active = self.active == Some(ix);
-                let dirty = tab.dirty(cx);
-                // A divider where the files start, after the sessions.
-                let group_start = tab.is_file() && ix > 0 && !self.tabs[ix - 1].is_file();
-                let icon = match tab.kind {
-                    TabKind::Terminal(_) => ">_",
-                    TabKind::Editor(_) => "▤",
-                    TabKind::Diff(_) => "±",
-                };
-                div()
-                    .id(("tab", ix))
-                    .h_full()
-                    .flex_none()
-                    .px_3()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .text_sm()
-                    .cursor_pointer()
-                    .border_r_1()
-                    .border_color(c(theme::BORDER))
-                    .when(group_start, |d| d.border_l_2().border_color(c(theme::BORDER_STRONG)))
-                    .text_color(c(if active { theme::TEXT } else { theme::TEXT_DIM }))
-                    .when(active, |d| d.bg(c(theme::BG)).border_t_2().border_color(c(theme::ACCENT)))
-                    .when(tab.preview, |d| d.italic())
-                    .hover(|s| s.bg(c(theme::PANEL_HOVER)))
-                    .child(div().text_xs().text_color(c(theme::TEXT_FAINT)).child(icon))
-                    .child(tab.title(cx))
-                    .child(
-                        div()
-                            .id(("close", ix))
-                            .w(px(14.))
-                            .flex()
-                            .justify_center()
-                            .text_color(c(theme::TEXT_FAINT))
-                            .hover(|s| s.text_color(c(theme::TEXT)))
-                            .child(if dirty { "●" } else { "×" })
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _, window, cx| {
-                                    cx.stop_propagation();
-                                    this.close_tab(ix, false, window, cx)
-                                }),
-                            ),
-                    )
-                    .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, window, cx| {
-                        // Double click keeps a preview tab open.
-                        if ev.click_count() >= 2 {
-                            if let Some(t) = this.tabs.get_mut(ix) {
-                                t.preview = false;
-                            }
-                        }
-                        this.activate(ix, window, cx)
-                    }))
-            }))
-            .child(
-                div()
-                    .id("new-terminal")
-                    .h_full()
-                    .px_3()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .cursor_pointer()
-                    .text_sm()
-                    .text_color(c(theme::TEXT_DIM))
-                    .hover(|s| s.text_color(c(theme::TEXT)))
-                    .child("+ terminal")
-                    .on_click(cx.listener(|this, _, window, cx| this.new_terminal(None, window, cx))),
-            )
-    }
-
-    fn render_status(&self) -> impl IntoElement {
-        let servers = self.lsp.running();
-        div()
-            .h(px(22.))
-            .flex_none()
-            .px_3()
-            .flex()
-            .items_center()
-            .gap_3()
-            .text_xs()
-            .bg(c(theme::PANEL))
-            .border_t_1()
-            .border_color(c(theme::BORDER))
-            .text_color(c(theme::TEXT_FAINT))
-            .child(div().flex_1().overflow_hidden().whitespace_nowrap().children(self.notice.clone()))
-            .children(servers.iter().map(|s| {
-                let name = s.command.split(' ').next().and_then(|b| Path::new(b).file_name()).map(|n| n.to_string_lossy().to_string());
-                let repo = s.open_root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-                format!("{} · {repo}", name.unwrap_or_default())
-            }))
-    }
 }
 
-fn section_header(label: &'static str) -> impl IntoElement {
-    div().px_3().pt_3().pb_2().text_xs().font_weight(gpui::FontWeight::SEMIBOLD).text_color(c(theme::TEXT_FAINT)).child(label)
+fn file_name(path: &Path) -> String {
+    path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().to_string())
 }
 
-impl Render for OrbitApp {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let content = match self.active_tab().map(|t| &t.kind) {
-            Some(TabKind::Terminal(t)) => t.clone().into_any_element(),
-            Some(TabKind::Editor(e)) => e.clone().into_any_element(),
-            Some(TabKind::Diff(d)) => d.clone().into_any_element(),
-            None => div()
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_color(c(theme::TEXT_FAINT))
-                .child("Ctrl+Shift+T opens a terminal · click a file to open it")
-                .into_any_element(),
-        };
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .bg(c(theme::BG))
-            .text_color(c(theme::TEXT))
-            .font(font(theme::UI_FONT))
-            .on_action(cx.listener(|this, _: &NewTerminal, window, cx| this.new_terminal(None, window, cx)))
-            .on_action(cx.listener(|this, _: &CloseFileTab, window, cx| {
-                if let Some(ix) = this.active.filter(|ix| this.tabs[*ix].is_file()) {
-                    this.close_tab(ix, false, window, cx);
-                }
-            }))
-            .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
-                if let Some(ix) = this.active {
-                    this.close_tab(ix, true, window, cx);
-                }
-            }))
-            .on_action(cx.listener(|this, _: &NextTab, window, cx| {
-                if !this.tabs.is_empty() {
-                    let next = this.active.map_or(0, |a| (a + 1) % this.tabs.len());
-                    this.activate(next, window, cx);
-                }
-            }))
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .child(self.render_sidebar(cx))
-                    .child(
-                        div()
-                            .w(px(280.))
-                            .flex_none()
-                            .h_full()
-                            .flex()
-                            .flex_col()
-                            .bg(c(theme::PANEL))
-                            .border_r_1()
-                            .border_color(c(theme::BORDER))
-                            .child(section_header("FILES"))
-                            .child(div().flex_1().min_h_0().child(self.tree.clone())),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .flex()
-                            .flex_col()
-                            .child(self.render_tabs(cx))
-                            .child(div().flex_1().min_h_0().child(content)),
-                    ),
-            )
-            .child(self.render_status())
-    }
+/// Loads the saved state from `path` (when there is one).
+pub fn load_state(path: Option<&Path>) -> SavedState {
+    path.map(state::load).unwrap_or_default()
 }

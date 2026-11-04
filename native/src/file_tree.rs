@@ -1,6 +1,7 @@
 //! Lazy file tree: a flat list of visible rows. A folder's children are read on
 //! the background executor when it's expanded, so deep or huge folders never
 //! block the UI thread; `.gitignore` is respected through the `ignore` crate.
+use crate::icons;
 use crate::theme::{self, c};
 use gpui::{
     actions, div, prelude::*, px, uniform_list, App, Context, EventEmitter, FocusHandle, Focusable,
@@ -334,6 +335,7 @@ impl Render for FileTree {
                                     .when(selected && !focused, |d| d.bg(c(theme::PANEL_RAISED)))
                                     .hover(|s| s.bg(c(theme::PANEL_HOVER)))
                                     .child(div().w(px(10.)).text_color(c(theme::TEXT_FAINT)).child(chevron))
+                                    .child(if e.is_dir { icons::folder_icon(e.expanded, 14.) } else { icons::file_icon(&e.name, 14.) })
                                     .child(e.name.clone())
                                     .on_mouse_down(
                                         MouseButton::Left,

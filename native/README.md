@@ -25,11 +25,15 @@ release build plus clippy and tests.
 The first start after a build takes several seconds while the GPU driver compiles and caches
 pipelines. Warm starts reach the first frame in 180–190 ms.
 
-Keys: `Ctrl+Shift+T` new terminal · `Ctrl+W` close file tab (refused when unsaved) ·
-`Ctrl+Shift+W` close any tab (discards) · `Ctrl+Tab` next tab · `Ctrl+Q` quit · in the editor
-`Ctrl+S` save, `F12` or `Ctrl+click` go to definition, hover for docs · in a terminal
-`Ctrl+Shift+C`/`Ctrl+Shift+V` copy/paste, drag to select (double click: word, triple: line;
-`Shift` overrides an app's mouse mode), middle click pastes the primary selection.
+Keys (JetBrains-style, as the Tauri app; `Ctrl+Shift+A` lists every command with its keys):
+`Ctrl+Shift+T` new terminal · `Ctrl+W` close the file tab (in a terminal the shell gets it; unsaved
+changes ask Save / Don't Save / Cancel) · `Ctrl+Shift+W` close any tab without saving ·
+`Ctrl+Tab` / `Ctrl+Shift+Tab` next / previous tab · `Alt+←` / `Alt+→` and the mouse side buttons
+back / forward (in a terminal `Alt+←/→` go to the shell) · `Ctrl+Shift+A` Find Action ·
+`Ctrl+Q` quit · in the editor `Ctrl+S` save, `F12` or `Ctrl+click` go to definition, hover for
+docs · in a terminal `Ctrl+Shift+C`/`Ctrl+Shift+V` copy/paste, drag to select (double click: word,
+triple: line; `Shift` overrides an app's mouse mode), middle click pastes the primary selection.
+Tabs: right click for the tab menu, middle click closes, double click keeps a preview tab.
 
 ### Self-test mode
 
@@ -45,11 +49,60 @@ dispatch (`Window::dispatch_keystroke` / `dispatch_event`), and the result is a 
     --type "text\n" --keys "f12 ctrl-s" # typed text, then key specs ("down*5" repeats)
     --ctrl-click --hover --diff         # Ctrl+click the word at the cursor, ask for hover, open the file's diff
     --term-drag "0,0:5,1"               # drag-select terminal cells (col,row)
-    --exit-after 40 --dump out.txt      # quit after 40 s and write the dump (tabs, editor, LSP, diagnostics, terminal grid…)
+    --do "rclick:tab:1;click:menu:Close Other Files;dump:after"   # shell steps, below
+    --state /tmp/s.json                 # restore from / save to this state file (none otherwise)
+    --exit-after 40 --dump out.txt      # quit after 40 s and write the dump (tabs, editor, LSP, diagnostics, terminal grid, layout, history, overlays…)
 scripts/measure.sh 8 [args…]            # PSS (+SwapPss) of the process tree after 8 s; language servers apart
 ```
 
 In self-test mode, copies are recorded in the dump and never written to the system clipboard.
+
+`--do` runs shell steps last, separated by `;` (`src/steps.rs`). Mouse steps target elements that
+render a `probe("name")` (tabs `tab:<ix>`, menu items `menu:<label>`, dialog buttons
+`dialog:<label>`, palette rows `palette:<title>`, `tb-sidebar`, `tb-back`, `tb-forward`,
+`tb-workspace`, `tb-dock`, `new-tab`, `resize-sidebar`, `resize-dock`, `resize-panel`,
+`panel-close`, `toast-close:<id>`, `ws:<name>`) and are dispatched with `Window::dispatch_event`:
+`click:` `rclick:` `mclick:` `dblclick:` `drag:<probe>:<dx>,<dy>`; plus `key:<spec>`,
+`type:<text>`, `mouse:back|forward`, `cmd:<command id>`, `open:<path>`, `preview:<path>`,
+`toast:<text>`, `wait:<ms>` and `dump:<label>` (the full dump, into the log, at that point).
+
+## Commands and keymap (the extension point)
+
+`src/commands.rs` holds every command a user can run by name or key. The palette (`Ctrl+Shift+A`,
+`src/palette.rs`) lists the ones that can run now, with their first shortcut. A stage registers
+its commands from an `init(cx: &mut App)` that `main.rs` calls after `app::init`:
+
+```rust
+use crate::commands::{self, Command};
+
+pub fn init(cx: &mut App) {
+    // Runs on the root view (`OrbitApp`): open tabs, panels, dialogs.
+    commands::register(cx, Command::new("run.build", "Build").keys(["ctrl-f9"])
+        .when(|app, cx| app.workspace().is_some())      // hidden from the palette, key passes through, when false
+        .run(|app, window, cx| { /* … */ }));
+    // A key for one view: bind that view's own action in its key context.
+    commands::register(cx, Command::new("editor.goToLine", "Go to Line").keys(["ctrl-g"])
+        .context("OrbitEditor").action(GoToLine));
+}
+```
+
+- `id` is unique: registering an id again replaces the command (its title, handler and
+  predicates; keys bound earlier stay bound to it). `app.newTerminal` is the one the sessions stage
+  is meant to take over: the tab strip's `+` runs whatever is registered under it.
+- `keys` use GPUI's syntax (`ctrl-shift-t`, `alt-left`, `f12`, `shift shift` for a double Shift);
+  `commands::display_keys` turns them into `Ctrl+Shift+T`.
+- `.run(f)` binds the keys to `RunCommand { id }`, handled by the root view;
+  `.action(a)` binds them to the action itself, dispatched to the focused view (from the palette
+  too, after it closes and the focus is back).
+- `.when(p)`: can it run now? `.key_when(p)`: extra condition for the shortcut only. When either
+  fails, the key propagates to the focused view: `Ctrl+W` and `Alt+←/→` reach a shell this way.
+- While a dialog, menu or the palette is open, app shortcuts do nothing.
+- `commands::run(id, app, window, cx)` runs one from code (menus, buttons, scripts).
+
+Other shell extension points on `OrbitApp`: `toast(kind, title, description, cx)` /
+`toast_error`; `open_menu(position, Vec<MenuItem>, …)`; `open_dialog(Dialog { title, message,
+buttons, on_cancel }, …)`; `titlebar_items: Vec<AnyView>` (the run widget and the inbox go there);
+`state.rs` for what is restored on start.
 
 ## Stack and why
 
@@ -174,16 +227,23 @@ Caveats found:
 
 | File | What |
 |---|---|
-| `src/main.rs` | app start, window, keymap, LSP shutdown on quit |
-| `src/app.rs` | root view: sidebar, tree panel, tab strip (sessions, then files; preview tab; dirty dot), status bar, tab logic |
+| `src/main.rs` | app start, window (client-side decorations), each stage's `init`, state restore, LSP shutdown and state save on quit |
+| `src/app.rs` | root view state: workspaces, tabs and their logic (preview, batch closes, unsaved dialog, tab menu), back/forward, pane sizes, state snapshot/restore, the app's commands |
+| `src/shell.rs` | rendering: titlebar, sidebar, tab strip, main area and bottom panel, files dock, status bar, resizers, overlays |
+| `src/commands.rs` | command registry and keymap |
+| `src/nav.rs` | back/forward history (`src/lib/navHistory.ts`) |
+| `src/state.rs` | saved state (`<config dir>/native-state.json`): workspace, tabs, active tab, cursors, pane sizes |
+| `src/overlay.rs`, `src/palette.rs`, `src/toast.rs` | context menus and dialogs, Find Action, toasts |
+| `src/icons.rs` | asset source: gpui-kit-assets' Lucide icons plus file-type glyphs (`FileIcons.tsx`) and tab icons (`Icons.tsx`) |
+| `src/probe.rs`, `src/steps.rs` | element bounds and `--do` steps for the self-test |
 | `src/editor.rs` | editor tab: `EditorState`, save, dirty, LSP document sync and providers, cross-file definition |
 | `src/lsp/` | `mod.rs` file → language and the server registry · `server.rs` JSON-RPC client and URI mapping over `orbit_core::lsp` (which picks, starts and feeds the process) · `paths.rs` URIs and root rebase |
 | `src/diff_view.rs` | diff tab over `git diff HEAD` |
 | `src/terminal/` | PTY + VT (`mod.rs`), grid layout and paint (`grid.rs`), keys and mouse reports (`input.rs`) |
 | `src/file_tree.rs` | virtualized tree with background folder loads |
 | `src/workspace.rs` | workspace list from `orbit_core::workspace` |
-| `src/theme.rs`, `src/orbit-dark.json` | Orbit Dark tokens (`src/App.css`, `src/lib/theme.ts`) for our views and for gpui-component |
 | `src/script.rs` | self-test mode and dumps |
+| `src/theme.rs`, `src/orbit-dark.json` | Orbit Dark colours and shell metrics (`src/App.css`) |
 
 ## Sharing the backend: `orbit-core`
 
@@ -279,13 +339,16 @@ Status of everything the React app does: **done**, **partial** (with what's miss
 ### App shell & layout
 - [ ] partial: main area with tabs, sidebar and focused workspace (`src/App.tsx`). Only terminal, editor and diff tab kinds exist.
 - [ ] — Tab kinds dashboard, reviews, settings, integrations, repo, workspace, changes, commit, pr, feature, ralph (`src/App.tsx`)
-- [ ] — Custom titlebar window controls (`src/components/WindowControls.tsx`); the system titlebar is used for now
-- [ ] — Back/forward navigation history (`src/lib/navHistory.ts`)
-- [ ] — Resizable side panes, snapping sidebar (`PaneResizer.tsx`, `SidebarResizer.tsx`)
+- [x] done: custom titlebar (client-side decorations; gpui-component's `TitleBar` draws the window controls and moves/maximizes the window): sidebar toggle, back/forward, workspace switcher, slots for the run widget and inbox, files-panel toggle (`WindowControls.tsx`)
+- [x] done: back/forward history: tab switches and cross-file jumps, with the cursor of each file; closed files reopen, closed terminals are skipped; `Alt+←/→`, mouse side buttons, titlebar arrows (`src/lib/navHistory.ts`). Jumps inside one file are not recorded yet (the editor emits no event for them).
+- [x] done: resizable sidebar (snaps to icons below 110 px), files dock and bottom panel; double click resets; sizes and hidden/open state persist (`PaneResizer.tsx`, `SidebarResizer.tsx`)
+- [x] done: persisted state: open workspace, editor and diff tabs (preview flag, cursor), active tab, pane sizes, restored on start. Terminal tabs are not restored (Sessions stage).
+- [x] done: command registry and keymap; Find Action palette (`Ctrl+Shift+A`, `src/lib/commands.ts`); Search Everywhere's other tabs are not ported
+- [ ] partial: bottom panel is a placeholder (Build/Run/Problems arrive with that stage)
 - [ ] — Error boundary / crash log (`ErrorBoundary.tsx`)
 - [ ] — Dashboard page (`src/pages/DashboardPage.tsx`)
-- [ ] — Skeletons, Select, CheckBox, PathInput, ConfirmDialog, ContextMenu, Tooltip (gpui-component has equivalents)
-- [ ] — Icons: activity bar, file icons, brand icons (`Icons.tsx`, `FileIcons.tsx`, `BrandIcons.tsx`)
+- [ ] partial: ConfirmDialog and ContextMenu (`src/overlay.rs`, keyboard: ↑/↓/Enter/Esc). Skeletons, Select, CheckBox, PathInput, Tooltip not yet (gpui-component has equivalents)
+- [ ] partial: icons. File-type icons in the tree (`FileIcons.tsx`), tab icons (`Icons.tsx`), Lucide for the titlebar and toasts. No activity bar or brand icons yet (`BrandIcons.tsx`).
 - [ ] — Arrow-key list navigation helper (`src/lib/arrowNav.ts`); only the file tree has key navigation
 - [ ] — Markdown rendering (`SafeMarkdown.tsx`, `MarkdownPreview.tsx`); gpui-component has a Markdown view
 
@@ -330,7 +393,8 @@ Status of everything the React app does: **done**, **partial** (with what's miss
 - [x] done: preview tabs (reuse the preview slot; editing or double click keeps it) (`src/lib/previewTabs.ts`)
 - [x] done: sessions and files groups with a divider, dirty dot, `Ctrl+W` closes the active file tab (refused when unsaved; `Ctrl+Shift+W` discards)
 - [x] done: definitions in other files open as editor tabs
-- [ ] — Tab context menu (keep open, close others/saved), rename session tabs, unsaved-changes dialog
+- [x] done: tab context menu as the React app (Close, Keep Open, Close Other Files, Close Files to the Right, Close Saved Files, Close All Files, Close Other Tabs, Close All Tabs; unsaved files stay open with a toast), middle click closes, unsaved-changes dialog (Save / Don't Save / Cancel)
+- [ ] — rename session tabs
 
 ### Editor
 - [x] done: code editor with tree-sitter highlighting (C, C++, Rust, TS/TSX, JS, JSON), line numbers, undo/redo
@@ -370,10 +434,11 @@ Status of everything the React app does: **done**, **partial** (with what's miss
 
 ### Settings / themes
 - [ ] — Settings page and sections: AI, Appearance, Health, Updates (`SettingsPage.tsx`, `AiSection.tsx`, `AppearanceSection.tsx`, `HealthSection.tsx`, `UpdatesSection.tsx`)
-- [ ] partial: themes. Orbit Dark only (tokens from `src/App.css` / `src/lib/theme.ts`, gpui-component theme JSON); the other six themes and the picker are not ported.
+- [ ] partial: themes. Orbit Dark only, with the shell's metrics (titlebar, tabs, menus, modals, toasts, buttons) from App.css (tokens from `src/App.css` / `src/lib/theme.ts`, gpui-component theme JSON); the other six themes and the picker are not ported.
 
 ### Notifications
-- [ ] — Toasts, inbox, OS notifications (`Toast.tsx`, `Inbox.tsx`); there is only a status-bar notice
+- [x] done: toasts (success/error/info, auto-dismiss, at most four, ×) (`Toast.tsx`)
+- [ ] — inbox, OS notifications (`Inbox.tsx`)
 
 ### Backend services
 - [x] done: the backend is shared through `crates/orbit-core` (config, workspaces, git, GitHub, LSP/DAP processes, watcher, builds, run configs, agents, Ralph, review, search, notes, files); the native app uses its workspace list and LSP manager
