@@ -4,13 +4,10 @@ use crate::git;
 use crate::github::{self, GithubRepo};
 use crate::integrations::{self, CardDetail, TrackerKind};
 use crate::usage::{self, AiUsage};
+use orbit_core::settings;
 use crate::workspace::{self, CardRef, RepoStatus, Workspace};
 use std::path::PathBuf;
 use tauri::async_runtime::spawn_blocking;
-
-fn repos_dir() -> Result<PathBuf, String> {
-    workspace::repos_dir()
-}
 
 /// Runs a blocking closure (fs/git/gh I/O) off the main thread.
 ///
@@ -37,173 +34,52 @@ pub async fn get_config() -> Result<Config, String> {
 /// checkout used as is, or an empty/missing folder to clone into later.
 #[tauri::command]
 pub async fn add_service(name: String, repo: String, path: Option<String>) -> Result<Config, String> {
-    blocking(move || {
-        let mut cfg = Config::load()?;
-        if cfg.services.iter().any(|s| s.name == name) {
-            return Err(format!("a repo named '{name}' already exists"));
-        }
-        let mut svc = Service::new(name, repo);
-        svc.path = path.filter(|p| !p.trim().is_empty());
-        if let Some(p) = svc.custom_path() {
-            check_clone_target(&p)?;
-        }
-        cfg.services.push(svc);
-        cfg.validate()?;
-        cfg.save()?;
-        Ok(cfg)
-    })
-    .await
+    blocking(move || settings::add_service(&name, &repo, path)).await
 }
 
 #[tauri::command]
 pub async fn local_repo_origin(path: String) -> Result<String, String> {
-    blocking(move || {
-        let dir = PathBuf::from(&path);
-        if !workspace::is_cloned(&dir) {
-            return Err(format!("{path} is not a git repository"));
-        }
-        origin_url(&dir).ok_or_else(|| format!("{path} has no 'origin' remote"))
-    })
-    .await
+    blocking(move || settings::local_repo_origin(&path)).await
 }
 
 #[tauri::command]
 pub async fn update_service(name: String, repo: String) -> Result<Config, String> {
-    blocking(move || {
-        let mut cfg = Config::load()?;
-        let svc = cfg
-            .services
-            .iter_mut()
-            .find(|s| s.name == name)
-            .ok_or_else(|| format!("repo '{name}' not found"))?;
-        svc.repo = repo;
-        cfg.save()?;
-        Ok(cfg)
-    })
-    .await
+    blocking(move || settings::update_service(&name, &repo)).await
 }
 
-/// A custom clone location must be a git checkout or an empty folder.
-fn check_clone_target(p: &std::path::Path) -> Result<(), String> {
-    if !p.exists() || workspace::is_cloned(p) {
-        return Ok(());
-    }
-    let empty = std::fs::read_dir(p).map(|mut d| d.next().is_none()).unwrap_or(false);
-    if empty {
-        Ok(())
-    } else {
-        Err(format!("{} is not empty and is not a git repository", p.display()))
-    }
-}
 
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Folders {
-    repos_dir: String,
-    workspaces_dir: String,
-    /// Used when the matching setting is empty.
-    default_repos_dir: String,
-    default_workspaces_dir: String,
-}
 
 #[tauri::command]
-pub async fn get_folders() -> Result<Folders, String> {
-    blocking(|| {
-        let root = workspace::workspace_root()?;
-        Ok(Folders {
-            repos_dir: workspace::repos_dir()?.to_string_lossy().into(),
-            workspaces_dir: workspace::workspaces_dir()?.to_string_lossy().into(),
-            default_repos_dir: root.join("repos").to_string_lossy().into(),
-            default_workspaces_dir: root.join("workspaces").to_string_lossy().into(),
-        })
-    })
-    .await
+pub async fn get_folders() -> Result<settings::Folders, String> {
+    blocking(settings::folders).await
 }
 
 /// Sets the clones/workspaces folders (None or empty = default).
 #[tauri::command]
 pub async fn set_folders(repos_dir: Option<String>, workspaces_dir: Option<String>) -> Result<Config, String> {
-    blocking(move || {
-        let mut cfg = Config::load()?;
-        cfg.repos_dir = repos_dir.filter(|p| !p.trim().is_empty());
-        cfg.workspaces_dir = workspaces_dir.filter(|p| !p.trim().is_empty());
-        cfg.save()?;
-        Ok(cfg)
-    })
-    .await
+    blocking(move || settings::set_folders(repos_dir, workspaces_dir)).await
 }
 
 #[tauri::command]
 pub async fn remove_service(name: String) -> Result<Config, String> {
-    blocking(move || {
-        let mut cfg = Config::load()?;
-        let in_groups: Vec<&String> = cfg
-            .groups
-            .iter()
-            .filter(|(_, members)| members.contains(&name))
-            .map(|(g, _)| g)
-            .collect();
-        if !in_groups.is_empty() {
-            return Err(format!(
-                "'{name}' is part of group(s): {}. Remove it from those groups first.",
-                in_groups
-                    .iter()
-                    .map(|s| s.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-        }
-        let owned_clone = cfg
-            .services
-            .iter()
-            .find(|s| s.name == name)
-            .is_some_and(|s| s.custom_path().is_none());
-        cfg.services.retain(|s| s.name != name);
-        cfg.save()?;
-        // Only clones Orbit made in its clones folder; a custom path may be
-        // the user's own checkout.
-        if owned_clone {
-            let _ = git::remove_clone(&repos_dir()?.join(&name));
-        }
-        Ok(cfg)
-    })
-    .await
+    blocking(move || settings::remove_service(&name)).await
 }
 
 #[tauri::command]
 pub async fn clone_service(name: String) -> Result<(), String> {
-    blocking(move || {
-        let cfg = Config::load()?;
-        let svc = cfg
-            .services
-            .iter()
-            .find(|s| s.name == name)
-            .ok_or_else(|| format!("repo '{name}' not found"))?;
-        let dest = workspace::clone_dir(svc)?;
-        if workspace::is_cloned(&dest) {
-            return Ok(());
-        }
-        git::clone(&svc.repo, &dest)
-    })
-    .await
+    blocking(move || settings::clone_service(&name)).await
 }
 
 #[tauri::command]
 pub async fn service_clone_status(name: String) -> Result<bool, String> {
-    blocking(move || {
-        Ok(workspace::is_cloned(&workspace::clone_dir_of(&name)?))
-    })
-    .await
+    blocking(move || settings::clone_status(&name)).await
 }
 
 /// Opens a repo's base clone in the OS file manager.
 #[tauri::command]
 pub async fn reveal_service(name: String) -> Result<(), String> {
     blocking(move || {
-        let dir = workspace::clone_dir_of(&name)?;
-        if !dir.exists() {
-            return Err(format!("'{name}' is not cloned"));
-        }
+        let dir = settings::clone_folder(&name)?;
         tauri_plugin_opener::open_path(&dir, None::<&str>).map_err(|e| format!("failed to open folder: {e}"))
     })
     .await
@@ -211,42 +87,17 @@ pub async fn reveal_service(name: String) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn create_group(name: String) -> Result<Config, String> {
-    blocking(move || {
-        let mut cfg = Config::load()?;
-        if cfg.groups.contains_key(&name) {
-            return Err(format!("group '{name}' already exists"));
-        }
-        cfg.groups.insert(name, vec![]);
-        cfg.save()?;
-        Ok(cfg)
-    })
-    .await
+    blocking(move || settings::create_group(&name)).await
 }
 
 #[tauri::command]
 pub async fn delete_group(name: String) -> Result<Config, String> {
-    blocking(move || {
-        let mut cfg = Config::load()?;
-        cfg.groups.remove(&name);
-        cfg.save()?;
-        Ok(cfg)
-    })
-    .await
+    blocking(move || settings::delete_group(&name)).await
 }
 
 #[tauri::command]
 pub async fn set_group_members(name: String, members: Vec<String>) -> Result<Config, String> {
-    blocking(move || {
-        let mut cfg = Config::load()?;
-        if !cfg.groups.contains_key(&name) {
-            return Err(format!("group '{name}' not found"));
-        }
-        cfg.groups.insert(name, members);
-        cfg.validate()?;
-        cfg.save()?;
-        Ok(cfg)
-    })
-    .await
+    blocking(move || settings::set_group_members(&name, members)).await
 }
 
 #[tauri::command]
@@ -405,19 +256,7 @@ pub async fn health_check() -> Result<Vec<crate::health::Check>, String> {
 /// Replaces a repo's build/link settings (everything but name and URL).
 #[tauri::command]
 pub async fn update_service_settings(service: Service) -> Result<Config, String> {
-    blocking(move || {
-        let mut cfg = Config::load()?;
-        let svc = cfg
-            .services
-            .iter_mut()
-            .find(|s| s.name == service.name)
-            .ok_or_else(|| format!("repo '{}' not found", service.name))?;
-        let repo = svc.repo.clone();
-        *svc = Service { repo, ..service };
-        cfg.save()?;
-        Ok(cfg)
-    })
-    .await
+    blocking(move || settings::update_service_settings(service)).await
 }
 
 /// Full card content (description) for the Plan flow.
@@ -572,13 +411,7 @@ pub async fn get_ai_settings() -> Result<AiSettings, String> {
 
 #[tauri::command]
 pub async fn set_ai_settings(ai: AiSettings) -> Result<Config, String> {
-    blocking(move || {
-        let mut cfg = Config::load()?;
-        cfg.ai = ai;
-        cfg.save()?;
-        Ok(cfg)
-    })
-    .await
+    blocking(move || settings::set_ai(ai)).await
 }
 
 #[tauri::command]
@@ -638,24 +471,7 @@ pub async fn refresh_repo(name: String) -> Result<(), String> {
 /// Opens a workspace repo's worktree in the user's editor (VS Code or Zed).
 #[tauri::command]
 pub async fn open_in_editor(workspace: String, repo: String) -> Result<(), String> {
-    blocking(move || {
-        let wt = crate::workspace::repo_path(&workspace, &repo)?;
-        if !wt.exists() {
-            return Err(format!("worktree for '{repo}' not found"));
-        }
-        for editor in ["code", "zed"] {
-            if which(editor) {
-                let out = crate::proc::cmd(editor)
-                    .arg(&wt)
-                    .spawn()
-                    .map_err(|e| format!("failed to launch {editor}: {e}"))?;
-                std::mem::forget(out);
-                return Ok(());
-            }
-        }
-        Err("no editor found (looked for 'code' and 'zed' in PATH)".into())
-    })
-    .await
+    blocking(move || settings::open_in_editor(&workspace, &repo)).await
 }
 
 /// Opens a workspace folder in the OS file manager.
@@ -672,20 +488,7 @@ pub async fn reveal_workspace_folder(name: String) -> Result<(), String> {
 /// Opens the whole workspace folder (all worktrees) in the user's editor.
 #[tauri::command]
 pub async fn open_workspace_in_editor(name: String) -> Result<(), String> {
-    blocking(move || {
-        let dir = workspace_dir(&name)?;
-        for editor in ["code", "zed"] {
-            if which(editor) {
-                crate::proc::cmd(editor)
-                    .arg(&dir)
-                    .spawn()
-                    .map_err(|e| format!("failed to launch {editor}: {e}"))?;
-                return Ok(());
-            }
-        }
-        Err("no editor found (looked for 'code' and 'zed' in PATH)".into())
-    })
-    .await
+    blocking(move || settings::launch_editor(&workspace_dir(&name)?)).await
 }
 
 fn workspace_dir(name: &str) -> Result<PathBuf, String> {
@@ -699,19 +502,7 @@ fn workspace_dir(name: &str) -> Result<PathBuf, String> {
 /// AI token usage for a workspace, from Claude Code's local session logs.
 #[tauri::command]
 pub async fn workspace_ai_usage(name: String) -> Result<AiUsage, String> {
-    blocking(move || {
-        let ws_dir = crate::workspace::scope_dir(&name)?;
-        if !ws_dir.exists() {
-            return Err(format!("workspace '{name}' not found"));
-        }
-        // A repo scope's sessions all run in the clone itself: no sub-repos.
-        let repos = match workspace::repo_scope(&name) {
-            Some(_) => vec![],
-            None => workspace::load_meta(&ws_dir).map(|m| m.repos).unwrap_or_default(),
-        };
-        Ok(usage::workspace_usage(&ws_dir, &repos))
-    })
-    .await
+    blocking(move || usage::for_scope(&name)).await
 }
 
 // ---------- Integrations (Shortcut / Linear) ----------
@@ -724,13 +515,7 @@ pub async fn integration_status(kind: String) -> Result<integrations::Integratio
 /// Validates the token against the provider, then saves it on success.
 #[tauri::command]
 pub async fn integration_connect(kind: String, token: String) -> Result<String, String> {
-    blocking(move || {
-        let kind = TrackerKind::parse(&kind)?;
-        let account = integrations::validate(kind, &token)?;
-        integrations::save_token(kind, &token)?;
-        Ok(account)
-    })
-    .await
+    blocking(move || integrations::connect(TrackerKind::parse(&kind)?, &token)).await
 }
 
 #[tauri::command]
@@ -770,10 +555,6 @@ pub async fn integration_fetch_cards(
         integrations::fetch_cards(TrackerKind::parse(&kind)?, query.as_deref().unwrap_or(""))
     })
     .await
-}
-
-fn which(bin: &str) -> bool {
-    crate::proc::exists(bin)
 }
 
 // ---------- Workspace pipeline (commit / push / rebase / PRs) ----------
@@ -936,17 +717,6 @@ pub async fn ws_pr_merge(workspace: String, repo: String, number: u64) -> Result
 #[tauri::command]
 pub async fn pr_merge_remote(owner_repo: String, number: u64) -> Result<(), String> {
     blocking(move || github::squash_merge(&owner_repo, number).map_err(|e| format!("{owner_repo} #{number}: {e}"))).await
-}
-
-fn origin_url(dir: &std::path::Path) -> Option<String> {
-    let out = crate::proc::cmd("git")
-        .args(["remote", "get-url", "origin"])
-        .current_dir(dir)
-        .output()
-        .ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 fn remote_of(dir: &std::path::Path) -> Option<String> {

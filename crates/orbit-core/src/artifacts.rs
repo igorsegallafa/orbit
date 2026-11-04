@@ -91,7 +91,11 @@ fn folder_name(s: &str) -> String {
     clean.trim_matches(['-', '.']).to_string()
 }
 
+/// `~/Downloads/Orbit`; `ORBIT_DOWNLOADS_DIR` overrides it (tests).
 fn downloads_root() -> Result<PathBuf, String> {
+    if let Some(d) = std::env::var_os("ORBIT_DOWNLOADS_DIR") {
+        return Ok(PathBuf::from(d));
+    }
     Ok(crate::config::home_dir()?.join("Downloads").join("Orbit"))
 }
 

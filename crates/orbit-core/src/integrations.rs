@@ -70,7 +70,12 @@ pub struct IntegrationStatus {
 // ---------- credentials file (~/.config/orbit/credentials, 0600) ----------
 
 pub fn credentials_path() -> Result<PathBuf, String> {
-    let dir = crate::config::home_dir()?.join(".config").join("orbit");
+    // ~/.config/orbit on every OS (macOS too, unlike config.yaml); a test's
+    // ORBIT_CONFIG_DIR keeps its tokens away from the real ones.
+    let dir = match std::env::var_os("ORBIT_CONFIG_DIR") {
+        Some(d) => PathBuf::from(d),
+        None => crate::config::home_dir()?.join(".config").join("orbit"),
+    };
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     Ok(dir.join("credentials"))
 }
@@ -376,6 +381,13 @@ pub fn validate(kind: TrackerKind, tok: &str) -> Result<String, String> {
         TrackerKind::Linear => linear_validate(tok),
         TrackerKind::Figma => figma_validate(tok),
     }
+}
+
+/// Validates the token against the provider and saves it; the account name.
+pub fn connect(kind: TrackerKind, tok: &str) -> Result<String, String> {
+    let account = validate(kind, tok)?;
+    save_token(kind, tok)?;
+    Ok(account)
 }
 
 pub fn save_token(kind: TrackerKind, tok: &str) -> Result<(), String> {

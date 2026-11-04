@@ -11,6 +11,7 @@ mod icons;
 mod lsp;
 mod nav;
 mod overlay;
+mod pages;
 mod palette;
 mod probe;
 mod review;
@@ -34,6 +35,7 @@ use std::time::Instant;
 
 fn main() {
     let started = Instant::now();
+    pages::crash::install();
     let script = Script::from_args();
     // A launcher's bare PATH would hide gh, clangd and the agents.
     orbit_core::proc::refresh_path();
@@ -55,6 +57,7 @@ fn main() {
         file_ops::init(cx);
         review::init(cx);
         run::init(cx);
+        pages::init(cx);
 
         let bounds = Bounds::centered(None, size(px(1400.), px(900.)), cx);
         let options = WindowOptions {

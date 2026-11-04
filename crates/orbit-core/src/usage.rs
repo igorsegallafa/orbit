@@ -37,7 +37,12 @@ pub struct AiUsage {
 }
 
 fn claude_projects_dir() -> Option<PathBuf> {
-    Some(crate::config::home_dir().ok()?.join(".claude/projects"))
+    // Claude Code honours CLAUDE_CONFIG_DIR for what is otherwise ~/.claude.
+    let root = match std::env::var_os("CLAUDE_CONFIG_DIR") {
+        Some(d) => PathBuf::from(d),
+        None => crate::config::home_dir().ok()?.join(".claude"),
+    };
+    Some(root.join("projects"))
 }
 
 /// Claude Code encodes a project dir by replacing every non-alphanumeric
@@ -96,6 +101,20 @@ fn add_session(raw: &mut Raw, model: &str, s: SessionDetail) {
         m.sessions.push(s);
         raw.models.push(m);
     }
+}
+
+/// Usage of a workspace (or a `@repo` / `dir:` scope) by name.
+pub fn for_scope(name: &str) -> Result<AiUsage, String> {
+    let ws_dir = crate::workspace::scope_dir(name)?;
+    if !ws_dir.exists() {
+        return Err(format!("workspace '{name}' not found"));
+    }
+    // A repo scope's sessions all run in the clone itself: no sub-repos.
+    let repos = match crate::workspace::repo_scope(name) {
+        Some(_) => vec![],
+        None => crate::workspace::load_meta(&ws_dir).map(|m| m.repos).unwrap_or_default(),
+    };
+    Ok(workspace_usage(&ws_dir, &repos))
 }
 
 /// Aggregates usage for sessions run in the workspace folder or any of its

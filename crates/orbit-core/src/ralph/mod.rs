@@ -18,7 +18,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use crate::agent::stream::{self, Event};
-use supervisor::{Iteration, Limits, RalphEnv, StopReason};
+use supervisor::{Iteration, RalphEnv};
+pub use supervisor::{Limits, StopReason};
 use crate::events::Events;
 
 const MAX_EVENTS_IN_MEMORY: usize = 600;
@@ -403,18 +404,18 @@ impl RalphEnv for RealEnv {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RalphState {
-    prd: Option<Prd>,
-    progress: String,
-    run: Option<RunState>,
-    prompt: String,
-    prompt_custom: bool,
-    default_config: RunConfig,
+    pub prd: Option<Prd>,
+    pub progress: String,
+    pub run: Option<RunState>,
+    pub prompt: String,
+    pub prompt_custom: bool,
+    pub default_config: RunConfig,
     /// Plan runs: whether the workspace has a PLAN.md at all.
     #[serde(default)]
-    plan_exists: bool,
+    pub plan_exists: bool,
     /// Plan runs: what would stop a run (e.g. a task naming an unknown repo).
     #[serde(default)]
-    warnings: Vec<String>,
+    pub warnings: Vec<String>,
 }
 
 fn default_config() -> RunConfig {
