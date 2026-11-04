@@ -760,6 +760,31 @@ pub fn diff_sides(dir: &Path, sha: &str) -> (String, String) {
     }
 }
 
+/// HEAD and working-tree content of `path`, for a file's diff.
+pub fn file_diff(dir: &Path, path: &str) -> Result<FileDiff, String> {
+    if path.is_empty() {
+        return Err("empty path".into());
+    }
+    let original = rev_content(dir, path, "HEAD").unwrap_or_default();
+    let modified = std::fs::read_to_string(dir.join(path)).unwrap_or_default();
+    Ok(FileDiff { original, modified })
+}
+
+/// Content of `path` before and after `sha` (or a "base...head" range).
+pub fn commit_file_diff(dir: &Path, sha: &str, path: &str) -> FileDiff {
+    let (before, after) = diff_sides(dir, sha);
+    FileDiff {
+        original: rev_content(dir, path, &before).unwrap_or_default(),
+        modified: rev_content(dir, path, &after).unwrap_or_default(),
+    }
+}
+
+/// Pushes the checked-out branch (`label` names the repo in errors).
+pub fn push_current(dir: &Path, label: &str, force: bool) -> Result<(), String> {
+    let branch = current_branch(dir).ok_or_else(|| format!("{label}: detached HEAD, nothing to push"))?;
+    push(dir, &branch, force)
+}
+
 /// Full content of a file at a revision (HEAD by default).
 pub fn rev_content(dir: &Path, path: &str, rev: &str) -> Result<String, String> {
     git_out(dir, &["show", &format!("{rev}:{path}")])

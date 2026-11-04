@@ -408,6 +408,15 @@ pub fn prune_worktrees(name: &str) -> Result<(), String> {
     git_ok(&clone_of(name)?, &["worktree", "prune"])
 }
 
+/// Fetches a repo's base clone (fresh ahead/behind for every workspace on it).
+pub fn fetch(name: &str) -> Result<(), String> {
+    let dir = crate::workspace::clone_dir_of(name)?;
+    if !dir.exists() {
+        return Err(format!("'{name}' is not cloned"));
+    }
+    git::fetch(&dir)
+}
+
 /// Light status of one clone for the sidebar: a single `git status` call.
 #[derive(Serialize, Debug, Clone, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]

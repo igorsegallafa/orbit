@@ -194,6 +194,7 @@ pub fn dump(app: &OrbitApp, log: &str, cx: &gpui::App) -> String {
             TabKind::Diff(_) => "diff",
             TabKind::Review(_) => "review",
             TabKind::Page(_) => "page",
+            TabKind::Tool(_) => "tool",
         };
         let _ = writeln!(
             out,
@@ -281,6 +282,7 @@ pub fn dump(app: &OrbitApp, log: &str, cx: &gpui::App) -> String {
         _ => {}
     }
     out.push_str(&crate::review::dump(app, cx));
+    out.push_str(&crate::workspace_ui::dump(app, cx));
     out.push_str(&crate::pages::dump(app, cx));
     let commands = crate::editor::editor_actions();
     let unresolved: Vec<_> = commands.iter().filter(|c| cx.build_action(c.id, None).is_err()).map(|c| c.id).collect();

@@ -124,7 +124,7 @@ pub fn open<V: PageView>(
     cx: &mut Context<OrbitApp>,
 ) {
     if let Some(ix) = app.tab_index(&key, cx) {
-        if let TabKind::Page(t) = &app.tabs[ix].kind {
+        if let TabKind::Tool(t) = &app.tabs[ix].kind {
             let reopen = t.read(cx).reopen.clone();
             reopen(window, cx);
         }
@@ -144,7 +144,7 @@ pub fn open<V: PageView>(
         }),
         focus: cx.focus_handle(),
     });
-    let ix = app.insert_tab(Tab { kind: TabKind::Page(tab), preview: false });
+    let ix = app.insert_tab(Tab { kind: TabKind::Tool(tab), preview: false });
     app.activate(ix, window, cx);
 }
 
@@ -152,7 +152,7 @@ pub fn open_settings(app: &mut OrbitApp, section: Section, window: &mut Window, 
     open(app, "page:settings".into(), |host, window, cx| settings::SettingsPage::new(host, section, window, cx), window, cx);
     // An open Settings tab moves to the section asked for.
     if let Some(ix) = app.tab_index("page:settings", cx) {
-        if let TabKind::Page(t) = &app.tabs[ix].kind {
+        if let TabKind::Tool(t) = &app.tabs[ix].kind {
             if let Ok(view) = t.read(cx).view.clone().downcast::<settings::SettingsPage>() {
                 view.update(cx, |p, cx| p.select(section, window, cx));
             }
@@ -193,7 +193,15 @@ pub fn init(cx: &mut App) {
         Command::new("ralph.open", "Ralph").when(has_ws).run(|a, w, cx| open_for_workspace(a, "ralph", w, cx)),
         Command::new("workspace.usage", "AI Usage").when(has_ws).run(|a, w, cx| open_for_workspace(a, "usage", w, cx)),
         Command::new("workspace.artifacts", "CI Artifacts").when(has_ws).run(|a, w, cx| open_for_workspace(a, "artifacts", w, cx)),
-        Command::new("workspace.openInEditor", "Open Repository in External Editor").when(has_ws).run(open_repo_in_editor),
+        Command::new("workspace.openInEditor", "Open in External Editor…").when(has_ws).run(open_repo_in_editor),
+        Command::new("workspace.revealFolder", "Open Workspace Folder").when(has_ws).run(|a, _, cx| {
+            let Some(dir) = a.workspace().map(|ws| ws.dir.clone()) else { return };
+            if crate::probe::ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
+                a.toast(ToastKind::Info, "Revealed", Some(dir.display().to_string().into()), cx);
+            } else {
+                cx.reveal_path(&dir);
+            }
+        }),
     ] {
         commands::register(cx, command);
     }
@@ -201,19 +209,24 @@ pub fn init(cx: &mut App) {
     crash::init(cx);
 }
 
-/// A menu of the workspace's repos; the pick opens in VS Code or Zed.
+/// A menu of the whole workspace and its repos; the pick opens in VS Code or Zed.
 fn open_repo_in_editor(app: &mut OrbitApp, window: &mut Window, cx: &mut Context<OrbitApp>) {
     let Some(ws) = app.workspace().cloned() else { return };
-    let items = ws
-        .meta
-        .repos
-        .iter()
+    let items = std::iter::once(None)
+        .chain(ws.meta.repos.iter().map(Some))
         .map(|repo| {
-            let (name, repo) = (ws.meta.name.clone(), repo.clone());
-            MenuItem::new(repo.clone(), move |a, _, cx| {
-                let (name, repo) = (name.clone(), repo.clone());
+            let (name, repo, dir) = (ws.meta.name.clone(), repo.cloned(), ws.dir.clone());
+            MenuItem::new(repo.clone().unwrap_or_else(|| "Whole workspace".into()), move |a, _, cx| {
+                let (name, repo, dir) = (name.clone(), repo.clone(), dir.clone());
                 cx.spawn(async move |this, cx| {
-                    let r = cx.background_spawn(async move { orbit_core::settings::open_in_editor(&name, &repo) }).await;
+                    let r = cx
+                        .background_spawn(async move {
+                            match repo {
+                                Some(repo) => orbit_core::settings::open_in_editor(&name, &repo),
+                                None => orbit_core::settings::launch_editor(&dir),
+                            }
+                        })
+                        .await;
                     if let Err(e) = r {
                         let _ = this.update(cx, |a, cx| a.toast(ToastKind::Error, "Couldn't open the editor", Some(e.into()), cx));
                     }
@@ -265,7 +278,7 @@ pub fn sidebar(app: &OrbitApp, cx: &mut Context<OrbitApp>) -> impl IntoElement {
 pub fn dump(app: &OrbitApp, cx: &App) -> String {
     let mut out = String::new();
     for tab in &app.tabs {
-        if let TabKind::Page(t) = &tab.kind {
+        if let TabKind::Tool(t) = &tab.kind {
             let t = t.read(cx);
             let _ = writeln!(out, "--- page {} ({})", t.title(cx), t.key);
             (t.dump.clone())(&mut out, cx);

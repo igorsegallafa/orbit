@@ -28,7 +28,8 @@ pub enum TabKind {
     Editor(Entity<EditorTab>),
     Diff(Entity<DiffTab>),
     Review(Entity<crate::review::ReviewTab>),
-    Page(Entity<crate::pages::PageTab>),
+    Page(Entity<crate::workspace_ui::PageTab>),
+    Tool(Entity<crate::pages::PageTab>),
 }
 
 pub struct Tab {
@@ -59,7 +60,8 @@ impl Tab {
             TabKind::Editor(e) => e.read(cx).title.clone(),
             TabKind::Diff(d) => d.read(cx).title.clone(),
             TabKind::Review(r) => r.read(cx).title(),
-            TabKind::Page(p) => p.read(cx).title(cx),
+            TabKind::Page(p) => p.read(cx).title(),
+            TabKind::Tool(p) => p.read(cx).title(cx),
         }
     }
 
@@ -74,6 +76,7 @@ impl Tab {
             TabKind::Diff(d) => d.read(cx).state.focus_handle(cx),
             TabKind::Review(r) => r.focus_handle(cx),
             TabKind::Page(p) => p.focus_handle(cx),
+            TabKind::Tool(p) => p.focus_handle(cx),
         }
     }
 
@@ -84,7 +87,8 @@ impl Tab {
             TabKind::Editor(e) => format!("ed:{}", e.read(cx).path.display()),
             TabKind::Diff(d) => format!("diff:{}", d.read(cx).path.display()),
             TabKind::Review(r) => r.read(cx).key(),
-            TabKind::Page(p) => p.read(cx).key.clone(),
+            TabKind::Page(p) => p.read(cx).key(),
+            TabKind::Tool(p) => p.read(cx).key.clone(),
         }
     }
 
@@ -93,7 +97,7 @@ impl Tab {
             TabKind::Terminal(_) => NavTarget::Terminal,
             TabKind::Editor(e) => NavTarget::Editor(e.read(cx).path.clone()),
             TabKind::Diff(d) => NavTarget::Diff(d.read(cx).path.clone()),
-            TabKind::Review(_) | TabKind::Page(_) => NavTarget::Review,
+            TabKind::Review(_) | TabKind::Page(_) | TabKind::Tool(_) => NavTarget::Review,
         }
     }
 }
@@ -757,7 +761,7 @@ impl OrbitApp {
                 }
                 TabKind::Diff(d) => Some(SavedTab::Diff { path: d.read(cx).path.clone() }),
                 // Sessions come back with the Sessions stage (scrollback restore).
-                TabKind::Terminal(_) | TabKind::Review(_) | TabKind::Page(_) => None,
+                TabKind::Terminal(_) | TabKind::Review(_) | TabKind::Page(_) | TabKind::Tool(_) => None,
             })
             .collect();
         let active = self.active.and_then(|a| {

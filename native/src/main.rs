@@ -7,6 +7,7 @@ mod diff_view;
 mod editor;
 mod file_ops;
 mod file_tree;
+mod git;
 mod icons;
 mod lsp;
 mod nav;
@@ -26,6 +27,7 @@ mod terminal;
 mod theme;
 mod toast;
 mod workspace;
+mod workspace_ui;
 
 use app::OrbitApp;
 use gpui::{px, size, App, AppContext, Bounds, WindowBounds, WindowDecorations, WindowOptions};
@@ -57,6 +59,7 @@ fn main() {
         file_ops::init(cx);
         review::init(cx);
         run::init(cx);
+        workspace_ui::init(cx);
         pages::init(cx);
 
         let bounds = Bounds::centered(None, size(px(1400.), px(900.)), cx);
