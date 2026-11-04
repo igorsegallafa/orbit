@@ -240,6 +240,8 @@ pub fn attach(app: &mut OrbitApp, window: &mut Window, cx: &mut Context<OrbitApp
     });
     let widget = cx.new(|cx| widget::RunWidget::new(weak.clone(), cx));
     app.titlebar_items.push(widget.into());
+    let inbox = cx.new(|cx| crate::sessions::inbox::InboxButton::new(weak.clone(), cx));
+    app.titlebar_items.push(inbox.into());
     let panel = cx.new(|cx| panel::Panel::new(weak, window, cx));
     store(cx).update(cx, |s, _| s.panel = Some(panel));
 }

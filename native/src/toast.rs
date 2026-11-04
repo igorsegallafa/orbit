@@ -2,7 +2,7 @@
 //! at most four, each dismissed after a few seconds or by its ×.
 use crate::app::OrbitApp;
 use crate::probe::probe;
-use crate::theme::{self, c, size};
+use crate::theme::{self, c};
 use gpui::{div, prelude::*, px, Context, FontWeight, IntoElement, MouseButton, SharedString};
 use gpui_component::{Icon, IconName};
 use std::time::Duration;
@@ -108,8 +108,8 @@ impl OrbitApp {
                         .py(px(11.))
                         .border_1()
                         .border_color(match t.kind {
-                            ToastKind::Error => gpui::rgba(0xff5d5d59),
-                            _ => c(theme::BORDER_STRONG),
+                            ToastKind::Error => theme::hsla(theme::DANGER).opacity(0.35),
+                            _ => theme::hsla(theme::BORDER_STRONG),
                         })
                         .rounded(theme::radius())
                         .bg(c(theme::PANEL_RAISED))
@@ -134,11 +134,10 @@ impl OrbitApp {
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .rounded(px(4.))
                                 .text_color(c(theme::TEXT_FAINT))
-                                .hover(|s| s.bg(c(theme::BORDER_STRONG)).text_color(c(theme::TEXT)))
+                                .hover(|s| s.text_color(c(theme::TEXT)))
                                 .cursor_pointer()
-                                .text_size(px(size::FONT))
+                                .text_size(px(16.))
                                 .child("×")
                                 .child(probe(format!("toast-close:{id}")))
                                 .on_mouse_down(

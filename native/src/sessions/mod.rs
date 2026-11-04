@@ -7,6 +7,7 @@
 //! turn or need the user land in the inbox.
 //!
 //! The actions below are the ids a command palette or keymap can bind.
+pub mod inbox;
 mod panel;
 pub mod status;
 
