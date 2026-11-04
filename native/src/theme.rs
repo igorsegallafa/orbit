@@ -109,3 +109,9 @@ pub fn init(cx: &mut App) {
     Theme::change(ThemeMode::Dark, None, cx);
     Theme::global_mut(cx).apply_config(&config);
 }
+
+// tools tokens
+/// `--info` (Nord).
+pub const INFO: u32 = 0x81a1c1;
+/// `--purple` (Nord).
+pub const PURPLE: u32 = 0xb48ead;

@@ -2,13 +2,15 @@
 //! sections AI, Languages, Appearance, Health and Updates. Repositories and
 //! Groups are in `repos.rs`. Everything reads and writes `config.yaml`
 //! through orbit-core, so the Tauri app sees the same settings.
-use super::ui::{self, Tone};
+use super::kit::{self, Kind};
+use super::themes;
+use super::ui;
 use super::{updates, Host, PageView};
 use crate::probe::probe;
 use crate::review::Load;
 use crate::theme::{self, c};
-use gpui::{div, prelude::*, px, App, ClickEvent, Context, Entity, SharedString, Subscription, Task, Window};
-use gpui_component::input::{InputEvent, InputState};
+use gpui::{div, prelude::*, px, App, ClickEvent, Context, Entity, Focusable, SharedString, Subscription, Task, Window};
+use gpui_component::input::{Input, InputEvent, InputState};
 use orbit_core::config::{AiSettings, Config};
 use orbit_core::health::Check;
 use orbit_core::lsp::LspStatus;
@@ -35,6 +37,8 @@ struct SectionDef {
     description: &'static str,
     /// Extra words the filter matches besides the title.
     keywords: &'static str,
+    /// Lucide icon (`SettingsPage.tsx`'s nav icons).
+    icon: &'static str,
 }
 
 const NAV: &[(&str, &[SectionDef])] = &[
@@ -43,6 +47,7 @@ const NAV: &[(&str, &[SectionDef])] = &[
         &[
             SectionDef {
                 id: Section::Repos,
+                icon: "book-marked",
                 slug: "repos",
                 title: "Repositories",
                 description: "The repositories Orbit manages and the folders it clones them into.",
@@ -50,6 +55,7 @@ const NAV: &[(&str, &[SectionDef])] = &[
             },
             SectionDef {
                 id: Section::Groups,
+                icon: "layers-2",
                 slug: "groups",
                 title: "Groups",
                 description: "Named sets of repositories you can spin up together as one workspace.",
@@ -62,6 +68,7 @@ const NAV: &[(&str, &[SectionDef])] = &[
         &[
             SectionDef {
                 id: Section::Ai,
+                icon: "sparkles",
                 slug: "ai",
                 title: "AI",
                 description: "The agent and model Orbit uses for sessions, commit messages and reviews.",
@@ -69,6 +76,7 @@ const NAV: &[(&str, &[SectionDef])] = &[
             },
             SectionDef {
                 id: Section::Languages,
+                icon: "code-xml",
                 slug: "languages",
                 title: "Languages",
                 description: "Language servers that power go-to-definition, hovers and diagnostics in the editor.",
@@ -81,6 +89,7 @@ const NAV: &[(&str, &[SectionDef])] = &[
         &[
             SectionDef {
                 id: Section::Appearance,
+                icon: "palette",
                 slug: "appearance",
                 title: "Appearance",
                 description: "The app's theme: interface, editor, diffs and terminals.",
@@ -88,6 +97,7 @@ const NAV: &[(&str, &[SectionDef])] = &[
             },
             SectionDef {
                 id: Section::Health,
+                icon: "activity",
                 slug: "health",
                 title: "Health",
                 description: "Tools Orbit relies on, and whether each one is installed.",
@@ -95,6 +105,7 @@ const NAV: &[(&str, &[SectionDef])] = &[
             },
             SectionDef {
                 id: Section::Updates,
+                icon: "download",
                 slug: "updates",
                 title: "Updates",
                 description: "The installed version and new releases.",
@@ -109,17 +120,6 @@ fn def(section: Section) -> &'static SectionDef {
 }
 
 const AGENTS: &[(&str, &str)] = &[("claude", "Claude Code"), ("opencode", "OpenCode"), ("omp", "OMP")];
-
-/// The themes of `src/lib/theme.ts`; only Orbit Dark is ported.
-const THEMES: &[(&str, bool)] = &[
-    ("Orbit Dark", true),
-    ("Dracula", true),
-    ("Nord", true),
-    ("Tokyo Night", true),
-    ("Catppuccin Mocha", true),
-    ("Orbit Light", false),
-    ("Solarized Light", false),
-];
 
 pub struct SettingsPage {
     pub(super) host: Host,
@@ -360,11 +360,11 @@ impl SettingsPage {
     }
 
     /// The custom command input of a language, created on first render.
-    fn draft(&mut self, id: &str, value: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Entity<InputState> {
+    fn draft(&mut self, id: &str, value: Option<String>, placeholder: String, window: &mut Window, cx: &mut Context<Self>) -> Entity<InputState> {
         if let Some(d) = self.drafts.get(id) {
             return d.clone();
         }
-        let input = cx.new(|cx| InputState::new(window, cx).default_value(value.unwrap_or_default()));
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder).default_value(value.unwrap_or_default()));
         let lang = id.to_string();
         cx.subscribe_in(&input, window, move |t: &mut Self, input, ev: &InputEvent, window, cx| {
             if matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur) {
@@ -408,57 +408,77 @@ impl SettingsPage {
 
     // ---------- rendering ----------
 
-    fn render_nav(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Settings' own navigation (`SettingsNav`): it stands in for the app sidebar.
+    fn render_nav(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let shown = self.matching(cx);
+        let focused = self.filter.read(cx).focus_handle(cx).is_focused(window);
+        let search = div()
+            .relative()
+            .h(px(30.))
+            .mb(px(8.))
+            .pl(px(28.))
+            .pr(px(10.))
+            .flex()
+            .items_center()
+            .rounded(px(6.))
+            .border_1()
+            .border_color(c(if focused { theme::ACCENT } else { theme::BORDER }))
+            .bg(c(theme::BG))
+            .child(div().absolute().left(px(9.)).top(px(8.)).child(kit::icon("search", 13., c(theme::TEXT_FAINT))))
+            .child(Input::new(&self.filter).appearance(false).px(px(0.)).text_size(px(12.5)).w_full())
+            .child(probe("settings-filter"));
         let mut nav = div()
             .id("settings-nav")
-            .w(px(210.))
+            .w(px(220.))
             .flex_none()
             .h_full()
             .overflow_y_scroll()
             .bg(c(theme::PANEL))
-            .border_r_1()
-            .border_color(c(theme::BORDER))
-            .py_2()
-            .child(div().px_2().pb_1().child(ui::input("settings-filter", &self.filter)));
+            .px(px(12.))
+            .py(px(16.))
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .child(
+                kit::nav_item("settings-back", "arrow-left", "Back to app", false)
+                    .text_color(c(theme::TEXT_FAINT))
+                    .mb(px(6.))
+                    .on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.host.close(super::SETTINGS_KEY, w, cx))),
+            )
+            .child(search);
         for (group, sections) in NAV {
             let items: Vec<_> = sections.iter().filter(|s| shown.iter().any(|m| m.id == s.id)).collect();
             if items.is_empty() {
                 continue;
             }
-            nav = nav.child(ui::nav_title(group));
+            nav = nav.child(kit::nav_section(group));
             for s in items {
-                let (id, active) = (s.id, s.id == self.section);
-                let name = format!("settings-nav:{}", s.slug);
+                let id = s.id;
                 nav = nav.child(
-                    div()
-                        .id(SharedString::from(name.clone()))
-                        .relative()
-                        .mx_2()
-                        .px_2()
-                        .py_1()
-                        .rounded_md()
-                        .cursor_pointer()
-                        .text_sm()
-                        .when(active, |d| d.bg(theme::accent_soft()).text_color(c(theme::TEXT)))
-                        .when(!active, |d| d.text_color(c(theme::TEXT_DIM)).hover(|s| s.bg(c(theme::PANEL_HOVER))))
-                        .child(s.title)
-                        .child(probe(name))
+                    kit::nav_item(format!("settings-nav:{}", s.slug), s.icon, s.title, s.id == self.section)
                         .on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.select(id, w, cx))),
                 );
             }
         }
         if shown.is_empty() {
-            nav = nav.child(div().px_3().child(ui::faint(format!("No settings match “{}”", self.filter.read(cx).value().trim()))));
+            nav = nav.child(
+                div()
+                    .p(px(10.))
+                    .text_size(px(12.))
+                    .text_color(c(theme::TEXT_FAINT))
+                    .child(format!("No settings match “{}”", self.filter.read(cx).value().trim())),
+            );
         }
         nav
     }
 
     fn render_ai(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let Some(ai) = self.ai() else { return ui::faint("Loading…").into_any_element() };
+        let Some(ai) = self.ai() else {
+            return kit::section().child(kit::skeleton(gpui::relative(0.4), 20.)).child(kit::skeleton(gpui::relative(1.), 34.)).into_any_element();
+        };
         let me = cx.entity().downgrade();
         let agents: Vec<(String, &str)> = AGENTS.iter().map(|(id, l)| (id.to_string(), *l)).collect();
-        let agent_seg = ui::segmented("ai-agent", &agents, &ai.agent, move |v, w, cx| {
+        let agent_seg = kit::seg("ai-agent", &agents, &ai.agent, move |v, w, cx| {
             let _ = me.update(cx, |t, cx| t.pick_agent(v, w, cx));
         });
         let model_hint = match ai.agent.as_str() {
@@ -467,89 +487,118 @@ impl SettingsPage {
             _ => "Passed to `claude --model`. Each AI feature uses it unless a run overrides it.",
         };
         let loading = matches!(self.models, Load::Loading);
-        let picker = |name: &'static str, label: String, fast: bool, cx: &mut Context<Self>| {
-            ui::button(name, if loading { "Loading models…".to_string() } else { format!("{label} ▾") }, Tone::Plain)
-                .on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.model_menu(fast, w, cx)))
+        let picker = |name: &'static str, label: String, fast: bool, cx: &mut Context<Self>| -> gpui::AnyElement {
+            let control = if loading {
+                kit::skeleton(gpui::relative(1.), 34.).into_any_element()
+            } else {
+                kit::select(name, label).on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.model_menu(fast, w, cx))).into_any_element()
+            };
+            div().w(px(340.)).child(control).into_any_element()
         };
         let fast_label = ai.fast_model.clone().unwrap_or_else(|| if ai.agent == "claude" { "Default (claude-haiku-4-5)".into() } else { "Same as Model".into() });
         let me = cx.entity().downgrade();
-        let remote = ui::segmented("ai-remote", &[(false, "Off"), (true, "On")], &ai.remote_control, move |on, w, cx| {
+        let remote = kit::seg("ai-remote", &[(false, "Off"), (true, "On")], &ai.remote_control, move |on, w, cx| {
             let _ = me.update(cx, |t, cx| t.set_ai(|ai| ai.remote_control = on, false, w, cx));
         });
-        let test_state = match &self.test {
-            Some(Load::Ready(())) => div().flex().items_center().gap_1().child(ui::dot(c(theme::OK))).child(ui::muted("Working")),
-            Some(Load::Failed(_)) => div().text_xs().text_color(c(theme::DANGER)).child("Failed"),
-            _ => div(),
-        };
         let testing = matches!(self.test, Some(Load::Loading));
-        let mut connection_text = "Sends a tiny prompt to check the agent is installed and the model answers.".to_string();
+        let state = match &self.test {
+            Some(Load::Ready(())) => Some(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(7.))
+                    .text_size(px(12.))
+                    .text_color(c(theme::TEXT_DIM))
+                    .child(repo_dot())
+                    .child("Working")
+                    .into_any_element(),
+            ),
+            Some(Load::Failed(_)) => {
+                Some(div().text_size(px(12.)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(c(theme::DANGER)).child("Failed").into_any_element())
+            }
+            _ => None,
+        };
+        let mut connection = div().flex().flex_col().gap(px(4.)).child(kit::hint("Sends a tiny prompt to check the agent is installed and the model answers."));
         if let Some(Load::Failed(e)) = &self.test {
-            connection_text = format!("{connection_text}\n{e}");
+            connection = connection.child(kit::error_box(e.clone()));
         }
-        ui::card()
-            .child(ui::setting("Agent", "The CLI Orbit runs for plans, commit messages, PR drafts, CI investigation and Ralph.", agent_seg))
-            .child(ui::setting("Model", model_hint, picker("ai-model", ai.model.clone(), false, cx)))
-            .child(ui::setting("Fast model", "Used for commit messages and PR drafts, where speed matters more than depth.", picker("ai-fast-model", fast_label, true, cx)))
-            .when(ai.agent == "claude", |d| {
-                d.child(ui::setting(
-                    "Remote Control",
-                    "Claude sessions opened in Orbit can be continued from claude.ai or the Claude app. Applies to sessions started after the change.",
-                    remote,
-                ))
-            })
-            .child(ui::setting(
-                "Connection",
-                connection_text,
-                div().flex().items_center().gap_2().child(test_state).child(
-                    ui::button("ai-test", if testing { "Testing…" } else { "Test agent" }, Tone::Plain)
-                        .on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.test_agent(w, cx))),
-                ),
-            ))
-            .into_any_element()
+        let test_btn = kit::disabled(kit::button("ai-test", if testing { "Testing…" } else { "Test agent" }, Kind::Secondary), testing)
+            .on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.test_agent(w, cx)));
+        let mut rows = vec![
+            kit::setting("Agent", kit::hint("The CLI Orbit runs for plans, commit messages, PR drafts, CI investigation and Ralph."), agent_seg),
+            kit::setting("Model", kit::hint(model_hint), picker("ai-model", ai.model.clone(), false, cx)),
+            kit::setting("Fast model", kit::hint("Used for commit messages and PR drafts, where speed matters more than depth."), picker("ai-fast-model", fast_label, true, cx)),
+        ];
+        if ai.agent == "claude" {
+            rows.push(kit::setting(
+                "Remote Control",
+                kit::hint("Claude sessions opened in Orbit can be continued from claude.ai or the Claude app. Applies to sessions started after the change."),
+                remote,
+            ));
+        }
+        rows.push(kit::setting("Connection", connection, div().flex().items_center().gap(px(12.)).children(state).child(test_btn)));
+        kit::section().child(kit::rows(rows)).into_any_element()
     }
 
     fn render_languages(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let status = match &self.languages {
             Load::Ready(s) => s.clone(),
-            Load::Failed(e) => return ui::error(e.clone()).into_any_element(),
-            _ => return ui::faint("Loading…").into_any_element(),
+            Load::Failed(e) => return kit::error_box(e.clone()).into_any_element(),
+            _ => return kit::section().child(kit::skeleton(gpui::relative(1.), 18.)).child(kit::skeleton(gpui::relative(1.), 200.)).into_any_element(),
         };
         let names: HashMap<String, String> = status.languages.iter().map(|l| (l.id.clone(), l.name.clone())).collect();
-        let mut card = ui::card();
+        let note = |text: &str| div().text_size(px(12.)).line_height(px(18.)).italic().text_color(c(theme::TEXT_FAINT)).child(text.to_string());
+        let mono = |text: String, color: u32| div().font_family(theme::MONO_FONT).text_size(px(11.5)).text_color(c(color)).child(text);
+        let mut rows = vec![];
         for l in &status.languages {
-            let draft = self.draft(&l.id, l.custom_command.clone(), window, cx);
-            let (state, color) = if l.disabled {
-                ("disabled", theme::TEXT_FAINT)
+            let bins = l.servers.iter().map(|s| s.bin.as_str()).collect::<Vec<_>>().join(" / ");
+            let draft = self.draft(&l.id, l.custom_command.clone(), bins, window, cx);
+            let state = if l.disabled {
+                kit::outline_pill("disabled", c(theme::TEXT_FAINT), c(theme::BORDER_STRONG))
             } else if l.command.is_some() {
-                ("ready", theme::OK)
+                kit::outline_pill("ready", c(theme::OK), kit::alpha(theme::OK, 0.35))
             } else {
-                ("not installed", theme::WARN)
+                kit::outline_pill("not installed", c(theme::WARN), kit::alpha(theme::WARN, 0.35))
             };
-            let mut text = div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(div().flex().items_center().gap_2().child(div().text_sm().text_color(c(theme::TEXT)).child(l.name.clone())).child(ui::pill(state, c(color))));
+            let mut text = div().flex().flex_col().gap(px(4.)).min_w_0().max_w(px(560.)).child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .text_size(px(13.5))
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_color(c(theme::TEXT))
+                    .child(l.name.clone())
+                    .child(state),
+            );
             if !l.disabled {
                 text = match &l.command {
-                    Some(cmd) => text.child(ui::code(cmd.clone())),
+                    Some(cmd) => text.child(mono(cmd.clone(), theme::TEXT_DIM)),
                     None => {
                         let bins: Vec<_> = l.servers.iter().map(|s| s.bin.as_str()).collect();
-                        text.child(ui::muted(format!("Install {}: {}", bins.join(" or "), l.servers.first().map(|s| s.install.as_str()).unwrap_or(""))))
+                        text.child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .gap(px(4.))
+                                .text_size(px(12.))
+                                .line_height(px(18.))
+                                .text_color(c(theme::TEXT_FAINT))
+                                .child(format!("Install {}:", bins.join(" or ")))
+                                .child(mono(l.servers.first().map(|s| s.install.clone()).unwrap_or_default(), theme::TEXT_FAINT)),
+                        )
                     }
                 };
             }
             if l.id == "cpp" {
-                text = text.child(ui::faint(
+                text = text.child(note(
                     "clangd reads compile_commands.json for include paths and flags; the editor offers to generate it with CMake when a repo has none.",
                 ));
             }
             if !l.disabled {
                 let (id, errors_only, hidden) = (l.id.clone(), l.errors_only, l.hidden_diagnostics.clone());
-                let mut filters = div().flex().flex_wrap().items_center().gap_2().child(
-                    ui::check(format!("lang:{}:errors-only", l.id), "Errors only", l.errors_only).on_click(cx.listener({
+                let mut filters = div().mt(px(4.)).flex().flex_wrap().items_center().gap_x(px(10.)).gap_y(px(6.)).child(
+                    kit::check(format!("lang:{}:errors-only", l.id), "Errors only", l.errors_only).on_click(cx.listener({
                         let (id, hidden) = (id.clone(), hidden.clone());
                         move |t, _: &ClickEvent, w, cx| {
                             let (id, hidden) = (id.clone(), hidden.clone());
@@ -561,36 +610,55 @@ impl SettingsPage {
                     let rest: Vec<String> = hidden.iter().filter(|c| *c != code).cloned().collect();
                     let id = id.clone();
                     filters = filters.child(
-                        ui::button(format!("lang:{}:show:{code}", l.id), format!("{code} ×"), Tone::Plain).on_click(cx.listener(move |t, _: &ClickEvent, w, cx| {
-                            let (id, rest) = (id.clone(), rest.clone());
-                            t.configure(move || orbit_core::lsp::set_diagnostics_filter(&id, errors_only, rest), w, cx)
-                        })),
+                        div()
+                            .id(SharedString::from(format!("lang:{}:show:{code}", l.id)))
+                            .relative()
+                            .flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .pl(px(7.))
+                            .pr(px(3.))
+                            .rounded_full()
+                            .border_1()
+                            .border_color(c(theme::BORDER_STRONG))
+                            .bg(c(theme::PANEL_RAISED))
+                            .font_family(theme::MONO_FONT)
+                            .text_size(px(11.))
+                            .text_color(c(theme::TEXT_DIM))
+                            .cursor_pointer()
+                            .child(code.clone())
+                            .child(div().text_color(c(theme::TEXT_FAINT)).hover(|s| s.text_color(c(theme::DANGER))).child("×"))
+                            .child(probe(format!("lang:{}:show:{code}", l.id)))
+                            .on_click(cx.listener(move |t, _: &ClickEvent, w, cx| {
+                                let (id, rest) = (id.clone(), rest.clone());
+                                t.configure(move || orbit_core::lsp::set_diagnostics_filter(&id, errors_only, rest), w, cx)
+                            })),
                     );
                 }
                 if hidden.is_empty() && !errors_only {
-                    filters = filters.child(ui::faint("Hide a kind of diagnostic from its quick fix menu in the editor (Ctrl+.)."));
+                    filters = filters.child(note("Hide a kind of diagnostic from its quick fix menu in the editor (Ctrl+.)."));
                 }
                 text = text.child(filters);
             }
             let (id, custom, disabled) = (l.id.clone(), l.custom_command.clone(), l.disabled);
-            card = card.child(
+            rows.push(
                 div()
-                    .px_4()
-                    .py_3()
+                    .px(px(20.))
+                    .py(px(18.))
                     .flex()
-                    .gap_4()
-                    .border_b_1()
-                    .border_color(c(theme::BORDER))
+                    .items_center()
+                    .justify_between()
+                    .gap(px(24.))
                     .child(text)
                     .child(
                         div()
-                            .w(px(260.))
+                            .w(px(340.))
                             .flex_none()
                             .flex()
-                            .flex_col()
-                            .gap_2()
-                            .child(ui::input(format!("lang:{}:command", l.id), &draft))
-                            .child(ui::check(format!("lang:{}:enabled", l.id), "Enabled", !l.disabled).on_click(cx.listener(
+                            .items_center()
+                            .gap(px(10.))
+                            .child(div().flex_1().min_w_0().child(kit::field_sized(format!("lang:{}:command", l.id), &draft, 30., 12., window, cx)))
+                            .child(kit::check(format!("lang:{}:enabled", l.id), "Enabled", !l.disabled).on_click(cx.listener(
                                 move |t, _: &ClickEvent, w, cx| {
                                     let (id, custom) = (id.clone(), custom.clone());
                                     t.configure(move || orbit_core::lsp::configure(&id, custom, !disabled), w, cx)
@@ -599,60 +667,65 @@ impl SettingsPage {
                     ),
             );
         }
-        let mut running = ui::card();
+        let mut running = vec![];
         if status.running.is_empty() {
-            running = running.child(div().px_4().py_3().child(ui::muted("None right now: open a source file to start its language server.")));
+            running.push(div().px(px(20.)).py(px(18.)).child(kit::hint("None right now: open a source file to start its language server.")));
         }
         for r in &status.running {
             let id = r.id;
             let log = self.logs.get(&id);
-            running = running.child(
-                div()
-                    .px_4()
-                    .py_3()
-                    .flex()
-                    .gap_4()
-                    .border_b_1()
-                    .border_color(c(theme::BORDER))
-                    .child(
+            let text = div()
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .min_w_0()
+                .flex_1()
+                .child(
+                    div()
+                        .flex()
+                        .items_baseline()
+                        .gap(px(6.))
+                        .text_size(px(13.5))
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_color(c(theme::TEXT))
+                        .child(names.get(&r.language).cloned().unwrap_or_else(|| r.language.clone()))
+                        .child(div().font_family(theme::MONO_FONT).font_weight(gpui::FontWeight::NORMAL).text_size(px(11.5)).text_color(c(theme::TEXT_FAINT)).child(r.root.clone())),
+                )
+                .child(mono(r.command.clone(), theme::TEXT_DIM))
+                .when_some(log, |d, lines| {
+                    let text = if lines.is_empty() { "(no output)".to_string() } else { lines.join("\n") };
+                    d.child(
                         div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .flex()
-                                    .gap_2()
-                                    .text_sm()
-                                    .text_color(c(theme::TEXT))
-                                    .child(names.get(&r.language).cloned().unwrap_or_else(|| r.language.clone()))
-                                    .child(ui::faint(r.root.clone())),
-                            )
-                            .child(ui::code(r.command.clone()))
-                            .when_some(log, |d, lines| {
-                                let text = if lines.is_empty() { "(no output)".to_string() } else { lines.join("\n") };
-                                d.child(
-                                    div()
-                                        .id(SharedString::from(format!("lsp-log-{id}")))
-                                        .max_h(px(240.))
-                                        .overflow_y_scroll()
-                                        .p_2()
-                                        .rounded(px(6.))
-                                        .bg(c(theme::BG))
-                                        .font_family(theme::MONO_FONT)
-                                        .text_xs()
-                                        .text_color(c(theme::TEXT_DIM))
-                                        .children(text.lines().map(|l| div().child(l.to_string())).collect::<Vec<_>>()),
-                                )
-                            }),
+                            .id(SharedString::from(format!("lsp-log-{id}")))
+                            .mt(px(6.))
+                            .max_h(px(220.))
+                            .overflow_y_scroll()
+                            .px(px(10.))
+                            .py(px(8.))
+                            .rounded(px(6.))
+                            .border_1()
+                            .border_color(c(theme::BORDER))
+                            .bg(c(theme::BG))
+                            .font_family(theme::MONO_FONT)
+                            .text_size(px(11.))
+                            .text_color(c(theme::TEXT_DIM))
+                            .children(text.lines().map(|l| div().child(l.to_string())).collect::<Vec<_>>()),
                     )
+                });
+            running.push(
+                div()
+                    .px(px(20.))
+                    .py(px(18.))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(24.))
+                    .child(text)
                     .child(
                         div()
                             .flex()
-                            .gap_2()
-                            .child(ui::button(format!("lsp:{id}:log"), if log.is_some() { "Hide log" } else { "Log" }, Tone::Plain).on_click(cx.listener(
+                            .gap(px(12.))
+                            .child(kit::mini(format!("lsp:{id}:log"), if log.is_some() { "Hide log" } else { "Log" }, Kind::Secondary).on_click(cx.listener(
                                 move |t, _: &ClickEvent, _, cx| {
                                     if t.logs.remove(&id).is_none() {
                                         let lines = orbit_core::lsp::log(id);
@@ -661,58 +734,92 @@ impl SettingsPage {
                                     cx.notify();
                                 },
                             )))
-                            .child(ui::button(format!("lsp:{id}:stop"), "Stop", Tone::Plain).on_click(cx.listener(move |t, _: &ClickEvent, _, cx| {
+                            .child(kit::mini(format!("lsp:{id}:stop"), "Stop", Kind::Secondary).on_click(cx.listener(move |t, _: &ClickEvent, _, cx| {
                                 orbit_core::lsp::stop(id);
                                 t.load_languages(cx);
                             }))),
                     ),
             );
         }
-        div()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .child(ui::muted(
-                "Orbit's editor talks to the same language servers VS Code uses: go to definition (F12, Ctrl+click), references (Shift+F12), symbols (Ctrl+Shift+O, Ctrl+T), completion and errors. A server starts when you open a file of its language, one per repository folder.",
-            ))
-            .child(card)
-            .child(ui::heading("Running servers"))
-            .child(running)
+        kit::section()
+            .child(
+                div().text_size(px(12.)).line_height(px(18.)).text_color(c(theme::TEXT_FAINT)).child(
+                    "Orbit's editor talks to the same language servers VS Code uses: go to definition (F12, Ctrl+click), references (Shift+F12), symbols (Ctrl+Shift+O, Ctrl+T), completion, errors and semantic colors. A server starts when you open a file of its language, one per repository folder, and stops a few minutes after its last file closes.",
+                ),
+            )
+            .child(kit::rows(rows))
+            .child(
+                div()
+                    .mt(px(8.))
+                    .text_size(px(12.))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(c(theme::TEXT_DIM))
+                    .child("RUNNING SERVERS"),
+            )
+            .child(kit::rows(running))
             .into_any_element()
     }
 
-    fn render_appearance(&self) -> gpui::AnyElement {
-        let mut grid = div().flex().flex_wrap().gap_3();
-        for (name, dark) in THEMES {
-            let on = *name == "Orbit Dark";
-            grid = grid.child(
-                div()
-                    .w(px(150.))
-                    .p_2()
-                    .rounded(px(8.))
-                    .border_1()
-                    .border_color(c(if on { theme::ACCENT } else { theme::BORDER }))
-                    .when(!on, |d| d.opacity(0.5))
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(div().text_sm().text_color(c(theme::TEXT)).child(*name))
-                    .child(ui::faint(if on { "Dark · in use" } else if *dark { "Dark · Tauri app only" } else { "Light · Tauri app only" })),
-            );
+    fn render_appearance(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let pref = themes::current();
+        let system = themes::system();
+        let mut cards: Vec<(String, &themes::ThemeInfo, String, String)> =
+            vec![("system".into(), system, "System".into(), format!("Now {}", if system.dark { "dark" } else { "light" }))];
+        let all = themes::list();
+        for t in all.iter().filter(|t| t.dark).chain(all.iter().filter(|t| !t.dark)) {
+            cards.push((t.id.to_string(), t, t.label.to_string(), if t.dark { "Dark".into() } else { "Light".into() }));
         }
-        ui::card()
+        // `repeat(auto-fill, minmax(168px, 1fr))` over the 1038px row: five columns.
+        let width = (1038. - 4. * 12.) / 5.;
+        let grid = div().flex().flex_wrap().gap(px(12.)).children(cards.into_iter().map(|(id, t, label, sub)| {
+            let on = id == pref;
+            let pid = id.clone();
+            div()
+                .id(SharedString::from(format!("theme:{id}")))
+                .relative()
+                .w(px(width))
+                .p(px(8.))
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .rounded(px(theme::size::RADIUS))
+                .border_1()
+                .bg(c(theme::PANEL_RAISED))
+                .cursor_pointer()
+                .when(on, |d| d.border_color(c(theme::ACCENT)).shadow(ring()))
+                .when(!on, |d| d.border_color(c(theme::BORDER)).hover(|s| s.border_color(c(theme::BORDER_STRONG))))
+                .child(theme_preview(&t.preview))
+                .child(
+                    div()
+                        .px(px(2.))
+                        .flex()
+                        .items_baseline()
+                        .justify_between()
+                        .gap(px(6.))
+                        .child(div().text_size(px(12.5)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(c(theme::TEXT)).child(label))
+                        .child(div().text_size(px(11.)).text_color(c(theme::TEXT_FAINT)).child(sub)),
+                )
+                .child(probe(format!("theme:{id}")))
+                .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                    themes::set(&pid);
+                    cx.notify();
+                }))
+        }));
+        kit::section()
             .child(
-                div()
-                    .px_4()
-                    .py_3()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(div().text_sm().text_color(c(theme::TEXT)).child("Theme"))
-                    .child(ui::muted(
-                        "Colors for the whole app, the editor, diffs and terminals. The native app has Orbit Dark only for now; the Tauri app keeps its own choice on this machine.",
-                    ))
-                    .child(grid),
+                kit::card().child(
+                    div()
+                        .px(px(20.))
+                        .py(px(18.))
+                        .flex()
+                        .flex_col()
+                        .gap(px(16.))
+                        .child(kit::row_text(
+                            "Theme",
+                            kit::hint("Colors for the whole app, the editor, diffs and terminals. System follows your OS light/dark setting."),
+                        ))
+                        .child(grid),
+                ),
             )
             .into_any_element()
     }
@@ -720,20 +827,37 @@ impl SettingsPage {
     fn render_health(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let checks = self.health.ready();
         let failing = checks.map(|l| l.iter().filter(|c| c.required && !c.ok).count());
-        let summary = match failing {
-            Some(0) => ui::muted("Everything Orbit needs is installed."),
-            Some(n) => ui::error(format!("{n} required check{} failing.", if n > 1 { "s" } else { "" })),
-            None => ui::faint("Checking…"),
+        let summary = failing.map(|n| {
+            div().mt(px(2.)).text_size(px(12.)).text_color(c(if n > 0 { theme::DANGER } else { theme::TEXT_FAINT })).child(if n == 0 {
+                "Everything Orbit needs is installed.".to_string()
+            } else {
+                format!("{n} required check{} failing.", if n > 1 { "s" } else { "" })
+            })
+        });
+        let recheck = kit::disabled(kit::button("health-recheck", "Re-check", Kind::Secondary), checks.is_none())
+            .on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.load_health(w, cx)));
+        let head = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .child(div().text_size(px(13.)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(c(theme::TEXT_DIM)).child("ENVIRONMENT"))
+                    .children(summary),
+            )
+            .child(recheck);
+        let mut out = kit::section().child(head);
+        let Some(checks) = checks else {
+            // `SkeletonTable rows={6} cols={3}`.
+            let bar = || kit::skeleton(gpui::relative(1.), 8.).flex_1();
+            let row = || div().flex().gap(px(24.)).child(bar()).child(bar()).child(bar());
+            let table = kit::card()
+                .p(px(20.))
+                .gap(px(16.))
+                .child(row().pb(px(10.)).border_b_1().border_color(c(theme::BORDER)))
+                .children((0..6).map(|_| row()));
+            return out.child(table).into_any_element();
         };
-        let mut out = div().flex().flex_col().gap_2().child(
-            div()
-                .flex()
-                .items_center()
-                .gap_3()
-                .child(div().flex_1().flex().flex_col().child(ui::heading("Environment")).child(summary))
-                .child(ui::button("health-recheck", "Re-check", Tone::Plain).on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.load_health(w, cx)))),
-        );
-        let Some(checks) = checks else { return out.into_any_element() };
         const GROUPS: &[(&str, &str, &str)] = &[
             ("orbit", "Orbit", ""),
             ("agent", "AI agent", ""),
@@ -741,14 +865,16 @@ impl SettingsPage {
             ("language", "Language servers", "Detected from the languages your cloned repositories use. None found yet."),
         ];
         for (id, title, empty) in GROUPS {
-            out = out.child(ui::faint(title.to_uppercase()).pt_2());
+            let mut group = div().mt(px(4.)).child(
+                div().mb(px(8.)).text_size(px(11.)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(c(theme::TEXT_FAINT)).child(title.to_uppercase()),
+            );
             let rows: Vec<_> = checks.iter().filter(|c| c.group == *id).collect();
             if rows.is_empty() {
-                out = out.child(ui::muted(*empty));
+                group = group.child(div().text_size(px(11.)).text_color(c(theme::TEXT_FAINT)).child(*empty));
+                out = out.child(group);
                 continue;
             }
-            let mut card = ui::card();
-            for ch in rows {
+            let list = rows.into_iter().map(|ch| {
                 let color = if ch.ok {
                     theme::OK
                 } else if ch.required {
@@ -756,22 +882,19 @@ impl SettingsPage {
                 } else {
                     theme::WARN
                 };
-                card = card.child(
-                    div()
-                        .px_4()
-                        .py_2()
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .border_b_1()
-                        .border_color(c(theme::BORDER))
-                        .child(ui::dot(c(color)))
-                        .child(div().w(px(170.)).flex_none().text_sm().text_color(c(theme::TEXT)).child(ch.name.clone()))
-                        .child(div().flex_1().min_w_0().text_xs().text_color(c(if ch.ok { theme::TEXT_DIM } else { color })).child(ch.detail.clone()))
-                        .when(!ch.used_by.is_empty(), |d| d.child(ui::faint(format!("used by {}", ch.used_by.join(", "))))),
-                );
-            }
-            out = out.child(card);
+                div()
+                    .px(px(14.))
+                    .py(px(9.))
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .text_size(px(13.))
+                    .child(div().size(px(8.)).flex_none().rounded_full().bg(c(color)))
+                    .child(div().w(px(180.)).flex_none().font_weight(gpui::FontWeight::SEMIBOLD).text_color(c(theme::TEXT)).child(ch.name.clone()))
+                    .child(div().flex_1().min_w_0().truncate().text_size(px(12.)).text_color(c(if ch.ok { theme::TEXT_FAINT } else { theme::TEXT_DIM })).child(ch.detail.clone()))
+                    .when(!ch.used_by.is_empty(), |d| d.child(div().text_size(px(11.)).text_color(c(theme::TEXT_FAINT)).child(format!("used by {}", ch.used_by.join(", ")))))
+            });
+            out = out.child(group.child(kit::rows(list)));
         }
         out.into_any_element()
     }
@@ -780,22 +903,103 @@ impl SettingsPage {
         let st = updates::state(cx);
         let busy = matches!(st.status, updates::Status::Checking);
         let action = match &st.status {
-            updates::Status::Available(_) => ui::button("updates-open", "Open release page", Tone::Primary).on_click(|_, _, cx| cx.open_url(updates::RELEASES_URL)),
-            _ => ui::button("updates-check", if busy { "Checking…" } else { "Check for updates" }, Tone::Plain).on_click(|_, _, cx| updates::check(true, cx)),
+            updates::Status::Available(_) => kit::button("updates-open", "Open release page", Kind::Primary).on_click(|_, _, cx| cx.open_url(updates::RELEASES_URL)),
+            _ => kit::disabled(kit::button("updates-check", if busy { "Checking…" } else { "Check for updates" }, Kind::Secondary), busy)
+                .on_click(|_, _, cx| updates::check(true, cx)),
         };
-        let mut text = st.describe();
+        let mut text = div().flex().flex_col().gap(px(4.)).child(kit::hint(st.describe()));
         if let updates::Status::Failed(e) = &st.status {
-            text = format!("{text}\n{e}");
+            text = text.child(kit::error_box(e.clone()));
         }
-        ui::card()
-            .child(ui::setting(
-                "Version",
-                "Orbit checks GitHub for a new release at startup and every hour while it's open.",
-                ui::code(updates::version()),
-            ))
-            .child(ui::setting("Updates", text, action))
+        kit::section()
+            .child(kit::rows([
+                kit::setting(
+                    "Version",
+                    kit::hint("Orbit checks GitHub for a new release at startup and every hour while it's open."),
+                    div().font_family(theme::MONO_FONT).text_size(px(13.)).text_color(c(theme::TEXT)).child(updates::version()),
+                ),
+                kit::setting("Updates", text, action),
+            ]))
             .into_any_element()
     }
+}
+
+/// `.repo-dot`: the green "working"/"cloned" dot with its soft ring.
+pub(super) fn repo_dot() -> gpui::Div {
+    div().size(px(7.)).flex_none().rounded_full().bg(c(theme::OK)).shadow(vec![gpui::BoxShadow {
+        color: kit::alpha(theme::OK, 0.12).into(),
+        offset: gpui::point(px(0.), px(0.)),
+        blur_radius: px(0.),
+        spread_radius: px(3.),
+        inset: false,
+    }])
+}
+
+/// `box-shadow: 0 0 0 1px var(--accent)`.
+fn ring() -> Vec<gpui::BoxShadow> {
+    vec![gpui::BoxShadow {
+        color: theme::hsla(theme::ACCENT),
+        offset: gpui::point(px(0.), px(0.)),
+        blur_radius: px(0.),
+        spread_radius: px(1.),
+        inset: false,
+    }]
+}
+
+/// `ThemePreview`: a miniature of the app in the theme's colours.
+fn theme_preview(p: &themes::Preview) -> gpui::Div {
+    let bar = |color: u32, w: f32, opacity: f32| div().h(px(4.)).w(gpui::relative(w)).rounded(px(2.)).bg(gpui::rgb(color)).opacity(opacity);
+    let dot = |color: u32| div().size(px(8.)).rounded_full().bg(gpui::rgb(color));
+    div()
+        .h(px(84.))
+        .flex()
+        .rounded(px(6.))
+        .overflow_hidden()
+        .border_1()
+        .border_color(gpui::rgb(p.border))
+        .bg(gpui::rgb(p.bg))
+        .child(
+            div()
+                .w(gpui::relative(0.28))
+                .px(px(6.))
+                .py(px(8.))
+                .flex()
+                .flex_col()
+                .gap(px(5.))
+                .border_r_1()
+                .border_color(gpui::rgb(p.border))
+                .bg(gpui::rgb(p.panel))
+                .child(bar(p.accent, 1., 1.))
+                .child(bar(p.text_faint, 1., 0.8))
+                .child(bar(p.text_faint, 1., 0.8)),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .p(px(8.))
+                .flex()
+                .flex_col()
+                .gap(px(5.))
+                .child(bar(p.text, 0.7, 1.))
+                .child(bar(p.text_dim, 0.5, 1.))
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(4.))
+                        .p(px(5.))
+                        .rounded(px(4.))
+                        .border_1()
+                        .border_color(gpui::rgb(p.border))
+                        .bg(gpui::rgb(p.panel_raised))
+                        .child(dot(p.ok))
+                        .child(dot(p.warn))
+                        .child(dot(p.danger))
+                        .child(dot(p.purple)),
+                )
+                .child(div().flex_1())
+                .child(div().w(gpui::relative(0.36)).h(px(9.)).rounded(px(3.)).bg(gpui::rgb(p.accent))),
+        )
 }
 
 impl Render for SettingsPage {
@@ -803,18 +1007,19 @@ impl Render for SettingsPage {
         let d = def(self.section);
         let body = match self.section {
             Section::Repos => self.render_repos(window, cx),
-            Section::Groups => self.render_groups(cx),
+            Section::Groups => self.render_groups(window, cx),
             Section::Ai => self.render_ai(cx),
             Section::Languages => self.render_languages(window, cx),
-            Section::Appearance => self.render_appearance(),
+            Section::Appearance => self.render_appearance(cx),
             Section::Health => self.render_health(cx),
             Section::Updates => self.render_updates(cx),
         };
         div()
             .size_full()
             .flex()
-            .child(self.render_nav(cx))
-            .child(div().flex_1().min_w_0().h_full().child(ui::page("settings-body", d.title, d.description).child(body)))
+            .bg(c(theme::BG))
+            .child(self.render_nav(window, cx))
+            .child(div().flex_1().min_w_0().h_full().child(kit::page("settings-body", kit::column(d.title, d.description).child(body))))
     }
 }
 
@@ -830,7 +1035,7 @@ impl PageView for SettingsPage {
     fn dump(&self, out: &mut String, cx: &App) {
         let d = def(self.section);
         let shown: Vec<&str> = self.matching(cx).iter().map(|s| s.slug).collect();
-        let _ = writeln!(out, "  section {} · nav {:?}", d.slug, shown);
+        let _ = writeln!(out, "  section {} · nav {:?} · theme {}", d.slug, shown, themes::current());
         match &self.config {
             Load::Ready(cfg) => {
                 let _ = writeln!(

@@ -2,11 +2,12 @@
 //! `RepoFormModal.tsx`, `GithubRepoModal.tsx`, `GroupsSection.tsx`). The
 //! modals are inline cards here.
 use super::settings::SettingsPage;
-use super::ui::{self, Tone};
+use super::kit::{self, Kind};
+use super::ui;
 use crate::review::Load;
 use crate::theme::{self, c};
 use crate::toast::ToastKind;
-use gpui::{div, prelude::*, px, AnyElement, App, ClickEvent, Context, Entity, SharedString, Window};
+use gpui::{div, prelude::*, px, AnyElement, App, ClickEvent, Context, Div, Entity, FontWeight, SharedString, Window};
 use gpui_component::input::InputState;
 use orbit_core::config::{BuildCmd, Service};
 use orbit_core::github::GithubRepo;
@@ -363,30 +364,78 @@ impl SettingsPage {
         );
     }
 
-    pub(super) fn render_repos(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let _ = window;
-        let Some(cfg) = self.cfg().cloned() else { return ui::faint("Loading…").into_any_element() };
-        let mut out = div().flex().flex_col().gap_3();
+    /// "Browse…": a native folder picker that fills `input`.
+    fn browse(&mut self, input: Entity<InputState>, window: &mut Window, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(gpui::PathPromptOptions { files: false, directories: true, multiple: false, prompt: None });
+        cx.spawn_in(window, async move |_, cx| {
+            let Ok(Ok(Some(paths))) = rx.await else { return };
+            let Some(path) = paths.first().map(|p| p.display().to_string()) else { return };
+            let _ = input.update_in(cx, |i, w, cx| i.set_value(path, w, cx));
+        })
+        .detach();
+    }
 
-        // Folders.
-        out = out.child(ui::heading("Folders")).child(
-            ui::card()
-                .child(ui::setting(
-                    "Clones",
-                    "Where Orbit clones repositories (empty: the default).",
-                    div().w(px(360.)).child(ui::input("folders-repos", &self.repos.repos_dir)),
-                ))
-                .child(ui::setting(
-                    "Workspaces",
-                    "Where workspaces and their worktrees live (empty: the default).",
-                    div().w(px(360.)).child(ui::input("folders-workspaces", &self.repos.workspaces_dir)),
-                ))
-                .child(div().px_4().py_2().flex().justify_end().child(ui::button("folders-save", "Save folders", Tone::Primary).on_click(cx.listener(
-                    |t, _: &ClickEvent, w, cx| {
-                        let (r, ws) = (text(&t.repos.repos_dir, cx), text(&t.repos.workspaces_dir, cx));
+    fn folders_dirty(&self, cx: &App) -> bool {
+        let cfg = self.cfg().cloned().unwrap_or_default();
+        text(&self.repos.repos_dir, cx) != cfg.repos_dir.unwrap_or_default() || text(&self.repos.workspaces_dir, cx) != cfg.workspaces_dir.unwrap_or_default()
+    }
+
+    fn render_folders(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let path_field = |name: &'static str, label: &'static str, hint: &'static str, input: &Entity<InputState>, cx: &mut Context<Self>| {
+            let i = input.clone();
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .child(div().text_size(px(12.)).font_weight(FontWeight::MEDIUM).text_color(c(theme::TEXT_DIM)).child(label))
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(8.))
+                        .child(kit::field(name, input, window, cx).font_family(theme::MONO_FONT))
+                        .child(
+                            kit::button(format!("{name}:browse"), "Browse…", Kind::Secondary)
+                                .on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.browse(i.clone(), w, cx))),
+                        ),
+                )
+                .child(div().text_size(px(11.)).line_height(px(15.4)).text_color(c(theme::TEXT_FAINT)).child(hint))
+        };
+        let mut card = kit::card().p(px(16.)).child(
+            div()
+                .flex()
+                .gap(px(12.))
+                .child(path_field("folders-repos", "Clones folder", "New repositories are cloned here unless you pick a folder for them.", &self.repos.repos_dir, cx))
+                .child(path_field(
+                    "folders-workspaces",
+                    "Workspaces folder",
+                    "Each workspace gets a folder here with one worktree per repository.",
+                    &self.repos.workspaces_dir,
+                    cx,
+                )),
+        );
+        if self.folders_dirty(cx) {
+            card = card.child(
+                div()
+                    .mt(px(14.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .mr_auto()
+                            .text_size(px(11.))
+                            .text_color(c(theme::TEXT_FAINT))
+                            .child("Existing clones and workspaces are not moved; Orbit starts using the new folders."),
+                    )
+                    .child(kit::button("folders-cancel", "Cancel", Kind::Secondary).on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.load_folders(w, cx))))
+                    .child(kit::button("folders-save", "Save folders", Kind::Primary).on_click(cx.listener(|t, _: &ClickEvent, w, cx| {
+                        let opt = |s: String| (!s.is_empty()).then_some(s);
+                        let (r, ws) = (opt(text(&t.repos.repos_dir, cx)), opt(text(&t.repos.workspaces_dir, cx)));
                         t.edit(
                             "Couldn't save the folders",
-                            move || settings::set_folders(Some(r), Some(ws)),
+                            move || settings::set_folders(r, ws),
                             |t, w, cx| {
                                 t.load_folders(w, cx);
                                 t.host.toast(ToastKind::Success, "Folders saved", None, cx);
@@ -394,152 +443,198 @@ impl SettingsPage {
                             w,
                             cx,
                         )
-                    },
-                )))),
-        );
+                    }))),
+            );
+        }
+        card
+    }
 
-        // Repositories.
-        out = out.child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(ui::heading(format!("Repositories · {}", cfg.services.len())))
-                .child(div().flex_1())
-                .child(ui::button("repo-add", "Add manually", Tone::Plain).on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.open_form(None, w, cx))))
-                .child(ui::button("repo-add-local", "Add local clone", Tone::Plain).on_click(cx.listener(|t, _: &ClickEvent, w, cx| {
-                    t.repos.form = None;
-                    t.repos.github = None;
-                    t.repos.local = Some(input(w, cx, "/path/to/an/existing/checkout", ""));
-                    cx.notify();
-                })))
-                .child(ui::button("repo-add-github", "Add from GitHub", Tone::Primary).on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.open_github(false, w, cx)))),
-        );
+    pub(super) fn render_repos(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let Some(cfg) = self.cfg().cloned() else {
+            return kit::section().child(kit::skeleton(gpui::relative(0.3), 16.)).child(kit::skeleton(gpui::relative(1.), 110.)).into_any_element();
+        };
+        let mut out = kit::section().child(kit::section_header("Folders", None, None)).child(self.render_folders(window, cx));
+
+        let actions = div()
+            .child(kit::icon_label_button("repo-add", "plus", "Add manually", Kind::Secondary).on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.open_form(None, w, cx))))
+            .child(kit::icon_label_button("repo-add-local", "folder", "Add local clone", Kind::Secondary).on_click(cx.listener(|t, _: &ClickEvent, w, cx| {
+                t.repos.form = None;
+                t.repos.github = None;
+                t.repos.local = Some(input(w, cx, "/path/to/an/existing/checkout", ""));
+                cx.notify();
+            })))
+            .child(kit::icon_label_button("repo-add-github", "git-branch", "Add from GitHub", Kind::Primary).on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.open_github(false, w, cx))));
+        out = out.child(kit::section_header("Repositories", Some(cfg.services.len()), Some(actions)));
         if let Some(form) = &self.repos.form {
-            out = out.child(self.render_form(form, cx));
+            out = out.child(self.render_form(form, window, cx));
         }
         if let Some(local) = &self.repos.local {
             out = out.child(
-                ui::card().p_3().flex().flex_col().gap_2().child(ui::muted("A folder with a git checkout: Orbit uses it as is and reads its origin.")).child(
+                kit::card().p(px(16.)).gap(px(10.)).child(kit::hint("A folder with a git checkout: Orbit uses it as is and reads its origin.")).child(
                     div()
                         .flex()
                         .items_center()
-                        .gap_2()
-                        .child(ui::input("local-path", local))
-                        .child(ui::button("local-cancel", "Cancel", Tone::Plain).on_click(cx.listener(|t, _: &ClickEvent, _, cx| {
+                        .gap(px(8.))
+                        .child(kit::field("local-path", local, window, cx).font_family(theme::MONO_FONT))
+                        .child(kit::button("local-cancel", "Cancel", Kind::Secondary).on_click(cx.listener(|t, _: &ClickEvent, _, cx| {
                             t.repos.local = None;
                             cx.notify();
                         })))
-                        .child(ui::button("local-add", "Add", Tone::Primary).on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.add_local(w, cx)))),
+                        .child(kit::button("local-add", "Add", Kind::Primary).on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.add_local(w, cx)))),
                 ),
             );
         }
         if let Some(g) = &self.repos.github {
-            out = out.child(self.render_github(g, &cfg.services, cx));
+            out = out.child(self.render_github(g, &cfg.services, window, cx));
         }
         if cfg.services.is_empty() {
-            out = out.child(ui::card().p_4().child(ui::muted(
-                "No repositories yet. Add the repositories your workspaces will span. Orbit clones them once and creates worktrees per workspace.",
-            )));
-        } else {
-            let mut list = ui::card();
-            for s in &cfg.services {
-                let st = self.repos.clone.get(&s.name).copied();
-                let (n1, n2, n3, s1, s2) = (s.name.clone(), s.name.clone(), s.name.clone(), s.clone(), s.clone());
-                let status: AnyElement = match st {
-                    None => ui::faint("…").into_any_element(),
-                    Some(CloneState::Cloned) => div().flex().items_center().gap_1().child(ui::dot(c(theme::OK))).child(ui::muted("Cloned")).into_any_element(),
-                    Some(CloneState::Cloning) => ui::muted("Cloning…").into_any_element(),
-                    Some(CloneState::Missing) => ui::button(format!("repo:{}:clone", s.name), "Clone", Tone::Plain)
-                        .on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.clone_repo(n1.clone(), w, cx)))
-                        .into_any_element(),
-                };
-                let mut title = div().flex().items_center().gap_2().child(div().text_sm().text_color(c(theme::TEXT)).child(s.name.clone()));
-                if s.build.is_some() {
-                    title = title.child(ui::pill("build", c(theme::TEXT_DIM)));
+            out = out.child(
+                kit::card()
+                    .p(px(32.))
+                    .items_center()
+                    .gap(px(8.))
+                    .child(div().size(px(40.)).rounded(px(10.)).bg(c(theme::BG)).flex().items_center().justify_center().child(kit::icon("git-branch", 20., c(theme::TEXT_DIM))))
+                    .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(c(theme::TEXT)).child("No repositories yet"))
+                    .child(kit::hint("Add the repositories your workspaces will span. Orbit clones them once and creates worktrees per workspace."))
+                    .child(kit::button("repo-empty-github", "Add from GitHub", Kind::Primary).on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.open_github(false, w, cx)))),
+            );
+            return out.into_any_element();
+        }
+        let mono = |text: String| div().min_w_0().truncate().font_family(theme::MONO_FONT).text_size(px(11.5)).line_height(px(15.)).text_color(c(theme::TEXT_FAINT)).child(text);
+        let rows = cfg.services.iter().map(|s| {
+            let st = self.repos.clone.get(&s.name).copied();
+            let (n1, n2, s1, s2, s3) = (s.name.clone(), s.name.clone(), s.clone(), s.clone(), s.clone());
+            let status: AnyElement = match st {
+                None => kit::skeleton(px(70.), 12.).rounded_full().into_any_element(),
+                Some(CloneState::Cloned) => {
+                    div().flex().items_center().gap(px(7.)).text_size(px(12.)).text_color(c(theme::TEXT_DIM)).child(super::settings::repo_dot()).child("Cloned").into_any_element()
                 }
-                if !s.worktree {
-                    title = title.child(ui::pill("branch in base clone", c(theme::TEXT_DIM)));
-                }
-                list = list.child(
+                Some(CloneState::Cloning) => div().text_size(px(12.)).text_color(c(theme::TEXT_DIM)).child("Cloning…").into_any_element(),
+                Some(CloneState::Missing) => kit::icon_label_button(format!("repo:{}:clone", s.name), "download", "Clone", Kind::Secondary)
+                    .h(px(30.))
+                    .text_size(px(12.5))
+                    .on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.clone_repo(n1.clone(), w, cx)))
+                    .into_any_element(),
+            };
+            let mut title = div().flex().items_center().gap(px(8.)).child(div().text_size(px(13.5)).line_height(px(17.)).font_weight(FontWeight::SEMIBOLD).text_color(c(theme::TEXT)).child(s.name.clone()));
+            if s.build.is_some() {
+                title = title.child(kit::outline_pill("build", c(theme::TEXT_DIM), c(theme::BORDER_STRONG)).font_weight(FontWeight::NORMAL));
+            }
+            if !s.worktree {
+                title = title.child(kit::outline_pill("branch in base clone", c(theme::TEXT_DIM), c(theme::BORDER_STRONG)).font_weight(FontWeight::NORMAL));
+            }
+            let cloned = st == Some(CloneState::Cloned);
+            let group = SharedString::from(format!("repo-row-{}", s.name));
+            div()
+                .id(SharedString::from(format!("repo:{}", s.name)))
+                .group(group.clone())
+                .px(px(14.))
+                .py(px(12.))
+                .flex()
+                .items_center()
+                .gap(px(14.))
+                .hover(|d| d.bg(c(theme::PANEL_RAISED)))
+                .on_click(cx.listener(move |t, ev: &ClickEvent, w, cx| {
+                    if ev.click_count() == 2 {
+                        t.open_form(Some(s3.clone()), w, cx)
+                    }
+                }))
+                .child(
                     div()
-                        .px_4()
-                        .py_2()
+                        .size(px(32.))
+                        .flex_none()
+                        .rounded(px(8.))
+                        .border_1()
+                        .border_color(c(theme::BORDER))
+                        .bg(c(theme::BG))
                         .flex()
                         .items_center()
-                        .gap_3()
-                        .border_b_1()
-                        .border_color(c(theme::BORDER))
+                        .justify_center()
+                        .child(kit::icon("git-branch", 15., c(theme::TEXT_DIM))),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(3.))
+                        .child(title)
+                        .child(mono(s.repo.clone()))
+                        .when_some(s.path.clone(), |d, p| d.child(div().flex().items_center().gap(px(5.)).child(kit::icon("folder", 11., c(theme::TEXT_FAINT))).child(mono(p)))),
+                )
+                .child(div().min_w(px(104.)).flex().justify_end().child(status))
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(2.))
+                        .opacity(0.35)
+                        .group_hover(group, |s| s.opacity(1.))
                         .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .flex()
-                                .flex_col()
-                                .child(title)
-                                .child(ui::faint(s.repo.clone()))
-                                .when_some(s.path.clone(), |d, p| d.child(ui::faint(format!("📁 {p}")))),
+                            kit::disabled(kit::icon_button(format!("repo:{}:reveal", s.name), "folder"), !cloned)
+                                .on_click(cx.listener(move |t, _: &ClickEvent, _, cx| t.reveal_repo(&n2, cx))),
                         )
-                        .child(status)
-                        .when(st == Some(CloneState::Cloned), |d| {
-                            d.child(ui::button(format!("repo:{}:reveal", s.name), "Open folder", Tone::Plain).on_click(cx.listener(move |t, _: &ClickEvent, _, cx| t.reveal_repo(&n2, cx))))
-                        })
-                        .child(ui::button(format!("repo:{}:edit", s.name), "Edit", Tone::Plain).on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.open_form(Some(s1.clone()), w, cx))))
-                        .child(ui::button(format!("repo:{}:remove", n3), "Remove", Tone::Danger).on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.remove_repo(s2.clone(), w, cx)))),
-                );
-            }
-            out = out.child(list);
-        }
-        out.into_any_element()
+                        .child(kit::icon_button(format!("repo:{}:edit", s.name), "pencil").on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.open_form(Some(s1.clone()), w, cx))))
+                        .child(kit::icon_button(format!("repo:{}:remove", s.name), "trash").on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.remove_repo(s2.clone(), w, cx)))),
+                )
+        });
+        out.child(kit::card().children(rows.enumerate().map(|(i, r)| r.when(i > 0, |r| r.border_t_1().border_color(c(theme::BORDER)))))).into_any_element()
     }
 
-    fn render_form(&self, f: &RepoForm, cx: &mut Context<Self>) -> AnyElement {
+    fn render_form(&self, f: &RepoForm, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let editing = f.editing.is_some();
         let cloned = f.editing.as_ref().is_some_and(|s| self.repos.clone.get(&s.name) == Some(&CloneState::Cloned));
         let per_os = matches!(f.editing.as_ref().and_then(|s| s.build.as_ref()), Some(BuildCmd::PerOs { .. }));
-        let field = |label: &'static str, el: AnyElement| div().flex().items_center().gap_3().child(div().w(px(150.)).flex_none().text_xs().text_color(c(theme::TEXT_DIM)).child(label)).child(el);
-        let mut card = ui::card()
-            .p_3()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .child(div().text_sm().text_color(c(theme::TEXT)).child(match &f.editing {
+        let label = |text: &'static str| div().text_size(px(12.)).font_weight(FontWeight::MEDIUM).text_color(c(theme::TEXT_DIM)).child(text);
+        let field = |text: &'static str, el: AnyElement| div().flex_1().min_w_0().flex().flex_col().gap(px(5.)).child(label(text)).child(el);
+        let mono = |text: String| div().h(px(34.)).flex().items_center().font_family(theme::MONO_FONT).text_size(px(12.)).text_color(c(theme::TEXT_DIM)).child(text);
+        let name: AnyElement = if editing { mono(f.editing.as_ref().map(|s| s.name.clone()).unwrap_or_default()).into_any_element() } else { kit::field("form-name", &f.name, window, cx).into_any_element() };
+        let mut card = kit::card()
+            .p(px(16.))
+            .gap(px(12.))
+            .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(c(theme::TEXT)).child(match &f.editing {
                 Some(s) => format!("Edit {}", s.name),
                 None => "Add a repository".into(),
             }))
-            .child(field("Name", if editing { ui::code(f.editing.as_ref().map(|s| s.name.clone()).unwrap_or_default()).into_any_element() } else { ui::input("form-name", &f.name) }))
-            .child(field("Repository URL", ui::input("form-url", &f.url)));
+            .child(div().flex().gap(px(12.)).child(field("Name", name)).child(field("Repository URL", kit::field("form-url", &f.url, window, cx).into_any_element())));
         if !editing {
-            card = card.child(field("Local path", ui::input("form-path", &f.path)));
+            card = card.child(field("Local path", kit::field("form-path", &f.path, window, cx).font_family(theme::MONO_FONT).into_any_element()));
         } else if let Some(p) = f.editing.as_ref().and_then(|s| s.path.clone()) {
-            card = card.child(field("Local path", ui::code(if cloned { format!("{p} (cloned)") } else { p }).into_any_element()));
+            card = card.child(field("Local path", mono(if cloned { format!("{p} (cloned)") } else { p }).into_any_element()));
         }
+        let build: AnyElement = if per_os {
+            mono("One command per OS (edit those in the Tauri app)".into()).into_any_element()
+        } else {
+            kit::field("form-build", &f.build, window, cx).font_family(theme::MONO_FONT).into_any_element()
+        };
         card = card
-            .child(field(
-                "Build command",
-                if per_os { ui::muted("One command per OS (edit those in the Tauri app)").into_any_element() } else { ui::input("form-build", &f.build) },
-            ))
-            .child(field("Output folder", ui::input("form-output", &f.output)))
-            .child(field("Share only", ui::input("form-shared", &f.shared)))
+            .child(field("Build command", build))
+            .child(
+                div()
+                    .flex()
+                    .gap(px(12.))
+                    .child(field("Output folder", kit::field("form-output", &f.output, window, cx).into_any_element()))
+                    .child(field("Share only", kit::field("form-shared", &f.shared, window, cx).into_any_element())),
+            )
             .child(field(
                 "Checkout",
                 div()
                     .flex()
-                    .gap_4()
-                    .child(ui::check("form-worktree", "Worktree per workspace", !f.branch_only).on_click(cx.listener(|t, _: &ClickEvent, _, cx| {
+                    .gap(px(16.))
+                    .child(kit::check("form-worktree", "Worktree per workspace", !f.branch_only).on_click(cx.listener(|t, _: &ClickEvent, _, cx| {
                         if let Some(f) = &mut t.repos.form {
                             f.branch_only = false;
                         }
                         cx.notify();
                     })))
-                    .child(ui::check("form-branch-only", "Branch in the base clone", f.branch_only).on_click(cx.listener(|t, _: &ClickEvent, _, cx| {
+                    .child(kit::check("form-branch-only", "Branch in the base clone", f.branch_only).on_click(cx.listener(|t, _: &ClickEvent, _, cx| {
                         if let Some(f) = &mut t.repos.form {
                             f.branch_only = true;
                         }
                         cx.notify();
                     })))
                     .when(f.branch_only, |d| {
-                        d.child(ui::check("form-auto-switch", "Switch branches automatically", f.auto_switch).on_click(cx.listener(|t, _: &ClickEvent, _, cx| {
+                        d.child(kit::check("form-auto-switch", "Switch branches automatically", f.auto_switch).on_click(cx.listener(|t, _: &ClickEvent, _, cx| {
                             if let Some(f) = &mut t.repos.form {
                                 f.auto_switch = !f.auto_switch;
                             }
@@ -552,10 +647,10 @@ impl SettingsPage {
             div()
                 .flex()
                 .items_center()
-                .gap_2()
-                .pt_1()
+                .gap(px(8.))
+                .pt(px(4.))
                 .when(!editing, |d| {
-                    d.child(ui::check("form-clone-now", "Clone now", f.clone_now).on_click(cx.listener(|t, _: &ClickEvent, _, cx| {
+                    d.child(kit::check("form-clone-now", "Clone now", f.clone_now).on_click(cx.listener(|t, _: &ClickEvent, _, cx| {
                         if let Some(f) = &mut t.repos.form {
                             f.clone_now = !f.clone_now;
                         }
@@ -563,25 +658,29 @@ impl SettingsPage {
                     })))
                 })
                 .child(div().flex_1())
-                .child(ui::button("form-cancel", "Cancel", Tone::Plain).on_click(cx.listener(|t, _: &ClickEvent, _, cx| {
+                .child(kit::button("form-cancel", "Cancel", Kind::Secondary).on_click(cx.listener(|t, _: &ClickEvent, _, cx| {
                     t.repos.form = None;
                     cx.notify();
                 })))
-                .child(ui::button("form-save", if editing { "Save" } else { "Add repository" }, Tone::Primary).on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.save_form(w, cx)))),
+                .child(kit::button("form-save", if editing { "Save" } else { "Add repository" }, Kind::Primary).on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.save_form(w, cx)))),
         )
         .into_any_element()
     }
 
-    fn render_github(&self, g: &GithubPicker, known: &[Service], cx: &mut Context<Self>) -> AnyElement {
+    fn render_github(&self, g: &GithubPicker, known: &[Service], window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let q = g.filter.read(cx).value().trim().to_lowercase();
-        let mut card = ui::card().p_3().flex().flex_col().gap_2().child(
+        let mut card = kit::card().child(
             div()
+                .px(px(14.))
+                .py(px(10.))
                 .flex()
                 .items_center()
-                .gap_2()
-                .child(ui::input("github-filter", &g.filter))
-                .child(ui::button("github-refresh", "Refresh", Tone::Plain).on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.open_github(true, w, cx))))
-                .child(ui::button("github-close", "Close", Tone::Plain).on_click(cx.listener(|t, _: &ClickEvent, _, cx| {
+                .gap(px(8.))
+                .border_b_1()
+                .border_color(c(theme::BORDER))
+                .child(kit::field("github-filter", &g.filter, window, cx))
+                .child(kit::icon_button("github-refresh", "refresh-cw").on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.open_github(true, w, cx))))
+                .child(kit::button("github-close", "Close", Kind::Secondary).on_click(cx.listener(|t, _: &ClickEvent, _, cx| {
                     t.repos.github = None;
                     cx.notify();
                 }))),
@@ -589,24 +688,26 @@ impl SettingsPage {
         card = match &g.list {
             Load::Ready(list) => {
                 let rows: Vec<_> = list.iter().filter(|r| q.is_empty() || r.name_with_owner.to_lowercase().contains(&q)).take(60).collect();
-                let mut body = div().id("github-list").max_h(px(320.)).overflow_y_scroll().flex().flex_col();
+                let mut body = div().id("github-list").max_h(px(320.)).overflow_y_scroll().p(px(6.)).flex().flex_col();
                 for r in rows {
                     let added = known.iter().any(|s| s.name == r.name);
                     let repo = r.clone();
                     body = body.child(
                         div()
-                            .px_2()
-                            .py_1()
+                            .px(px(10.))
+                            .h(px(36.))
                             .flex()
                             .items_center()
-                            .gap_2()
-                            .text_sm()
+                            .gap(px(8.))
+                            .rounded(px(6.))
+                            .text_size(px(13.))
+                            .hover(|s| s.bg(c(theme::PANEL_RAISED)))
                             .child(div().flex_1().text_color(c(theme::TEXT)).child(r.name_with_owner.clone()))
-                            .when(r.is_private, |d| d.child(ui::pill("private", c(theme::TEXT_DIM))))
+                            .when(r.is_private, |d| d.child(kit::tag("private", true)))
                             .child(if added {
-                                ui::faint("added").into_any_element()
+                                div().text_size(px(12.)).text_color(c(theme::TEXT_FAINT)).child("added").into_any_element()
                             } else {
-                                ui::button(SharedString::from(format!("github:{}", r.name_with_owner)), "Add", Tone::Plain)
+                                kit::mini(SharedString::from(format!("github:{}", r.name_with_owner)), "Add", Kind::Secondary)
                                     .on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.add_github(repo.clone(), w, cx)))
                                     .into_any_element()
                             }),
@@ -614,14 +715,14 @@ impl SettingsPage {
                 }
                 card.child(body)
             }
-            Load::Failed(e) => card.child(ui::error(e.clone())),
-            _ => card.child(ui::faint("Loading your GitHub repositories…")),
+            Load::Failed(e) => card.child(div().p(px(14.)).child(kit::error_box(e.clone()))),
+            _ => card.child(div().p(px(14.)).child(kit::hint("Loading your GitHub repositories…"))),
         };
         card.into_any_element()
     }
 
-    pub(super) fn render_groups(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let Some(cfg) = self.cfg().cloned() else { return ui::faint("Loading…").into_any_element() };
+    pub(super) fn render_groups(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let Some(cfg) = self.cfg().cloned() else { return kit::skeleton(gpui::relative(1.), 66.).into_any_element() };
         let create = |t: &mut Self, w: &mut Window, cx: &mut Context<Self>| {
             let name = text(&t.groups.new_group, cx);
             if name.is_empty() {
@@ -636,65 +737,81 @@ impl SettingsPage {
                 cx,
             );
         };
-        let mut out = div().flex().flex_col().gap_3().child(
-            ui::card()
-                .p_3()
+        let mut out = kit::section().child(
+            kit::card()
+                .p(px(16.))
                 .flex_row()
                 .items_center()
-                .gap_2()
-                .child(ui::input("group-new", &self.groups.new_group))
-                .child(ui::button("group-create", "Create group", Tone::Primary).on_click(cx.listener(move |t, _: &ClickEvent, w, cx| create(t, w, cx)))),
+                .gap(px(8.))
+                .child(kit::field("group-new", &self.groups.new_group, window, cx))
+                .child(kit::button("group-create", "Create group", Kind::Primary).on_click(cx.listener(move |t, _: &ClickEvent, w, cx| create(t, w, cx)))),
         );
         let mut names: Vec<&String> = cfg.groups.keys().collect();
         names.sort();
         if names.is_empty() {
-            out = out.child(ui::muted(if cfg.services.is_empty() {
-                "Add repositories first, then group them to reuse selections when creating workspaces."
-            } else {
-                "No groups yet. Create one above to bundle repositories you often change together."
-            }));
+            return out
+                .child(kit::empty(if cfg.services.is_empty() {
+                    "Add repositories first, then group them to reuse selections when creating workspaces."
+                } else {
+                    "No groups yet. Create one above to bundle repositories you often change together."
+                }))
+                .into_any_element();
         }
-        let mut list = ui::card();
+        let mut list = div().flex().flex_col().gap(px(10.));
         for g in names {
             let members = cfg.groups.get(g).cloned().unwrap_or_default();
             let editing = self.groups.editing.as_ref().filter(|(e, _)| e == g).map(|(_, m)| m.clone());
             let (g1, g2, m1) = (g.clone(), g.clone(), members.clone());
-            let mut row = div().px_4().py_2().flex().flex_col().gap_2().border_b_1().border_color(c(theme::BORDER)).child(
+            let group = SharedString::from(format!("group-row-{g}"));
+            let mut row = kit::card().p(px(16.)).gap(px(12.)).child(
                 div()
+                    .id(SharedString::from(format!("group:{g}")))
+                    .group(group.clone())
                     .flex()
                     .items_center()
-                    .gap_2()
-                    .child(div().text_sm().text_color(c(theme::TEXT)).child(g.clone()))
-                    .child(div().flex_1().flex().flex_wrap().gap_1().children(if members.is_empty() {
-                        vec![ui::pill("empty", c(theme::TEXT_FAINT))]
-                    } else {
-                        members.iter().map(|m| ui::pill(m.clone(), c(theme::TEXT_DIM))).collect()
-                    }))
-                    .child(ui::button(format!("group:{g}:edit"), "Edit", Tone::Plain).on_click(cx.listener(move |t, _: &ClickEvent, _, cx| {
-                        t.groups.editing = Some((g1.clone(), m1.clone()));
-                        cx.notify();
-                    })))
-                    .child(ui::button(format!("group:{g}:remove"), "Remove", Tone::Danger).on_click(cx.listener(move |t, _: &ClickEvent, w, cx| {
-                        let me = cx.entity().downgrade();
-                        let g = g2.clone();
-                        t.host.confirm(
-                            "Remove group",
-                            format!("Remove group '{g}'?"),
-                            "Remove",
-                            move |w, cx| {
-                                let g = g.clone();
-                                let _ = me.update(cx, |t, cx| t.edit("Couldn't remove the group", move || settings::delete_group(&g), |_, _, _| {}, w, cx));
-                            },
-                            w,
-                            cx,
-                        );
-                    }))),
+                    .justify_between()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .child(div().mb(px(7.)).text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(c(theme::TEXT)).child(g.clone()))
+                            .child(div().flex().flex_wrap().gap(px(6.)).children(if members.is_empty() {
+                                vec![kit::tag("empty", true)]
+                            } else {
+                                members.iter().map(|m| kit::tag(m.clone(), false)).collect()
+                            })),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(4.))
+                            .opacity(0.)
+                            .group_hover(group, |s| s.opacity(1.))
+                            .child(kit::link(format!("group:{g}:edit"), "Edit").on_click(cx.listener(move |t, _: &ClickEvent, _, cx| {
+                                t.groups.editing = Some((g1.clone(), m1.clone()));
+                                cx.notify();
+                            })))
+                            .child(kit::link(format!("group:{g}:remove"), "Remove").text_color(c(theme::DANGER)).on_click(cx.listener(move |t, _: &ClickEvent, w, cx| {
+                                let me = cx.entity().downgrade();
+                                let g = g2.clone();
+                                t.host.confirm(
+                                    "Remove group",
+                                    format!("Remove group '{g}'?"),
+                                    "Remove",
+                                    move |w, cx| {
+                                        let g = g.clone();
+                                        let _ = me.update(cx, |t, cx| t.edit("Couldn't remove the group", move || settings::delete_group(&g), |_, _, _| {}, w, cx));
+                                    },
+                                    w,
+                                    cx,
+                                );
+                            }))),
+                    ),
             );
             if let Some(draft) = editing {
-                let mut checks = div().flex().flex_wrap().gap_3();
+                let mut checks = div().flex().flex_wrap().gap(px(14.));
                 for s in &cfg.services {
                     let name = s.name.clone();
-                    checks = checks.child(ui::check(format!("group-member:{}", s.name), s.name.clone(), draft.contains(&s.name)).on_click(cx.listener(
+                    checks = checks.child(kit::check(format!("group-member:{}", s.name), s.name.clone(), draft.contains(&s.name)).on_click(cx.listener(
                         move |t, _: &ClickEvent, _, cx| {
                             if let Some((_, m)) = &mut t.groups.editing {
                                 if let Some(ix) = m.iter().position(|x| *x == name) {
@@ -708,18 +825,18 @@ impl SettingsPage {
                     )));
                 }
                 if cfg.services.is_empty() {
-                    checks = checks.child(ui::muted("No repositories to add. Configure them in Repositories first."));
+                    checks = checks.child(kit::hint("No repositories to add. Configure them in Repositories first."));
                 }
-                row = row.child(ui::faint(format!("{} of {} repositories selected", draft.len(), cfg.services.len()))).child(checks).child(
+                row = row.child(kit::hint(format!("{} of {} repositories selected", draft.len(), cfg.services.len()))).child(checks).child(
                     div()
                         .flex()
-                        .gap_2()
+                        .gap(px(8.))
                         .justify_end()
-                        .child(ui::button("group-cancel", "Cancel", Tone::Plain).on_click(cx.listener(|t, _: &ClickEvent, _, cx| {
+                        .child(kit::button("group-cancel", "Cancel", Kind::Secondary).on_click(cx.listener(|t, _: &ClickEvent, _, cx| {
                             t.groups.editing = None;
                             cx.notify();
                         })))
-                        .child(ui::button("group-save", "Save", Tone::Primary).on_click(cx.listener(|t, _: &ClickEvent, w, cx| {
+                        .child(kit::button("group-save", "Save", Kind::Primary).on_click(cx.listener(|t, _: &ClickEvent, w, cx| {
                             let Some((g, m)) = t.groups.editing.clone() else { return };
                             t.edit("Couldn't save the group", move || settings::set_group_members(&g, m), |t, _, _| t.groups.editing = None, w, cx);
                         }))),
@@ -727,6 +844,7 @@ impl SettingsPage {
             }
             list = list.child(row);
         }
-        out.child(list).into_any_element()
+        out = out.child(list);
+        out.into_any_element()
     }
 }

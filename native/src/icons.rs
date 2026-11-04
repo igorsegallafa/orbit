@@ -4,12 +4,12 @@
 use gpui::{div, prelude::*, px, svg, AnyElement, AssetSource, FontWeight, Result, SharedString};
 use std::borrow::Cow;
 
-/// gpui-kit-assets plus the file-type SVGs under `filetypes/`.
-pub struct Assets(gpui_kit_assets::Assets);
+/// The whole Lucide catalog of gpui-kit-assets plus the file-type SVGs under `filetypes/`.
+pub struct Assets(gpui_kit_assets::AllAssets);
 
 impl Assets {
     pub fn new() -> Self {
-        Self(gpui_kit_assets::Assets::new(""))
+        Self(gpui_kit_assets::AllAssets::new(""))
     }
 }
 

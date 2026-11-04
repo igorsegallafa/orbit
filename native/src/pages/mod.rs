@@ -6,9 +6,11 @@
 mod artifacts;
 pub mod crash;
 mod integrations;
+pub mod kit;
 mod ralph;
 mod repos;
 mod settings;
+pub mod themes;
 pub mod ui;
 pub mod updates;
 mod usage;
@@ -106,6 +108,30 @@ impl Host {
         app.update(cx, |a, cx| a.open_dialog(dialog, window, cx));
     }
 
+    /// Closes the page open under `key` ("Back to app").
+    pub fn close(&self, key: &str, window: &mut Window, cx: &mut App) {
+        let Some(app) = self.0.upgrade() else { return };
+        let key = key.to_string();
+        // Deferred: the page asking is being updated right now.
+        window.defer(cx, move |window, cx| {
+            app.update(cx, |a, cx| {
+                if let Some(ix) = a.tab_index(&key, cx) {
+                    a.close_tab(ix, false, window, cx);
+                }
+            });
+        });
+    }
+
+    /// Opens a file in an editor tab.
+    pub fn open_file(&self, path: std::path::PathBuf, window: &mut Window, cx: &mut App) {
+        let Some(app) = self.0.upgrade() else { return };
+        window.defer(cx, move |window, cx| {
+            app.update(cx, |a, cx| {
+                a.open_file(path, false, window, cx);
+            });
+        });
+    }
+
     /// A menu at the mouse: `(label, action)` rows.
     pub fn menu(&self, items: Vec<(String, Action)>, window: &mut Window, cx: &mut App) {
         let Some(app) = self.0.upgrade() else { return };
@@ -148,10 +174,15 @@ pub fn open<V: PageView>(
     app.activate(ix, window, cx);
 }
 
+/// The key of the Settings page's tab: the shell can show that tab full-window,
+/// since the page draws its own navigation in place of the app sidebar.
+pub const SETTINGS_KEY: &str = "page:settings";
+
+/// Opens Settings on `section` (the sidebar's Settings entry uses `Section::Repos`).
 pub fn open_settings(app: &mut OrbitApp, section: Section, window: &mut Window, cx: &mut Context<OrbitApp>) {
-    open(app, "page:settings".into(), |host, window, cx| settings::SettingsPage::new(host, section, window, cx), window, cx);
+    open(app, SETTINGS_KEY.into(), |host, window, cx| settings::SettingsPage::new(host, section, window, cx), window, cx);
     // An open Settings tab moves to the section asked for.
-    if let Some(ix) = app.tab_index("page:settings", cx) {
+    if let Some(ix) = app.tab_index(SETTINGS_KEY, cx) {
         if let TabKind::Tool(t) = &app.tabs[ix].kind {
             if let Ok(view) = t.read(cx).view.clone().downcast::<settings::SettingsPage>() {
                 view.update(cx, |p, cx| p.select(section, window, cx));
@@ -160,8 +191,13 @@ pub fn open_settings(app: &mut OrbitApp, section: Section, window: &mut Window, 
     }
 }
 
-fn open_integrations(app: &mut OrbitApp, window: &mut Window, cx: &mut Context<OrbitApp>) {
+pub fn open_integrations(app: &mut OrbitApp, window: &mut Window, cx: &mut Context<OrbitApp>) {
     open(app, "page:integrations".into(), integrations::IntegrationsPage::new, window, cx);
+}
+
+/// Opens the selected workspace's Ralph page.
+pub fn open_ralph(app: &mut OrbitApp, window: &mut Window, cx: &mut Context<OrbitApp>) {
+    open_for_workspace(app, "ralph", window, cx);
 }
 
 /// Workspace pages need a selected workspace.
@@ -190,7 +226,7 @@ pub fn init(cx: &mut App) {
             open_settings(a, Section::Updates, w, cx);
             updates::check(true, cx);
         }),
-        Command::new("ralph.open", "Ralph").when(has_ws).run(|a, w, cx| open_for_workspace(a, "ralph", w, cx)),
+        Command::new("ralph.open", "Ralph").when(has_ws).run(open_ralph),
         Command::new("workspace.usage", "AI Usage").when(has_ws).run(|a, w, cx| open_for_workspace(a, "usage", w, cx)),
         Command::new("workspace.artifacts", "CI Artifacts").when(has_ws).run(|a, w, cx| open_for_workspace(a, "artifacts", w, cx)),
         Command::new("workspace.openInEditor", "Open in External Editor…").when(has_ws).run(open_repo_in_editor),
