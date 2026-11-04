@@ -185,16 +185,46 @@ function locate(uri: monaco.Uri): DocContext | null {
   return null;
 }
 
+// Models made for result files (peek views, references, definitions not yet
+// opened in a tab). Monaco keeps a model, with its text and tokens, until it's
+// disposed: they're released once no editor shows them for a while.
+const resultModels = new Map<string, number>();
+const RESULT_MODELS_MAX = 20;
+const RESULT_MODEL_IDLE_MS = 2 * 60 * 1000;
+/** Results that get a preview; the rest are listed without one. */
+const PREVIEWED_RESULTS = 50;
+
+function sweepResultModels() {
+  const shown = new Set(monaco.editor.getEditors().map((e) => e.getModel()?.uri.toString()));
+  const now = Date.now();
+  const byRecent = [...resultModels].sort((a, b) => b[1] - a[1]);
+  byRecent.forEach(([uri, used], i) => {
+    const model = monaco.editor.getModel(monaco.Uri.parse(uri));
+    if (!model) resultModels.delete(uri);
+    else if (shown.has(uri)) resultModels.set(uri, now);
+    else if (i >= RESULT_MODELS_MAX || now - used > RESULT_MODEL_IDLE_MS) {
+      resultModels.delete(uri);
+      model.dispose();
+    }
+  });
+}
+setInterval(sweepResultModels, 30 * 1000);
+
 /** Makes sure Monaco has a model for a file a result points at, so peek
  *  views and "go to definition" can show it. */
 async function ensureModel(uriStr: string): Promise<monaco.Uri> {
   const uri = monaco.Uri.parse(uriStr);
+  const key = uri.toString();
+  if (resultModels.has(key)) resultModels.set(key, Date.now());
   if (!monaco.editor.getModel(uri)) {
     try {
       const text = await invoke<string>("lsp_read_file", { path: uri.fsPath });
       // C++ headers: Monaco would guess C from ".h" (same rule as EditorPane).
       const lang = /\.(h|hh|hpp|hxx|inl|ipp|tpp)$/i.test(uri.path) ? "cpp" : undefined;
-      if (!monaco.editor.getModel(uri)) monaco.editor.createModel(text, lang, uri);
+      if (!monaco.editor.getModel(uri)) {
+        monaco.editor.createModel(text, lang, uri);
+        resultModels.set(key, Date.now());
+      }
     } catch {
       // Unreadable (binary, gone): the location still shows, without preview.
     }
@@ -208,7 +238,13 @@ async function toLocations(result: any): Promise<monaco.languages.Location[]> {
   const locs = list.slice(0, 300).map((l) =>
     l.targetUri ? { uri: l.targetUri, range: l.targetSelectionRange ?? l.targetRange } : { uri: l.uri, range: l.range },
   );
-  return Promise.all(locs.map(async (l) => ({ uri: await ensureModel(l.uri), range: toRange(l.range) })));
+  // Reading hundreds of files for a references list costs a model each:
+  // only the first files get a preview.
+  const files = [...new Set(locs.map((l) => l.uri))];
+  const previewed = new Set(files.slice(0, PREVIEWED_RESULTS));
+  return Promise.all(
+    locs.map(async (l) => ({ uri: previewed.has(l.uri) ? await ensureModel(l.uri) : monaco.Uri.parse(l.uri), range: toRange(l.range) })),
+  );
 }
 
 // ---------- clients ----------

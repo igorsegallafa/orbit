@@ -92,15 +92,24 @@ function pixelSize(term: Terminal) {
   };
 }
 
-function loadWebgl(term: Terminal) {
+function loadWebgl(term: Terminal, onGone: () => void): WebglAddon | null {
   try {
     const webgl = new WebglAddon();
-    webgl.onContextLoss(() => webgl.dispose());
+    webgl.onContextLoss(() => {
+      webgl.dispose();
+      onGone();
+    });
     term.loadAddon(webgl);
+    return webgl;
   } catch {
     // No WebGL2: the DOM renderer stays.
+    return null;
   }
 }
+
+/** A hidden terminal gives its WebGL renderer (GL context and glyph atlas)
+ *  back after this long, and gets it again when shown. */
+const WEBGL_IDLE_MS = 30 * 1000;
 
 export function TerminalPane({ tab, onError, onStatusChange, onSignal, active }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
@@ -112,6 +121,8 @@ export function TerminalPane({ tab, onError, onStatusChange, onSignal, active }:
   const onSignalRef = useRef(onSignal);
   onSignalRef.current = onSignal;
   const [status, setStatus] = useState<AgentStatus>("idle");
+  const activeRef = useRef(active);
+  activeRef.current = active;
 
   // Becoming the visible tab (new or switched to): type right away. After a
   // frame, and once more shortly after, since whatever opened the tab (the
@@ -125,6 +136,30 @@ export function TerminalPane({ tab, onError, onStatusChange, onSignal, active }:
       cancelAnimationFrame(raf);
       window.clearTimeout(t);
     };
+  }, [active]);
+
+  const webglRef = useRef<WebglAddon | null>(null);
+  const attachWebgl = (term: Terminal) => {
+    if (webglRef.current) return;
+    const addon = loadWebgl(term, () => {
+      if (webglRef.current === addon) webglRef.current = null;
+    });
+    webglRef.current = addon;
+    term.refresh(0, term.rows - 1);
+  };
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term) return;
+    if (active) {
+      attachWebgl(term);
+      return;
+    }
+    const t = window.setTimeout(() => {
+      webglRef.current?.dispose();
+      webglRef.current = null;
+    }, WEBGL_IDLE_MS);
+    return () => window.clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active]);
 
   // Types the text into the running agent's prompt (PTY keystrokes).
@@ -177,8 +212,9 @@ export function TerminalPane({ tab, onError, onStatusChange, onSignal, active }:
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(hostRef.current);
-    loadWebgl(term);
     termRef.current = term;
+    // Restored tabs that aren't shown start on the DOM renderer.
+    if (activeRef.current) attachWebgl(term);
     const graphics = new KittyGraphics(term, {
       reply: injectText,
       readFile: (path, offset, size, temp) => invoke<ArrayBuffer>("pty_read_image", { path, offset, size, temp }),
@@ -370,6 +406,7 @@ export function TerminalPane({ tab, onError, onStatusChange, onSignal, active }:
       resizeObserver.disconnect();
       offTheme();
       term.dispose();
+      webglRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
