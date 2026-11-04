@@ -27,7 +27,12 @@ pipelines. Warm starts reach the first frame in 180–190 ms.
 
 Keys: `Ctrl+Shift+T` new terminal (a shell session) · `Ctrl+W` close file tab (refused when unsaved) ·
 `Ctrl+Shift+W` close any tab (discards) · `Ctrl+Tab` next tab · `Ctrl+Q` quit · in the editor
-`Ctrl+S` save, `F12` or `Ctrl+click` go to definition, hover for docs · in a terminal
+`Ctrl+S` save, `F12` or `Ctrl+click` go to definition, hover for docs, `Shift+F12` references,
+`Ctrl+F12` implementation, `Ctrl+Shift+O` file outline, `Ctrl+T` project symbols, `Ctrl+G` go to
+line, `F8`/`Shift+F8` next/previous problem, `Ctrl+Space` completion (also as you type),
+`Ctrl+Shift+Space` parameter hints (also on `(` and `,`), `Ctrl+.`/`Alt+Enter` quick fixes, `F2`
+rename, `Ctrl+Shift+I`/`Shift+Alt+F` format (`editor::editor_actions()` lists them all, with
+their GPUI action ids, for a command palette) · in a terminal
 `Ctrl+Shift+C`/`Ctrl+Shift+V` copy/paste, drag to select (double click: word, triple: line;
 `Shift` overrides an app's mouse mode), middle click pastes the primary selection.
 
@@ -170,6 +175,55 @@ diagnostic underlines and the diff's look were exercised only through state. GPU
 wgpu renderer (`gpui-pre-platform`, `test-support` feature: `current_headless_renderer`) that could
 render frames to images for visual checks in a later stage.
 
+## Verified in stage 4 (editor completeness)
+
+Self-tests against aether-engine (read-only: nothing saved) and a scratch CMake repo in a scratch
+workspace (`ORBIT_WORKSPACE_ROOT` and `ORBIT_CONFIG_DIR` pointed at a temp dir) for what writes.
+`--keys` now also takes `@namespace::Action`, `wait` (which draws a frame: a hidden window gets no
+frame callbacks, and gpui-component's overlays sync when drawn) and `type:text`; the dump shows the
+status bar, breadcrumb, picker, completion menu, signature help and banner.
+
+- **Completion.** Typing `PhysicsW` on an empty line of `Game::Initialize` lists `PhysicsWorld |
+  Physics::PhysicsWorld | …`; Enter inserts `PhysicsWorld`. Items are ranked by match (prefix,
+  substring, subsequence), then the server's `sortText`. The document is synced before each
+  request: the editor asks for completions before it reports the keystroke as a change.
+- **References** of `Initialize` (39:12 of `Game.h`, `Shift+F12`): `Game.h:39` and `Game.cpp:44`
+  once clangd has both files; picking a row opens it. Implementation and type definition share the
+  path (one result jumps, several list).
+- **Outline** of `Game.h` (`Ctrl+Shift+O`): namespace `Game` with its functions and variables,
+  indented, filtered by typing (`init` → `Initialize`, `UnInitialize`…).
+- **Project symbols** (`Ctrl+T`, `addN`): `addNumbers  function · cpp/util.cpp:2`.
+- **Quick fixes** (`Ctrl+.` on an unused include): "remove #include directive", "remove all unused
+  includes"; Enter removes the line. Commands that answer with `workspace/applyEdit` (clangd's
+  tweaks) are applied too.
+- **Signature help**: typing `addNumbers(1, ` shows `addNumbers(int a, [int b]) -> int`.
+- **Rename** (`F2` on `addNumbers` → `sumOf`): the open file in its buffer, `util.h` and `util.cpp`
+  on disk (other open editors in their buffers); **format** (`Ctrl+Shift+I`) reindents with clangd;
+  checked with `git diff` in the scratch repo after `Ctrl+S`.
+- **Go to line** (`Ctrl+G`, `6:7`), **next problem** (`F8`, wraps, message in the status bar).
+- **clangd banner**: the scratch repo without `compile_commands.json` shows it; "Generate with CMake"
+  (or `@orbit_editor::GenerateCompileCommands`) runs `cmake -S . -B build -G Ninja
+  -DCMAKE_EXPORT_COMPILE_COMMANDS=ON` (a preset when the repo has them), and on success the banner
+  goes and clangd restarts for every editor using it.
+- **Status bar**: `⨯ 0 ⚠ 2 | Unsaved | Ln 25, Col 3 | LF | Spaces: 4 | C++ | clangd · indexing:
+  1/45` (indent detected from the file; the LSP chip shows `$/progress`, "stopped · Restart" when the
+  server exits, and restarts on click).
+- The stage-1 gate still passes (F12 on `Initialize` opens `Game.cpp` at 44:10) once clangd has
+  indexed `Game.cpp`; asked in the first seconds it answers with the declaration itself.
+
+gpui-component limits met on the way:
+
+- No snippet engine: the client asks for plain completions (`snippetSupport: false`);
+  `completionItem/resolve` is never called by the component (clangd sends docs inline anyway), and
+  additional text edits are dropped (clangd runs with `--header-insertion=never`).
+- No signature help UI: ours is a popup anchored above the caret.
+- Its code action menu's Enter also inserted a newline into the text, so `Ctrl+.` opens our own
+  list instead (the component's provider hook stays installed).
+- No semantic tokens yet: the component wants range requests, which clangd doesn't serve.
+- Not done: the "hide this diagnostic" quick fix and the diagnostics filter from config, folder
+  crumbs revealing in the tree (needs the tree from the shell), Markdown preview, the Languages
+  settings section.
+
 ## Gate verdict
 
 **Pass.** gpui-component's editor plus a ~400-line LSP client gives definition (F12, Ctrl+click,
@@ -196,7 +250,9 @@ Caveats found:
 |---|---|
 | `src/main.rs` | app start, window, keymap, LSP shutdown on quit |
 | `src/app.rs` | root view: sidebar, tree panel, tab strip (sessions, then files; preview tab; dirty dot), status bar, tab logic |
-| `src/editor.rs` | editor tab: `EditorState`, save, dirty, LSP document sync and providers, cross-file definition |
+| `src/editor.rs` | editor tab: `EditorState`, save, dirty, actions and keys (`editor_actions()`), pickers, problems, format, rename, signature help, breadcrumb, status bar, clangd banner |
+| `src/editor/provider.rs` | the LSP document (sync) and gpui-component providers: definition, hover, completion, code actions; WorkspaceEdit and location parsing |
+| `src/editor/picker.rs` | the quick-pick overlay: go to line, outline, project symbols, references, rename, quick fixes |
 | `src/lsp/` | `mod.rs` file → language and the server registry · `server.rs` JSON-RPC client and URI mapping over `orbit_core::lsp` (which picks, starts and feeds the process) · `paths.rs` URIs and root rebase |
 | `src/diff_view.rs` | diff tab over `git diff HEAD` |
 | `src/terminal/` | terminal view over `orbit_core::pty`: VT parse, status tracking, scrollback replay (`mod.rs`), grid layout and paint (`grid.rs`), keys and mouse reports (`input.rs`) |
@@ -431,16 +487,19 @@ Status of everything the React app does: **done**, **partial** (with what's miss
 ### Editor
 - [x] done: code editor with tree-sitter highlighting (C, C++, Rust, TS/TSX, JS, JSON), line numbers, undo/redo
 - [x] done: `Ctrl+S` save, dirty state
-- [ ] — `Ctrl+G` go to line, `F8` next problem, line endings, Markdown editor/preview toggle (`EditorPane.tsx`)
-- [ ] partial: file path bar (path, diagnostics count, server name, Diff button)
-- [ ] — clangd setup banner (missing compile DB, run CMake, restart server)
-- [ ] — Workspace symbol search (`SymbolSearch.tsx`)
+- [x] done: `Ctrl+G` go to line, `F8`/`Shift+F8` problems, status bar (problems, Unsaved, Ln/Col and selection, LF/CRLF, indent, language, LSP chip with progress and restart) (`EditorPane.tsx`)
+- [ ] partial: breadcrumb; the file opens its outline, folders don't reveal in the tree yet
+- [x] done: clangd setup banner (missing compile DB, CMake with presets, restart clangd)
+- [x] done: symbol search in project (`Ctrl+T`) and in file (`Ctrl+Shift+O`) (`SymbolSearch.tsx`)
+- [ ] — Markdown editor/preview toggle, reload when changed on disk
 
 ### LSP
 - [x] done: client over stdio, one server per (repo, language), started on demand by `orbit_core::lsp` with the Tauri app's server choice and config (`src/lib/lsp/client.ts`, `manager.ts`)
 - [x] done: path mapping for symlinked repos (`src/lib/lsp/paths.ts`)
 - [x] done: definition (F12, Ctrl+click), hover, diagnostics
-- [ ] — declaration, type definition, implementation, references, highlights, document symbols, completion, signature help, formatting, semantic tokens, code actions (gpui-component has providers for completion, code actions and semantic tokens)
+- [x] done: references, implementation, type definition, document and workspace symbols, completion, signature help, code actions (with `workspace/applyEdit`), formatting, rename across files, `$/progress`, restart
+- [ ] — declaration, document highlights, semantic tokens, snippets, completion resolve
+- [ ] partial: servers for Python, Go, C#, Lua are mapped like C++/Rust/TS (orbit-core's table), untested (only clangd here)
 - [ ] — Diagnostics filter from config; Languages settings (server per language, logs, restart) (`LanguagesSection.tsx`)
 
 ### Search
