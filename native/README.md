@@ -102,7 +102,8 @@ Search Everywhere tabs `search-tab:<Label>`, Find's `find-toggle:case|word|regex
 `find-repo:<repo>|All repos`, tree rows `tree:<name>`, breadcrumb folders `crumb:<ix>`, `tb-sidebar`, `tb-back`, `tb-forward`,
 `tb-inbox`, `tb-dock`, `tb-workspace` and its rows `wsw:<workspace>|No workspace|New workspace…`, `new-tab`, `resize-sidebar`, `resize-dock`, `resize-panel`,
 `panel-close`, `toast-close:<id>`, `ws:<name>`) and are dispatched with `Window::dispatch_event`:
-`click:` `rclick:` `mclick:` `dblclick:` `drag:<probe>:<dx>,<dy>`; plus `key:<spec>`,
+`click:` `rclick:` `mclick:` `dblclick:` `sclick:` (Shift) `drag:<probe>:<dx>,<dy>`, and `<probe>@x,y` for a point
+from the probe's top-left; plus `key:<spec>`,
 `type:<text>`, `shift:<n>` (bare Shift taps as modifier events; `shift:2` is a double Shift), `mouse:back|forward`, `cmd:<command id>`, `open:<path>`, `preview:<path>`,
 `toast:<text>`, `wait:<ms>` and `dump:<label>` (the full dump, into the log, at that point).
 Build/Run/Debug adds (`src/run/script.rs`) `until:<text>[@secs]` (wait until the dump contains
@@ -549,8 +550,8 @@ Changes*, *Pull Requests and Checks*), plus review notes in every diff tab of a 
   the workspace's REVIEW.md notes: resolve, delete, jump (to the diff while the file has changes,
   else to the file), show/clear resolved, *Fix N notes with agent* (the prompt of `notesPrompt`, sent
   to an agent session of the workspace or a new one) and *Send to PR…*.
-- **Diff tab notes** (`src/diff_view.rs`), on gpui-component's `Diff` hooks: `on_add_annotation`
-  (the `+` beside the hovered line and at the end of a selection) opens a composer, `annotations` +
+- **Diff tab notes** (`src/diff_view.rs`), on gpui-component's `Diff` hooks: the `+` in the gutter
+  marker lane (`src/diff_select.rs`, see *Line selection* below) opens a composer, `annotations` +
   `render_annotation` put each note's card under its line, `decorations` tint multi-line notes.
   Cards have Resolve/Reopen, Reply, Edit and Delete; the composer is an `InputState` (Enter saves,
   Escape cancels). Notes are written with `orbit_core::notes`, so both apps read and write the same
@@ -617,10 +618,39 @@ workspace with two repos cloned from local bare remotes, origins set to GitHub-l
 - Send to PR was tested on its logic only (unit tests of the line checks): posting needs GitHub's
   GraphQL and contents APIs, which the stub doesn't answer.
 
-gpui-component limits met: the `+` button and line selection are pointer gestures inside the `Diff`
-element, which the self-test can't target (no probes inside it), so the composer was opened with the
-command that shares its path; notes on folded lines show once the fold is expanded; the diff view is
+gpui-component limits met: notes on folded lines show once the fold is expanded; the diff view is
 read-only, so there is no editing in the diff.
+
+**Line selection** (`src/diff_select.rs`, every diff: Changes, diff tabs, commit review, PR code
+review, the commit and inspect modals). The `Diff`'s own `+` (`on_add_annotation`) is an absolute
+button over the first characters of each line's code, invisible until hovered but always hit: a
+press there was taken by the button, so a drag started at a line's start selected nothing (and a
+click opened a one-line note). Its text selection also never became a line range, so the `+` and
+`review.commentSelection` saw one line. Rather than vendoring gpui-component (4.5 MB of source) for
+a few lines, the fix is layered on its public API:
+
+- the `+` moved to the gutter marker lane (`gutter_markers` + `render_gutter_marker`, one marker per
+  new-side line, built once per patch), which is Monaco's glyph margin: presses there never start a
+  text selection. Click it for one line, drag it across lines (hunks and folds included) for a range,
+  or click it inside a selection for the whole selection, as `useReviewZones.tsx` does. It shows on
+  the hovered line and at the end of the selection. Old-side lines take notes in the PR review's split
+  view only, as in the Tauri app;
+- a text selection's lines come from the line under the pointer (`on_line_hover`) at the press and
+  the newline count of the selected text; a selection ending at the start of a line leaves that line
+  out (Monaco's rule). Shift+click extends from the last press. `review.commentSelection` and the `+`
+  use the range; the note sits under its last line with "Lines N–M";
+- Ctrl+C copies the exact selected text (`DiffState::selected_text`), recorded in the dump and kept
+  off the system clipboard in self-test runs.
+
+Notes go through `orbit_core::notes::add` with the snippet `lines[start-1..end]`, which is what
+`ChangesReview.tsx` sends to the same command, so both apps write `` - [ ] `web/main.rs:5-9` `` with
+the same snippet (unit test `range_notes_match_the_tauri_format`). Self-test: probes `diff-body`,
+`chg-diff`, `commit-diff`, `pane-diff` over each diff, and `<probe>@x,y` targets a point inside one
+(`drag:chg-diff@99,149:60,72`, `sclick:chg-diff@140,221`). Verified on a scratch workspace with two
+hunks: text drags (also across hunks) gave spans 5–9 and 9–42, Shift+click 5–9, the `+` inside the
+selection and a lane drag wrote `5-9` and `9-42` notes, and Ctrl+C copied the text in the Changes
+page, a diff tab, the commit review and the commit modal. The PR code review shares the code but was
+not run (it needs GitHub).
 
 ## Build / Run / Debug
 

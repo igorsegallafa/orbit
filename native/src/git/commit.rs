@@ -80,6 +80,7 @@ impl CommitFlow {
     pub fn dump(&self, out: &mut String, cx: &App) {
         let _ = writeln!(out, "  commit flow ({}){}", self.scope, if self.committing { " committing" } else { "" });
         let _ = writeln!(out, "    focus {:?} diff {:?}", self.focus, self.pane.read(cx).source());
+        out.push_str(&self.pane.read(cx).selection_dump(cx));
         for r in &self.repos {
             let files = match &r.files {
                 Load::Ready(list) => list

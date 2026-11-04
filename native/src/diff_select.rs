@@ -228,7 +228,7 @@ pub fn attach(diff: Diff, sel: &Handle, state: &Entity<DiffState>, sides: &[Diff
         // Bubbles here unless the `+` or a card took the press.
         .on_mouse_down(MouseButton::Left, move |ev: &MouseDownEvent, _, _| {
             let mut s = s_down.borrow_mut();
-            let kept = ev.modifiers.shift && s.span.is_some() && s.press.is_some();
+            let kept = ev.modifiers.shift && s.press.is_some();
             if !kept {
                 s.press = s.hovered.clone().map(|h| (h, ev.position.y));
             }
@@ -304,6 +304,31 @@ mod tests {
         // A word.
         assert_eq!(lines(text_span(&at(7), "line_7", true)), (7, 7));
         assert_eq!(text_span(&at(7), "x\ny", true).side(), DiffSide::Modified);
+    }
+
+    /// A range note is written as the Tauri app writes it (`ChangesReview.tsx`:
+    /// `lines.slice(start - 1, end)` as the snippet, through `notes_add`).
+    #[test]
+    fn range_notes_match_the_tauri_format() {
+        let text: String = (1..=12).map(|i| format!("line {i}\n")).collect();
+        let r = text_span(&at(5), "ne 5\nline 6\nline 7\nline 8\nli", true);
+        let (start, end) = (r.start() as u32, r.end() as u32);
+        let snippet = crate::review::notes::snippet(&text, start, end);
+        let react: Vec<&str> = text.split('\n').collect::<Vec<_>>()[start as usize - 1..end as usize].to_vec();
+        assert_eq!(snippet, react.join("\n"));
+        let note = orbit_core::notes::Note {
+            id: String::new(),
+            done: false,
+            repo: "web".into(),
+            path: "main.rs".into(),
+            start,
+            end,
+            body: "Range".into(),
+            snippet,
+        };
+        let md = orbit_core::notes::render(&[note], None);
+        assert!(md.contains("- [ ] `web/main.rs:5-9`\n  Range\n  ```rs\n  line 5\n"), "{md}");
+        assert!(md.contains("  line 9\n  ```\n"), "{md}");
     }
 
     #[test]
