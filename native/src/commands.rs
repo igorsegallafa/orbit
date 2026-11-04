@@ -156,9 +156,10 @@ pub fn run(id: &str, app: &mut OrbitApp, window: &mut Window, cx: &mut Context<O
 /// The root view's handler for `RunCommand`. A shortcut that doesn't apply
 /// now propagates, so the focused view gets the key (a shell's Ctrl+W).
 pub fn on_run_command(app: &mut OrbitApp, action: &RunCommand, window: &mut Window, cx: &mut Context<OrbitApp>) {
-    // An open dialog, menu or palette owns the keyboard.
+    // An open dialog, menu or palette owns the keyboard: the key goes on to
+    // its own bindings (double Shift closes Search Everywhere).
     if app.dialog.is_some() || app.menu.is_some() || app.palette.is_some() {
-        return;
+        return cx.propagate();
     }
     let Some(command) = get(cx, &action.id) else { return cx.propagate() };
     let applies = command.enabled(app, cx) && (!action.from_key || command.key_when.as_ref().is_none_or(|w| w(app, cx)));
@@ -202,12 +203,6 @@ pub fn display_keys(spec: &str) -> String {
         .join(" ")
 }
 
-/// Fuzzy-enough palette match: every word of the query appears in the title.
-pub fn matches(title: &str, query: &str) -> bool {
-    let title = title.to_lowercase();
-    query.split_whitespace().all(|w| title.contains(&w.to_lowercase()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,12 +214,5 @@ mod tests {
         assert_eq!(display_keys("f12"), "F12");
         assert_eq!(display_keys("ctrl-f9"), "Ctrl+F9");
         assert_eq!(display_keys("shift shift"), "Shift Shift");
-    }
-
-    #[test]
-    fn matches_words() {
-        assert!(matches("Close Saved Files", "clo sav"));
-        assert!(matches("Close Saved Files", ""));
-        assert!(!matches("Close Saved Files", "open"));
     }
 }

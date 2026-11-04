@@ -69,6 +69,9 @@ pub struct SessionMeta {
     /// Claude conversation id (`--session-id`), so a restart can `--resume` it.
     #[serde(default)]
     pub agent_session_id: Option<String>,
+    /// A folder to start in instead of the repo or scope folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
 }
 
 /// An ended agent session that can be picked up again.
@@ -385,9 +388,27 @@ pub fn new_session(app: &mut OrbitApp, cmd: Option<&str>, input: Option<String>,
         args: agent_session_id.iter().flat_map(|id| ["--session-id".to_string(), id.clone()]).collect(),
         repo: None,
         agent_session_id,
+        cwd: None,
     };
     let args = meta.args.clone();
     open(app, meta, args, None, input, window, cx);
+}
+
+/// A shell session started in `dir` (the file tree's Open in Terminal).
+pub fn new_shell_in(app: &mut OrbitApp, dir: &std::path::Path, window: &mut Window, cx: &mut Context<OrbitApp>) {
+    let taken: Vec<String> = store(cx).read(cx).open.iter().map(|(m, _)| m.session_name.clone()).collect();
+    let meta = SessionMeta {
+        id: new_key(),
+        workspace: scope(app),
+        label: "shell".into(),
+        session_name: codename(taken.iter().map(String::as_str)),
+        cmd: None,
+        args: vec![],
+        repo: None,
+        agent_session_id: None,
+        cwd: Some(dir.to_string_lossy().to_string()),
+    };
+    open(app, meta, vec![], None, None, window, cx);
 }
 
 /// Opens `meta` as a tab running `args`, after replaying `replay`.
@@ -400,7 +421,7 @@ fn open(
     window: &mut Window,
     cx: &mut Context<OrbitApp>,
 ) -> Option<Entity<TerminalView>> {
-    let cwd = match pty::session_dir(&meta.workspace, meta.repo.as_deref(), None) {
+    let cwd = match pty::session_dir(&meta.workspace, meta.repo.as_deref(), meta.cwd.as_deref()) {
         Ok(dir) => dir,
         Err(e) => {
             app.toast_error(format!("{}: {e}", meta.session_name), cx);
@@ -520,6 +541,7 @@ pub fn resume(app: &mut OrbitApp, r: &RecentSession, window: &mut Window, cx: &m
         args: args.clone(),
         repo: r.repo.clone(),
         agent_session_id: claude.then(|| r.resume_id.clone()),
+        cwd: None,
     };
     open(app, meta, args, None, None, window, cx);
 }

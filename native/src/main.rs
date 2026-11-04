@@ -5,6 +5,7 @@ mod commands;
 mod debug;
 mod diff_view;
 mod editor;
+mod file_ops;
 mod file_tree;
 mod icons;
 mod lsp;
@@ -15,6 +16,7 @@ mod probe;
 mod review;
 mod run;
 mod script;
+mod search;
 mod sessions;
 mod shell;
 mod state;
@@ -49,6 +51,8 @@ fn main() {
         app::init(cx);
         file_tree::bind_keys(cx);
         editor::bind_keys(cx);
+        search::init(cx);
+        file_ops::init(cx);
         review::init(cx);
         run::init(cx);
 

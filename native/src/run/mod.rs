@@ -592,6 +592,7 @@ impl RunStore {
             args: config.args.clone(),
             repo: Some(target.repo),
             agent_session_id: None,
+            cwd: Some(config.cwd.clone()),
         };
         let spec = orbit_core::pty::Spawn {
             cwd: config.cwd.clone().into(),

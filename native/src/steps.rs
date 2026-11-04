@@ -8,6 +8,7 @@
 //! | `drag:<probe>:<dx>,<dy>` | drag from the probe's center by (dx, dy) px |
 //! | `key:<spec>` | one keystroke (`ctrl-shift-a`, `escape`) |
 //! | `type:<text>` | typed text |
+//! | `shift:<n>` | `n` bare Shift taps (modifier events; `shift:2` is a double Shift) |
 //! | `mouse:back` `mouse:forward` | the mouse's side buttons |
 //! | `cmd:<id>` | run a command by id |
 //! | `open:<path>` `preview:<path>` | open a file (relative to the workspace) |
@@ -118,6 +119,17 @@ pub async fn run(steps: &[String], window: AnyWindowHandle, app: &Entity<OrbitAp
                     let _ = writeln!(log, "  bad key: {e:?}");
                 }
             },
+            "shift" => {
+                for _ in 0..arg.parse().unwrap_or(1) {
+                    for shift in [true, false] {
+                        let modifiers = Modifiers { shift, ..Default::default() };
+                        let event = gpui::ModifiersChangedEvent { modifiers, capslock: Default::default() };
+                        send(window, PlatformInput::ModifiersChanged(event), cx);
+                        sleep(cx, 20).await;
+                    }
+                }
+                sleep(cx, 150).await;
+            }
             "type" => {
                 for ch in arg.chars() {
                     let ks = Keystroke { key: ch.to_lowercase().to_string(), key_char: Some(ch.to_string()), ..Default::default() };
@@ -219,14 +231,7 @@ pub fn shell_dump(app: &OrbitApp, cx: &gpui::App) -> String {
         let _ = writeln!(out, "--- dialog: {:?} {buttons:?}", d.title);
     }
     if let Some(p) = &app.palette {
-        let titles: Vec<String> = p.matches.iter().take(6).map(|c| format!("{} [{}]", c.title, c.shortcut().unwrap_or_default())).collect();
-        let _ = writeln!(
-            out,
-            "--- palette: {:?}, {} matches, selected {}: {titles:?}",
-            p.input.read(cx).value(),
-            p.matches.len(),
-            p.selected
-        );
+        out.push_str(&p.dump_text(cx));
     }
     for t in &app.toasts.items {
         let _ = writeln!(out, "--- toast {:?}: {}", t.kind, t.title);
