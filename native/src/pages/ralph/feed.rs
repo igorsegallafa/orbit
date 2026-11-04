@@ -3,6 +3,7 @@
 use super::super::kit;
 use crate::theme::{self, c};
 use gpui::{div, prelude::*, px, FontWeight, HighlightStyle, SharedString, StyledText};
+use orbit_core::ralph::Activity;
 use serde_json::Value;
 use std::ops::Range;
 use std::sync::OnceLock;
@@ -33,8 +34,58 @@ pub fn describe(ev: &Value) -> String {
         "push" if ev["ok"].as_bool() == Some(true) => "pushed".into(),
         "push" => format!("push failed: {}", s("message")),
         "limit_wait" => format!("usage limit: waiting until {}", ev["until"]),
+        "iteration_idle" | "iteration_exit_grace" | "iteration_timeout" | "reconcile" => watchdog_text(ev),
         "stopped" => format!("■ stopped: {} after {} iterations", reason(&ev["reason"]), ev["iterations"]),
         other => format!("{other} {ev}"),
+    }
+}
+
+/// The watchdog's feed lines (`FeedLine`): why an iteration was killed and
+/// whether its story still counted.
+fn watchdog_text(ev: &Value) -> String {
+    let id = ev["id"].as_str().unwrap_or("");
+    match ev["kind"].as_str().unwrap_or("") {
+        "iteration_idle" => format!("No agent output for {} min: killed the iteration's processes", ev["idleMin"]),
+        "iteration_exit_grace" => format!("The agent finished but didn't exit: killed its processes after {}s", ev["graceSec"]),
+        "iteration_timeout" => format!("Iteration hit its {} min limit: killed its processes", ev["timeoutMin"]),
+        _ if ev["passed"].as_bool() == Some(true) => format!("{id} was committed cleanly: counted as passed"),
+        _ => {
+            let mut why = Vec::new();
+            if ev["committed"].as_bool() != Some(true) {
+                why.push(format!("no \"feat: [{id}]\" commit"));
+            }
+            if ev["clean"].as_bool() != Some(true) {
+                why.push("uncommitted changes".into());
+            }
+            if ev["messageOk"].as_bool() != Some(true) {
+                why.push("the agent reported a failure".into());
+            }
+            format!("{id} not counted: {}", why.join(", "))
+        }
+    }
+}
+
+/// An iteration outcome as shown (`outcomeLabel`): "Failed(..)" → "Failed".
+pub fn outcome_label(outcome: &str) -> String {
+    match outcome.split('(').next().unwrap_or("").trim() {
+        "Recovered" => "passed (recovered)".into(),
+        other => other.to_string(),
+    }
+}
+
+/// Seconds since the agent's last output, and whether that's past half the
+/// idle timeout (`idleness`).
+pub fn idleness(last_event_at: Option<u64>, now: u64, idle_min: f64) -> (u64, bool) {
+    let secs = last_event_at.map(|t| now.saturating_sub(t)).unwrap_or(0);
+    (secs, idle_min > 0. && secs as f64 >= idle_min * 60. / 2.)
+}
+
+/// "12s", "4m", "1h 5m" (`formatAgo`).
+pub fn ago(secs: u64) -> String {
+    match secs / 60 {
+        0 => format!("{secs}s"),
+        m if m < 60 => format!("{m}m"),
+        m => format!("{}h {}m", m / 60, m % 60),
     }
 }
 
@@ -296,6 +347,19 @@ pub fn feed_line(ev: &Value) -> Option<gpui::AnyElement> {
         "limit_wait" => event(format!("Usage limit reached · retrying at {}", local_hm(ev["until"].as_i64().unwrap_or(0))), theme::WARN, false),
         "run_start" => event(format!("Run started with {} · {}", s("agent"), s("model")), theme::TEXT_FAINT, false),
         "model" => event(format!("Agent is running {}", s("model")), theme::TEXT_FAINT, false),
+        "iteration_idle" | "iteration_exit_grace" | "iteration_timeout" => event(watchdog_text(ev), theme::WARN, false),
+        "reconcile" if ev["passed"].as_bool() == Some(true) => div()
+            .my(px(6.))
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .text_size(px(12.))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(c(theme::OK))
+            .child(kit::icon("check", 12., c(theme::OK)))
+            .child(watchdog_text(ev))
+            .into_any_element(),
+        "reconcile" => event(watchdog_text(ev), theme::DANGER, false),
         "stopped" => {
             let n = ev["iterations"].as_u64().unwrap_or(0);
             let ok = ev["reason"]["kind"].as_str() == Some("complete");
@@ -306,8 +370,11 @@ pub fn feed_line(ev: &Value) -> Option<gpui::AnyElement> {
 }
 
 /// `IterationBlock`: the iteration's head (story, outcome, commits, time,
-/// cost) and its lines.
-pub fn iteration_block(g: &Group, live: bool) -> gpui::Div {
+/// cost) and its lines. A live one shows the time since the agent's last
+/// output (yellow from half the idle timeout) and its running commands.
+pub fn iteration_block(g: &Group, live: bool, activity: Option<&Activity>, idle_min: f64, now: u64) -> gpui::Div {
+    let activity = activity.filter(|a| live && g.end.is_none() && a.last_event_at.is_some());
+    let (idle_secs, warn) = idleness(activity.and_then(|a| a.last_event_at), now, idle_min);
     let mut block = div().pt(px(12.));
     if g.n > 0 {
         let story: gpui::AnyElement = match &g.story {
@@ -316,7 +383,7 @@ pub fn iteration_block(g: &Group, live: bool) -> gpui::Div {
         };
         let meta = match g.end {
             Some(end) => {
-                let outcome = end["outcome"].as_str().map(|o| o.split('(').next().unwrap_or("").trim().to_string()).filter(|o| !o.is_empty() && o != "Done" && o != "Complete");
+                let outcome = end["outcome"].as_str().map(outcome_label).filter(|o| !o.is_empty() && o != "Done" && o != "Complete");
                 let commits = end["commits"].as_u64().unwrap_or(0);
                 let mut text = format!("{commits} commit{}", if commits == 1 { "" } else { "s" });
                 if let Some(ms) = end["durationMs"].as_u64().filter(|ms| *ms > 0) {
@@ -325,9 +392,13 @@ pub fn iteration_block(g: &Group, live: bool) -> gpui::Div {
                 if let Some(cost) = end["costUsd"].as_f64().filter(|c| *c > 0.) {
                     text += &format!(" · ${cost:.2}");
                 }
-                Some(div().flex().items_center().gap(px(6.)).children(outcome.map(|o| div().font_weight(FontWeight::SEMIBOLD).text_color(c(theme::DANGER)).child(o))).child(text))
+                let color = |o: &str| if o == "passed (recovered)" { theme::OK } else { theme::DANGER };
+                Some(div().flex().items_center().gap(px(6.)).children(outcome.map(|o| div().font_weight(FontWeight::SEMIBOLD).text_color(c(color(&o))).child(o))).child(text))
             }
-            None if live => Some(div().flex().items_center().gap(px(6.)).child(crate::workspace_ui::kit::spinner(("ralph-iter", g.n as usize), 11., c(theme::ACCENT))).child("working")),
+            None if live => {
+                let label = if activity.is_some() { format!("last event {} ago", ago(idle_secs)) } else { "working".into() };
+                Some(div().flex().items_center().gap(px(6.)).when(warn, |d| d.text_color(c(theme::WARN))).child(crate::workspace_ui::kit::spinner(("ralph-iter", g.n as usize), 11., c(theme::ACCENT))).child(label))
+            }
             None => None,
         };
         block = block.child(
@@ -341,8 +412,22 @@ pub fn iteration_block(g: &Group, live: bool) -> gpui::Div {
                 .border_color(c(theme::BORDER))
                 .child(div().text_size(px(11.)).font_weight(FontWeight::BOLD).text_color(c(theme::ACCENT)).child(format!("#{}", g.n)))
                 .child(div().flex_1().min_w_0().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(theme::TEXT)).child(story))
-                .children(meta.map(|m| m.flex_none().text_size(px(11.)).text_color(c(theme::TEXT_FAINT)))),
+                .children(meta.map(|m| m.flex_none().text_size(px(11.)).text_color(c(if warn { theme::WARN } else { theme::TEXT_FAINT })))),
         );
+        if let Some(a) = activity {
+            let lines = a.tool.iter().map(|t| format!("▸ {t}")).chain(a.background.iter().map(|b| format!("⟳ background: {b}")));
+            block = block.child(
+                div()
+                    .mb(px(6.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .font_family(theme::MONO_FONT)
+                    .text_size(px(11.))
+                    .text_color(c(if warn { theme::WARN } else { theme::TEXT_FAINT }))
+                    .children(lines.map(|l| div().truncate().child(l))),
+            );
+        }
     }
     block.child(div().flex().flex_col().gap(px(2.)).children(g.events.iter().filter_map(|e| feed_line(e))))
 }
@@ -378,6 +463,19 @@ mod tests {
             "■ stopped: max iterations after 3 iterations"
         );
         assert_eq!(d(&json!({"kind": "iteration_end", "n": 1, "outcome": "Done", "commits": 1, "passed": 1, "total": 2, "costUsd": 0.5})), "iteration 1 Done · 1 commits · 1/2 done · $0.50");
+    }
+
+    #[test]
+    fn idle_warning_and_watchdog_lines() {
+        assert_eq!(super::idleness(Some(1000), 1000 + 420, 15.), (420, false));
+        assert_eq!(super::idleness(Some(1000), 1000 + 450, 15.), (450, true));
+        assert_eq!(super::idleness(Some(1000), 5000, 0.), (4000, false));
+        assert_eq!((super::ago(42), super::ago(485), super::ago(3900)), ("42s".into(), "8m".into(), "1h 5m".into()));
+        assert_eq!(super::outcome_label("Recovered"), "passed (recovered)");
+        assert_eq!(super::outcome_label("Failed(\"x\")"), "Failed");
+        let d = super::describe;
+        assert_eq!(d(&json!({"kind": "iteration_idle", "n": 1, "idleMin": 15.0})), "No agent output for 15.0 min: killed the iteration's processes");
+        assert_eq!(d(&json!({"kind": "reconcile", "id": "T1", "committed": true, "clean": false, "messageOk": true, "passed": false})), "T1 not counted: uncommitted changes");
     }
 
     #[test]

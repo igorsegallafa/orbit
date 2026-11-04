@@ -41,13 +41,60 @@ pub fn kill_tree(child: &mut Child) {
     }
     // run_streaming puts the child in its own process group (pgid = pid).
     #[cfg(unix)]
-    {
-        let _ = crate::proc::cmd("kill")
-            .args(["-9", &format!("-{}", child.id())])
-            .output();
-    }
+    signal_group(child.id(), "-KILL");
     let _ = child.kill();
 }
+
+#[cfg(unix)]
+fn signal_group(pgid: u32, sig: &str) -> bool {
+    crate::proc::cmd("kill")
+        .args([sig, "--", &format!("-{pgid}")])
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+/// SIGTERM to the whole process group, SIGKILL to whatever is left after
+/// `grace`. Windows has no group signal: `taskkill /T /F` at once.
+pub fn terminate_tree(child: &mut Child, grace: Duration) {
+    #[cfg(unix)]
+    {
+        let pgid = child.id();
+        if signal_group(pgid, "-TERM") {
+            let end = Instant::now() + grace;
+            // `kill -0` succeeds while any member of the group is alive.
+            while Instant::now() < end && signal_group(pgid, "-0") {
+                let _ = child.try_wait();
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = grace;
+    kill_tree(child);
+}
+
+/// Extra stop rules for unattended runs (`run_watched`).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Watch {
+    /// Kill the tree when no output line arrives for this long.
+    pub idle: Option<Duration>,
+    /// Kill the tree this long after `on_line` reported the run finished.
+    pub exit_grace: Option<Duration>,
+}
+
+/// Why a run ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ended {
+    Exited,
+    Idle,
+    /// Reported finished but stayed alive past the exit grace.
+    ExitGrace,
+    Timeout,
+}
+
+const TERM_GRACE: Duration = Duration::from_secs(5);
+/// How long a watched leader's children may hold the pipes after it exits.
+const ORPHAN_GRACE: Duration = Duration::from_secs(2);
 
 pub enum Line {
     Out(String),
@@ -60,6 +107,9 @@ pub struct Outcome {
     pub cancelled: bool,
     pub stdout: String,
     pub stderr: String,
+    pub ended: Ended,
+    /// Process id, also the process group id on unix.
+    pub pid: u32,
 }
 
 /// Spawns `cmd` in `dir`, calling `on_line` for every stdout/stderr line
@@ -67,11 +117,32 @@ pub struct Outcome {
 /// given the run is cancellable via `cancel(id)`; a previous run with the
 /// same id is killed first. Stdin is the caller's to set.
 pub fn run_streaming(
-    mut cmd: Command,
+    cmd: Command,
     dir: &Path,
     timeout: Duration,
     id: Option<&str>,
     mut on_line: impl FnMut(Line),
+) -> Result<Outcome, String> {
+    let program = cmd.get_program().to_string_lossy().to_string();
+    let o = run_watched(cmd, dir, timeout, id, Watch::default(), |l| {
+        on_line(l);
+        false
+    })?;
+    if o.ended == Ended::Timeout {
+        return Err(format!("{program} timed out after {}s", timeout.as_secs()));
+    }
+    Ok(o)
+}
+
+/// `run_streaming` with `watch`'s stop rules: `on_line` returns true once
+/// the run reported it is finished, and a timeout is an `Ended`, not an error.
+pub fn run_watched(
+    mut cmd: Command,
+    dir: &Path,
+    timeout: Duration,
+    id: Option<&str>,
+    watch: Watch,
+    mut on_line: impl FnMut(Line) -> bool,
 ) -> Result<Outcome, String> {
     // PWD too: opencode takes its project directory from it, and the one
     // inherited from wherever Orbit was launched would win over current_dir.
@@ -88,6 +159,7 @@ pub fn run_streaming(
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("failed to launch {program}: {e}"))?;
+    let pid = child.id();
 
     let (tx, rx) = mpsc::channel::<Line>();
     let out = child.stdout.take().ok_or("no stdout from process")?;
@@ -115,13 +187,19 @@ pub fn run_streaming(
         }
     }
 
+    let watched = watch.idle.is_some() || watch.exit_grace.is_some();
     let deadline = Instant::now() + timeout;
     let (mut stdout, mut stderr) = (String::new(), String::new());
-    let mut timed_out = false;
+    let mut ended = Ended::Exited;
+    let mut last_line = Instant::now();
+    let mut finished_at: Option<Instant> = None;
+    let mut leader_gone: Option<Instant> = None;
+    let mut orphans_killed = false;
     // Lines keep flowing until both pipes close (process exit or kill).
     loop {
         match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(line) => {
+                last_line = Instant::now();
                 match &line {
                     Line::Out(l) => {
                         stdout.push_str(l);
@@ -132,14 +210,43 @@ pub fn run_streaming(
                         stderr.push('\n');
                     }
                 }
-                on_line(line);
+                if on_line(line) && finished_at.is_none() {
+                    finished_at = Some(Instant::now());
+                }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
-        if !timed_out && Instant::now() > deadline {
-            timed_out = true;
-            kill_tree(&mut child.lock().unwrap());
+        if ended != Ended::Exited {
+            continue;
+        }
+        let now = Instant::now();
+        let stop = if now > deadline {
+            Some(Ended::Timeout)
+        } else if watch.idle.is_some_and(|d| now - last_line > d) {
+            Some(Ended::Idle)
+        } else if finished_at.zip(watch.exit_grace).is_some_and(|(t, d)| now - t > d) {
+            Some(Ended::ExitGrace)
+        } else {
+            None
+        };
+        if let Some(why) = stop {
+            ended = why;
+            if why == Ended::Timeout {
+                kill_tree(&mut child.lock().unwrap());
+            } else {
+                terminate_tree(&mut child.lock().unwrap(), TERM_GRACE);
+            }
+            continue;
+        }
+        // The leader exited but its children still hold the pipes open.
+        if watched
+            && !orphans_killed
+            && child.lock().unwrap().try_wait().ok().flatten().is_some()
+            && now - *leader_gone.get_or_insert(now) > ORPHAN_GRACE
+        {
+            orphans_killed = true;
+            terminate_tree(&mut child.lock().unwrap(), TERM_GRACE);
         }
     }
     let status = child.lock().unwrap().wait().map_err(|e| format!("wait failed: {e}"))?;
@@ -155,14 +262,13 @@ pub fn run_streaming(
         }
         None => false,
     };
-    if timed_out {
-        return Err(format!("{program} timed out after {}s", timeout.as_secs()));
-    }
     Ok(Outcome {
-        success: status.success() && !cancelled,
+        success: status.success() && !cancelled && ended == Ended::Exited,
         cancelled,
         stdout,
         stderr,
+        ended,
+        pid,
     })
 }
 
@@ -228,5 +334,46 @@ mod tests {
         assert!(cancel(&id));
         let o = h.join().unwrap().unwrap();
         assert!(o.cancelled && !o.success);
+    }
+
+    #[cfg(unix)]
+    fn group_alive(pgid: u32) -> bool {
+        signal_group(pgid, "-0")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn idle_watch_kills_the_whole_group() {
+        let watch = Watch { idle: Some(Duration::from_millis(600)), exit_grace: None };
+        let start = Instant::now();
+        let o = run_watched(shell("echo hi; sleep 30 & sleep 30"), &std::env::temp_dir(), Duration::from_secs(60), None, watch, |_| false).unwrap();
+        assert_eq!(o.ended, Ended::Idle);
+        assert!(!o.success);
+        assert!(start.elapsed() < Duration::from_secs(10));
+        assert!(!group_alive(o.pid));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exit_grace_kills_a_finished_run_that_stays_alive() {
+        let watch = Watch { idle: Some(Duration::from_secs(60)), exit_grace: Some(Duration::from_millis(500)) };
+        let o = run_watched(shell("echo done; sleep 30"), &std::env::temp_dir(), Duration::from_secs(60), None, watch, |l| {
+            matches!(l, Line::Out(s) if s == "done")
+        })
+        .unwrap();
+        assert_eq!(o.ended, Ended::ExitGrace);
+        assert!(!group_alive(o.pid));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn watched_run_reaps_children_left_holding_the_pipes() {
+        let watch = Watch { idle: Some(Duration::from_secs(60)), exit_grace: None };
+        let start = Instant::now();
+        let o = run_watched(shell("sleep 30 & echo bye"), &std::env::temp_dir(), Duration::from_secs(60), None, watch, |_| false).unwrap();
+        assert_eq!(o.ended, Ended::Exited);
+        assert!(o.success);
+        assert!(start.elapsed() < Duration::from_secs(15));
+        assert!(!group_alive(o.pid));
     }
 }

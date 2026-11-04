@@ -49,6 +49,12 @@ pub enum Iteration {
     Blocked(String),
     /// Stopped by the user mid-iteration.
     Cancelled,
+    /// Killed (hung, timed out, stopped) after its story was committed
+    /// cleanly: counted as passed.
+    Recovered,
+    /// Killed or cut short without a clean story commit: a retry that
+    /// counts toward `stall_after`.
+    Stalled,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -148,7 +154,7 @@ pub fn supervise(limits: &Limits, env: &mut impl RalphEnv) -> Summary {
         }
         // Commits are the only progress signal: uncommitted edits don't
         // count, stopping for review is the safe reading of them.
-        if env.head() == before {
+        if outcome == Iteration::Stalled || env.head() == before {
             idle += 1;
             if limits.stall_after > 0 && idle >= limits.stall_after {
                 return done(StopReason::Stalled, iterations, limit_waits);
@@ -319,6 +325,17 @@ mod tests {
         f.stop_at = Some(1);
         let s = supervise(&limits(), &mut f);
         assert_eq!((s.reason, s.iterations), (StopReason::Stopped, 1));
+    }
+
+    #[test]
+    fn stalled_iterations_count_toward_stall_after_even_with_commits() {
+        let mut f = Fake::new(vec![(Iteration::Stalled, true), (Iteration::Stalled, true)]);
+        let s = supervise(&limits(), &mut f);
+        assert_eq!((s.reason, s.iterations), (StopReason::Stalled, 2));
+
+        let mut f = Fake::new(vec![(Iteration::Stalled, false), (Iteration::Recovered, true), (Iteration::Stalled, false)]);
+        let s = supervise(&Limits { max_iterations: 3, ..limits() }, &mut f);
+        assert_eq!((s.reason, s.iterations), (StopReason::MaxIterations, 3));
     }
 
     #[test]
