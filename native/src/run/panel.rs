@@ -1,5 +1,6 @@
 //! The bottom tool window (`BottomPanel.tsx`): Build output with links to
-//! problems, the running program's terminal, Problems and Debug. The shell
+//! problems, the running programs' terminals, Problems and Debug; with more
+//! than one run or debug session, a strip of instance tabs picks one. The shell
 //! sizes it (`layout.panel_height`, resizable and saved) and shows it when
 //! `layout.panel_open`.
 use super::{open_location, store, BuildStatus, Stream};
@@ -11,6 +12,17 @@ use crate::run::problems::Severity;
 use crate::theme::{self, c, size};
 use gpui::{div, prelude::*, px, AnyElement, App, Context, Entity, Subscription, WeakEntity, Window};
 use std::rc::Rc;
+
+/// A tab of the instance strip: name, dot colour, selected, select, close (stop when live).
+type Instance = (String, u32, bool, Rc<dyn Fn(&mut App)>, Rc<dyn Fn(&mut App)>);
+
+fn debug_color(status: DebugStatus) -> u32 {
+    match status {
+        DebugStatus::Stopped => theme::WARN,
+        DebugStatus::Starting | DebugStatus::Running => theme::INFO,
+        _ => theme::TEXT_FAINT,
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PanelView {
@@ -64,10 +76,10 @@ impl Panel {
         let (view, build, run, counts) = {
             let s = store(cx).read(cx);
             let build = s.build.as_ref().map(|b| (b.status, b.elapsed));
-            let run = s.run.as_ref().map(|r| (r.name.clone(), r.exited));
+            let run = s.shown().map(|r| (r.id(), r.name.clone(), r.exited));
             (s.view, build, run, s.build.as_ref().map(|b| b.counts()).unwrap_or_default())
         };
-        let debug_status = debug::store(cx).read(cx).status;
+        let debug_status = debug::active(cx).map_or(DebugStatus::Idle, |s| s.read(cx).status);
         // `.panel-status`; `-running` is info and pulses (`panel-pulse`, 1s).
         let dot = |id: &'static str, color: u32| -> gpui::AnyElement {
             let d = div().size(px(7.)).flex_none().rounded_full().bg(c(color));
@@ -81,15 +93,11 @@ impl Panel {
             None => theme::TEXT_FAINT,
         };
         let run_label = match &run {
-            Some((name, _)) => format!("Run · {name}"),
+            Some((_, name, _)) => format!("Run · {name}"),
             None => "Run".into(),
         };
-        let run_color = if run.as_ref().is_some_and(|r| !r.1) { theme::INFO } else { theme::TEXT_FAINT };
-        let debug_color = match debug_status {
-            DebugStatus::Stopped => theme::WARN,
-            DebugStatus::Starting | DebugStatus::Running => theme::INFO,
-            _ => theme::TEXT_FAINT,
-        };
+        let run_color = if store(cx).read(cx).is_running() { theme::INFO } else { theme::TEXT_FAINT };
+        let debug_color = debug_color(debug_status);
         let count = |n: usize, color: u32| {
             (n > 0).then(|| div().px_1().rounded(px(8.)).text_xs().bg(c(color)).text_color(c(theme::BG)).child(n.to_string()))
         };
@@ -100,7 +108,7 @@ impl Panel {
             Some((BuildStatus::Cancelled, _)) => "Build cancelled".into(),
             None => String::new(),
         };
-        let run_exited = run.as_ref().is_some_and(|r| r.1);
+        let exited_run = run.filter(|r| r.2).map(|r| r.0);
         div()
             .h(px(32.))
             .flex_none()
@@ -123,7 +131,7 @@ impl Panel {
             ))
             .child(div().flex_1())
             .when(view == PanelView::Build, |d| d.child(div().text_xs().text_color(c(theme::TEXT_FAINT)).child(meta)))
-            .when(view == PanelView::Run && run_exited, |d| {
+            .when_some(exited_run.filter(|_| view == PanelView::Run), |d, id| {
                 d.child(
                     div()
                         .id("panel-clear")
@@ -135,7 +143,7 @@ impl Panel {
                         .hover(|s| s.bg(c(theme::BORDER_STRONG)).text_color(c(theme::TEXT)))
                         .child("Clear")
                         .child(probe("panel-clear"))
-                        .on_click(cx.listener(|_, _, _, cx| store(cx).update(cx, |s, cx| s.clear_run(cx)))),
+                        .on_click(cx.listener(move |_, _, _, cx| store(cx).update(cx, |s, cx| s.close_run(id, cx)))),
                 )
             })
             .child(
@@ -153,6 +161,91 @@ impl Panel {
                         let _ = this.app.update(cx, |a, cx| a.toggle_panel(cx));
                     })),
             )
+    }
+
+    /// The Run or Debug tab's instances, when there is more than one.
+    fn render_instances(&self, view: PanelView, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let items: Vec<Instance> = match view {
+            PanelView::Run => {
+                let s = store(cx).read(cx);
+                let shown = s.shown().map(|r| r.id());
+                s.runs
+                    .iter()
+                    .map(|r| {
+                        let id = r.id();
+                        let select: Rc<dyn Fn(&mut App)> = Rc::new(move |cx| store(cx).update(cx, |s, cx| s.show_run(id, cx)));
+                        let close: Rc<dyn Fn(&mut App)> = Rc::new(move |cx| store(cx).update(cx, |s, cx| s.close_run(id, cx)));
+                        (r.name.clone(), if r.exited { theme::TEXT_FAINT } else { theme::INFO }, Some(id) == shown, select, close)
+                    })
+                    .collect()
+            }
+            PanelView::Debug => {
+                let d = debug::store(cx).read(cx);
+                d.sessions
+                    .iter()
+                    .map(|e| {
+                        let (a, b) = (e.clone(), e.clone());
+                        let select: Rc<dyn Fn(&mut App)> = Rc::new(move |cx| debug::store(cx).update(cx, |d, cx| d.activate(a.clone(), cx)));
+                        let close: Rc<dyn Fn(&mut App)> = Rc::new(move |cx| debug::store(cx).update(cx, |d, cx| d.close(b.clone(), cx)));
+                        let s = e.read(cx);
+                        (s.name.clone(), debug_color(s.status), d.active.as_ref() == Some(e), select, close)
+                    })
+                    .collect()
+            }
+            _ => return None,
+        };
+        if items.len() < 2 {
+            return None;
+        }
+        let tabs = items.into_iter().enumerate().map(|(ix, (name, color, active, select, close))| {
+            div()
+                .id(("panel-instance", ix))
+                .relative()
+                .h_full()
+                .pl_2()
+                .pr_1()
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .cursor_pointer()
+                .border_b_2()
+                .border_color(if active { c(theme::ACCENT) } else { gpui::transparent_black().into() })
+                .text_color(c(if active { theme::TEXT } else { theme::TEXT_DIM }))
+                .hover(|s| s.text_color(c(theme::TEXT)))
+                .child(div().size(px(6.)).flex_none().rounded_full().bg(c(color)))
+                .child(name.clone())
+                .child(
+                    div()
+                        .id(("panel-instance-close", ix))
+                        .relative()
+                        .px_1()
+                        .rounded(px(3.))
+                        .text_color(c(theme::TEXT_FAINT))
+                        .hover(|s| s.bg(c(theme::BORDER_STRONG)).text_color(c(theme::TEXT)))
+                        .child("×")
+                        .child(probe(format!("instance-close:{name}")))
+                        .on_click(move |_, _, cx| {
+                            cx.stop_propagation();
+                            close(cx);
+                        }),
+                )
+                .child(probe(format!("instance:{name}")))
+                .on_click(move |_, _, cx| select(cx))
+        });
+        Some(
+            div()
+                .h(px(26.))
+                .flex_none()
+                .px_2()
+                .flex()
+                .items_center()
+                .gap_1()
+                .text_xs()
+                .border_b_1()
+                .border_color(c(theme::BORDER))
+                .children(tabs)
+                .into_any_element(),
+        )
     }
 
     /// The output views, for the self-test dump.
@@ -260,7 +353,7 @@ impl Render for Panel {
         let body = match view {
             PanelView::Build => self.render_output(cx),
             PanelView::Problems => self.render_problems(cx),
-            PanelView::Run => match store(cx).read(cx).run.as_ref() {
+            PanelView::Run => match store(cx).read(cx).shown() {
                 Some(r) => div().size_full().child(r.view.clone()).into_any_element(),
                 None => Self::empty("Nothing running · Shift+F10 builds and runs the selected configuration"),
             },
@@ -274,6 +367,7 @@ impl Render for Panel {
             .border_t_1()
             .border_color(c(theme::BORDER))
             .child(self.render_header(cx))
+            .children(self.render_instances(view, cx))
             .child(div().flex_1().min_h_0().child(body))
     }
 }

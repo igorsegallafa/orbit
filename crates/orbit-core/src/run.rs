@@ -24,7 +24,8 @@ const LOCAL_FILE: &str = "run.local.json";
 #[serde(rename_all = "camelCase", default)]
 pub struct RunConfig {
     pub name: String,
-    /// "cmake" (build a target with a CMake preset) or "command".
+    /// "cmake" (build a target with a CMake preset), "command", or
+    /// "compound" (launches `configs`).
     pub kind: String,
     /// CMake preset; empty or "${auto}" picks one (see `pick_preset`).
     pub preset: String,
@@ -46,6 +47,36 @@ pub struct RunConfig {
     /// Rider's "Before launch: Build"; on when absent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub build_before_launch: Option<bool>,
+    /// Rider's "Allow multiple instances": launching it again starts another
+    /// instance instead of restarting the running one.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub allow_multiple: bool,
+    /// kind "compound": the repo's configurations it launches, in order.
+    pub configs: Vec<String>,
+}
+
+impl RunConfig {
+    pub fn is_compound(&self) -> bool {
+        self.kind == "compound"
+    }
+}
+
+/// A compound's configurations that can launch, in order, and what is wrong
+/// with the others: an unknown name, itself, or another compound (they don't nest).
+pub fn compound_parts<'a>(compound: &RunConfig, configs: impl IntoIterator<Item = &'a RunConfig> + Clone) -> (Vec<String>, Vec<String>) {
+    let (mut parts, mut problems) = (vec![], vec![]);
+    for name in &compound.configs {
+        match configs.clone().into_iter().find(|c| &c.name == name) {
+            _ if *name == compound.name => problems.push(format!("'{name}' can't include itself")),
+            None => problems.push(format!("'{}' lists '{name}', which is not a configuration", compound.name)),
+            Some(c) if c.is_compound() => problems.push(format!("'{name}' is a compound: compounds don't nest")),
+            Some(_) => parts.push(name.clone()),
+        }
+    }
+    if compound.configs.is_empty() {
+        problems.push(format!("'{}' lists no configurations", compound.name));
+    }
+    (parts, problems)
 }
 
 /// Where a configuration comes from.
@@ -490,7 +521,8 @@ fn update_entry(existing: &Map<String, Value>, config: &RunConfig) -> Map<String
                 out.insert(k.clone(), new.clone());
             }
             Some(_) => {}
-            None if k == "buildBeforeLaunch" => {}
+            // Fields serde leaves out at their default: dropped from the file too.
+            None if k == "buildBeforeLaunch" || k == "allowMultiple" => {}
             None => {
                 out.insert(k.clone(), v.clone());
             }
@@ -889,6 +921,49 @@ mod tests {
 
         remove_config(&root, "game local").unwrap();
         assert!(read_configs(&root).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn compounds_list_known_configurations_in_order() {
+        let c = |name: &str, kind: &str, configs: &[&str]| RunConfig {
+            name: name.into(),
+            kind: kind.into(),
+            configs: configs.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        };
+        let all = [c("gameserver", "cmake", &[]), c("game", "cmake", &[]), c("both", "compound", &["game", "gameserver"]), c("other", "compound", &[])];
+        assert_eq!(compound_parts(&all[2], &all), (vec!["game".to_string(), "gameserver".to_string()], vec![]));
+
+        let bad = c("bad", "compound", &["game", "nope", "bad", "both"]);
+        let (parts, problems) = compound_parts(&bad, &all);
+        assert_eq!(parts, ["game"]);
+        assert_eq!(problems.len(), 3, "{problems:?}");
+        assert!(problems[0].contains("'nope'") && problems[1].contains("itself") && problems[2].contains("don't nest"));
+        assert_eq!(compound_parts(&all[3], &all).1.len(), 1);
+
+        let parsed: RunConfig = serde_json::from_value(json!({ "name": "both", "kind": "compound", "configs": ["game", "gameserver"] })).unwrap();
+        assert_eq!(parsed, all[2]);
+    }
+
+    #[test]
+    fn allow_multiple_is_saved_only_when_on() {
+        let off: RunConfig = serde_json::from_value(json!({ "name": "game" })).unwrap();
+        assert!(!off.allow_multiple);
+        assert!(serde_json::to_value(&off).unwrap().get("allowMultiple").is_none());
+
+        let root = scratch("multi");
+        let mut game = RunConfig { name: "game".into(), kind: "command".into(), allow_multiple: true, ..Default::default() };
+        save_config(&root, &game, true, None).unwrap();
+        let text = std::fs::read_to_string(root.join(".orbit/run.json")).unwrap();
+        assert!(text.contains("\"allowMultiple\": true"), "{text}");
+        assert!(read_configs(&root).unwrap()[0].0.allow_multiple);
+
+        game.allow_multiple = false;
+        save_config(&root, &game, true, Some("game")).unwrap();
+        let text = std::fs::read_to_string(root.join(".orbit/run.json")).unwrap();
+        assert!(!text.contains("allowMultiple"), "{text}");
+        assert!(!read_configs(&root).unwrap()[0].0.allow_multiple);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

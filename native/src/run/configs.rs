@@ -261,6 +261,34 @@ impl RunConfigs {
         cx.notify();
     }
 
+    fn set_kind(&mut self, kind: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.commit(cx);
+        let Some(ix) = self.selected else { return };
+        self.items[ix].config.kind = kind.into();
+        self.selected = None;
+        self.select(Some(ix), window, cx);
+    }
+
+    /// Checks or unchecks one of a compound's configurations (checked ones launch in the order checked).
+    fn toggle_part(&mut self, name: String, cx: &mut Context<Self>) {
+        self.commit(cx);
+        let Some(ix) = self.selected else { return };
+        let list = &mut self.items[ix].config.configs;
+        match list.iter().position(|n| *n == name) {
+            Some(at) => {
+                list.remove(at);
+            }
+            None => list.push(name),
+        }
+        cx.notify();
+    }
+
+    fn compound_problem(&self, ix: usize) -> Option<String> {
+        let i = &self.items[ix];
+        let repo = self.items.iter().filter(|o| o.repo == i.repo).map(|o| &o.config);
+        i.config.is_compound().then(|| orbit_core::run::compound_parts(&i.config, repo).1.into_iter().next()).flatten()
+    }
+
     fn set_target(&mut self, target: String, window: &mut Window, cx: &mut Context<Self>) {
         self.commit(cx);
         let Some(ix) = self.selected else { return };
@@ -364,6 +392,9 @@ impl RunConfigs {
             if self.items.iter().skip(ix + 1).any(|o| o.repo == i.repo && o.config.name == i.config.name) {
                 return Err((Some(ix), format!("Two configurations are named '{}'", i.config.name)));
             }
+            if let Some(e) = self.compound_problem(ix) {
+                return Err((Some(ix), e));
+            }
         }
         // The form's rows: an empty name would be dropped silently.
         env_problem(&self.env_rows(cx)).map_or(Ok(()), |e| Err((self.selected, e)))
@@ -453,7 +484,7 @@ impl RunConfigs {
             let env: Vec<String> = f.env.iter().map(|r| format!("{}={}", text(&r.key, cx), r.value.read(cx).value())).collect();
             let _ = writeln!(
                 out,
-                "  selected {} | target {} | program {:?} | args {:?} | cwd {:?} | env {env:?} | project file {} | build first {} | file {}",
+                "  selected {} | target {} | program {:?} | args {:?} | cwd {:?} | env {env:?} | project file {} | build first {} | allow multiple {} | kind {} {:?} | file {}",
                 text(&f.name, cx),
                 i.config.target,
                 text(&f.program, cx),
@@ -461,6 +492,9 @@ impl RunConfigs {
                 text(&f.cwd, cx),
                 i.shared,
                 i.config.build_before_launch.unwrap_or(true),
+                i.config.allow_multiple,
+                i.config.kind,
+                i.config.configs,
                 self.repos[i.repo].root.join(".orbit").join(if i.shared { "run.json" } else { "run.local.json" }).display(),
             );
         }
@@ -669,6 +703,46 @@ impl RunConfigs {
         let target_kind = repo.targets.iter().find(|t| t.name == item.config.target).map(|t| kind_label(&t.kind));
         let has_targets = !repo.targets.is_empty();
         let command = item.config.kind == "command";
+        let compound = item.config.is_compound();
+        let kinds = div().flex().gap(px(6.)).children([("cmake", "CMake target"), ("command", "Command"), ("compound", "Compound")].into_iter().enumerate().map(|(n, (kind, label))| {
+            let on = item.config.kind == kind;
+            div()
+                .id(("rc-kind", n))
+                .relative()
+                .h(px(26.))
+                .px(px(10.))
+                .flex()
+                .items_center()
+                .rounded(px(6.))
+                .border_1()
+                .border_color(c(if on { theme::ACCENT } else { theme::BORDER_STRONG }))
+                .when(on, |d| d.bg(c(theme::ACCENT_SOFT)))
+                .text_size(px(12.5))
+                .text_color(c(if on { theme::TEXT } else { theme::TEXT_DIM }))
+                .cursor_pointer()
+                .child(label)
+                .child(probe(format!("rc-kind:{kind}")))
+                .on_click(cx.listener(move |t, _: &ClickEvent, window, cx| t.set_kind(kind, window, cx)))
+        }));
+        let parts: Vec<String> = self.items.iter().filter(|o| o.repo == item.repo && !o.config.is_compound() && !o.config.name.is_empty()).map(|o| o.config.name.clone()).collect();
+        let checklist = div().flex().flex_col().gap(px(6.)).children(parts.into_iter().enumerate().map(|(n, name)| {
+            let order = item.config.configs.iter().position(|c| *c == name);
+            let toggle = name.clone();
+            div()
+                .id(("rc-part", n))
+                .relative()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .cursor_pointer()
+                .text_size(px(13.))
+                .child(kit::check(order.is_some(), false))
+                .child(name.clone())
+                .children(order.map(|o| div().text_size(px(11.)).text_color(c(theme::TEXT_FAINT)).child(format!("#{}", o + 1))))
+                .child(probe(format!("rc-part:{name}")))
+                .on_click(cx.listener(move |t, _: &ClickEvent, _, cx| t.toggle_part(toggle.clone(), cx)))
+        }));
+        let problem = self.compound_problem(ix);
         let target = div()
             .id("rc-target")
             .relative()
@@ -712,7 +786,7 @@ impl RunConfigs {
         let shared_file = if item.shared { ".orbit/run.json — shared, commit it" } else { ".orbit/run.local.json — yours, keep it out of git" };
         let browse = kit::button("rc-browse", "Browse…", Kind::Secondary, kit::NORMAL).on_click(cx.listener(|t, _: &ClickEvent, window, cx| t.browse(window, cx)));
         let _ = window;
-        div()
+        let form = div()
             .id("rc-form")
             .flex_1()
             .min_w_0()
@@ -722,6 +796,17 @@ impl RunConfigs {
             .flex_col()
             .gap(px(12.))
             .child(row("Name", field("name", &self.form.name)))
+            .child(row("Kind", kinds));
+        if compound {
+            return form
+                .child(row("Configurations", checklist))
+                .child(hint(problem.unwrap_or_else(|| "Run and Debug launch the checked configurations in this order".into())))
+                .child(div().h(px(1.)).bg(c(theme::BORDER)))
+                .child(checkbox("rc-shared", "Store as project file", item.shared, cx, |i| i.shared = !i.shared))
+                .child(div().mt(px(-8.)).pl(px(24.)).text_size(px(11.5)).text_color(c(theme::TEXT_FAINT)).child(shared_file))
+                .into_any_element();
+        }
+        form
             .when(!command, |d| d.child(row("Target", target)))
             .when(command, |d| d.child(row("Build command", field("build", &self.form.build))))
             .child(row("Executable", field("program", &self.form.program)))
@@ -762,6 +847,7 @@ impl RunConfigs {
                 let on = i.config.build_before_launch.unwrap_or(true);
                 i.config.build_before_launch = if on { Some(false) } else { None };
             }))
+            .child(checkbox("rc-allow-multiple", "Allow multiple instances", item.config.allow_multiple, cx, |i| i.config.allow_multiple = !i.config.allow_multiple))
             .into_any_element()
     }
 

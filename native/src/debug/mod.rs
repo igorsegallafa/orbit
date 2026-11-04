@@ -1,6 +1,8 @@
-//! The debug session (`src/lib/dap/session.ts`), one at a time as in Rider:
-//! breakpoints, launching a run configuration under the debugger, where it
-//! stopped (threads, frames, variables) and the debug console.
+//! Debug sessions (`src/lib/dap/session.ts`), several at once as in Rider:
+//! the shared breakpoints, and per session the run configuration launched
+//! under the debugger, where it stopped (threads, frames, variables) and the
+//! debug console. The active session is the one the Debug tab, the gutter
+//! and the stepping commands follow; a session that stops becomes it.
 pub mod client;
 pub mod gutter;
 pub mod view;
@@ -9,7 +11,8 @@ use crate::run::{self, RunTarget};
 use crate::terminal::TerminalView;
 use client::{DapClient, DapEvent};
 use futures::{FutureExt, StreamExt};
-use gpui::{App, AppContext, Context, Entity, Global, Task};
+use futures::channel::oneshot;
+use gpui::{App, AppContext, Context, Entity, EntityId, Global, Subscription, Task};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -65,6 +68,16 @@ struct Roots {
 }
 
 pub struct DebugStore {
+    pub sessions: Vec<Entity<Session>>,
+    pub active: Option<Entity<Session>>,
+    /// Breakpoint lines (1-based) by the file's workspace path.
+    pub breakpoints: BTreeMap<PathBuf, Vec<u32>>,
+    _watch: HashMap<EntityId, Subscription>,
+}
+
+pub struct Session {
+    /// The instance's name in the Debug tab ("game", "game (2)").
+    pub name: String,
     pub status: DebugStatus,
     pub target: Option<RunTarget>,
     roots: Option<Roots>,
@@ -88,8 +101,6 @@ pub struct DebugStore {
     /// Rider's Console: its colours and input are a real terminal's.
     pub program: Option<Entity<TerminalView>>,
     pub stop_reason: Option<String>,
-    /// Breakpoint lines (1-based) by the file's workspace path.
-    pub breakpoints: BTreeMap<PathBuf, Vec<u32>>,
     _session: Task<()>,
 }
 
@@ -101,15 +112,21 @@ pub fn store(cx: &App) -> Entity<DebugStore> {
     cx.global::<GlobalDebug>().0.clone()
 }
 
+pub fn active(cx: &App) -> Option<Entity<Session>> {
+    store(cx).read(cx).active.clone()
+}
+
 pub fn init(cx: &mut App) {
     let breakpoints = run::saved::load().breakpoints;
-    let entity = cx.new(|_| DebugStore { breakpoints, ..empty() });
-    // Decorations follow the session and the breakpoints.
+    let entity = cx.new(|_| DebugStore { sessions: vec![], active: None, breakpoints, _watch: HashMap::new() });
+    // Decorations follow the active session and the breakpoints.
     cx.observe(&entity, |_, cx| gutter::refresh(cx)).detach();
-    // The adapter (and with it the debuggee) goes with the app.
+    // The adapters (and with them the debuggees) go with the app.
     cx.on_app_quit(|cx| {
-        if let Some(c) = store(cx).read(cx).client.clone() {
-            c.kill();
+        for s in &store(cx).read(cx).sessions {
+            if let Some(c) = s.read(cx).client.clone() {
+                c.kill();
+            }
         }
         async {}
     })
@@ -125,6 +142,108 @@ fn rebase(path: &Path, from: &Path, to: &Path) -> Option<PathBuf> {
 }
 
 impl DebugStore {
+    pub fn breakpoints_in(&self, file: &Path) -> Vec<u32> {
+        self.breakpoints.iter().find(|(k, _)| gutter::same_file(k, file)).map(|(_, v)| v.clone()).unwrap_or_default()
+    }
+
+    pub fn toggle_breakpoint(&mut self, file: PathBuf, line: u32, cx: &mut Context<Self>) {
+        let key = self.breakpoints.keys().find(|k| gutter::same_file(k, &file)).cloned().unwrap_or(file);
+        let lines = self.breakpoints.entry(key.clone()).or_default();
+        match lines.iter().position(|l| *l == line) {
+            Some(ix) => {
+                lines.remove(ix);
+            }
+            None => {
+                lines.push(line);
+                lines.sort_unstable();
+            }
+        }
+        if lines.is_empty() {
+            self.breakpoints.remove(&key);
+        }
+        let all = self.breakpoints.clone();
+        run::saved::update(|s| s.breakpoints = all);
+        let lines = self.breakpoints_in(&key);
+        for s in &self.sessions {
+            s.update(cx, |s, cx| {
+                if matches!(s.status, DebugStatus::Running | DebugStatus::Stopped) && s.owns(&key) {
+                    s.send_breakpoints(&key, lines.clone(), cx).detach();
+                }
+            });
+        }
+        cx.notify();
+    }
+
+    /// A new session, launched once `built` says the build went well; it
+    /// becomes the active one.
+    pub fn start(&mut self, name: String, launch: run::Launch, built: oneshot::Receiver<bool>, cx: &mut Context<Self>) {
+        let session = cx.new(|cx| {
+            let mut s = Session { name, ..empty() };
+            s.start(launch, built, cx);
+            s
+        });
+        // The store's observers (views, gutter) hear of every session's change.
+        self._watch.insert(session.entity_id(), cx.observe(&session, |_, _, cx| cx.notify()));
+        self.sessions.push(session.clone());
+        self.active = Some(session);
+        cx.notify();
+    }
+
+    pub fn activate(&mut self, session: Entity<Session>, cx: &mut Context<Self>) {
+        if self.active.as_ref() != Some(&session) {
+            self.active = Some(session);
+            cx.notify();
+        }
+    }
+
+    /// Drops the sessions `f` picks (stopping live ones); the active one
+    /// moves to the last left.
+    pub fn remove(&mut self, cx: &mut Context<Self>, f: impl Fn(&Entity<Session>, &App) -> bool) {
+        let (gone, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.sessions).into_iter().partition(|s| f(s, cx));
+        self.sessions = kept;
+        for s in gone {
+            self._watch.remove(&s.entity_id());
+            s.update(cx, |s, cx| s.stop(cx));
+        }
+        if self.active.as_ref().is_some_and(|a| !self.sessions.contains(a)) {
+            self.active = self.sessions.last().cloned();
+        }
+        cx.notify();
+    }
+
+    /// The instance tab's ×: stops a live session, closes an ended one.
+    pub fn close(&mut self, session: Entity<Session>, cx: &mut Context<Self>) {
+        if session.read(cx).is_live() {
+            session.update(cx, |s, cx| s.stop(cx));
+        } else {
+            self.remove(cx, |s, _| *s == session);
+        }
+    }
+
+    /// The state for the self-test dump: the active session in full, the others in a line.
+    pub fn dump(&self, cx: &App) -> String {
+        use std::fmt::Write as _;
+        let mut out = String::new();
+        if self.sessions.len() > 1 {
+            let list: Vec<String> = self
+                .sessions
+                .iter()
+                .map(|s| format!("{}{} {:?}", if self.active.as_ref() == Some(s) { "*" } else { "" }, s.read(cx).name, s.read(cx).status))
+                .collect();
+            let _ = writeln!(out, "--- debug sessions: {list:?}");
+        }
+        match &self.active {
+            Some(s) => out.push_str(&s.read(cx).dump(cx)),
+            None => out.push_str("--- debug: Idle\n"),
+        }
+        for (file, lines) in &self.breakpoints {
+            let _ = writeln!(out, "  breakpoints {} {lines:?}", file.display());
+        }
+        out
+    }
+}
+
+impl Session {
     pub fn is_live(&self) -> bool {
         matches!(self.status, DebugStatus::Starting | DebugStatus::Running | DebugStatus::Stopped)
     }
@@ -163,33 +282,6 @@ impl DebugStore {
 
     // ---------- breakpoints ----------
 
-    pub fn breakpoints_in(&self, file: &Path) -> Vec<u32> {
-        self.breakpoints.iter().find(|(k, _)| gutter::same_file(k, file)).map(|(_, v)| v.clone()).unwrap_or_default()
-    }
-
-    pub fn toggle_breakpoint(&mut self, file: PathBuf, line: u32, cx: &mut Context<Self>) {
-        let key = self.breakpoints.keys().find(|k| gutter::same_file(k, &file)).cloned().unwrap_or(file);
-        let lines = self.breakpoints.entry(key.clone()).or_default();
-        match lines.iter().position(|l| *l == line) {
-            Some(ix) => {
-                lines.remove(ix);
-            }
-            None => {
-                lines.push(line);
-                lines.sort_unstable();
-            }
-        }
-        if lines.is_empty() {
-            self.breakpoints.remove(&key);
-        }
-        let all = self.breakpoints.clone();
-        run::saved::update(|s| s.breakpoints = all);
-        if matches!(self.status, DebugStatus::Running | DebugStatus::Stopped) {
-            self.send_breakpoints(&key, cx).detach();
-        }
-        cx.notify();
-    }
-
     /// Editor path → the path the debugger knows (links resolved).
     fn to_debugger(&self, path: &Path) -> PathBuf {
         self.roots.as_ref().and_then(|r| rebase(path, &r.linked, &r.real)).unwrap_or_else(|| path.to_path_buf())
@@ -199,9 +291,9 @@ impl DebugStore {
         self.roots.as_ref().and_then(|r| rebase(path, &r.real, &r.linked)).unwrap_or_else(|| path.to_path_buf())
     }
 
-    fn send_breakpoints(&self, file: &Path, cx: &mut Context<Self>) -> Task<()> {
+    fn send_breakpoints(&self, file: &Path, lines: Vec<u32>, cx: &mut Context<Self>) -> Task<()> {
         let Some(c) = self.client.clone() else { return Task::ready(()) };
-        let lines: Vec<Value> = self.breakpoints_in(file).into_iter().map(|line| json!({ "line": line })).collect();
+        let lines: Vec<Value> = lines.into_iter().map(|line| json!({ "line": line })).collect();
         let args = json!({ "source": { "path": self.to_debugger(file) }, "breakpoints": lines });
         let request = c.request("setBreakpoints", args);
         let shown = file.display().to_string();
@@ -215,30 +307,19 @@ impl DebugStore {
         })
     }
 
-    /// Files under the session's repo (breakpoints elsewhere belong to others).
-    fn session_files(&self) -> Vec<PathBuf> {
-        let Some(r) = &self.roots else { return vec![] };
-        self.breakpoints.keys().filter(|f| f.starts_with(&r.linked)).cloned().collect()
+    /// The file is under the session's repo (breakpoints elsewhere belong to others).
+    fn owns(&self, file: &Path) -> bool {
+        self.roots.as_ref().is_some_and(|r| file.starts_with(&r.linked))
     }
 
     // ---------- session ----------
 
-    /// Builds the selected configuration, then runs it under the debugger.
-    pub fn start(&mut self, cx: &mut Context<Self>) {
-        if self.is_live() {
-            return;
-        }
-        let runs = run::store(cx);
-        let Some((target, config, setup_roots)) = runs.read(cx).selected() else { return };
+    /// Once built, runs the configuration under the debugger.
+    fn start(&mut self, what: run::Launch, built: oneshot::Receiver<bool>, cx: &mut Context<Self>) {
+        let run::Launch { target, config, roots: setup_roots } = what;
         let Some(program) = config.program.clone() else { return };
-        *self = DebugStore { breakpoints: std::mem::take(&mut self.breakpoints), ..empty() };
         self.status = DebugStatus::Starting;
         self.target = Some(target);
-        cx.notify();
-        let Some(built) = runs.update(cx, |r, cx| r.prepare_launch(cx)) else {
-            self.status = DebugStatus::Idle;
-            return;
-        };
         self._session = cx.spawn(async move |this, cx| {
             if !built.await.unwrap_or(false) {
                 let _ = this.update(cx, |s, cx| {
@@ -354,6 +435,9 @@ impl DebugStore {
                 .iter()
                 .filter_map(|t| Some((t["id"].as_i64()?, t["name"].as_str().unwrap_or_default().to_string())))
                 .collect();
+            if let Some(me) = this.upgrade() {
+                cx.update(|cx| store(cx).update(cx, |d, cx| d.activate(me, cx)));
+            }
             let _ = this.update(cx, |s, cx| {
                 let thread = body["threadId"].as_i64().or(threads.first().map(|t| t.0));
                 s.status = DebugStatus::Stopped;
@@ -561,8 +645,11 @@ impl DebugStore {
     pub fn stop(&mut self, cx: &mut Context<Self>) {
         let Some(c) = self.client.clone() else {
             if self.status == DebugStatus::Starting {
-                // Still building: cancel that.
-                run::store(cx).update(cx, |r, cx| r.stop(cx));
+                // Still building (or waiting to): cancel that.
+                self._session = Task::ready(());
+                if let Some(t) = &self.target {
+                    run::store(cx).update(cx, |r, _| r.cancel_build_of(t));
+                }
                 self.status = DebugStatus::Idle;
                 cx.notify();
             }
@@ -589,14 +676,12 @@ impl DebugStore {
         let mut out = String::new();
         let _ = writeln!(
             out,
-            "--- debug: {:?}{}{}",
+            "--- debug: {:?}{}{} · {}",
             self.status,
             self.adapter.as_ref().map(|a| format!(" via {a}")).unwrap_or_default(),
-            self.stop_reason.as_ref().map(|r| format!(" · {r}")).unwrap_or_default()
+            self.stop_reason.as_ref().map(|r| format!(" · {r}")).unwrap_or_default(),
+            self.name
         );
-        for (file, lines) in &self.breakpoints {
-            let _ = writeln!(out, "  breakpoints {} {lines:?}", file.display());
-        }
         if !self.threads.is_empty() {
             let threads: Vec<String> = self.threads.iter().map(|(id, n)| format!("{id} {n}")).collect();
             let _ = writeln!(out, "  threads {threads:?}, selected {:?}", self.thread_id);
@@ -631,8 +716,9 @@ impl DebugStore {
     }
 }
 
-fn empty() -> DebugStore {
-    DebugStore {
+pub(crate) fn empty() -> Session {
+    Session {
+        name: String::new(),
         status: DebugStatus::Idle,
         target: None,
         roots: None,
@@ -650,7 +736,6 @@ fn empty() -> DebugStore {
         open_line: None,
         program: None,
         stop_reason: None,
-        breakpoints: BTreeMap::new(),
         _session: Task::ready(()),
     }
 }
@@ -659,7 +744,7 @@ fn empty() -> DebugStore {
 /// `configurationDone`, so: initialize → launch (not awaited) → initialized
 /// → setBreakpoints → configurationDone → launch's answer.
 /// The program's terminal: a PTY with no process, which gdb starts the program on.
-fn program_terminal(config: &orbit_core::run::ResolvedRun, cx: &mut Context<DebugStore>) -> Entity<TerminalView> {
+fn program_terminal(config: &orbit_core::run::ResolvedRun, cx: &mut Context<Session>) -> Entity<TerminalView> {
     let meta = crate::sessions::SessionMeta {
         id: format!("debug:{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis())),
         workspace: String::new(),
@@ -698,7 +783,7 @@ fn launch_env(adapter: &str, config: &[(String, String)]) -> Value {
 }
 
 async fn launch(
-    this: &gpui::WeakEntity<DebugStore>,
+    this: &gpui::WeakEntity<Session>,
     c: &Arc<DapClient>,
     config: &orbit_core::run::ResolvedRun,
     program: &str,
@@ -737,8 +822,10 @@ async fn launch(
             initialized.await?;
         }
     }
-    let files = this.update(cx, |s, _| s.session_files()).map_err(|_| "gone")?;
-    let sends: Vec<Task<()>> = this.update(cx, |s, cx| files.iter().map(|f| s.send_breakpoints(f, cx)).collect()).map_err(|_| "gone")?;
+    let all = cx.update(|cx| store(cx).read(cx).breakpoints.clone());
+    let sends: Vec<Task<()>> = this
+        .update(cx, |s, cx| all.iter().filter(|(f, _)| s.owns(f)).map(|(f, lines)| s.send_breakpoints(f, lines.clone(), cx)).collect())
+        .map_err(|_| "gone")?;
     futures::future::join_all(sends).await;
     c.request("configurationDone", json!({})).await?;
     if answer.is_none() {

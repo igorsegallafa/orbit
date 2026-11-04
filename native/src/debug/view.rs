@@ -3,7 +3,8 @@
 //! left, and the main area for the program's output (a real terminal: gdb
 //! runs the program on it) or the Debug Console (the debugger's messages and
 //! the evaluate input). Both splitters are dragged and saved in the layout.
-use super::{store, ConsoleKind, DebugStatus, DebugStore};
+//! It shows the active session.
+use super::{store, ConsoleKind, DebugStatus, Session};
 use crate::app::OrbitApp;
 use crate::logview::LogView;
 use crate::probe::probe;
@@ -31,6 +32,8 @@ pub struct DebugView {
     pub tab: MainTab,
     /// The session the tab was last chosen for (a new one shows its program's output).
     program_shown: Option<gpui::EntityId>,
+    /// The session the console shows.
+    console_of: Option<gpui::EntityId>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -56,8 +59,8 @@ pub struct VarRow {
 }
 
 /// The tree flattened: scopes, then expanded variables under them.
-pub fn variable_rows(s: &DebugStore, out: &mut Vec<VarRow>) {
-    fn children(s: &DebugStore, reference: i64, depth: usize, out: &mut Vec<VarRow>) {
+pub fn variable_rows(s: &Session, out: &mut Vec<VarRow>) {
+    fn children(s: &Session, reference: i64, depth: usize, out: &mut Vec<VarRow>) {
         let Some(list) = s.vars.get(&reference) else {
             out.push(VarRow { depth, name: "Loading…".into(), value: String::new(), ty: None, reference: 0, scope: false, open: false, loading: true });
             return;
@@ -83,6 +86,20 @@ const TOOLBAR: f32 = 30.;
 const SPLITTER: f32 = 6.;
 const MAX_CONSOLE_LINES: usize = 5000;
 
+/// Reads the active session (an idle one when there is none).
+fn read<R>(cx: &App, f: impl FnOnce(&Session) -> R) -> R {
+    match super::active(cx) {
+        Some(s) => f(s.read(cx)),
+        None => f(&super::empty()),
+    }
+}
+
+fn update(cx: &mut App, f: impl FnOnce(&mut Session, &mut Context<Session>)) {
+    if let Some(s) = super::active(cx) {
+        s.update(cx, f);
+    }
+}
+
 impl DebugView {
     pub fn new(app: WeakEntity<OrbitApp>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("Evaluate expression while paused (Enter)"));
@@ -92,16 +109,16 @@ impl DebugView {
             cx.subscribe_in(&input, window, |this, input, ev: &InputEvent, window, cx| {
                 if let InputEvent::PressEnter { .. } = ev {
                     let text = input.read(cx).value().to_string();
-                    if text.trim().is_empty() || store(cx).read(cx).status != DebugStatus::Stopped {
+                    if text.trim().is_empty() || read(cx, |s| s.status) != DebugStatus::Stopped {
                         return;
                     }
                     input.update(cx, |i, cx| i.set_value("", window, cx));
                     this.tab = MainTab::Console;
-                    store(cx).update(cx, |s, cx| s.evaluate(text, cx));
+                    update(cx, |s, cx| s.evaluate(text, cx));
                 }
             }),
         ];
-        Self { app, input, console, tab: MainTab::Output, program_shown: None, _subscriptions: subs }
+        Self { app, input, console, tab: MainTab::Output, program_shown: None, console_of: None, _subscriptions: subs }
     }
 
     fn sizes(&self, cx: &App) -> (f32, f32) {
@@ -137,14 +154,18 @@ impl DebugView {
 
     /// Keeps the console's lines in step with the store's.
     fn sync_console(&mut self, cx: &mut Context<Self>) {
+        let of = store(cx).read(cx).active.as_ref().map(|s| s.entity_id());
+        if of != self.console_of {
+            self.console_of = of;
+            self.console.update(cx, |v, cx| v.clear(cx));
+        }
         let seen = self.console.read(cx).seen();
-        let (total, tail) = {
-            let s = store(cx).read(cx);
+        let (total, tail) = read(cx, |s| {
             let fresh = s.console_total.saturating_sub(seen).min(s.console.len());
             // One more: the last shown line may have grown.
             let from = s.console.len() - (fresh + 1).min(s.console.len());
             (s.console_total, s.console[from..].to_vec())
-        };
+        });
         self.console.update(cx, |v, cx| {
             v.sync(
                 total,
@@ -172,7 +193,7 @@ fn tool(
     hint: &'static str,
     enabled: bool,
     cx: &mut Context<DebugView>,
-    on: fn(&mut DebugStore, &mut Context<DebugStore>),
+    on: fn(&mut Session, &mut Context<Session>),
 ) -> impl IntoElement {
     div()
         .id(id)
@@ -190,7 +211,7 @@ fn tool(
         .tooltip(move |window, cx| Tooltip::new(hint).build(window, cx))
         .on_click(cx.listener(move |_, _, _, cx| {
             if enabled {
-                store(cx).update(cx, on);
+                update(cx, on);
             }
         }))
 }
@@ -229,9 +250,8 @@ fn caption(text: &'static str) -> impl IntoElement {
 
 impl DebugView {
     fn render_frames(&self, cx: &mut Context<Self>) -> AnyElement {
-        let s = store(cx).read(cx);
-        let stopped = s.status == DebugStatus::Stopped;
-        let (threads, thread_id, frames, frame_id) = (s.threads.clone(), s.thread_id, s.frames.clone(), s.frame_id);
+        let (stopped, threads, thread_id, frames, frame_id) =
+            read(cx, |s| (s.status == DebugStatus::Stopped, s.threads.clone(), s.thread_id, s.frames.clone(), s.frame_id));
         div()
             .id("dbg-frames")
             .flex_1()
@@ -252,7 +272,7 @@ impl DebugView {
                         .hover(|s| s.bg(c(theme::PANEL_HOVER)))
                         .child(label)
                         .child(probe(format!("thread:{id}")))
-                        .on_click(cx.listener(move |_, _, _, cx| store(cx).update(cx, |s, cx| s.select_thread(id, false, cx))))
+                        .on_click(cx.listener(move |_, _, _, cx| update(cx, |s, cx| s.select_thread(id, false, cx))))
                 }))
             })
             .when(frames.is_empty(), |d| {
@@ -275,16 +295,17 @@ impl DebugView {
                     .child(div().flex_1().truncate().text_color(c(if f.in_repo { theme::TEXT } else { theme::TEXT_FAINT })).child(f.name.clone()))
                     .child(div().flex_none().text_xs().text_color(c(theme::TEXT_FAINT)).child(loc))
                     .child(probe(format!("frame:{ix}")))
-                    .on_click(cx.listener(move |_, _, _, cx| store(cx).update(cx, |s, cx| s.select_frame(id, true, cx))))
+                    .on_click(cx.listener(move |_, _, _, cx| update(cx, |s, cx| s.select_frame(id, true, cx))))
             }))
             .into_any_element()
     }
 
     fn render_vars(&self, cx: &mut Context<Self>) -> AnyElement {
-        let s = store(cx).read(cx);
-        let stopped = s.status == DebugStatus::Stopped;
-        let mut rows = vec![];
-        variable_rows(s, &mut rows);
+        let (stopped, rows) = read(cx, |s| {
+            let mut rows = vec![];
+            variable_rows(s, &mut rows);
+            (s.status == DebugStatus::Stopped, rows)
+        });
         div()
             .id("dbg-vars")
             .flex_1()
@@ -323,7 +344,7 @@ impl DebugView {
                             .tooltip(move |window, cx| Tooltip::new(full.clone()).build(window, cx))
                     })
                     .child(probe(format!("var:{}", r.name)))
-                    .on_click(cx.listener(move |_, _, _, cx| store(cx).update(cx, |s, cx| s.toggle_var(reference, cx))))
+                    .on_click(cx.listener(move |_, _, _, cx| update(cx, |s, cx| s.toggle_var(reference, cx))))
             }))
             .into_any_element()
     }
@@ -355,18 +376,15 @@ impl Render for DebugView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_console(cx);
         let (side_w, frames_ratio) = self.sizes(cx);
-        let entity = store(cx);
-        let s = entity.read(cx);
-        let (status, stopped) = (s.status, s.status == DebugStatus::Stopped);
-        let live = s.is_live();
+        let (status, live, reason, program) = read(cx, |s| (s.status, s.is_live(), s.stop_reason.clone(), s.program.clone()));
+        let stopped = status == DebugStatus::Stopped;
         let state = match status {
             DebugStatus::Idle => "Shift+F9 debugs the selected configuration".to_string(),
             DebugStatus::Starting => "Starting…".into(),
             DebugStatus::Running => "Running".into(),
-            DebugStatus::Stopped => format!("Paused{}", s.stop_reason.as_ref().map(|r| format!(" · {r}")).unwrap_or_default()),
+            DebugStatus::Stopped => format!("Paused{}", reason.map(|r| format!(" · {r}")).unwrap_or_default()),
             DebugStatus::Ended => "Ended".into(),
         };
-        let program = s.program.clone();
         // A new session's program: show its output.
         if program.as_ref().map(|p| p.entity_id()) != self.program_shown {
             self.program_shown = program.as_ref().map(|p| p.entity_id());
@@ -385,12 +403,12 @@ impl Render for DebugView {
             .gap_0p5()
             .border_b_1()
             .border_color(c(theme::BORDER))
-            .child(tool("dbg-resume", "play", "Resume (F9)", stopped, cx, DebugStore::resume))
-            .child(tool("dbg-pause", "pause", "Pause", status == DebugStatus::Running, cx, DebugStore::pause))
-            .child(tool("dbg-over", "step-over", "Step Over (F8)", stopped, cx, DebugStore::step_over))
-            .child(tool("dbg-into", "step-into", "Step Into (F7)", stopped, cx, DebugStore::step_into))
-            .child(tool("dbg-out", "step-out", "Step Out (Shift+F8)", stopped, cx, DebugStore::step_out))
-            .child(tool("dbg-stop", "stop", "Stop (Ctrl+F2)", live, cx, DebugStore::stop))
+            .child(tool("dbg-resume", "play", "Resume (F9)", stopped, cx, Session::resume))
+            .child(tool("dbg-pause", "pause", "Pause", status == DebugStatus::Running, cx, Session::pause))
+            .child(tool("dbg-over", "step-over", "Step Over (F8)", stopped, cx, Session::step_over))
+            .child(tool("dbg-into", "step-into", "Step Into (F7)", stopped, cx, Session::step_into))
+            .child(tool("dbg-out", "step-out", "Step Out (Shift+F8)", stopped, cx, Session::step_out))
+            .child(tool("dbg-stop", "stop", "Stop (Ctrl+F2)", live, cx, Session::stop))
             .child(div().ml_2().text_xs().text_color(c(theme::TEXT_FAINT)).child(state));
 
         let side = div()

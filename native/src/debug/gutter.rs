@@ -75,10 +75,11 @@ pub fn refresh(cx: &mut App) {
     editors(cx);
     let debug = store(cx);
     let d = debug.read(cx);
-    let here: Option<(PathBuf, u32)> = (d.status == DebugStatus::Stopped)
-        .then(|| d.frames.iter().find(|f| Some(f.id) == d.frame_id))
-        .flatten()
-        .and_then(|f| Some((f.file.clone()?, f.line)));
+    // The paused line is the active session's.
+    let here: Option<(PathBuf, u32)> = d.active.as_ref().map(|s| s.read(cx)).filter(|s| s.status == DebugStatus::Stopped).and_then(|s| {
+        let f = s.frames.iter().find(|f| Some(f.id) == s.frame_id)?;
+        Some((f.file.clone()?, f.line))
+    });
     let marks: Vec<(Deco, Vec<u32>, Option<u32>)> = cx
         .global::<Decorated>()
         .0

@@ -1,8 +1,9 @@
 //! Build and Run (`src/lib/runStore.ts`): the selected run configuration
 //! per workspace (from each repo's `.orbit/run.json`, through
 //! `orbit_core::run`), the current build with its output and problems, and
-//! the running program's terminal. One build and one run at a time, as in
-//! Rider. The title bar widget is `widget.rs`, the bottom panel `panel.rs`.
+//! the running programs' terminals. One build at a time (launches that need
+//! one wait their turn) and any number of programs, launched by Rider's
+//! rules (`launch`). The title bar widget is `widget.rs`, the bottom panel `panel.rs`.
 pub mod configs;
 pub mod problems;
 pub mod saved;
@@ -18,8 +19,8 @@ use crate::terminal::{self, TerminalView};
 use futures::channel::{mpsc, oneshot};
 use futures::StreamExt;
 use gpui::{
-    AnyElement, AnyWindowHandle, App, AppContext, Context, Entity, Global, IntoElement, KeyBinding, ParentElement,
-    SharedString, Styled, Subscription, Task, WeakEntity, Window,
+    AnyElement, AnyWindowHandle, App, AppContext, Context, Entity, EntityId, Global, IntoElement, KeyBinding,
+    ParentElement, SharedString, Styled, Subscription, Task, WeakEntity, Window,
 };
 use orbit_core::events::Events;
 use orbit_core::run::ResolvedRun;
@@ -108,9 +109,24 @@ impl Build {
 
 pub struct RunProc {
     pub view: Entity<TerminalView>,
+    /// The instance's name ("game", "game (2)").
     pub name: String,
+    pub target: RunTarget,
     pub exited: bool,
     _watch: Subscription,
+}
+
+impl RunProc {
+    pub fn id(&self) -> EntityId {
+        self.view.entity_id()
+    }
+}
+
+/// What a launch needs: the configuration and its repo's (real, workspace) roots.
+pub struct Launch {
+    pub target: RunTarget,
+    pub config: ResolvedRun,
+    pub roots: (PathBuf, PathBuf),
 }
 
 pub struct RunStore {
@@ -122,14 +138,15 @@ pub struct RunStore {
     pub target: Option<RunTarget>,
     pub loading: bool,
     pub build: Option<Build>,
-    pub run: Option<RunProc>,
+    pub runs: Vec<RunProc>,
+    /// The run the Run tab shows (None: the last).
+    pub shown_run: Option<EntityId>,
     pub view: PanelView,
     pub panel: Option<Entity<panel::Panel>>,
     /// Edit Configurations, while open.
     pub dialog: Option<Entity<configs::RunConfigs>>,
     _load: Task<()>,
     _build: Task<()>,
-    _run_after: Task<()>,
 }
 
 struct GlobalRun(Entity<RunStore>);
@@ -145,11 +162,110 @@ fn building(cx: &App) -> bool {
 }
 
 fn has_program(cx: &App) -> bool {
-    store(cx).read(cx).config().is_some_and(|c| c.program.is_some())
+    store(cx).read(cx).config().is_some_and(|c| c.program.is_some() || c.raw.is_compound())
+}
+
+fn active_status(cx: &App) -> Option<DebugStatus> {
+    debug::active(cx).map(|s| s.read(cx).status)
 }
 
 fn paused(cx: &App) -> bool {
-    debug::store(cx).read(cx).status == DebugStatus::Stopped
+    active_status(cx) == Some(DebugStatus::Stopped)
+}
+
+/// The configurations of the live programs and debug sessions, one per instance.
+pub fn live_targets(cx: &App) -> Vec<RunTarget> {
+    let runs = store(cx).read(cx).runs.iter().filter(|r| !r.exited).map(|r| r.target.clone());
+    let sessions = debug::store(cx).read(cx).sessions.iter().map(|s| s.read(cx)).filter(|s| s.is_live()).filter_map(|s| s.target.clone());
+    runs.chain(sessions).collect()
+}
+
+fn live(cx: &App) -> bool {
+    !live_targets(cx).is_empty()
+}
+
+/// The same configuration (whatever the preset).
+pub fn same(a: &RunTarget, b: &RunTarget) -> bool {
+    a.workspace == b.workspace && a.repo == b.repo && a.name == b.name
+}
+
+/// A new instance's name beside the live ones': the configuration's, then "name (2)", "name (3)"…
+pub fn instance_name(config: &str, live: &[String]) -> String {
+    (1..).map(|n| if n == 1 { config.to_string() } else { format!("{config} ({n})") }).find(|n| !live.contains(n)).unwrap_or_default()
+}
+
+/// Rider's rule: launching a configuration that runs restarts it, unless it allows multiple instances.
+pub fn restarts(live: usize, allow_multiple: bool) -> bool {
+    live > 0 && !allow_multiple
+}
+
+/// Runs or debugs `target` beside whatever else runs; its live instances are
+/// stopped first unless it allows multiple, its finished one of that kind makes room.
+pub fn launch(target: RunTarget, debug: bool, cx: &mut App) {
+    let runs = store(cx);
+    let Some(launch) = runs.read(cx).resolve(&target) else { return };
+    if launch.config.program.is_none() {
+        return;
+    }
+    let mut live: Vec<String> = runs.read(cx).runs.iter().filter(|r| !r.exited && same(&r.target, &target)).map(|r| r.name.clone()).collect();
+    for s in &debug::store(cx).read(cx).sessions {
+        let s = s.read(cx);
+        if s.is_live() && s.target.as_ref().is_some_and(|t| same(t, &target)) {
+            live.push(s.name.clone());
+        }
+    }
+    let restart = restarts(live.len(), launch.config.raw.allow_multiple);
+    let name = instance_name(&target.name, if restart { &[] } else { &live });
+    runs.update(cx, |s, cx| {
+        // A Run of it still building is superseded too.
+        if !launch.config.raw.allow_multiple {
+            s.cancel_build_of(&target);
+        }
+        s.remove_runs(cx, |r| same(&r.target, &target) && if r.exited { !debug } else { restart })
+    });
+    debug::store(cx).update(cx, |d, cx| {
+        d.remove(cx, |s, cx| {
+            let s = s.read(cx);
+            s.target.as_ref().is_some_and(|t| same(t, &target)) && if s.is_live() { restart } else { debug }
+        })
+    });
+    let built = runs.update(cx, |s, cx| s.prepare_launch(&launch, cx));
+    if debug {
+        debug::store(cx).update(cx, |d, cx| d.start(name, launch, built, cx));
+    } else {
+        runs.update(cx, |s, cx| s.run_after(name, launch, built, cx));
+    }
+}
+
+/// Stops the live programs and debug sessions whose configuration `f` picks.
+fn stop_where(f: impl Fn(&RunTarget) -> bool, cx: &mut App) {
+    store(cx).update(cx, |s, cx| {
+        for r in s.runs.iter().filter(|r| !r.exited && f(&r.target)) {
+            r.view.read(cx).send(b"\x03");
+        }
+    });
+    for session in debug::store(cx).read(cx).sessions.clone() {
+        session.update(cx, |s, cx| {
+            if s.is_live() && s.target.as_ref().is_some_and(&f) {
+                s.stop(cx);
+            }
+        });
+    }
+}
+
+/// Stop (Ctrl+F2): the build, else the selected configuration's instances
+/// (a compound's: its configurations'), else everything.
+fn stop(cx: &mut App) {
+    let runs = store(cx);
+    if runs.read(cx).is_building() {
+        runs.update(cx, |s, cx| s.stop(cx));
+        return;
+    }
+    let Some(target) = runs.read(cx).target.clone() else { return };
+    let members = runs.read(cx).members(&target);
+    let mine = |t: &RunTarget| members.iter().any(|m| same(m, t));
+    let any_mine = live_targets(cx).iter().any(mine);
+    stop_where(|t| !any_mine || mine(t), cx);
 }
 
 /// Commands, keys and the stores. Called from `main.rs` after the editor's keys.
@@ -162,21 +278,30 @@ pub fn init(cx: &mut App) {
         target: None,
         loading: false,
         build: None,
-        run: None,
+        runs: vec![],
+        shown_run: None,
         view: PanelView::Build,
         panel: None,
         dialog: None,
         _load: Task::ready(()),
         _build: Task::ready(()),
-        _run_after: Task::ready(()),
     });
     cx.set_global(GlobalRun(entity));
     debug::init(cx);
 
-    let ready = |_: &OrbitApp, cx: &App| store(cx).read(cx).config().is_some() && !building(cx);
-    let live = |_: &OrbitApp, cx: &App| debug::store(cx).read(cx).is_live();
-    let with_debug = |f: fn(&mut debug::DebugStore, &mut Context<debug::DebugStore>)| {
-        move |_: &mut OrbitApp, _: &mut Window, cx: &mut Context<OrbitApp>| debug::store(cx).update(cx, f)
+    let ready = |_: &OrbitApp, cx: &App| store(cx).read(cx).config().is_some_and(|c| !c.raw.is_compound()) && !building(cx);
+    // Run and Debug don't wait for a build to end: theirs queues behind it.
+    let launchable = |_: &OrbitApp, cx: &App| has_program(cx);
+    let with_debug = |f: fn(&mut debug::Session, &mut Context<debug::Session>)| {
+        move |_: &mut OrbitApp, _: &mut Window, cx: &mut Context<OrbitApp>| {
+            if let Some(s) = debug::active(cx) {
+                s.update(cx, f);
+            }
+        }
+    };
+    let selected = |cx: &App| {
+        let s = store(cx).read(cx);
+        s.target.as_ref().map(|t| s.members(t)).unwrap_or_default()
     };
     for command in [
         Command::new("run.build", "Build").keys(["ctrl-f9"]).when(ready).run(|a, _, cx| {
@@ -200,34 +325,30 @@ pub fn init(cx: &mut App) {
                 open_configurations(window, cx);
                 cx.notify();
             }),
-        Command::new("run.run", "Run").keys(["shift-f10"]).when(move |a, cx| ready(a, cx) && has_program(cx)).run(|a, _, cx| {
+        Command::new("run.run", "Run").keys(["shift-f10"]).when(launchable).run(move |a, _, cx| {
             a.layout.panel_open = true;
-            store(cx).update(cx, |s, cx| s.build_and_run(cx));
+            for t in selected(cx) {
+                launch(t, false, cx);
+            }
         }),
-        Command::new("run.debug", "Debug")
-            .keys(["shift-f9"])
-            .when(move |a, cx| ready(a, cx) && has_program(cx) && !live(a, cx))
-            .run(|a, _, cx| {
-                a.layout.panel_open = true;
-                debug::store(cx).update(cx, |d, cx| d.start(cx));
-            }),
-        Command::new("run.stop", "Stop")
-            .keys(["ctrl-f2"])
-            .when(move |a, cx| building(cx) || store(cx).read(cx).is_running() || live(a, cx))
-            .run(|_, _, cx| {
-                if debug::store(cx).read(cx).is_live() {
-                    debug::store(cx).update(cx, |d, cx| d.stop(cx));
-                } else {
-                    store(cx).update(cx, |s, cx| s.stop(cx));
-                }
-            }),
+        Command::new("run.debug", "Debug").keys(["shift-f9"]).when(launchable).run(move |a, _, cx| {
+            a.layout.panel_open = true;
+            for t in selected(cx) {
+                launch(t, true, cx);
+            }
+        }),
+        Command::new("run.stop", "Stop").keys(["ctrl-f2"]).when(|_, cx| building(cx) || live(cx)).run(|_, _, cx| stop(cx)),
+        Command::new("run.stopAll", "Stop All").when(|_, cx| building(cx) || live(cx)).run(|_, _, cx| {
+            store(cx).update(cx, |s, cx| s.stop(cx));
+            stop_where(|_| true, cx);
+        }),
         Command::new("debug.pause", "Pause Program")
-            .when(|_, cx| debug::store(cx).read(cx).status == DebugStatus::Running)
-            .run(with_debug(debug::DebugStore::pause)),
-        Command::new("debug.resume", "Resume Program").keys(["f9"]).when(|_, cx| paused(cx)).run(with_debug(debug::DebugStore::resume)),
-        Command::new("debug.stepOver", "Step Over").keys(["f8"]).when(|_, cx| paused(cx)).run(with_debug(debug::DebugStore::step_over)),
-        Command::new("debug.stepInto", "Step Into").keys(["f7"]).when(|_, cx| paused(cx)).run(with_debug(debug::DebugStore::step_into)),
-        Command::new("debug.stepOut", "Step Out").keys(["shift-f8"]).when(|_, cx| paused(cx)).run(with_debug(debug::DebugStore::step_out)),
+            .when(|_, cx| active_status(cx) == Some(DebugStatus::Running))
+            .run(with_debug(debug::Session::pause)),
+        Command::new("debug.resume", "Resume Program").keys(["f9"]).when(|_, cx| paused(cx)).run(with_debug(debug::Session::resume)),
+        Command::new("debug.stepOver", "Step Over").keys(["f8"]).when(|_, cx| paused(cx)).run(with_debug(debug::Session::step_over)),
+        Command::new("debug.stepInto", "Step Into").keys(["f7"]).when(|_, cx| paused(cx)).run(with_debug(debug::Session::step_into)),
+        Command::new("debug.stepOut", "Step Out").keys(["shift-f8"]).when(|_, cx| paused(cx)).run(with_debug(debug::Session::step_out)),
         Command::new("debug.toggleBreakpoint", "Toggle Breakpoint")
             .keys(["ctrl-f8"])
             .when(|a, _| a.active_editor().is_some())
@@ -395,7 +516,11 @@ impl RunStore {
     }
 
     pub fn is_running(&self) -> bool {
-        self.run.as_ref().is_some_and(|r| !r.exited)
+        self.runs.iter().any(|r| !r.exited)
+    }
+
+    pub fn shown(&self) -> Option<&RunProc> {
+        self.runs.iter().find(|r| Some(r.id()) == self.shown_run).or(self.runs.last())
     }
 
     pub fn can_build_all(&self) -> bool {
@@ -415,12 +540,24 @@ impl RunStore {
         self.setup(&t.repo)?.configs.iter().find(|c| c.name == t.name)
     }
 
-    /// The target, its configuration and the repo's (real, workspace) roots.
-    pub fn selected(&self) -> Option<(RunTarget, ResolvedRun, (PathBuf, PathBuf))> {
-        let t = self.target.clone()?;
+    /// What launching `t` launches: a compound's configurations, else `t`.
+    pub fn members(&self, t: &RunTarget) -> Vec<RunTarget> {
+        let Some(setup) = self.setup(&t.repo) else { return vec![] };
+        match setup.configs.iter().find(|c| c.name == t.name) {
+            Some(c) if c.raw.is_compound() => {
+                let (parts, _) = orbit_core::run::compound_parts(&c.raw, setup.configs.iter().map(|c| &c.raw));
+                parts.into_iter().map(|name| RunTarget { name, ..t.clone() }).collect()
+            }
+            Some(_) => vec![t.clone()],
+            None => vec![],
+        }
+    }
+
+    /// `t` with its configuration and the repo's roots.
+    pub fn resolve(&self, t: &RunTarget) -> Option<Launch> {
         let setup = self.setup(&t.repo)?;
         let config = setup.configs.iter().find(|c| c.name == t.name)?.clone();
-        Some((t, config, (setup.root.clone(), setup.linked_root.clone())))
+        Some(Launch { target: t.clone(), config, roots: (setup.root.clone(), setup.linked_root.clone()) })
     }
 
     pub fn set_view(&mut self, view: PanelView, cx: &mut Context<Self>) {
@@ -529,31 +666,57 @@ impl RunStore {
 
     /// Builds the selected configuration; the receiver gets whether it succeeded.
     pub fn start_build(&mut self, cx: &mut Context<Self>) -> Option<oneshot::Receiver<bool>> {
-        self.build_inner(false, cx)
+        let t = self.target.clone()?;
+        self.build_inner(&t, false, cx)
     }
 
     /// Builds every target of the selected configuration's repo.
     pub fn start_build_all(&mut self, cx: &mut Context<Self>) -> Option<oneshot::Receiver<bool>> {
-        self.build_inner(true, cx)
+        let t = self.target.clone()?;
+        self.build_inner(&t, true, cx)
     }
 
-    /// Before Run or Debug: the build, or a ready answer when the
-    /// configuration doesn't build first ("Before launch: Build" off).
-    pub fn prepare_launch(&mut self, cx: &mut Context<Self>) -> Option<oneshot::Receiver<bool>> {
-        let (_, config, _) = self.selected()?;
-        if config.build_before_launch {
-            return self.start_build(cx);
-        }
+    /// Before Run or Debug: the build, queued behind the current one, or a ready
+    /// answer when "Before launch: Build" is off. Dropping the receiver gives up the wait.
+    pub fn prepare_launch(&mut self, launch: &Launch, cx: &mut Context<Self>) -> oneshot::Receiver<bool> {
         let (tx, rx) = oneshot::channel();
-        let _ = tx.send(true);
-        Some(rx)
+        if !launch.config.build_before_launch {
+            let _ = tx.send(true);
+            return rx;
+        }
+        let target = launch.target.clone();
+        cx.spawn(async move |this, cx| loop {
+            if tx.is_canceled() {
+                return;
+            }
+            match this.update(cx, |s, cx| (!s.is_building()).then(|| s.build_inner(&target, false, cx))) {
+                Ok(Some(built)) => {
+                    let ok = match built {
+                        Some(done) => done.await.unwrap_or(false),
+                        None => false,
+                    };
+                    let _ = tx.send(ok);
+                    return;
+                }
+                Ok(None) => cx.background_executor().timer(Duration::from_millis(200)).await,
+                Err(_) => return,
+            }
+        })
+        .detach();
+        rx
     }
 
-    fn build_inner(&mut self, all: bool, cx: &mut Context<Self>) -> Option<oneshot::Receiver<bool>> {
+    pub fn cancel_build_of(&mut self, t: &RunTarget) {
+        if let Some(b) = self.build.as_ref().filter(|b| b.status == BuildStatus::Running && same(&b.target, t)) {
+            orbit_core::run::cancel(&b.key);
+        }
+    }
+
+    fn build_inner(&mut self, target: &RunTarget, all: bool, cx: &mut Context<Self>) -> Option<oneshot::Receiver<bool>> {
         if self.is_building() {
             return None;
         }
-        let (target, config, (root, linked_root)) = self.selected()?;
+        let Launch { target, config, roots: (root, linked_root) } = self.resolve(target)?;
         let base_dir = if all { self.setup(&target.repo)?.build_dir.clone() } else { config.build_dir.clone() };
         let key = format!("{}/{}/{}", target.workspace, target.repo, if all { "*all*" } else { target.name.as_str() });
         let (tx, mut rx) = mpsc::unbounded::<(Stream, String)>();
@@ -671,36 +834,28 @@ impl RunStore {
 
     // ---------- run ----------
 
-    /// Builds, then starts the program in the panel's Run terminal.
-    pub fn build_and_run(&mut self, cx: &mut Context<Self>) {
-        let Some((_, config, _)) = self.selected() else { return };
-        if config.program.is_none() {
-            self.start_build(cx);
-            return;
-        }
-        if self.is_running() {
-            self.stop_program(cx);
-        }
-        let Some(built) = self.prepare_launch(cx) else { return };
-        self._run_after = cx.spawn(async move |this, cx| {
+    /// Once built, starts the program in a Run terminal of the panel.
+    fn run_after(&mut self, name: String, launch: Launch, built: oneshot::Receiver<bool>, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
             if built.await.unwrap_or(false) {
-                let _ = this.update(cx, |s, cx| s.start_program(config, cx));
+                let _ = this.update(cx, |s, cx| s.start_program(name, launch, cx));
             }
-        });
+        })
+        .detach();
     }
 
-    fn start_program(&mut self, config: ResolvedRun, cx: &mut Context<Self>) {
+    fn start_program(&mut self, name: String, launch: Launch, cx: &mut Context<Self>) {
+        let Launch { target, config, .. } = launch;
         let Some(program) = config.program.clone() else { return };
-        let Some(target) = self.target.clone() else { return };
         let meta = SessionMeta {
             id: format!("run:{}", now_ms()),
-            workspace: target.workspace,
+            workspace: target.workspace.clone(),
             label: "run".into(),
-            session_name: config.name.clone(),
+            session_name: name.clone(),
             codename: None,
             cmd: Some(program.clone()),
             args: config.args.clone(),
-            repo: Some(target.repo),
+            repo: Some(target.repo.clone()),
             agent_session_id: None,
             cwd: Some(config.cwd.clone()),
         };
@@ -718,38 +873,45 @@ impl RunStore {
         let view = cx.new(|cx| TerminalView::new(meta, spec, None, None, cx));
         let watch = cx.observe(&view, |s: &mut RunStore, view, cx| {
             let exited = view.read(cx).exited();
-            if let Some(r) = s.run.as_mut().filter(|r| r.view == view && !r.exited && exited) {
+            if let Some(r) = s.runs.iter_mut().find(|r| r.view == view && !r.exited && exited) {
                 r.exited = true;
                 cx.notify();
             }
         });
-        self.run = Some(RunProc { view, name: config.name, exited: false, _watch: watch });
+        self.shown_run = Some(view.entity_id());
+        self.runs.push(RunProc { view, name, target, exited: false, _watch: watch });
         self.reveal(PanelView::Run, cx);
     }
 
-    /// Ctrl+C to the program.
-    fn stop_program(&mut self, cx: &mut Context<Self>) {
-        if let Some(r) = self.run.as_ref().filter(|r| !r.exited) {
-            r.view.read(cx).send(b"\x03");
-        }
-    }
-
-    /// Stops the build, or the running program.
-    pub fn stop(&mut self, cx: &mut Context<Self>) {
+    pub fn stop(&mut self, _: &mut Context<Self>) {
         if let Some(b) = self.build.as_ref().filter(|b| b.status == BuildStatus::Running) {
             orbit_core::run::cancel(&b.key);
-            return;
         }
-        self.stop_program(cx);
     }
 
-    pub fn clear_run(&mut self, cx: &mut Context<Self>) {
-        if self.run.as_ref().is_some_and(|r| r.exited) {
-            self.run = None;
-            if self.view == PanelView::Run {
-                self.view = PanelView::Build;
-            }
-            cx.notify();
+    /// Drops the runs `f` picks (a live one gets Ctrl+C first; its terminal closes with it).
+    fn remove_runs(&mut self, cx: &mut Context<Self>, f: impl Fn(&RunProc) -> bool) {
+        for r in self.runs.iter().filter(|r| !r.exited && f(r)) {
+            r.view.read(cx).send(b"\x03");
+        }
+        self.runs.retain(|r| !f(r));
+        if self.runs.is_empty() && self.view == PanelView::Run {
+            self.view = PanelView::Build;
+        }
+        cx.notify();
+    }
+
+    pub fn show_run(&mut self, id: EntityId, cx: &mut Context<Self>) {
+        self.shown_run = Some(id);
+        cx.notify();
+    }
+
+    /// The instance tab's × (and Clear): stops a live run, closes a finished one.
+    pub fn close_run(&mut self, id: EntityId, cx: &mut Context<Self>) {
+        match self.runs.iter().find(|r| r.id() == id) {
+            Some(r) if !r.exited => r.view.read(cx).send(b"\x03"),
+            Some(_) => self.remove_runs(cx, |r| r.id() == id),
+            None => {}
         }
     }
 
@@ -806,7 +968,11 @@ impl RunStore {
         if let Some(d) = &self.dialog {
             out.push_str(&d.read(cx).dump(cx));
         }
-        if let Some(r) = &self.run {
+        if self.runs.len() > 1 {
+            let names: Vec<String> = self.runs.iter().map(|r| format!("{}{}", r.name, if r.exited { " (exited)" } else { "" })).collect();
+            let _ = writeln!(out, "  runs {names:?}");
+        }
+        if let Some(r) = self.shown() {
             let v = r.view.read(cx);
             let _ = writeln!(out, "  run {}{}: {}", r.name, if r.exited { " (exited)" } else { "" }, v.scroll_summary());
             for line in v.grid_text().trim_end().lines().filter(|l| !l.trim().is_empty()).take(12) {
@@ -832,4 +998,29 @@ pub fn dump(cx: &App) -> String {
     }
     out.push_str(&debug::gutter::dump(cx));
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn instances_are_numbered_from_the_first_free_name() {
+        let live = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        assert_eq!(instance_name("game", &[]), "game");
+        assert_eq!(instance_name("game", &live(&["game"])), "game (2)");
+        assert_eq!(instance_name("game", &live(&["game", "game (2)"])), "game (3)");
+        // A freed name is reused.
+        assert_eq!(instance_name("game", &live(&["game (2)"])), "game");
+        assert_eq!(instance_name("game", &live(&["game", "game (3)"])), "game (2)");
+    }
+
+    #[test]
+    fn a_running_configuration_restarts_unless_it_allows_multiple() {
+        assert!(!restarts(0, false));
+        assert!(!restarts(0, true));
+        assert!(restarts(1, false));
+        assert!(!restarts(1, true));
+        assert!(!restarts(3, true));
+    }
 }

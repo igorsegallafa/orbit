@@ -90,6 +90,10 @@ impl RunWidget {
                         }
                     }
                 }
+                let mine = s.members(&target);
+                if super::live_targets(cx).iter().any(|t| !mine.iter().any(|m| super::same(m, t))) {
+                    rows.push(Row::Command { label: "Stop all".into(), hint: None, command: "run.stopAll" });
+                }
                 rows.push(Row::Command { label: "Edit Configurations…".into(), hint: None, command: "run.editConfigurations" });
                 rows
             }
@@ -428,17 +432,18 @@ fn button(
 
 impl Render for RunWidget {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (target, config, multi, presets, building, running) = {
+        let (target, config, multi, presets, building) = {
             let s = store(cx).read(cx);
             let (Some(target), Some(config)) = (s.target.clone(), s.config().cloned()) else { return div().id("run-widget") };
             let presets = s.setup(&target.repo).map_or(0, |p| p.presets.len());
-            (target, config, s.setups.len() > 1, presets, s.is_building(), s.is_running())
+            (target, config, s.setups.len() > 1, presets, s.is_building())
         };
-        let live = debug::store(cx).read(cx).is_live();
+        let running = super::live_targets(cx).len();
         let label = if multi { format!("{} · {}", target.repo, config.name) } else { config.name.clone() };
-        let program = config.program.clone();
+        let compound = config.raw.is_compound();
+        let program = if compound { Some(config.raw.configs.join(", ")) } else { config.program.clone() };
         let no_program: SharedString = "No program to run in this configuration".into();
-        let stoppable = building || running || live;
+        let stoppable = building || running > 0;
         div()
             .id("run-widget")
             .track_focus(&self.focus)
@@ -451,13 +456,13 @@ impl Render for RunWidget {
             .when(presets > 0 && config.kind == "cmake", |d| {
                 d.child(self.select("run-preset", Open::Preset, config.preset.clone().unwrap_or_else(|| "preset".into()), true, cx))
             })
-            .child(self.build_split(building, format!("Build (Ctrl+F9)\n{}\nRight click: Build All", config.build_label).into(), cx))
+            .when(!compound, |d| d.child(self.build_split(building, format!("Build (Ctrl+F9)\n{}\nRight click: Build All", config.build_label).into(), cx)))
             .child(button(
                 "run-run",
                 "play-fill",
                 13.,
                 theme::OK,
-                !building && program.is_some(),
+                program.is_some(),
                 program.as_ref().map_or(no_program.clone(), |p| format!("Run (Shift+F10)\n{p}").into()),
                 "run.run",
                 cx,
@@ -467,7 +472,7 @@ impl Render for RunWidget {
                 "bug",
                 14.,
                 theme::OK,
-                !building && program.is_some() && !live,
+                program.is_some(),
                 if program.is_some() { "Debug (Shift+F9)".into() } else { "No program to debug in this configuration".into() },
                 "run.debug",
                 cx,
@@ -482,5 +487,20 @@ impl Render for RunWidget {
                 "run.stop",
                 cx,
             ))
+            .when(running > 1, |d| {
+                d.child(
+                    div()
+                        .id("run-count")
+                        .relative()
+                        .px(px(5.))
+                        .rounded(px(8.))
+                        .text_size(px(10.5))
+                        .bg(c(theme::PANEL_RAISED))
+                        .text_color(c(theme::TEXT_DIM))
+                        .child(running.to_string())
+                        .child(probe("run-count"))
+                        .tooltip(move |window, cx| Tooltip::new(format!("{running} running")).build(window, cx)),
+                )
+            })
     }
 }
