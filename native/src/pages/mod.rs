@@ -1,9 +1,8 @@
 //! Pages that are not files or sessions: Settings (`SettingsPage.tsx` and its
 //! sections), Integrations (`IntegrationsPage.tsx`), and per workspace Ralph
-//! (`RalphView.tsx`), AI usage (`UsageBar.tsx`) and CI artifacts
-//! (`ArtifactsSection.tsx`). Each page is its own view inside a `PageTab`.
+//! (`RalphView.tsx`) and AI usage (`UsageBar.tsx`). Each page is its own
+//! view inside a `PageTab`.
 //! Also the update check (`updates.rs`) and the crash log (`crash.rs`).
-mod artifacts;
 pub mod crash;
 mod integrations;
 pub mod kit;
@@ -120,6 +119,12 @@ impl Host {
         });
     }
 
+    /// Runs `f` on the root view once the current update is done.
+    pub fn with_app(&self, window: &mut Window, cx: &mut App, f: impl FnOnce(&mut OrbitApp, &mut Window, &mut Context<OrbitApp>) + 'static) {
+        let Some(app) = self.0.upgrade() else { return };
+        window.defer(cx, move |window, cx| app.update(cx, |a, cx| f(a, window, cx)));
+    }
+
     /// Opens a file in an editor tab.
     pub fn open_file(&self, path: std::path::PathBuf, window: &mut Window, cx: &mut App) {
         let Some(app) = self.0.upgrade() else { return };
@@ -203,16 +208,11 @@ fn open_selected_ralph(app: &mut OrbitApp, window: &mut Window, cx: &mut Context
     open_ralph(app, &name, window, cx);
 }
 
-/// Workspace pages need a selected workspace.
-fn open_for_workspace(app: &mut OrbitApp, kind: &'static str, window: &mut Window, cx: &mut Context<OrbitApp>) {
+fn open_usage(app: &mut OrbitApp, window: &mut Window, cx: &mut Context<OrbitApp>) {
     let Some(ws) = app.workspace().cloned() else {
         return app.toast(ToastKind::Info, "Pick a workspace first", None, cx);
     };
-    let key = format!("page:{kind}:{}", ws.meta.name);
-    match kind {
-        "usage" => open(app, key, |h, w, cx| usage::UsagePage::new(h, ws, w, cx), window, cx),
-        _ => open(app, key, |h, w, cx| artifacts::ArtifactsPage::new(h, ws, w, cx), window, cx),
-    }
+    open(app, format!("page:usage:{}", ws.meta.name), |h, w, cx| usage::UsagePage::new(h, ws, w, cx), window, cx);
 }
 
 /// The pages' commands, plus the update check and the crash notice.
@@ -230,8 +230,7 @@ pub fn init(cx: &mut App) {
             updates::check(true, cx);
         }),
         Command::new("ralph.open", "Ralph").when(has_ws).run(open_selected_ralph),
-        Command::new("workspace.usage", "AI Usage").when(has_ws).run(|a, w, cx| open_for_workspace(a, "usage", w, cx)),
-        Command::new("workspace.artifacts", "CI Artifacts").when(has_ws).run(|a, w, cx| open_for_workspace(a, "artifacts", w, cx)),
+        Command::new("workspace.usage", "AI Usage").when(has_ws).run(open_usage),
         Command::new("workspace.openInEditor", "Open in External Editor…").when(has_ws).run(open_repo_in_editor),
         Command::new("workspace.revealFolder", "Open Workspace Folder").when(has_ws).run(|a, _, cx| {
             let Some(dir) = a.workspace().map(|ws| ws.dir.clone()) else { return };

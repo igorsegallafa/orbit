@@ -378,7 +378,6 @@ impl CodeReviewPage {
         let checks = status.as_ref().and_then(|s| s.checks);
         let group = format!("cr-row-{ix}");
         let (prs, prs_menu, prs_co) = (g.prs.clone(), g.clone(), g.prs.clone());
-        let url = first.url.clone();
         div()
             .id(SharedString::from(name.clone()))
             .group(SharedString::from(group.clone()))
@@ -522,11 +521,7 @@ impl CodeReviewPage {
                                         }
                                     },
                                 )),
-                            )
-                            .child(pr_ui::btn_mini(format!("cr-github:{ix}"), "↗").on_click(move |_, _, cx| {
-                                cx.stop_propagation();
-                                cx.open_url(&url);
-                            })),
+                            ),
                     ),
             )
     }

@@ -377,6 +377,30 @@ pub fn forget(key: &str) {
     }
 }
 
+/// The files `forget` would have removed for sessions that are gone (Orbit
+/// killed, or ended elsewhere), with their sizes; `live` keys keep theirs.
+pub fn leftovers(live: &[String]) -> Vec<(PathBuf, u64)> {
+    crate::config::config_dir().map(|dir| leftovers_in(&dir, live)).unwrap_or_default()
+}
+
+fn leftovers_in(config: &Path, live: &[String]) -> Vec<(PathBuf, u64)> {
+    let live: Vec<String> = live.iter().map(|k| k.replace(':', "_")).collect();
+    let mut out = vec![];
+    for (dir, ext) in [("scrollback", "log"), ("agent-settings", "json")] {
+        for entry in std::fs::read_dir(config.join(dir)).into_iter().flatten().flatten() {
+            let path = entry.path();
+            // Only session files (`tm_<ms>-<id>.<ext>`), never links or folders.
+            let ours = path.extension().is_some_and(|e| e == ext)
+                && path.file_stem().and_then(|s| s.to_str()).is_some_and(|s| s.starts_with("tm_") && !live.iter().any(|k| k == s));
+            match std::fs::symlink_metadata(&path) {
+                Ok(meta) if ours && meta.is_file() => out.push((path, meta.len())),
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
 /// True when Claude Code has a transcript for this session id in the
 /// workspace folder, i.e. `--resume <id>` will find it.
 pub fn claude_session_exists(workspace: &str, session_id: &str) -> bool {
@@ -446,6 +470,32 @@ mod tests {
         ];
         assert_eq!(pick_opencode_session(&list, "/w/a", 19_000).as_deref(), Some("mine"));
         assert_eq!(pick_opencode_session(&list, "/w/c", 0), None);
+    }
+
+    #[test]
+    fn leftovers_are_dead_session_files_only() {
+        let root = std::env::temp_dir().join(format!("orbit-leftovers-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for (dir, name, body) in [
+            ("scrollback", "tm_1-dead.log", "12345"),
+            ("scrollback", "tm_2-live.log", "x"),
+            ("scrollback", "notes.log", "x"),
+            ("scrollback", "tm_3-dead.txt", "x"),
+            ("agent-settings", "tm_1-dead.json", "{}"),
+            ("agent-settings", "tm_2-live.json", "{}"),
+            ("other", "tm_4-dead.log", "x"),
+        ] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+            std::fs::write(root.join(dir).join(name), body).unwrap();
+        }
+        std::fs::create_dir_all(root.join("scrollback/tm_5-dir.log")).unwrap();
+        let mut found: Vec<_> = leftovers_in(&root, &["tm:2-live".into()])
+            .into_iter()
+            .map(|(p, n)| (p.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/"), n))
+            .collect();
+        found.sort();
+        assert_eq!(found, [("agent-settings/tm_1-dead.json".to_string(), 2), ("scrollback/tm_1-dead.log".to_string(), 5)]);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
