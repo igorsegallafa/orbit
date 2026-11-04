@@ -1,6 +1,6 @@
 mod commands;
 mod dap;
-use orbit_core::{agent, agent_hooks, build, config, git, github, health, integrations, proc, run, usage, workspace};
+use orbit_core::{agent, agent_hooks, build, config, git, github, health, integrations, proc, prs, run, usage, workspace};
 mod artifacts;
 mod files;
 mod lsp;
