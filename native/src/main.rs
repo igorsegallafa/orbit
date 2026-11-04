@@ -122,7 +122,7 @@ fn run() {
         let bounds = Bounds::centered(None, size(px(w), px(h)), cx);
         let options = WindowOptions {
             window_bounds: Some(if script.window_size.is_some() { WindowBounds::Windowed(bounds) } else { WindowBounds::Maximized(bounds) }),
-            app_id: Some("orbit".into()),
+            app_id: Some("Orbit".into()),
             // Our own titlebar (TitleBar draws the window controls and moves the window).
             window_decorations: Some(WindowDecorations::Client),
             window_min_size: Some(size(px(720.), px(480.))),

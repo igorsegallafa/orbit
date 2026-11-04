@@ -1127,26 +1127,30 @@ expanded through WebKit's remote inspector (no OS input); its first paint is the
 
 ### Packaging (Linux)
 
-- `packaging/linux/orbit.desktop` (app id `orbit`, so Wayland matches the window to it) and the
-  icons in `packaging/icons` (32–512 px, `.ico`, `.icns`).
+- `packaging/linux/orbit.desktop` (`StartupWMClass=Orbit`, the window's app id and the Tauri
+  app's class, so docks match either) and the icons in `packaging/icons` (32–512 px, `.ico`, `.icns`).
 - `scripts/package-linux.sh [--no-build]` writes `dist/Orbit-<version>-linux-<arch>.tar.gz`
   (`bin/orbit`, `share/`, `install.sh`) and, when `appimagetool` is found (`$APPIMAGETOOL` or `PATH`),
   `dist/Orbit-<version>-<arch>.AppImage`. The version is `ORBIT_VERSION`, else `native/Cargo.toml`'s;
   the binary is the workspace's `target/release/orbit-native`.
+  It also writes `dist/Orbit-<version>-amd64.deb` (with `ar` and `tar`) and, when `rpmbuild` is
+  found, `dist/Orbit-<version>-1.<arch>.rpm`: package `orbit`, `/usr/bin/orbit` plus a
+  `/usr/bin/Orbit` link (the Tauri package's binary path).
   `install.sh` installs into `~/.local` (or `PREFIX`), points the entry's `Exec` at the binary and
   refreshes the desktop and icon caches; `--uninstall` removes it. Checked: the tarball, the
-  `.desktop` (`desktop-file-validate`), install and uninstall into a scratch prefix. The AppImage
-  path was not run here (running a downloaded `appimagetool` was not allowed); CI builds it.
+  `.desktop` (`desktop-file-validate`), install and uninstall into a scratch prefix, the AppImage
+  (with the `appimagetool` inside Tauri's cached `linuxdeploy-plugin-appimage`) and the .deb's
+  layout; the .rpm is built in CI only.
 - The binary links only glibc, libgcc, `libxcb`/`libxkbcommon` (Vulkan, Wayland and fonts are
   loaded at run time), so the AppImage needs no bundled libraries. As with the Tauri release, build
   it on the oldest Ubuntu to support (glibc).
 
 **CI** (`.github/workflows/native.yml`, on PRs, pushes to main and by hand; it blocks a PR):
-Linux on `ubuntu-latest` runs `cargo
-build`, `clippy -D warnings` and `test` (the app and `orbit-core`), the packaging, and uploads the tarball and AppImage for a
-week; Windows and macOS run `cargo check --all-targets` (macOS with
+Linux on `ubuntu-latest` runs `cargo build`, `clippy -D warnings` and `test` for the workspace
+(the app and `orbit-core`), clippy for `tools/sign`, and the packaging, and uploads the tarball and
+AppImage for a week; Windows and macOS run `cargo check -p orbit-native --all-targets` (macOS with
 `gpui_platform/runtime_shaders`, so the runner needs no Metal toolchain). Caches use
-`swatinem/rust-cache` with `native/target`, one key per OS.
+`swatinem/rust-cache` with the root `target/`, one key per OS.
 
 **Windows and macOS.** Checked here by cross-compiling (`x86_64-pc-windows-msvc`,
 `aarch64-apple-darwin`; C dependencies stubbed, Metal shaders skipped, so type-checking only):
@@ -1160,48 +1164,77 @@ middle-click paste are Linux-only now. Nothing has been *run* on Windows or macO
 sets it from the tag, `v1.2.3` → `1.2.3`), else `Cargo.toml`'s version. `orbit --version` prints it.
 
 **Release** (`.github/workflows/release.yml`, on publishing a GitHub release): one `build` job per
-OS, then `publish`.
+OS, then `publish`. The version must be above the last Tauri release (0.1.17); `Cargo.toml` says 0.2.0.
 
-| OS | Runner | Downloads | The updater uses |
+| OS | Runner | Downloads | The in-app updater uses |
 |---|---|---|---|
-| Linux x86_64 | ubuntu-22.04 (glibc floor) | `Orbit-<v>-x86_64.AppImage`, `Orbit-<v>-linux-x86_64.tar.gz` | the AppImage, or the tarball's `bin/orbit` |
+| Linux x86_64 | ubuntu-22.04 (glibc floor) | `Orbit-<v>-x86_64.AppImage`, `Orbit-<v>-amd64.deb`, `Orbit-<v>-1.x86_64.rpm`, `Orbit-<v>-linux-x86_64.tar.gz` | the AppImage, the .deb/.rpm (through `pkexec dpkg -i` / `rpm -U`), or the tarball's `bin/orbit` |
 | Windows x86_64 | windows-latest | `Orbit-<v>-windows-x86_64-setup.exe` (NSIS, per user, no admin), `Orbit-<v>-windows-x86_64.zip` | the zip's `Orbit.exe` |
 | macOS aarch64 | macos-latest | `Orbit-<v>-macos-aarch64.dmg`, `Orbit-<v>-macos-aarch64.app.tar.gz` | the `.app.tar.gz` |
 
-Windows: the installer is for a first install (Start menu entry, uninstaller), and the zip is what
-the app swaps in, so an update needs no installer run and no UAC. macOS is ad-hoc signed (no
-Developer ID or notarization secrets): the first launch needs right-click → Open.
+Windows: the installer is for a first install and for Tauri installs (below); the zip is what the
+app swaps in, so an update needs no installer run and no UAC. macOS is ad-hoc signed (no Developer
+ID or notarization secrets): the first launch needs right-click → Open.
 Scripts: `scripts/package-{linux,windows,macos}.sh`, `packaging/windows/installer.nsi`.
 
-`publish` signs every download with `tools/sign` (minisign, the same key and secrets the Tauri app
-used: `TAURI_SIGNING_PRIVATE_KEY` and its password; the trusted comment names the version), writes
-`latest.json` with `scripts/release-manifest.sh` and uploads it all to the release. `latest.json`
-keeps the Tauri updater's URL and format: Orbit reads `linux-x86_64-appimage|tar`,
-`windows-x86_64-zip` and `darwin-aarch64-app`, and the bare `<os>-<arch>` / `-nsis` keys are what an
-installed Tauri build reads, so it updates itself to this app (AppImage: rewritten in place;
-Windows: the NSIS installer runs with its `/P /R` flags into the same `%LOCALAPPDATA%\Orbit`;
-macOS: the bundle is replaced). Tauri `.deb`/`.rpm`/`.msi` installs can't take these files and
-report a failed update: reinstall.
+`publish` signs every download with `tools/sign` (minisign, the key and secrets the Tauri release
+used: `TAURI_SIGNING_PRIVATE_KEY` and its password; the trusted comment names the version, which
+the Tauri updater and Orbit both check), writes `latest.json` with `scripts/release-manifest.sh` and
+uploads it all to the release.
+
+**Tauri → native.** `latest.json` stays at the Tauri updater's endpoint
+(`releases/latest/download/latest.json`) in its format, with the legacy release's platform keys,
+so an installed Tauri Orbit offers the native release as an update and installs it with its own
+updater (`tauri-plugin-updater` 2.12, which tries `<os>-<arch>-<bundle>`, then `<os>-<arch>`):
+
+| Tauri install | Key | Gets | What happens |
+|---|---|---|---|
+| AppImage | `linux-x86_64-appimage` | the native AppImage | `$APPIMAGE` rewritten in place; relaunch runs it |
+| .deb / .rpm | `linux-x86_64-deb` / `-rpm` | package `orbit`, newer | `pkexec dpkg -i` / `rpm -U` upgrades the package; `/usr/bin/Orbit` is kept as a link |
+| NSIS | `windows-x86_64-nsis` | the setup exe | run with `/P /UPDATE /R`: silent, same folder (`$LOCALAPPDATA\Orbit` or the one in `HKCU\Software\nsx001220\Orbit`), same `Orbit.exe`, Start menu entry and uninstall key; starts Orbit |
+| MSI | `windows-x86_64-msi` | the setup exe | the Tauri updater runs an exe as NSIS; the installer uninstalls the MSI Orbit (`msiexec /x`, UAC) and installs per user |
+| .app | `darwin-aarch64-app` | `Orbit.app.tar.gz` | the bundle is replaced (same id `com.nsx001220.orbit`); relaunch reads `CFBundleExecutable` |
+
+After that, Orbit updates itself from the same `latest.json`.
 
 **In-app update** (`orbit_core::updates`, `src/pages/updates.rs`). `Target::detect` finds what to
-replace: `$APPIMAGE`, the executable (tarball install, Windows) or the `.app` (macOS); a
-`target/{debug,release}` build doesn't update. *Update* in the toast or *Install update* in
-Settings downloads next to the install (curl, with progress), checks the signature against the
-public key in `updates::PUBLIC_KEY` (and that it was signed for that version), unpacks (tar; the
-system `tar.exe` on Windows), and replaces: a rename over the file on Linux (the running process
-keeps its inode), the running exe renamed to `Orbit.exe.old` first on Windows (removed at the next
-start), a directory swap on macOS. Then *Restart to update* starts the new version and quits.
-`orbit --update` does the same without a window. Test hooks: `ORBIT_UPDATE_URL`,
-`ORBIT_UPDATE_PUBKEY`.
+replace: `$APPIMAGE`, the `orbit` package (an exe under `/usr` owned by dpkg or rpm), the
+executable (tarball install, Windows) or the `.app` (macOS); a `target/{debug,release}` build
+doesn't update. *Update* in the toast or *Install update* in Settings downloads next to the install
+(curl, with progress), checks the signature against `updates::PUBLIC_KEY` (the Tauri app's key) and
+that it was signed for that version, unpacks (tar; the system `tar.exe` on Windows), and replaces:
+a rename over the file on Linux (the running process keeps its inode), the running exe renamed to
+`Orbit.exe.old` first on Windows (removed at the next start), a directory swap on macOS, or the
+package manager. Then *Restart to update* starts the new version and quits. `orbit --update` does
+the same without a window. Test hooks: `ORBIT_UPDATE_URL`, `ORBIT_UPDATE_PUBKEY`.
 
-**Verified** (Linux, scratch folders, a test key pair, a local HTTP server): unit tests for version
-order, the manifest, the install detection, signatures (good, tampered, other key, other version),
-the replace (file, Windows rename dance, bundle) and unpacking; `orbit-sign` + `release-manifest.sh`
-made the release; a 0.1.0 build updated a fake AppImage and a tarball install to the 9.9.9 build,
-which then printed `Orbit 9.9.9`; a tampered download and a wrong key were refused with the install
-untouched; and in the app (self-test steps) Settings → *Install update* → *Restart to update*
-relaunched into 9.9.9. Not run here: appimagetool (the AppImage was the bare binary), the Windows
-and macOS packaging and swap, and the Tauri → native path: CI and a real release check those.
+**Verified** (Linux, scratch folders, a test key pair, a local HTTP server):
+- Unit tests: version order, the manifest, the install detection, signatures (good, tampered,
+  other key, other version), the replace (file, Windows rename dance, bundle), unpacking.
+- `orbit --update`: a 0.1.0 build updated a stand-in AppImage and a tarball install to a 9.9.9
+  build, which then printed `Orbit 9.9.9`; a tampered download and a wrong key were refused with
+  the install untouched.
+- In the app (self-test steps): Settings → *Install update* → *Restart to update* relaunched into 9.9.9.
+- **Tauri → native**: the Tauri app built from the last Tauri commit (5329299) as an AppImage, with
+  only its endpoint (`http://127.0.0.1:…`, `dangerousInsecureTransportProtocol`) and public key
+  (the test key) changed, was served the native 0.2.0 AppImage (built with `package-linux.sh`,
+  signed with `orbit-sign`, `latest.json` from `release-manifest.sh`). It showed "Orbit 0.2.0 is
+  available"; its *Update* button (pressed through the WebKit inspector) downloaded, verified and
+  rewrote its AppImage file with the native one, and relaunched: the native app drew its first
+  frame from that same path.
+
+Not run here: the .rpm build, the Tauri .deb/.rpm/NSIS/MSI/.app paths, and the Windows and macOS
+packaging and self-update. Manual checks for those, with a real release (or a draft one):
+- Windows: install the last Tauri Orbit (NSIS), start it, accept the update: Orbit restarts as the
+  native app; `%LOCALAPPDATA%\Orbit\Orbit.exe` is native, one *Orbit* in Apps & features, the Start
+  menu entry starts it. Repeat from the Tauri .msi: a UAC prompt removes it, then the same. Then
+  publish a newer version and use *Install update* → *Restart to update*: `Orbit.exe.old` appears and
+  is gone after the next start.
+- macOS: install the Tauri `Orbit.app` in /Applications, accept the update: the bundle is replaced
+  and relaunches as native (`/Applications/Orbit.app/Contents/MacOS/Orbit --version`). Then a newer
+  release through *Install update*.
+- Linux .deb/.rpm: install the Tauri package, accept the update (pkexec asks for the password),
+  `dpkg -s orbit` / `rpm -q orbit` shows the new version, the menu entry starts the native app.
 
 ### Fixes in this stage
 
