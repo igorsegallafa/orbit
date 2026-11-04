@@ -160,6 +160,7 @@ pub async fn run(steps: &[String], window: AnyWindowHandle, app: &Entity<OrbitAp
                 let focus = focus_text(window, app, cx);
                 let _ = writeln!(log, "=== dump {arg}\n{text}{focus}=== end {arg}");
             }
+            _ if crate::run::script::step(verb, arg, window, app, log, cx).await => {}
             _ => {
                 let _ = writeln!(log, "  unknown step");
             }

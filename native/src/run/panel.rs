@@ -1,0 +1,303 @@
+//! The bottom tool window (`BottomPanel.tsx`): Build output with links to
+//! problems, the running program's terminal, Problems and Debug. The shell
+//! sizes it (`layout.panel_height`, resizable and saved) and shows it when
+//! `layout.panel_open`.
+use super::{open_location, store, BuildStatus, Stream};
+use crate::app::OrbitApp;
+use crate::debug::{self, view::DebugView, DebugStatus};
+use crate::probe::probe;
+use crate::run::problems::Severity;
+use crate::theme::{self, c, size};
+use gpui::{
+    div, prelude::*, px, uniform_list, AnyElement, Context, Entity, ScrollEvent, ScrollStrategy,
+    SharedString, Subscription, UniformListScrollHandle, WeakEntity, Window,
+};
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PanelView {
+    Build,
+    Run,
+    Problems,
+    Debug,
+}
+
+pub struct Panel {
+    app: WeakEntity<OrbitApp>,
+    debug: Entity<DebugView>,
+    output: UniformListScrollHandle,
+    /// Follow the output while it streams, unless scrolled up to read.
+    stick: bool,
+    shown_lines: usize,
+    _subscriptions: Vec<Subscription>,
+}
+
+const LINE: f32 = 18.;
+
+impl Panel {
+    pub fn new(app: WeakEntity<OrbitApp>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let subs = vec![cx.observe(&store(cx), |_, _, cx| cx.notify()), cx.observe(&debug::store(cx), |_, _, cx| cx.notify())];
+        Self {
+            app,
+            debug: cx.new(|cx| DebugView::new(window, cx)),
+            output: UniformListScrollHandle::new(),
+            stick: true,
+            shown_lines: 0,
+            _subscriptions: subs,
+        }
+    }
+
+    fn tab(&self, id: &'static str, view: PanelView, active: bool, label: AnyElement, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id(id)
+            .relative()
+            .h_full()
+            .px_2()
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .cursor_pointer()
+            .border_b_2()
+            .border_color(if active { c(theme::ACCENT) } else { gpui::transparent_black().into() })
+            .text_color(c(if active { theme::TEXT } else { theme::TEXT_DIM }))
+            .hover(|s| s.text_color(c(theme::TEXT)))
+            .child(label)
+            .child(probe(id))
+            .on_click(cx.listener(move |_, _, _, cx| store(cx).update(cx, |s, cx| s.set_view(view, cx))))
+    }
+
+    fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let (view, build, run, counts) = {
+            let s = store(cx).read(cx);
+            let build = s.build.as_ref().map(|b| (b.status, b.elapsed));
+            let run = s.run.as_ref().map(|r| (r.name.clone(), r.exited));
+            (s.view, build, run, s.build.as_ref().map(|b| b.counts()).unwrap_or_default())
+        };
+        let debug_status = debug::store(cx).read(cx).status;
+        let dot = |color: u32| div().size(px(7.)).rounded_full().bg(c(color));
+        let build_color = match build.map(|b| b.0) {
+            Some(BuildStatus::Running) => theme::ACCENT,
+            Some(BuildStatus::Ok) => theme::OK,
+            Some(BuildStatus::Failed) => theme::DANGER,
+            Some(BuildStatus::Cancelled) => theme::WARN,
+            None => theme::TEXT_FAINT,
+        };
+        let run_label = match &run {
+            Some((name, _)) => format!("Run · {name}"),
+            None => "Run".into(),
+        };
+        let run_color = if run.as_ref().is_some_and(|r| !r.1) { theme::OK } else { theme::TEXT_FAINT };
+        let debug_color = match debug_status {
+            DebugStatus::Stopped => theme::WARN,
+            DebugStatus::Starting | DebugStatus::Running => theme::OK,
+            _ => theme::TEXT_FAINT,
+        };
+        let count = |n: usize, color: u32| {
+            (n > 0).then(|| div().px_1().rounded(px(8.)).text_xs().bg(c(color)).text_color(c(theme::BG)).child(n.to_string()))
+        };
+        let meta = match build {
+            Some((BuildStatus::Running, _)) => "Building…".to_string(),
+            Some((BuildStatus::Ok, d)) => format!("Build succeeded · {}s", d.map_or(0, |d| d.as_secs_f32().round() as u64)),
+            Some((BuildStatus::Failed, _)) => "Build failed".into(),
+            Some((BuildStatus::Cancelled, _)) => "Build cancelled".into(),
+            None => String::new(),
+        };
+        let run_exited = run.as_ref().is_some_and(|r| r.1);
+        div()
+            .h(px(32.))
+            .flex_none()
+            .px_2()
+            .flex()
+            .items_center()
+            .gap_1()
+            .text_size(px(size::TAB_FONT))
+            .border_b_1()
+            .border_color(c(theme::BORDER))
+            .child(self.tab("panel-build", PanelView::Build, view == PanelView::Build, div().flex().items_center().gap_1p5().child(dot(build_color)).child("Build").into_any_element(), cx))
+            .child(self.tab("panel-run", PanelView::Run, view == PanelView::Run, div().flex().items_center().gap_1p5().child(dot(run_color)).child(run_label).into_any_element(), cx))
+            .child(self.tab("panel-debug", PanelView::Debug, view == PanelView::Debug, div().flex().items_center().gap_1p5().child(dot(debug_color)).child("Debug").into_any_element(), cx))
+            .child(self.tab(
+                "panel-problems",
+                PanelView::Problems,
+                view == PanelView::Problems,
+                div().flex().items_center().gap_1p5().child("Problems").children(count(counts.0, theme::DANGER)).children(count(counts.1, theme::WARN)).into_any_element(),
+                cx,
+            ))
+            .child(div().flex_1())
+            .when(view == PanelView::Build, |d| d.child(div().text_xs().text_color(c(theme::TEXT_FAINT)).child(meta)))
+            .when(view == PanelView::Run && run_exited, |d| {
+                d.child(
+                    div()
+                        .id("panel-clear")
+                        .relative()
+                        .px_2()
+                        .rounded(px(4.))
+                        .cursor_pointer()
+                        .text_color(c(theme::TEXT_DIM))
+                        .hover(|s| s.bg(c(theme::BORDER_STRONG)).text_color(c(theme::TEXT)))
+                        .child("Clear")
+                        .child(probe("panel-clear"))
+                        .on_click(cx.listener(|_, _, _, cx| store(cx).update(cx, |s, cx| s.clear_run(cx)))),
+                )
+            })
+            .child(
+                div()
+                    .id("panel-close")
+                    .relative()
+                    .px_1()
+                    .rounded(px(4.))
+                    .cursor_pointer()
+                    .text_color(c(theme::TEXT_FAINT))
+                    .hover(|s| s.bg(c(theme::BORDER_STRONG)).text_color(c(theme::TEXT)))
+                    .child("×")
+                    .child(probe("panel-close"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let _ = this.app.update(cx, |a, cx| a.toggle_panel(cx));
+                    })),
+            )
+    }
+
+    fn empty(text: &'static str) -> AnyElement {
+        div().size_full().flex().items_center().justify_center().text_color(c(theme::TEXT_FAINT)).child(text).into_any_element()
+    }
+
+    fn render_output(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let count = store(cx).read(cx).build.as_ref().map_or(0, |b| b.lines.len());
+        if store(cx).read(cx).build.is_none() {
+            return Self::empty("No build yet · Ctrl+F9 builds the selected configuration");
+        }
+        if count != self.shown_lines {
+            self.shown_lines = count;
+            if self.stick && count > 0 {
+                self.output.scroll_to_item(count - 1, ScrollStrategy::Bottom);
+            }
+        }
+        uniform_list(
+            "build-output",
+            count,
+            cx.processor(|_, range: std::ops::Range<usize>, _, cx| {
+                let s = store(cx).read(cx);
+                let Some(b) = &s.build else { return vec![] };
+                range
+                    .filter_map(|ix| {
+                        let l = b.lines.get(ix)?;
+                        let problem = l.problem.and_then(|p| b.problems.get(p));
+                        let color = match (l.stream, problem.map(|p| p.problem.severity)) {
+                            (_, Some(Severity::Error)) => theme::DANGER,
+                            (_, Some(Severity::Warning)) => theme::WARN,
+                            (Stream::Info, _) => theme::TEXT_FAINT,
+                            (Stream::Err, _) => theme::TEXT_DIM,
+                            (Stream::Out, _) => theme::TEXT,
+                        };
+                        let target = problem.and_then(|p| Some((p.open.clone()?, p.problem.line, p.problem.column)));
+                        let text: SharedString = l.text.clone();
+                        Some(
+                            div()
+                                .id(ix)
+                                .h(px(LINE))
+                                .px_3()
+                                .whitespace_nowrap()
+                                .text_color(c(color))
+                                .child(text)
+                                .when_some(target, |d, (path, line, col)| {
+                                    d.cursor_pointer().hover(|s| s.underline()).on_click(move |_, _, cx| open_location(path.clone(), line, col, cx))
+                                })
+                                .into_any_element(),
+                        )
+                    })
+                    .collect()
+            }),
+        )
+        .track_scroll(&self.output)
+        .size_full()
+        .font_family(theme::MONO_FONT)
+        .text_size(px(12.))
+        .on_scroll(cx.listener(|this, ev: &ScrollEvent, _, _| {
+            // Up: stop following; down: follow again.
+            let dy = f32::from(ev.delta.pixel_delta(px(LINE)).y);
+            if dy > 0. {
+                this.stick = false;
+            } else if dy < 0. {
+                this.stick = true;
+            }
+        }))
+        .into_any_element()
+    }
+
+    fn render_problems(&self, cx: &mut Context<Self>) -> AnyElement {
+        let s = store(cx).read(cx);
+        let Some(b) = &s.build else { return Self::empty("No problems in the last build") };
+        if b.problems.is_empty() {
+            return Self::empty("No problems in the last build");
+        }
+        // Grouped by file, errors first.
+        let mut order: Vec<usize> = (0..b.problems.len()).collect();
+        order.sort_by_key(|&i| b.problems[i].problem.severity != Severity::Error);
+        let mut groups: Vec<(String, Vec<usize>)> = vec![];
+        for i in order {
+            let p = &b.problems[i];
+            let file = match &p.open {
+                Some(o) => o.strip_prefix(&b.linked_root).map(|r| format!("{}/{}", b.target.repo, r.display())).unwrap_or_else(|_| o.display().to_string()),
+                None => p.problem.file.clone().unwrap_or_else(|| "Linker".into()),
+            };
+            match groups.iter_mut().find(|(f, _)| *f == file) {
+                Some((_, list)) => list.push(i),
+                None => groups.push((file, vec![i])),
+            }
+        }
+        let rows: Vec<AnyElement> = groups
+            .into_iter()
+            .flat_map(|(file, list)| {
+                let header = div().px_3().pt_2().pb_1().text_xs().text_color(c(theme::TEXT_FAINT)).child(file).into_any_element();
+                let items = list.into_iter().map(|i| {
+                    let p = &b.problems[i];
+                    let q = &p.problem;
+                    let (icon, color) = if q.severity == Severity::Error { ("⨯", theme::DANGER) } else { ("⚠", theme::WARN) };
+                    let target = p.open.clone().map(|o| (o, q.line, q.column));
+                    div()
+                        .id(("problem", i))
+                        .relative()
+                        .px_3()
+                        .py(px(3.))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(div().text_color(c(color)).child(icon))
+                        .child(div().flex_1().truncate().text_color(c(theme::TEXT)).child(q.message.clone()))
+                        .children(q.code.clone().map(|code| div().text_xs().text_color(c(theme::TEXT_FAINT)).child(code)))
+                        .when(q.line > 0, |d| d.child(div().text_xs().text_color(c(theme::TEXT_FAINT)).child(format!("{}:{}", q.line, q.column))))
+                        .child(probe(format!("problem:{i}")))
+                        .when_some(target, |d, (path, line, col)| {
+                            d.cursor_pointer().hover(|s| s.bg(c(theme::PANEL_HOVER))).on_click(move |_, _, cx| open_location(path.clone(), line, col, cx))
+                        })
+                        .into_any_element()
+                });
+                std::iter::once(header).chain(items).collect::<Vec<_>>()
+            })
+            .collect();
+        div().id("panel-problems-list").size_full().overflow_y_scroll().children(rows).into_any_element()
+    }
+}
+
+impl Render for Panel {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let view = store(cx).read(cx).view;
+        let body = match view {
+            PanelView::Build => self.render_output(cx),
+            PanelView::Problems => self.render_problems(cx),
+            PanelView::Run => match store(cx).read(cx).run.as_ref() {
+                Some(r) => div().size_full().child(r.view.clone()).into_any_element(),
+                None => Self::empty("Nothing running · Shift+F10 builds and runs the selected configuration"),
+            },
+            PanelView::Debug => self.debug.clone().into_any_element(),
+        };
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(c(theme::PANEL))
+            .border_t_1()
+            .border_color(c(theme::BORDER))
+            .child(self.render_header(cx))
+            .child(div().flex_1().min_h_0().child(body))
+    }
+}

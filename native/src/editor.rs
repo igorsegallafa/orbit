@@ -185,7 +185,10 @@ pub struct EditorTab {
     lsp_state: LspState,
     /// Last progress text shown, to repaint only when it changes.
     shown_progress: Option<String>,
+    /// The language server's and the last build's together (`set_build_diagnostics`).
     pub diagnostics: Vec<lsp_types::Diagnostic>,
+    lsp_diagnostics: Vec<lsp_types::Diagnostic>,
+    pub build_diagnostics: Vec<lsp_types::Diagnostic>,
     pub last_error: Option<String>,
     /// A transient line in the status bar (problem text, format and rename results).
     pub message: Option<SharedString>,
@@ -347,6 +350,8 @@ impl EditorTab {
             lsp_state: LspState::Off,
             shown_progress: None,
             diagnostics: vec![],
+            lsp_diagnostics: vec![],
+            build_diagnostics: vec![],
             last_error: None,
             message: None,
             picker: None,
@@ -487,6 +492,18 @@ impl EditorTab {
         if let Some(doc) = &self.doc {
             *doc.diagnostics.borrow_mut() = diagnostics.clone();
         }
+        self.lsp_diagnostics = diagnostics;
+        self.show_diagnostics(cx);
+    }
+
+    /// Problems from the last build (`run::apply_problems`), shown with the server's.
+    pub fn set_build_diagnostics(&mut self, diagnostics: Vec<lsp_types::Diagnostic>, cx: &mut Context<Self>) {
+        self.build_diagnostics = diagnostics;
+        self.show_diagnostics(cx);
+    }
+
+    fn show_diagnostics(&mut self, cx: &mut Context<Self>) {
+        let diagnostics: Vec<_> = self.lsp_diagnostics.iter().chain(&self.build_diagnostics).cloned().collect();
         self.diagnostics = diagnostics.clone();
         self.diagnostics.sort_by_key(|d| (d.range.start.line, d.range.start.character));
         self.state.update(cx, |s, cx| {
@@ -1527,6 +1544,8 @@ impl Render for EditorTab {
                     .relative()
                     .flex_1()
                     .min_h_0()
+                    // Breakpoint strip clicks (after the editor moved the caret).
+                    .on_mouse_down(MouseButton::Left, cx.listener(crate::debug::gutter::on_mouse_down))
                     .child(Editor::new(&self.state).size_full().bordered(false))
                     .children(picker),
             )

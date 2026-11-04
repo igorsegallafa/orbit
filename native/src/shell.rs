@@ -353,53 +353,9 @@ impl OrbitApp {
         }
     }
 
-    /// Placeholder for the Build/Run/Problems panel (`BottomPanel.tsx`), which arrives with that stage.
+    /// The Build/Run/Problems/Debug panel (`src/run/panel.rs`).
     fn render_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .h(px(self.layout.panel_height))
-            .flex_none()
-            .flex()
-            .flex_col()
-            .bg(c(theme::PANEL))
-            .border_t_1()
-            .border_color(c(theme::BORDER))
-            .child(
-                div()
-                    .h(px(32.))
-                    .flex_none()
-                    .px_3()
-                    .flex()
-                    .items_center()
-                    .gap_4()
-                    .text_size(px(size::TAB_FONT))
-                    .text_color(c(theme::TEXT_DIM))
-                    .child("Build")
-                    .child("Run")
-                    .child("Problems")
-                    .child(div().flex_1())
-                    .child(
-                        div()
-                            .id("panel-close")
-                            .relative()
-                            .px_1()
-                            .rounded(px(4.))
-                            .cursor_pointer()
-                            .text_color(c(theme::TEXT_FAINT))
-                            .hover(|s| s.bg(c(theme::BORDER_STRONG)).text_color(c(theme::TEXT)))
-                            .child("×")
-                            .child(probe("panel-close"))
-                            .on_click(cx.listener(|this, _, _, cx| this.toggle_panel(cx))),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_color(c(theme::TEXT_FAINT))
-                    .child("Build output, the run terminal and problems arrive with the Run/Build stage."),
-            )
+        crate::run::render_panel(self, cx)
     }
 
     fn render_dock(&self) -> impl IntoElement {

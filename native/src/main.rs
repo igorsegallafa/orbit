@@ -2,6 +2,7 @@
 //! tree, and the editor with language servers; see README.md.
 mod app;
 mod commands;
+mod debug;
 mod diff_view;
 mod editor;
 mod file_tree;
@@ -11,6 +12,7 @@ mod nav;
 mod overlay;
 mod palette;
 mod probe;
+mod run;
 mod script;
 mod sessions;
 mod shell;
@@ -46,6 +48,7 @@ fn main() {
         app::init(cx);
         file_tree::bind_keys(cx);
         editor::bind_keys(cx);
+        run::init(cx);
 
         let bounds = Bounds::centered(None, size(px(1400.), px(900.)), cx);
         let options = WindowOptions {
@@ -64,6 +67,7 @@ fn main() {
                 window.on_next_frame(move |_, _| eprintln!("first frame after {} ms", started.elapsed().as_millis()));
                 let view = cx.new(|cx| {
                     let mut app = OrbitApp::new(state_path.clone(), window, cx);
+                    run::attach(&mut app, window, cx);
                     app.restore(saved.clone(), window, cx);
                     script::start(&setup, &mut app, window, cx);
                     app

@@ -91,6 +91,12 @@ render a `probe("name")` (tabs `tab:<ix>`, menu items `menu:<label>`, dialog but
 `click:` `rclick:` `mclick:` `dblclick:` `drag:<probe>:<dx>,<dy>`; plus `key:<spec>`,
 `type:<text>`, `mouse:back|forward`, `cmd:<command id>`, `open:<path>`, `preview:<path>`,
 `toast:<text>`, `wait:<ms>` and `dump:<label>` (the full dump, into the log, at that point).
+Build/Run/Debug adds (`src/run/script.rs`) `until:<text>[@secs]` (wait until the dump contains
+`text`, e.g. `until:build Ok@300`, `until:debug: Stopped@60`) and `gutter:<line>` (click the active
+editor's breakpoint strip at that line); its probes are `run-config`, `run-preset`, `run-build`,
+`run-run`, `run-debug`, `run-stop`, `panel-build|run|debug|problems`, `panel-clear`, `problem:<ix>`,
+`dbg-resume|pause|over|into|out|stop`, `dbg-eval` (the console input), `frame:<ix>`, `thread:<id>`,
+`var:<name>`.
 
 ## Commands and keymap (the extension point)
 
@@ -320,6 +326,8 @@ Caveats found:
 | `src/sessions/` | sessions (`mod.rs`: keys, codenames, save/restore, inbox, recent, resume, actions), agent status heuristics and hooks (`status.rs`), the sidebar block (`panel.rs`) |
 | `src/file_tree.rs` | virtualized tree with background folder loads |
 | `src/workspace.rs` | workspace list from `orbit_core::workspace` |
+| `src/run/` | Build/Run: the store and commands (`mod.rs`: configurations, build, run terminal, problems as diagnostics), titlebar widget (`widget.rs`), bottom panel (`panel.rs`), compiler message parser (`problems.rs`), saved selection and breakpoints (`saved.rs`), self-test steps (`script.rs`) |
+| `src/debug/` | the DAP session (`mod.rs`: launch sequence, stops, frames, variables, console, breakpoints), the DAP client over `orbit_core::dap` (`client.rs`), editor breakpoints and paused line (`gutter.rs`), the Debug tab (`view.rs`) |
 | `src/script.rs` | self-test mode and dumps |
 | `src/theme.rs`, `src/orbit-dark.json` | Orbit Dark colours and shell metrics (`src/App.css`) |
 
@@ -497,7 +505,7 @@ Status of everything the React app does: **done**, **partial** (with what's miss
 - [x] done: resizable sidebar (snaps to icons below 110 px), files dock and bottom panel; double click resets; sizes and hidden/open state persist (`PaneResizer.tsx`, `SidebarResizer.tsx`)
 - [x] done: persisted state: open workspace, editor and diff tabs (preview flag, cursor), active tab, pane sizes, restored on start. Terminal tabs are not restored (Sessions stage).
 - [x] done: command registry and keymap; Find Action palette (`Ctrl+Shift+A`, `src/lib/commands.ts`); Search Everywhere's other tabs are not ported
-- [ ] partial: bottom panel is a placeholder (Build/Run/Problems arrive with that stage)
+- [x] done: bottom panel with Build, Run, Debug and Problems tabs (see *Build / Run / Debug*)
 - [ ] — Error boundary / crash log (`ErrorBoundary.tsx`)
 - [ ] — Dashboard page (`src/pages/DashboardPage.tsx`)
 - [ ] partial: ConfirmDialog and ContextMenu (`src/overlay.rs`, keyboard: ↑/↓/Enter/Esc). Skeletons, Select, CheckBox, PathInput, Tooltip not yet (gpui-component has equivalents)
@@ -583,10 +591,10 @@ Status of everything the React app does: **done**, **partial** (with what's miss
 - [ ] — Checks: list, rerun, logs, investigate, fix; discard, sync branch
 
 ### Run / Build / Debug
-- [ ] — Run widget with configs and CMake presets, `Ctrl+F9`/`Shift+F10`/`Shift+F9`/`Ctrl+F2` (`RunWidget.tsx`, `src/lib/runStore.ts`)
-- [ ] — Bottom panel: build output, run terminal, problems, debug (`BottomPanel.tsx`, `src/lib/problems.ts`)
+- [x] done: run widget with configurations (all repos of the workspace) and CMake presets, remembered per workspace, `Ctrl+F9`/`Shift+F10`/`Shift+F9`/`Ctrl+F2` (`RunWidget.tsx`, `src/lib/runStore.ts`)
+- [x] done: bottom panel: build output with `file:line` links, run terminal (cwd, args, env), problems (GCC/Clang/MSVC/ld, also as editor diagnostics with source `build`), debug (`BottomPanel.tsx`, `src/lib/problems.ts`)
 - [ ] — Multi-repo build modal (`BuildModal.tsx`)
-- [ ] — DAP debugger: session, gutter breakpoints, debug view, stepping keys (`src/lib/dap/*`, `DebugView.tsx`)
+- [x] done: DAP debugger: session (gdb `-i dap` / lldb-dap), gutter breakpoints (click, `Ctrl+F8`, persisted), paused line, threads, call stack, lazy variables, console with evaluate, `F9`/`F8`/`F7`/`Shift+F8`, symlink path mapping (`src/lib/dap/*`, `DebugView.tsx`). lldb-dap is wired but untested (not installed here).
 
 ### Settings / themes
 - [ ] — Settings page and sections: AI, Appearance, Health, Updates (`SettingsPage.tsx`, `AiSection.tsx`, `AppearanceSection.tsx`, `HealthSection.tsx`, `UpdatesSection.tsx`)
@@ -599,5 +607,5 @@ Status of everything the React app does: **done**, **partial** (with what's miss
 ### Backend services
 - [x] done: the backend is shared through `crates/orbit-core` (config, workspaces, git, GitHub, LSP/DAP processes, watcher, builds, run configs, agents, Ralph, review, search, notes, files); the native app uses its workspace list and LSP manager
 - [ ] partial: no native UI writes state yet; the core functions for it exist (`workspace::create`, `repo::commit`, `notes::add`, …)
-- [ ] — FS/git watcher events in the native UI (`orbit_core::watch::watch` with a channel sink), run configs (`.orbit/run.json`)
+- [ ] partial: run configs (`.orbit/run.json`) are used; FS/git watcher events in the native UI are not (`orbit_core::watch::watch` with a channel sink)
 - [x] done: PTY registry, scrollback and flow control in core (`orbit_core::pty`); `src-tauri/src/pty.rs` is an adapter

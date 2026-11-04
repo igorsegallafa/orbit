@@ -33,6 +33,8 @@ url = "2"
 dirs = "6"
 futures = "0.3"
 anyhow = "1"
+# Compiler message parsing (run/problems.rs); already in the lock through other crates.
+regex = "1"
 
 [profile.release]
 debug = false

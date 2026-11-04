@@ -285,6 +285,7 @@ pub fn dump(app: &OrbitApp, log: &str, cx: &gpui::App) -> String {
         let _ = writeln!(out, "  {:40} {:32} {} ({})", c.id, c.title, c.keys.join(" "), c.context);
     }
     out.push_str(&crate::steps::shell_dump(app, cx));
+    out.push_str(&crate::run::dump(cx));
     dump_sessions(&mut out, cx);
     out
 }
