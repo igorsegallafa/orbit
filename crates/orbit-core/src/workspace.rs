@@ -291,6 +291,24 @@ fn create_at(
     finish_create(name, branch, base, repos.to_vec(), card)
 }
 
+/// Candidate base branches for a new workspace: main and master, then the
+/// branches of the first cloned repo among `repos`.
+pub fn base_branches(repos: &[String]) -> Result<Vec<String>, String> {
+    let mut out = vec!["main".to_string(), "master".to_string()];
+    for repo in repos {
+        let dir = clone_dir_of(repo)?;
+        if is_cloned(&dir) {
+            for b in git::list_branches(&dir) {
+                if !out.contains(&b) {
+                    out.push(b);
+                }
+            }
+            break;
+        }
+    }
+    Ok(out)
+}
+
 /// Adds repos to an existing workspace, on its branch and base.
 pub fn add_repos(name: &str, repos: &[String]) -> Result<Workspace, String> {
     let dir = ws_dir(name)?;
@@ -1104,6 +1122,55 @@ dist
         let r = sync_branch("b", "web", false).unwrap();
         assert!(!r.dirty && r.restored, "{r:?}");
         assert_eq!(std::fs::read_to_string(clone.join("wip.txt")).unwrap(), "b's work");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The native app's git flows end to end: create with a worktree repo,
+    /// add a linked one, commit, diff, push to the local bare origin.
+    #[test]
+    fn creates_adds_linked_repos_commits_and_pushes() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = std::env::temp_dir().join(format!("orbit-git-flows-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::env::set_var("ORBIT_WORKSPACE_ROOT", root.join("ws-root"));
+        std::env::set_var("ORBIT_CONFIG_DIR", root.join("cfg"));
+        for (k, v) in [("GIT_AUTHOR_NAME", "t"), ("GIT_AUTHOR_EMAIL", "t@t"), ("GIT_COMMITTER_NAME", "t"), ("GIT_COMMITTER_EMAIL", "t@t")] {
+            std::env::set_var(k, v);
+        }
+        let bare = origin(&root);
+        let web = crate::config::Service::new("web".into(), bare.to_string_lossy().into());
+        let mut api = crate::config::Service::new("api".into(), bare.to_string_lossy().into());
+        api.worktree = false;
+        api.path = Some(root.join("api-clone").to_string_lossy().into());
+        Config { services: vec![web, api], ..Default::default() }.save().unwrap();
+
+        assert_eq!(base_branches(&["web".into()]).unwrap()[..2], ["main", "master"]);
+        create("f", "feat/f", "main", &["web".into()], None).unwrap();
+        // Cloned now: origin's branches are offered too.
+        assert!(base_branches(&["web".into()]).unwrap().contains(&"feat/existing".to_string()));
+        let ws = add_repos("f", &["api".into()]).unwrap();
+        assert_eq!(ws.repos, ["web", "api"]);
+        assert!(add_repos("f", &["web".into()]).is_err());
+        let linked = ws_dir("f").unwrap().join("api");
+        assert_eq!(git::current_branch(&linked).as_deref(), Some("feat/f"));
+        assert_eq!(std::fs::canonicalize(&linked).unwrap(), std::fs::canonicalize(root.join("api-clone")).unwrap());
+
+        let wt = ws_dir("f").unwrap().join("web");
+        std::fs::write(wt.join("package.json"), "{\"a\":1}").unwrap();
+        let d = git::file_diff(&wt, "package.json").unwrap();
+        assert_eq!((d.original.as_str(), d.modified.as_str()), ("{}", "{\"a\":1}"));
+        git::commit_paths(&crate::prs::worktree_on_branch("f", "web").unwrap(), "change", &[]).unwrap();
+        assert_eq!(status("f").unwrap()[0].ahead, 1);
+        crate::prs::push("f", "web", false).unwrap();
+        let st = &status("f").unwrap()[0];
+        assert_eq!((st.ahead, st.dirty), (0, false));
+        let pushed = crate::proc::run("git", &["branch", "--list", "feat/f"], Some(&bare)).unwrap();
+        assert!(pushed.contains("feat/f"), "{pushed}");
+        let c = git::commit_file_diff(&wt, "HEAD", "package.json");
+        assert_eq!((c.original.as_str(), c.modified.as_str()), ("{}", "{\"a\":1}"));
+        crate::repo::fetch("web").unwrap();
+        assert!(crate::repo::fetch("nope").is_err());
         let _ = std::fs::remove_dir_all(&root);
     }
 

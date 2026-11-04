@@ -215,6 +215,7 @@ impl OrbitApp {
                         )
                 }
             }))
+            .when(!collapsed, |d| d.child(crate::workspace_ui::sidebar(self, cx)))
             .when(!collapsed, |d| d.child(crate::review::sidebar(self, cx)))
             .when(!collapsed, |d| d.child(self.sessions.clone()))
     }
@@ -242,6 +243,7 @@ impl OrbitApp {
                     TabKind::Terminal(_) => "terminal",
                     TabKind::Editor(_) => "doc",
                     TabKind::Diff(_) | TabKind::Review(_) => "diff",
+                    TabKind::Page(_) => "folder",
                 };
                 let divider = group_start.then(|| div().w(px(1.)).h(px(18.)).mb(px(9.)).mx(px(2.)).flex_none().bg(c(theme::BORDER_STRONG)));
                 let el = div()
@@ -344,6 +346,7 @@ impl OrbitApp {
             Some(TabKind::Editor(e)) => e.clone().into_any_element(),
             Some(TabKind::Diff(d)) => d.clone().into_any_element(),
             Some(TabKind::Review(r)) => r.clone().into_any_element(),
+            Some(TabKind::Page(p)) => p.clone().into_any_element(),
             None => div()
                 .size_full()
                 .flex()

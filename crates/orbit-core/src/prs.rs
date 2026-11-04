@@ -271,6 +271,24 @@ fn job_of(link: &str) -> Result<(String, u64, u64), String> {
     Ok((owner_repo, run_id, job_id))
 }
 
+// ---------- push / merge ----------
+
+/// Pushes a workspace repo's branch to origin; `force` uses `--force-with-lease`.
+pub fn push(workspace: &str, repo: &str, force: bool) -> Result<(), String> {
+    git::push_current(&worktree_on_branch(workspace, repo)?, repo, force)
+}
+
+/// Squash-merges one of the workspace's PRs on GitHub (its remote branch is
+/// deleted; the worktree stays until the workspace is removed).
+pub fn merge(workspace: &str, repo: &str, number: u64) -> Result<(), String> {
+    github::squash_merge(&owner_repo(workspace, repo)?, number).map_err(|e| format!("{repo} #{number}: {e}"))
+}
+
+/// Squash-merges a PR addressed on GitHub alone (never checked out).
+pub fn merge_remote(owner_repo: &str, number: u64) -> Result<(), String> {
+    github::squash_merge(owner_repo, number).map_err(|e| format!("{owner_repo} #{number}: {e}"))
+}
+
 /// Re-runs the failed jobs of the workflow run behind `link`.
 pub fn rerun(link: &str) -> Result<(), String> {
     let run_id = github::run_id_from_link(link).ok_or("check has no GitHub Actions run to re-run")?;

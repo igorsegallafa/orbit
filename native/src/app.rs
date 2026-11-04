@@ -28,6 +28,7 @@ pub enum TabKind {
     Editor(Entity<EditorTab>),
     Diff(Entity<DiffTab>),
     Review(Entity<crate::review::ReviewTab>),
+    Page(Entity<crate::workspace_ui::PageTab>),
 }
 
 pub struct Tab {
@@ -58,6 +59,7 @@ impl Tab {
             TabKind::Editor(e) => e.read(cx).title.clone(),
             TabKind::Diff(d) => d.read(cx).title.clone(),
             TabKind::Review(r) => r.read(cx).title(),
+            TabKind::Page(p) => p.read(cx).title(),
         }
     }
 
@@ -71,6 +73,7 @@ impl Tab {
             TabKind::Editor(e) => e.focus_handle(cx),
             TabKind::Diff(d) => d.read(cx).state.focus_handle(cx),
             TabKind::Review(r) => r.focus_handle(cx),
+            TabKind::Page(p) => p.focus_handle(cx),
         }
     }
 
@@ -81,6 +84,7 @@ impl Tab {
             TabKind::Editor(e) => format!("ed:{}", e.read(cx).path.display()),
             TabKind::Diff(d) => format!("diff:{}", d.read(cx).path.display()),
             TabKind::Review(r) => r.read(cx).key(),
+            TabKind::Page(p) => p.read(cx).key(),
         }
     }
 
@@ -89,7 +93,7 @@ impl Tab {
             TabKind::Terminal(_) => NavTarget::Terminal,
             TabKind::Editor(e) => NavTarget::Editor(e.read(cx).path.clone()),
             TabKind::Diff(d) => NavTarget::Diff(d.read(cx).path.clone()),
-            TabKind::Review(_) => NavTarget::Review,
+            TabKind::Review(_) | TabKind::Page(_) => NavTarget::Review,
         }
     }
 }
@@ -753,7 +757,7 @@ impl OrbitApp {
                 }
                 TabKind::Diff(d) => Some(SavedTab::Diff { path: d.read(cx).path.clone() }),
                 // Sessions come back with the Sessions stage (scrollback restore).
-                TabKind::Terminal(_) | TabKind::Review(_) => None,
+                TabKind::Terminal(_) | TabKind::Review(_) | TabKind::Page(_) => None,
             })
             .collect();
         let active = self.active.and_then(|a| {

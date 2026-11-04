@@ -104,7 +104,7 @@ Build/Run/Debug adds (`src/run/script.rs`) `until:<text>[@secs]` (wait until the
 editor's breakpoint strip at that line); its probes are `run-config`, `run-preset`, `run-build`,
 `run-run`, `run-debug`, `run-stop`, `panel-build|run|debug|problems`, `panel-clear`, `problem:<ix>`,
 `dbg-resume|pause|over|into|out|stop`, `dbg-eval` (the console input), `frame:<ix>`, `thread:<id>`,
-`var:<name>`.
+`var:<name>`. The git and workspace pages' probes are listed in *Stage: git and workspace flows*.
 
 ## Commands and keymap (the extension point)
 
@@ -339,6 +339,8 @@ Caveats found:
 | `src/workspace.rs` | workspace list from `orbit_core::workspace` |
 | `src/run/` | Build/Run: the store and commands (`mod.rs`: configurations, build, run terminal, problems as diagnostics), titlebar widget (`widget.rs`), bottom panel (`panel.rs`), compiler message parser (`problems.rs`), saved selection and breakpoints (`saved.rs`), self-test steps (`script.rs`) |
 | `src/debug/` | the DAP session (`mod.rs`: launch sequence, stops, frames, variables, console, breakpoints), the DAP client over `orbit_core::dap` (`client.rs`), editor breakpoints and paused line (`gutter.rs`), the Debug tab (`view.rs`) |
+| `src/workspace_ui/` | page tabs (`mod.rs`: `PageTab`, its in-tab modal, commands, sidebar entries, dump) · `dashboard.rs` · `workspace_page.rs` (delivery flow, repos, PRs) · `repo_page.rs` (a repo's base clone) · `forms.rs` (new workspace, add repositories) |
+| `src/git/` | the git flows shown over a page: `commit.rs`, `push.rs`, `rebase.rs`, `merge.rs`, the branch drift banner (`drift.rs`); shared modal pieces in `mod.rs` |
 | `src/script.rs` | self-test mode and dumps |
 | `src/theme.rs`, `src/orbit-dark.json` | Orbit Dark colours and shell metrics (`src/App.css`) |
 
@@ -384,7 +386,7 @@ held logic became core functions (`notes::add`, `lsp::cpp_setup`, `ralph::start`
   (`pty.rs` moved to core in stage 3 and is now a thin adapter, see *Stage 3*.)
 - `commands.rs` (93 commands): most are one-line wrappers over core, but some still hold logic
   inline: service/folder/group editing in the config and `open_in_editor`. (The PR commands moved
-  to `orbit_core::prs` in the review stage.)
+  to `orbit_core::prs` in the review stage, the git and workspace ones in the git flows stage.)
 - `lib.rs`: the Tauri builder, plugins, the handler list, `events()` and `blocking()`.
 - Plugin calls (`tauri_plugin_opener` for reveal/open after an artifact download) stay in the wrappers.
 
@@ -638,6 +640,115 @@ tiny CMake project reached through a symlinked workspace repo:
   the game was not completed: another build of the same tree was running at the same time and the
   link failed (`ld terminated with signal 7`), and the debug session correctly did not start.
 
+## Stage: git and workspace flows
+
+A new tab kind, `TabKind::Page` (`src/workspace_ui/`), holds three pages; forms and git flows open
+as a modal inside the page tab (an occluding scrim), so switching tabs keeps them.
+
+- **Dashboard** (`DashboardPage.tsx`): a card per workspace (branch, repos coloured by state with
+  `↑n`, "Up to date" or "n with changes · n to push · n behind", tracker card id), onboarding when
+  there are no repos or workspaces, and the configured repositories with their brief, each opening
+  its repo page. Sidebar *Dashboard*, command `workspace.dashboard`.
+- **Workspace page** (`WorkspaceDetailPage.tsx`): header tools (Commit, Push, Rebase, Merge,
+  Changes and PRs review tabs, + Repos, Refresh, Remove), the delivery flow (Changes → Push → Pull
+  requests → Checks with the React page's rules: dropped repos whose PRs were closed, integrated
+  repos needing no push, "Create" when pushed without PRs, "Squash and merge" when checks allow, the
+  next step highlighted), the branch drift banner, repos with badges (off branch, operation in
+  progress, dirty/clean, merged, `↑ahead`, `↓behind` with *Pull* when nothing is ahead, *linked
+  clone*), and the PRs with their check aggregate. Local status first, then a fetch with PRs and
+  checks; again every 60 s and on Refresh. Sidebar *Overview*, command `workspace.overview`.
+- **Repo page** (`RepoPage.tsx`), on the base clone (scope `@repo`): branch, upstream and
+  ahead/behind, Fetch, Pull / Pull --rebase, Push or Publish (the push flow), Commit… (the commit
+  flow), Stash, New workspace… (preselects the repo); a paused operation's banner (Resolve with
+  AI, Continue, Abort); branches (Switch, asking Stash and switch / Bring changes when dirty;
+  Delete, confirmed), Create branch; history (Undo on the last commit, Revert, confirmed); stashes
+  (Restore, Drop); worktrees with Prune. Command `repo.open` (a menu of repos) or the dashboard.
+- **Git flows** (`src/git/`), as the React modals: *Commit* (per repo: files with checkboxes, all in
+  by default, a repo checkbox for all/none, `✦` and *Draft all with AI* through
+  `agent::commit_message` for the selected files, the message box, ↺ / *Discard all* behind a
+  confirm dialog (new files to the Trash), a file name opens its diff tab, commits in parallel, a
+  clean repo drops out); *Push* (nothing runs before the click; up to date / rejected / failed;
+  *Force push* with lease on a rejected row, *Push anyway* for a dropped repo; "Updated the open pull
+  requests: site #7"; *Create pull requests →* opens the PRs review tab, which creates them);
+  *Rebase* onto `origin/<base>` (conflicts pause a row with *Resolve with AI*, which continues the
+  rebase or aborts on failure, and *Abort*); *Squash and merge* (one PR at a time, stopping at the
+  first failure; fetches afterwards). Commands `git.commit`, `git.push`, `git.rebase`, `git.merge`,
+  `git.syncBranches`; run from anywhere they open the selected workspace's page and wait for its
+  first read.
+- **Branch drift** (`BranchDriftBanner.tsx`): repos not on the workspace's branch (a linked repo's
+  shared clone switched by another workspace), who holds them, a paused operation that blocks the
+  switch; *Switch back*, then for dirty repos *Stash and switch* (re-applied when that branch
+  returns); auto-switch repos go back on their own once per page. Ahead/behind against the
+  upstream is on each repo row and the dashboard.
+- **New workspace** (`WorkspaceCreateModal.tsx`): Manual (name, branch defaulting to
+  `feat/<slug>`, base from a menu of the first selected repo's branches, groups as chips, repos with
+  a *linked* note for `worktree: false` ones) or Existing branch (`create_from_branch`, problems in an
+  Info toast). **Add repositories** (`AddReposModal.tsx`). Both close at once and report in toasts;
+  orbit-core sets up worktrees or, for linked repos, checks the branch out in the base clone and
+  links it. The app's workspace list and file tree follow (`workspace_ui::reload_workspaces`).
+  **Remove workspace** asks, and asks again before discarding uncommitted changes.
+
+**Core move.** Inline logic of the git/workspace commands moved to orbit-core: `git::file_diff`
+(`git_file_diff`), `git::commit_file_diff` (`git_commit_diff`), `git::push_current` and
+`prs::push` (`ws_push`), `prs::merge` / `prs::merge_remote` (`ws_pr_merge`, `pr_merge_remote`),
+`repo::fetch` (`refresh_repo`), `workspace::base_branches` (`list_base_branches`), and
+`ws_address_review` now uses `prs::owner_repo`. The commands keep their arguments and results. A core
+test (`creates_adds_linked_repos_commits_and_pushes`) creates a workspace from a local bare origin,
+adds a linked repo, diffs, commits and pushes, and fetches.
+
+Self-test probes: sidebar `side-dashboard`, `side-workspace`; dashboard `dash-new`,
+`dash-refresh`, `dash-ws:<name>`, `dash-repo:<name>`; workspace page `ws-commit`, `ws-push`,
+`ws-rebase`, `ws-merge`, `ws-changes`, `ws-prs`, `ws-add-repos`, `ws-refresh`, `ws-remove`,
+`ws-done-remove`, `flow-changes|push|prs|checks`, `ws-repo:<repo>`, `ws-pull:<repo>`,
+`ws-repo-page:<repo>`, `ws-pr:<repo>#<n>`, `drift-switch`, `drift-stash`, `drift-cancel`; modals
+`modal-cancel`, `commit-open:<repo>`, `commit-repo:<repo>`, `commit-file:<repo>/<path>`,
+`commit-diff:<repo>/<path>`, `commit-discard:<repo>/<path>`, `commit-discard-all:<repo>`,
+`commit-draft:<repo>`, `commit-draft-all`, `commit-msg:<repo>` (the message box), `commit-submit`,
+`push-submit`, `push-force:<repo>`, `push-anyway:<repo>`, `push-create-prs`, `rebase-submit`,
+`rebase-ai:<repo>`, `rebase-abort:<repo>`, `merge-submit`, `create-source-manual|branch`,
+`create-name`, `create-branch`, `create-base`, `create-group:<g>`, `create-repo:<repo>`,
+`create-submit`, `add-repo:<repo>`, `add-repos-submit`; repo page `repo-fetch`, `repo-pull`,
+`repo-pull-rebase`, `repo-push`, `repo-commit`, `repo-stash`, `repo-new-ws`, `repo-op-ai|continue|abort`,
+`repo-switch:<branch>`, `repo-delete:<branch>`, `repo-branch-name`, `repo-create-branch`, `repo-undo`,
+`repo-revert:<sha>`, `repo-stash-pop:<ix>`, `repo-stash-drop:<ix>`, `repo-prune`. The dump lists each
+page (`--- page …`: statuses, PRs, checks, the derived flow, drift; the dashboard's cards and repos;
+the repo overview) and the open modal's rows.
+
+Verified by self-tests on a scratch root (`ORBIT_WORKSPACE_ROOT`, `ORBIT_CONFIG_DIR`,
+`XDG_DATA_HOME` for the Trash, `GIT_ALLOW_PROTOCOL=file` so nothing reaches GitHub) with three repos
+cloned from local bare remotes (`api` linked, `worktree: false`), a stub `gh` and a stub `claude`
+(drafts `feat: stub drafted message`, "resolves" conflicts by taking the replayed side) first on
+`PATH`:
+
+- New workspace `flows` from the form (web + api): `feat/flows`, web a worktree, api's clone switched
+  in place (`linked`). Existing branch `topic` (on web's origin only) made workspace `topic` with web
+  alone. The base menu offered the first repo's branches; the `backend` group chip selected api + web.
+- Commit: with `main.txt` modified and `new.txt`, `notes.txt` new, `git.commit` listed both repos;
+  `new.txt` unticked, api's message drafted by the stub, web's typed; *Commit 2 repos* made two
+  commits, `new.txt` stayed untracked (checked with `git log --stat`). ↺ on it, confirmed, moved it
+  to the scratch Trash and the repo dropped out of the modal.
+- Push: both pushed with upstreams `origin/feat/flows` (bare remotes checked). After a conflicting
+  commit on `origin/main`, Rebase: api clean, web `Conflicts(["main.txt"])` → *Resolve with AI* →
+  `Done`, "Rebased onto origin/main"; Push then gave `Rejected: Branch diverged from origin` and
+  *Force push* `Force-pushed`. (With the stub at first not resolving, the row failed and the rebase
+  was aborted, leaving the branch as before.)
+- Drift: workspace `other` with api switched the shared clone; `flows` showed `api on feat/other …
+  OFF-BRANCH`; *Switch* left it (uncommitted `wip.txt`), *Stash and switch* gave "Switched: api
+  (changes stashed)".
+- Add repositories: `site` added on `feat/flows` (a new status row). With site's origin set to a
+  GitHub-looking URL (pushes rewritten to the bare remote), the stub's PR `site #7` showed OPEN with
+  checks `pass`; Push said `open prs: {"site": 7}`; *Squash and merge* ran `gh pr view … headRefName`,
+  `gh pr merge 7 -R o/site --squash` and the branch delete, then showed `site #7 MERGED`.
+- Pull: a teammate's push to `origin/feat/flows` gave web `behind 1`; *↓ 1 Pull* fast-forwarded.
+- Repo page of web: Pull (behind 1), Create branch `topic`, Commit… (`@web` scope), Publish (push
+  flow, upstream `origin/topic`), Switch to main, Delete `topic` (confirmed).
+- Remove workspace `other`: confirmed, removed, and its tab closed.
+
+Not done: tracker sources (Shortcut/Linear) in New workspace (the integrations stage's), the
+commit modal's side-by-side diff (a file opens its diff tab instead), compare / cherry-pick on the
+repo page, Ctrl+Enter to commit, Race, Plan, Ralph, artifacts and usage on the workspace page,
+"Open in editor" / "Open folder" (owned by the settings stage), the dashboard's context menu.
+
 ## Next stages
 
 Ordered by dependency, with rough sizes (one focused agent-day ≈ 1 unit).
@@ -660,9 +771,9 @@ Ordered by dependency, with rough sizes (one focused agent-day ≈ 1 unit).
    folder load).
 6. **Review** (4–5): mostly done (stage above: changes review, REVIEW.md notes, send-to-PR, F7,
    PRs, checks and logs); left: commit review, GitHub PR review with threads, address review.
-7. **Git and workspace flows** (4): commit, push, PR, rebase and merge modals, checks, branch
-   drift, the repo page, workspace create and add repos, the dashboard, ~~Search Everywhere and
-   Find in Files~~ (done in the files and search stage).
+7. ~~**Git and workspace flows**~~: mostly done (see *Stage: git and workspace flows*); left:
+   tracker cards in New workspace, compare and cherry-pick on the repo page, the commit modal's
+   inline diff, the workspace page's Plan, Race, Ralph, artifacts and usage sections.
 8. ~~**Run/Build/Debug**~~: done (see *Build / Run / Debug*); left: the multi-repo build modal,
    breakpoint conditions, a round breakpoint glyph (needs an editor gutter hook upstream).
 9. **Settings, Ralph, integrations, usage, artifacts, updates** (3–4).
@@ -676,7 +787,7 @@ Status of everything the React app does: **done**, **partial** (with what's miss
 
 ### App shell & layout
 - [ ] partial: main area with tabs, sidebar and focused workspace (`src/App.tsx`). Tab kinds: terminal, editor, diff, review (changes, pull requests).
-- [ ] partial: tab kinds: changes is done (review stage); dashboard, reviews, settings, integrations, repo, workspace, commit, pr, feature, ralph are not (`src/App.tsx`)
+- [ ] partial: tab kinds: changes (review stage), dashboard, workspace and repo pages (git flows stage) are done; reviews, settings, integrations, commit, pr, feature, ralph are not (`src/App.tsx`)
 - [x] done: custom titlebar (client-side decorations; gpui-component's `TitleBar` draws the window controls and moves/maximizes the window): sidebar toggle, back/forward, workspace switcher, slots for the run widget and inbox, files-panel toggle (`WindowControls.tsx`)
 - [x] done: back/forward history: tab switches and cross-file jumps, with the cursor of each file; closed files reopen, closed terminals are skipped; `Alt+←/→`, mouse side buttons, titlebar arrows (`src/lib/navHistory.ts`). Jumps inside one file are not recorded yet (the editor emits no event for them).
 - [x] done: resizable sidebar (snaps to icons below 110 px), files dock and bottom panel; double click resets; sizes and hidden/open state persist (`PaneResizer.tsx`, `SidebarResizer.tsx`)
@@ -684,7 +795,7 @@ Status of everything the React app does: **done**, **partial** (with what's miss
 - [x] done: command registry and keymap; Find Action (`Ctrl+Shift+A`, `src/lib/commands.ts`) is Search Everywhere's Actions tab
 - [x] done: bottom panel with Build, Run, Debug and Problems tabs (see *Build / Run / Debug*)
 - [ ] — Error boundary / crash log (`ErrorBoundary.tsx`)
-- [ ] — Dashboard page (`src/pages/DashboardPage.tsx`)
+- [x] done: Dashboard page: workspace cards with status summary, onboarding, the repositories with their brief (`src/pages/DashboardPage.tsx`). No context menu, Ralph or editor/folder buttons.
 - [ ] partial: ConfirmDialog and ContextMenu (`src/overlay.rs`, keyboard: ↑/↓/Enter/Esc). Skeletons, Select, CheckBox, PathInput, Tooltip not yet (gpui-component has equivalents)
 - [ ] partial: icons. File-type icons in the tree (`FileIcons.tsx`), tab icons (`Icons.tsx`), Lucide for the titlebar and toasts. No activity bar or brand icons yet (`BrandIcons.tsx`).
 - [ ] — Arrow-key list navigation helper (`src/lib/arrowNav.ts`); only the file tree has key navigation
@@ -692,21 +803,21 @@ Status of everything the React app does: **done**, **partial** (with what's miss
 
 ### Workspaces & sidebar
 - [ ] partial: workspace list from `config.yaml` / `.workspace.yaml`, click to select. No session entries or status indicators (`src/App.tsx`, `StatusIndicator.tsx`).
-- [ ] — Create workspace: blank, from branch, from a tracker card (`WorkspaceCreateModal.tsx`)
-- [ ] — Workspace detail page: repos, PRs, checks, plan, artifacts, usage (`WorkspaceDetailPage.tsx`)
-- [ ] — Add repositories (`AddReposModal.tsx`)
-- [ ] — Branch drift banner (`BranchDriftBanner.tsx`)
+- [ ] partial: Create workspace: blank (manual) and from an existing branch, groups, base branch menu, linked repos noted (`WorkspaceCreateModal.tsx`). No tracker cards (Shortcut/Linear).
+- [ ] partial: Workspace detail page: delivery flow, repos with badges and pull, PRs with check aggregates, remove (`WorkspaceDetailPage.tsx`). No plan, race, artifacts, usage, investigate/fix checks with AI, review feedback.
+- [x] done: Add repositories (`AddReposModal.tsx`)
+- [x] done: Branch drift banner: switch back, stash and switch, auto-switch (`BranchDriftBanner.tsx`)
 - [ ] — Folders card (`FoldersCard.tsx`) and folder scopes `dir:<path>` (`src/lib/folderScope.ts`)
 - [ ] — Open in an external editor / reveal folder
-- [ ] — Workspace pull and status summary
+- [x] done: Workspace pull (fast-forward from a repo row) and status summary (dashboard, delivery flow)
 - [ ] — Race (`Race.tsx`), CI artifacts (`ArtifactsSection.tsx`), AI usage bar (`UsageBar.tsx`)
 - [ ] — Plan modal and PLAN.md progress (`PlanModal.tsx`, `PlanProgress.tsx`)
 - [ ] — Integrations page (`IntegrationsPage.tsx`)
 
 ### Repos / worktrees
 - [ ] — Settings → Repos, repo form, GitHub repo picker, groups (`ReposSection.tsx`, `RepoFormModal.tsx`, `GithubRepoModal.tsx`, `GroupsSection.tsx`)
-- [ ] — Repo page: branches, pull, commit, stash, history, compare, cherry-pick, revert, prune (`RepoPage.tsx`)
-- [ ] — Repo briefs refresh and background fetch (`src/lib/useRepoBriefs.ts`)
+- [ ] partial: Repo page: branches (switch, create, delete), pull, push/publish, commit, stash, history (undo, revert), stashes, a paused operation, prune (`RepoPage.tsx`). No compare or cherry-pick.
+- [ ] partial: repo briefs on the dashboard (`src/lib/useRepoBriefs.ts`); no sidebar list or background fetch timer
 
 ### Sessions / agents
 - [ ] partial: new session (shell, Claude Code, Open Code, OMP in the current scope) and codenames (`NewSessionMenu.tsx`, `src/lib/names.ts`). No "Open in" folder/repo picker, no rename.
@@ -766,7 +877,8 @@ Status of everything the React app does: **done**, **partial** (with what's miss
 - [ ] — GitHub PR review threads and submit, Code Review page, feature page, PR checkout, address review (`PrReviewPane.tsx`, `ReviewThreads.tsx`, `SubmitReview.tsx`, `CodeReviewPage.tsx`, `FeaturePage.tsx`, `PrCheckoutModal.tsx`, `AddressReview.tsx`)
 
 ### Git operations
-- [ ] partial: PRs (`PrsModal.tsx`): the workspace's open PRs and saved PRs' live state, create PRs for the repos without one (title from the branch or *Draft with AI*, description), into the workspace base. Commit, push, rebase, merge modals are not ported (`CommitModal.tsx`, `PushModal.tsx`, `RebaseModal.tsx`, `MergeModal.tsx`).
+- [ ] partial: PRs (`PrsModal.tsx`): the workspace's open PRs and saved PRs' live state, create PRs for the repos without one (title from the branch or *Draft with AI*, description), into the workspace base.
+- [x] done: commit (files, partial commits, AI drafts, discard), push (force with lease, dropped repos, open PR note), rebase (conflicts, resolve with AI, abort) and squash-and-merge flows (`CommitModal.tsx`, `PushModal.tsx`, `RebaseModal.tsx`, `MergeModal.tsx`). The commit flow opens diffs as tabs instead of a side pane.
 - [ ] partial: checks: list per PR with the aggregate, failed-check logs (the tail the AI gets), re-run failed jobs. No investigate/fix with AI; discard and sync branch not ported.
 
 ### Run / Build / Debug
@@ -785,7 +897,7 @@ Status of everything the React app does: **done**, **partial** (with what's miss
 
 ### Backend services
 - [x] done: the backend is shared through `crates/orbit-core` (config, workspaces, git, GitHub, LSP/DAP processes, watcher, builds, run configs, agents, Ralph, review, search, notes, files); the native app uses its workspace list and LSP manager
-- [ ] partial: no native UI writes state yet; the core functions for it exist (`workspace::create`, `repo::commit`, `notes::add`, …)
+- [ ] partial: native UI writes state through core: workspaces (create, add repos, remove), commits, pushes, rebases, merges, branches, stashes, REVIEW.md notes, PRs; config editing not yet
 - [x] done: FS/git watcher events in the native UI (`orbit_core::watch::watch` with a channel sink; the tree and editors)
 - [x] done: run configs (`.orbit/run.json`, with `run.local.json` and CMake presets) through `orbit_core::run`
 - [x] done: PTY registry, scrollback and flow control in core (`orbit_core::pty`); `src-tauri/src/pty.rs` is an adapter

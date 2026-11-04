@@ -522,17 +522,7 @@ pub async fn git_file_diff(
     repo: String,
     path: String,
 ) -> Result<git::FileDiff, String> {
-    blocking(move || {
-        let dir = worktree_of(&workspace, &repo)?;
-        let original = git::rev_content(&dir, &path, "HEAD").unwrap_or_default();
-        let modified = if path.is_empty() {
-            return Err("empty path".into());
-        } else {
-            std::fs::read_to_string(dir.join(&path)).unwrap_or_default()
-        };
-        Ok(git::FileDiff { original, modified })
-    })
-    .await
+    blocking(move || git::file_diff(&worktree_of(&workspace, &repo)?, &path)).await
 }
 
 /// Files touched by a commit.
@@ -553,14 +543,7 @@ pub async fn git_commit_diff(
     sha: String,
     path: String,
 ) -> Result<git::FileDiff, String> {
-    blocking(move || {
-        let dir = worktree_of(&workspace, &repo)?;
-        let (before, after) = git::diff_sides(&dir, &sha);
-        let original = git::rev_content(&dir, &path, &before).unwrap_or_default();
-        let modified = git::rev_content(&dir, &path, &after).unwrap_or_default();
-        Ok(git::FileDiff { original, modified })
-    })
-    .await
+    blocking(move || Ok(git::commit_file_diff(&worktree_of(&workspace, &repo)?, &sha, &path))).await
 }
 
 // ---------- AI settings ----------
@@ -625,14 +608,7 @@ pub async fn workspace_status(name: String) -> Result<Vec<RepoStatus>, String> {
 /// Fetches the upstream for a repo's clone (refreshes ahead/behind data).
 #[tauri::command]
 pub async fn refresh_repo(name: String) -> Result<(), String> {
-    blocking(move || {
-        let dir = workspace::clone_dir_of(&name)?;
-        if !dir.exists() {
-            return Err(format!("'{name}' is not cloned"));
-        }
-        git::fetch(&dir)
-    })
-    .await
+    blocking(move || crate::repo::fetch(&name)).await
 }
 
 /// Opens a workspace repo's worktree in the user's editor (VS Code or Zed).
@@ -742,22 +718,7 @@ pub async fn integration_disconnect(kind: String) -> Result<(), String> {
 /// base-branch select). Always includes main/master fallbacks.
 #[tauri::command]
 pub async fn list_base_branches(repos: Vec<String>) -> Result<Vec<String>, String> {
-    blocking(move || {
-        let mut out = vec!["main".to_string(), "master".to_string()];
-        for repo in &repos {
-            let dir = workspace::clone_dir_of(repo)?;
-            if workspace::is_cloned(&dir) {
-                for b in git::list_branches(&dir) {
-                    if !out.contains(&b) {
-                        out.push(b);
-                    }
-                }
-                break; // first cloned repo is enough for suggestions
-            }
-        }
-        Ok(out)
-    })
-    .await
+    blocking(move || workspace::base_branches(&repos)).await
 }
 
 /// Card search from a connected tracker (query filters server-side).
@@ -806,13 +767,7 @@ pub async fn ws_discard(workspace: String, repo: String, paths: Vec<String>) -> 
 /// `--force-with-lease`, for a branch a rebase rewrote.
 #[tauri::command]
 pub async fn ws_push(workspace: String, repo: String, force: Option<bool>) -> Result<(), String> {
-    blocking(move || {
-        let dir = worktree_on_branch(&workspace, &repo)?;
-        let branch = git::current_branch(&dir)
-            .ok_or_else(|| format!("{repo}: detached HEAD, nothing to push"))?;
-        git::push(&dir, &branch, force.unwrap_or(false))
-    })
-    .await
+    blocking(move || crate::prs::push(&workspace, &repo, force.unwrap_or(false))).await
 }
 
 /// Rebase one repo onto origin/<base>. Conflicts leave the rebase PAUSED
@@ -914,7 +869,7 @@ pub async fn ws_address_review(
     notes: Vec<String>,
 ) -> Result<Vec<agent::ThreadReply>, String> {
     blocking(move || {
-        let owner_repo = remote_of(&worktree_of(&workspace, &repo)?).ok_or_else(|| format!("{repo}: origin is not a GitHub repository"))?;
+        let owner_repo = crate::prs::owner_repo(&workspace, &repo)?;
         agent::address_review(&crate::events(app), &run, &workspace, &repo, &owner_repo, number, &thread_ids, &notes)
     })
     .await
@@ -924,18 +879,14 @@ pub async fn ws_address_review(
 /// deleted); the worktree and local branch stay until the workspace is removed.
 #[tauri::command]
 pub async fn ws_pr_merge(workspace: String, repo: String, number: u64) -> Result<(), String> {
-    blocking(move || {
-        let owner_repo = remote_of(&worktree_of(&workspace, &repo)?).ok_or_else(|| format!("{repo}: origin is not a GitHub repository"))?;
-        github::squash_merge(&owner_repo, number).map_err(|e| format!("{repo} #{number}: {e}"))
-    })
-    .await
+    blocking(move || crate::prs::merge(&workspace, &repo, number)).await
 }
 
 /// Squash-merges a PR addressed on GitHub alone (a Code Review feature
 /// that was never checked out) and deletes its branch there.
 #[tauri::command]
 pub async fn pr_merge_remote(owner_repo: String, number: u64) -> Result<(), String> {
-    blocking(move || github::squash_merge(&owner_repo, number).map_err(|e| format!("{owner_repo} #{number}: {e}"))).await
+    blocking(move || crate::prs::merge_remote(&owner_repo, number)).await
 }
 
 fn origin_url(dir: &std::path::Path) -> Option<String> {
@@ -947,10 +898,6 @@ fn origin_url(dir: &std::path::Path) -> Option<String> {
     out.status
         .success()
         .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
-}
-
-fn remote_of(dir: &std::path::Path) -> Option<String> {
-    crate::prs::remote_of(dir)
 }
 
 /// PR status rows for the workspace home tracker. Source of truth is the
