@@ -664,6 +664,7 @@ impl ReviewTab {
             Some(std::rc::Rc::new(move |range, window, cx| {
                 let _ = w2.update(cx, |t, cx| t.comment_on(range, window, cx));
             })),
+            cx,
         );
         div()
             .id("chg-scroll")

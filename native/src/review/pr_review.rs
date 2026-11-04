@@ -1468,6 +1468,7 @@ impl PrReviewPage {
             Some(std::rc::Rc::new(move |range, window, cx| {
                 let _ = w2.update(cx, |p, cx| p.comment_on(range, window, cx));
             })),
+            cx,
         );
         let outdated = off.iter().any(|t| t.line.is_none() || t.is_outdated);
         let removed = !self.split && off.iter().any(|t| t.line.is_some() && t.side == "LEFT");

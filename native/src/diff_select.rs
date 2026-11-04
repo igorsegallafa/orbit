@@ -13,7 +13,7 @@ use gpui::{
     div, prelude::*, px, AnyElement, App, ClipboardItem, ElementId, Entity, Focusable, MouseButton, MouseDownEvent, MouseUpEvent,
     Pixels, Window,
 };
-use gpui_component::diff::{Diff, DiffFile, DiffGutterMarker, DiffLinePosition, DiffLineRange, DiffSide, DiffState};
+use gpui_component::diff::{Diff, DiffFile, DiffGutterMarker, DiffLinePosition, DiffLineRange, DiffMode, DiffSide, DiffState};
 use gpui_component::input::Copy;
 use gpui_component::{ActiveTheme, Icon, IconName, Sizable};
 use std::cell::RefCell;
@@ -160,8 +160,13 @@ fn plus(sel: &Handle, state: &Entity<DiffState>, marker: &DiffGutterMarker, cx: 
 
 /// The Diff with its `+` lane on `sides` (when `on_comment` is given),
 /// text-selection line tracking and Ctrl+C, inside a full-size wrapper.
-pub fn attach(diff: Diff, sel: &Handle, state: &Entity<DiffState>, sides: &[DiffSide], on_comment: Option<OnComment>) -> impl IntoElement {
-    let mut diff = diff.on_line_hover({
+///
+/// Split view wraps long lines. Unwrapped, the Diff sizes both columns to half
+/// the widest line of either side and scrolls them together, so a long line
+/// pushes the new side out of view; wrapped, each side takes half the width.
+pub fn attach(diff: Diff, sel: &Handle, state: &Entity<DiffState>, sides: &[DiffSide], on_comment: Option<OnComment>, cx: &App) -> impl IntoElement {
+    let split = state.read(cx).mode() == DiffMode::Split;
+    let mut diff = diff.soft_wrap(split).on_line_hover({
         let (sel, state) = (sel.clone(), state.clone());
         move |p, window, cx| {
             let mut s = sel.borrow_mut();

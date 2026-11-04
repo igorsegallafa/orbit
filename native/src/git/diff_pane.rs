@@ -161,7 +161,7 @@ impl Render for DiffPane {
                 .flex_1()
                 .min_h_0()
                 .relative()
-                .child(crate::diff_select::attach(Diff::new(&self.state).size_full().header_visible(false), &self.sel, &self.state, &[], None))
+                .child(crate::diff_select::attach(Diff::new(&self.state).size_full().header_visible(false), &self.sel, &self.state, &[], None, cx))
                 .child(crate::probe::probe("pane-diff"))
                 .into_any_element(),
         };

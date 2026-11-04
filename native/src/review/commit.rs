@@ -176,7 +176,7 @@ impl ReviewTab {
                 .flex_1()
                 .min_h_0()
                 .relative()
-                .child(crate::diff_select::attach(Diff::new(&v.diff).size_full().header_visible(false), &v.sel, &v.diff, &[], None))
+                .child(crate::diff_select::attach(Diff::new(&v.diff).size_full().header_visible(false), &v.sel, &v.diff, &[], None, cx))
                 .child(crate::probe::probe("commit-diff"))
                 .into_any_element(),
         };
