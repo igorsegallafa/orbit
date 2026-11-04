@@ -2,6 +2,7 @@
 //! patch view (split or unified, tree-sitter colors). In a workspace repo it
 //! is also a local review: notes from REVIEW.md (the Tauri app's file) show
 //! under their lines, and the `+` beside a line or a selection leaves one.
+use crate::diff_select;
 use crate::lsp::file_language;
 use crate::probe::probe;
 use crate::review::notes::{self as rnotes, Anchor};
@@ -21,6 +22,7 @@ use gpui_component::ActiveTheme;
 use orbit_core::notes::Note;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
 /// Unchanged lines are folded by the view, so the patch carries the whole
@@ -84,14 +86,6 @@ pub fn git_patch_in(dir: &Path, rel: &str, prefix: Option<&str>) -> Result<Strin
     Ok(patch)
 }
 
-/// The dump line for a diff's selection, if any.
-pub fn selection_dump(state: &Entity<DiffState>, cx: &App) -> Option<String> {
-    let s = state.read(cx);
-    let lines = s.selected_lines().map(|r| format!("{} {:?} {}-{}", r.path(), r.side(), r.start(), r.end()));
-    let text = s.selected_text(cx);
-    (lines.is_some() || !text.is_empty()).then(|| format!("  selection lines {lines:?} text {text:?}"))
-}
-
 /// A diff state that colors code with the active theme.
 pub fn highlighted_state(files: Vec<DiffFile>, mode: DiffMode, cx: &mut App) -> Entity<DiffState> {
     let highlight_theme = cx.theme().highlight_theme.clone();
@@ -134,6 +128,7 @@ pub fn first_added_line(patch: &str) -> Option<u32> {
 /// What opening or refreshing a diff tab reads from disk.
 pub struct LoadedDiff {
     files: Vec<DiffFile>,
+    patch: String,
     first_added: Option<u32>,
     changes: usize,
     review: Option<(RepoFile, String, Vec<Note>, Option<SystemTime>)>,
@@ -195,6 +190,7 @@ pub struct DiffTab {
     pub review: Option<FileReview>,
     pub composer: Option<Composer>,
     pub message: Option<String>,
+    pub sel: diff_select::Handle,
     first_added: Option<u32>,
     changes: usize,
     change_ix: Option<usize>,
@@ -229,11 +225,13 @@ impl DiffTab {
             let notes = rnotes::list(&at.workspace).map(|f| file_notes(&f.notes, &at)).unwrap_or_default();
             (at, text, notes, stamp)
         });
-        Ok(LoadedDiff { files, first_added: first_added_line(&patch), changes: ui::change_blocks(&patch), review, stamp: mtime(path) })
+        Ok(LoadedDiff { files, first_added: first_added_line(&patch), patch: patch.clone(), changes: ui::change_blocks(&patch), review, stamp: mtime(path) })
     }
 
     pub fn new(path: PathBuf, loaded: LoadedDiff, split: bool, cx: &mut Context<Self>) -> Self {
-        let LoadedDiff { files, first_added, changes, review, stamp } = loaded;
+        let LoadedDiff { files, patch, first_added, changes, review, stamp } = loaded;
+        let sel = diff_select::new();
+        sel.borrow_mut().set_files(&files, &patch, &[DiffSide::Modified]);
         let (additions, deletions) = counts(&files);
         let highlight_theme = cx.theme().highlight_theme.clone();
         let mode = if split { DiffMode::Split } else { DiffMode::Unified };
@@ -262,6 +260,7 @@ impl DiffTab {
             review,
             composer: None,
             message: None,
+            sel,
             first_added,
             changes,
             change_ix: None,
@@ -332,6 +331,7 @@ impl DiffTab {
         self.first_added = loaded.first_added;
         self.changes = loaded.changes;
         self.change_ix = None;
+        self.sel.borrow_mut().set_files(&loaded.files, &loaded.patch, &[DiffSide::Modified]);
         self.state.update(cx, |s, cx| s.set_files(loaded.files, cx));
         if let (Some(r), Some((_, text, notes, stamp))) = (self.review.as_mut(), loaded.review) {
             (r.text, r.notes, r.notes_stamp) = (text, notes, stamp);
@@ -385,7 +385,7 @@ impl DiffTab {
 
     /// Comments on the selected lines, or the first added line without a selection.
     pub fn comment_on_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let selected = self.state.read(cx).selected_lines();
+        let selected = self.sel.borrow().range(self.state.read(cx));
         let range = match (selected, self.diff_path(cx)) {
             (Some(r), _) => r,
             (None, Some(path)) => DiffLineRange::new(path, DiffSide::Modified, self.first_added.unwrap_or(1) as usize, self.first_added.unwrap_or(1) as usize),
@@ -613,16 +613,15 @@ impl Render for DiffTab {
         let (annotations, decorations) = self.annotations(cx);
         let note_counts = self.review.as_ref().map(|r| (r.notes.iter().filter(|n| !n.done).count(), r.notes.len(), r.show_done));
         let mut diff = Diff::new(&self.state).size_full();
+        let mut on_comment: Option<diff_select::OnComment> = None;
         if self.review.is_some() {
             let (w1, w2) = (weak.clone(), weak.clone());
-            diff = diff
-                .annotations(annotations)
-                .decorations(decorations)
-                .render_annotation(move |a, _, cx| render_annotation(&w1, a, cx))
-                .on_add_annotation(move |range, window, cx| {
-                    let _ = w2.update(cx, |t, cx| t.comment_on(range, window, cx));
-                });
+            diff = diff.annotations(annotations).decorations(decorations).render_annotation(move |a, _, cx| render_annotation(&w1, a, cx));
+            on_comment = Some(Rc::new(move |range, window, cx| {
+                let _ = w2.update(cx, |t, cx| t.comment_on(range, window, cx));
+            }));
         }
+        let diff = diff_select::attach(diff, &self.sel, &self.state, on_comment);
         let toolbar_btn = |id: &'static str, label: String| {
             div()
                 .id(id)

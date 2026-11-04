@@ -4,6 +4,7 @@
 mod app;
 mod commands;
 mod debug;
+mod diff_select;
 mod diff_view;
 mod editor;
 mod file_ops;

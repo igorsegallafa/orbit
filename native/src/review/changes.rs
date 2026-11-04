@@ -108,6 +108,7 @@ pub struct ChangesView {
     /// First added line per file: where a note goes without a selection.
     first_added: HashMap<String, u32>,
     pub composer: Option<Composer>,
+    pub sel: crate::diff_select::Handle,
 }
 
 impl ChangesView {
@@ -125,7 +126,7 @@ impl ChangesView {
                     highlighter.styles(&(0..text.len()), &*highlight_theme)
                 })
         });
-        Self { diff, sig: 0, viewed: load_viewed(ws), texts: HashMap::new(), first_added: HashMap::new(), composer: None }
+        Self { diff, sig: 0, viewed: load_viewed(ws), texts: HashMap::new(), first_added: HashMap::new(), composer: None, sel: crate::diff_select::new() }
     }
 }
 
@@ -169,14 +170,17 @@ impl ReviewTab {
         self.chg.sig = sig;
         self.chg.first_added =
             snap.patches.iter().filter_map(|(k, p)| crate::diff_view::first_added_line(p).map(|l| (k.clone(), l))).collect();
-        let files: Vec<DiffFile> = snap
+        let parsed: Vec<(Vec<DiffFile>, &str)> = snap
             .patches
             .iter()
-            .flat_map(|(key, patch)| {
+            .map(|(key, patch)| {
                 let language = file_language(Path::new(split_key(key).1)).highlight;
-                DiffFile::parse(patch).unwrap_or_default().into_iter().map(move |f| f.with_language(language))
+                (DiffFile::parse(patch).unwrap_or_default().into_iter().map(|f| f.with_language(language)).collect(), patch.as_str())
             })
             .collect();
+        let per_patch: Vec<(&[DiffFile], &str)> = parsed.iter().map(|(f, p)| (f.as_slice(), *p)).collect();
+        self.chg.sel.borrow_mut().set_patches(&per_patch, &[DiffSide::Modified]);
+        let files: Vec<DiffFile> = parsed.iter().flat_map(|(f, _)| f.iter().cloned()).collect();
         let viewed = self.chg.viewed.clone();
         self.chg.diff.update(cx, |s, cx| {
             s.set_files(files, cx);
@@ -311,7 +315,7 @@ impl ReviewTab {
     /// The selected lines, else the first file's first changed line.
     pub fn comment_on_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let state = self.chg.diff.read(cx);
-        let range = state.selected_lines().or_else(|| {
+        let range = self.chg.sel.borrow().range(state).or_else(|| {
             let key = state.files().first()?.path().clone();
             let line = *self.chg.first_added.get(key.as_ref())? as usize;
             Some(DiffLineRange::new(key, DiffSide::Modified, line, line))
@@ -649,10 +653,15 @@ impl ReviewTab {
             .hunk_separator(DiffHunkSeparator::LineInfo)
             .annotations(annotations)
             .decorations(decorations)
-            .render_annotation(move |a, _, cx| render_annotation(&w1, a, first.as_ref(), cx))
-            .on_add_annotation(move |range, window, cx| {
+            .render_annotation(move |a, _, cx| render_annotation(&w1, a, first.as_ref(), cx));
+        let diff = crate::diff_select::attach(
+            diff,
+            &self.chg.sel,
+            &self.chg.diff,
+            Some(std::rc::Rc::new(move |range, window, cx| {
                 let _ = w2.update(cx, |t, cx| t.comment_on(range, window, cx));
-            });
+            })),
+        );
         div()
             .id("chg-scroll")
             .flex_1()

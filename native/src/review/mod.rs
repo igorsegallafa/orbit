@@ -339,9 +339,7 @@ pub fn dump(app: &OrbitApp, cx: &App) -> String {
                 if let Some(cm) = &d.composer {
                     let _ = writeln!(out, "  composer {:?}: {:?}", cm.kind, cm.input.read(cx).value());
                 }
-                if let Some(s) = crate::diff_view::selection_dump(&d.state, cx) {
-                    let _ = writeln!(out, "{s}");
-                }
+                out.push_str(&crate::diff_select::dump(&d.sel, &d.state, cx));
                 if let Some(m) = &d.message {
                     let _ = writeln!(out, "  message: {m}");
                 }
@@ -378,9 +376,7 @@ impl ReviewTab {
                 if let Some(cm) = &self.chg.composer {
                     let _ = writeln!(out, "  composer {:?}: {:?}", cm.kind, cm.input.read(cx).value());
                 }
-                if let Some(s) = crate::diff_view::selection_dump(&self.chg.diff, cx) {
-                    let _ = writeln!(out, "{s}");
-                }
+                out.push_str(&crate::diff_select::dump(&self.chg.sel, &self.chg.diff, cx));
             }
             Page::Commit => {
                 if let Some(v) = &self.commit {
