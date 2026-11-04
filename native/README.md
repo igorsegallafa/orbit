@@ -4,9 +4,10 @@ Orbit's UI rewritten as a native Rust app on [GPUI](https://www.gpui.rs/) (Zed's
 [gpui-component](https://github.com/longbridge/gpui-kit), to replace the Tauri + WebKitGTK + React
 frontend, which costs 340–595 MB idle (mostly `WebKitWebProcess`).
 
-This is **stage 1**. It builds the shell and proves the riskiest part first: a code editor with a
-language server, which every later stage depends on. The Tauri app in the repo root is untouched and
-remains the product.
+Stage 1 built the shell and proved the riskiest part first: a code editor with a language server,
+which every later stage depends on. Stage 2 moved Orbit's backend into the shared crate
+`crates/orbit-core` (see *Sharing the backend*), which both apps now link. The Tauri app in the repo
+root remains the product.
 
 ## Build and run
 
@@ -16,8 +17,9 @@ cargo build --release      # 824 crates; incremental release builds take 40 s–
 ./target/release/orbit-native
 ```
 
-The app reads Orbit's own `~/.config/orbit/config.yaml` and each workspace's `.workspace.yaml`
-(read-only), so it shows the same workspaces as the Tauri app. `target/` is ~3.3 GB after a
+The app lists workspaces and starts language servers through `orbit-core`, the same code as the
+Tauri app, so it shows the same workspaces and honours Settings → Languages (server overrides,
+disabled languages). `target/` is ~3.3 GB after a
 release build plus clippy and tests.
 
 The first start after a build takes several seconds while the GPU driver compiles and caches
@@ -175,42 +177,77 @@ Caveats found:
 | `src/main.rs` | app start, window, keymap, LSP shutdown on quit |
 | `src/app.rs` | root view: sidebar, tree panel, tab strip (sessions, then files; preview tab; dirty dot), status bar, tab logic |
 | `src/editor.rs` | editor tab: `EditorState`, save, dirty, LSP document sync and providers, cross-file definition |
-| `src/lsp/` | `mod.rs` server choice per language and registry · `server.rs` process + JSON-RPC + URI mapping · `paths.rs` URIs, root rebase, `find_compile_commands` |
+| `src/lsp/` | `mod.rs` file → language and the server registry · `server.rs` JSON-RPC client and URI mapping over `orbit_core::lsp` (which picks, starts and feeds the process) · `paths.rs` URIs and root rebase |
 | `src/diff_view.rs` | diff tab over `git diff HEAD` |
 | `src/terminal/` | PTY + VT (`mod.rs`), grid layout and paint (`grid.rs`), keys and mouse reports (`input.rs`) |
 | `src/file_tree.rs` | virtualized tree with background folder loads |
-| `src/workspace.rs` | Orbit config and `.workspace.yaml` (read-only) |
+| `src/workspace.rs` | workspace list from `orbit_core::workspace` |
 | `src/theme.rs`, `src/orbit-dark.json` | Orbit Dark tokens (`src/App.css`, `src/lib/theme.ts`) for our views and for gpui-component |
 | `src/script.rs` | self-test mode and dumps |
 
 ## Sharing the backend: `orbit-core`
 
-The Tauri crate (`src-tauri`, lib `orbit_lib`) holds all the logic the native app needs: git,
-workspaces, PRs, builds, run configs, LSP and DAP processes, agents, Ralph. Most of it is already
-free of Tauri:
+`crates/orbit-core` holds Orbit's backend logic with no Tauri dependency. `src-tauri` keeps the
+`#[tauri::command]` wrappers (thin: argument plumbing, `spawn_blocking`, events to the webview) and
+calls into it; the native app calls it directly.
 
-- **No Tauri at all:** `config`, `workspace`, `git`, `github`, `links`, `proc`, `health`,
-  `integrations`, `usage`, `agent/{cmd,runner,stream}`, `ralph/{prd,prompts,supervisor}`.
-- **Only `#[tauri::command]` wrappers** (thin, easy to split off): `files`, `repo`, `review`,
-  `notes`, `search`, `artifacts`, `term_image`, `commands`.
-- **Emit events through `AppHandle`:** `watch`, `pty`, `lsp`, `dap`, `build`, `run`,
-  `agent_hooks`, `agent/live`, `ralph/mod` (+ `agent/plan`, `ralph/plan_run` take an AppHandle).
+**Layout.** `orbit-core` is a member of `src-tauri`'s Cargo workspace (`[workspace]` in
+`src-tauri/Cargo.toml`, `package.workspace` in the core crate), so the Tauri app keeps its
+`Cargo.lock`, its `src-tauri/target` and the CI cache path unchanged. `pnpm run check` runs clippy
+and tests with `--workspace`, which covers the core crate. `native/` stays a separate workspace with
+its own lock file and target dir and takes `orbit-core` as a path dependency: GPUI's dependency tree
+never meets Tauri's, so neither can force upgrades on the other. Adding the core crate to `native/`
+only added `trash`, `urlencoding` and `winreg` to its lock; no existing version moved. The cost is
+that `orbit-core` compiles twice, once per target dir (a few seconds).
 
-Proposal for a later stage: move these into a workspace crate `orbit-core` with no Tauri
-dependency. The command wrappers stay in `src-tauri`. Event-emitting code takes an
-`Arc<dyn EventSink>` (`fn emit(&self, event: &str, payload: serde_json::Value)`), which Tauri
-implements with `AppHandle::emit` and the native app with a channel into GPUI. Process managers
-(pty, lsp, dap) keep their output callbacks instead of emitting. Both apps then link `orbit-core`
-(the native crate by path, with a Cargo workspace at the repo root or a `[dependencies]` path).
-This was not done in stage 1: it touches most backend files and the Tauri build. For now
-`native/src/workspace.rs` and `native/src/lsp` duplicate small read-only parts
-(`.workspace.yaml` reading, `find_compile_commands`, server flags).
+**Events.** Long-running work reports through `orbit_core::events`:
+
+```rust
+pub trait EventSink: Send + Sync + 'static { fn emit(&self, event: &str, payload: serde_json::Value); }
+#[derive(Clone)] pub struct Events(Arc<dyn EventSink>);   // events.emit("fs-changed", change)
+```
+
+Any `Fn(&str, Value)` closure is a sink. `src-tauri` builds one per command from its `AppHandle`
+(`crate::events(app)`, which calls `AppHandle::emit`); the native app would pass a closure that sends
+into a GPUI channel. Event names and payload shapes are unchanged (`fs-changed`, `build-output`,
+`run-output`, `agent-feed`, `agent-event`, `ralph-event`, `ralph-prd-progress`). Process managers
+(`lsp`, `dap`) don't emit: `start` takes `on_message(id, raw)` and `on_exit(id, …)` callbacks, and the
+Tauri wrapper turns those into `lsp-message`/`lsp-exit` and `dap-message`/`dap-exit`.
+
+**What moved** (with their tests, 124 Rust tests in total, as before plus one for `events`):
+`config`, `proc`, `git`, `github`, `links`, `workspace`, `health`, `integrations`, `usage`, `repo`,
+`review`, `search`, `notes`, `files`, `artifacts`, `lsp`, `dap`, `watch`, `build`, `run`,
+`agent_hooks`, `agent/*` (plan, live feed, runner, stream parsing) and `ralph/*`. Command bodies that
+held logic became core functions (`notes::add`, `lsp::cpp_setup`, `ralph::start`, `repo::briefs`,
+`files::*`…); the wrappers only call them.
+
+**What stays in `src-tauri`, and why:**
+
+- `pty.rs` + `term_image.rs`: the PTY streams output to the webview through a Tauri `ipc::Channel`
+  with flow control and scrollback files, and uses `portable-pty 0.8` where the native terminal uses
+  0.9 with its own VT. Unifying the two is the *Sessions* stage's job (move the PTY registry,
+  scrollback and flow control to core behind an output callback, on one `portable-pty` version).
+- `commands.rs` (93 commands): most are one-line wrappers over core, but some still hold logic
+  inline: service/folder/group editing in the config, `ws_create_pr(s)`, `ws_checks` aggregation,
+  `check_logs`, `open_in_editor`. Not moved here to keep this stage reviewable; the *Git and
+  workspace flows* stage should move each into core as it gets a native UI.
+- `lib.rs`: the Tauri builder, plugins, the handler list, `events()` and `blocking()`.
+- Plugin calls (`tauri_plugin_opener` for reveal/open after an artifact download) stay in the wrappers.
+
+**The native app now uses** `orbit_core::workspace::list` for the sidebar and `orbit_core::lsp::start`
+/ `send` / `stop` / `log` for language servers, so server choice (config override, disabled
+languages, rust-analyzer's rustup proxy check), clangd's `--compile-commands-dir` lookup, the
+real-root working directory of symlinked repos and `proc::cmd`'s environment are the Tauri app's.
+Its own `paths::real_path`, `find_compile_commands` and server table are gone. It also calls
+`proc::refresh_path` at start (a launcher's bare PATH). Re-checked with the self-tests: F12 and
+Ctrl+click on `Initialize` (39:12 of `Game.h`) open `Game.cpp` at 44:10, hover returns clangd's
+markdown, the tree loads 3 levels (1,436 rows) in the background, terminals spawn.
 
 ## Next stages
 
 Ordered by dependency, with rough sizes (one focused agent-day ≈ 1 unit).
 
-1. **orbit-core extraction** (2–3): above. It unblocks everything that writes state.
+1. ~~**orbit-core extraction**~~: done (stage 2), except `pty` and `commands.rs`'s inline logic.
 2. **Shell parity** (2): resizable panes, the activity bar and icons (Lucide is bundled), the
    status bar, toasts and notifications, the custom titlebar, back/forward history, persisted tab
    and session state.
@@ -304,7 +341,7 @@ Status of everything the React app does: **done**, **partial** (with what's miss
 - [ ] — Workspace symbol search (`SymbolSearch.tsx`)
 
 ### LSP
-- [x] done: client over stdio, one server per (repo folder, language), started on demand (`src/lib/lsp/client.ts`, `manager.ts`)
+- [x] done: client over stdio, one server per (repo, language), started on demand by `orbit_core::lsp` with the Tauri app's server choice and config (`src/lib/lsp/client.ts`, `manager.ts`)
 - [x] done: path mapping for symlinked repos (`src/lib/lsp/paths.ts`)
 - [x] done: definition (F12, Ctrl+click), hover, diagnostics
 - [ ] — declaration, type definition, implementation, references, highlights, document symbols, completion, signature help, formatting, semantic tokens, code actions (gpui-component has providers for completion, code actions and semantic tokens)
@@ -339,5 +376,7 @@ Status of everything the React app does: **done**, **partial** (with what's miss
 - [ ] — Toasts, inbox, OS notifications (`Toast.tsx`, `Inbox.tsx`); there is only a status-bar notice
 
 ### Backend services
-- [ ] partial: config and workspace metadata are read; nothing is written yet
-- [ ] — FS/git watcher events (`watch.rs`), run configs (`.orbit/run.json`)
+- [x] done: the backend is shared through `crates/orbit-core` (config, workspaces, git, GitHub, LSP/DAP processes, watcher, builds, run configs, agents, Ralph, review, search, notes, files); the native app uses its workspace list and LSP manager
+- [ ] partial: no native UI writes state yet; the core functions for it exist (`workspace::create`, `repo::commit`, `notes::add`, …)
+- [ ] — FS/git watcher events in the native UI (`orbit_core::watch::watch` with a channel sink), run configs (`.orbit/run.json`)
+- [ ] — PTY registry, scrollback and flow control in core (still `src-tauri/src/pty.rs`)
