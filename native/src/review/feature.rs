@@ -8,6 +8,7 @@ use crate::probe::probe;
 use crate::theme::{self, c};
 use crate::toast::ToastKind;
 use crate::workspace::Workspace;
+use crate::workspace_ui::kit;
 use gpui::{div, prelude::*, px, AnyElement, App, Context, FontWeight, SharedString, Task, Window};
 use orbit_core::github::{PrDetail, PullRequest};
 use orbit_core::prs::{RemotePr, WsCheck};
@@ -241,10 +242,10 @@ impl FeaturePage {
             _ => (c(theme::PANEL_RAISED), c(theme::TEXT_DIM)),
         };
         let icon = match s.state {
-            StepState::Done => lucide("check", 13., icon_fg),
-            StepState::Fail => lucide("x", 12., icon_fg),
-            StepState::Running | StepState::Loading => lucide("loader-circle", 13., icon_fg),
-            _ => lucide(s.icon, 15., icon_fg),
+            StepState::Done => lucide("check", 13., icon_fg).into_any_element(),
+            StepState::Fail => lucide("x", 12., icon_fg).into_any_element(),
+            StepState::Running | StepState::Loading => kit::spinner(("ft-step-spin", ix), 14., c(theme::ACCENT)).into_any_element(),
+            _ => lucide(s.icon, 15., icon_fg).into_any_element(),
         };
         let detail_color = match s.state {
             StepState::Done => theme::TEXT_DIM,
@@ -327,7 +328,7 @@ impl FeaturePage {
 
     fn render_repo(&self, ix: usize, pr: &PullRequest, cx: &mut Context<Self>) -> impl IntoElement {
         let size: AnyElement = match self.details.get(&pr.repo) {
-            None => div().w(px(90.)).h(px(10.)).rounded(px(4.)).bg(c(theme::PANEL_RAISED)).into_any_element(),
+            None => crate::motion::skeleton(px(90.), 10.).into_any_element(),
             Some(None) => div().into_any_element(),
             Some(Some(d)) => div()
                 .flex()
@@ -431,7 +432,7 @@ impl FeaturePage {
         let dot = match status.as_str() {
             "pass" => div().size(px(9.)).rounded_full().bg(c(theme::OK)).into_any_element(),
             "fail" => div().size(px(9.)).rounded_full().bg(c(theme::DANGER)).into_any_element(),
-            "running" => lucide("loader-circle", 10., c(theme::ACCENT)).into_any_element(),
+            "running" => kit::spinner(("ft-pr-spin", ix), 10., c(theme::ACCENT)).into_any_element(),
             _ => div().size(px(9.)).rounded_full().border(px(1.5)).border_color(c(theme::TEXT_FAINT)).into_any_element(),
         };
         let (k2, url, one) = (k.clone(), pr.url.clone(), vec![pr.clone()]);
@@ -541,10 +542,10 @@ impl FeaturePage {
         list.children(check.checks.iter().enumerate().map(|(i, ch)| {
             let failed = ch.bucket == "fail";
             let icon = match ch.bucket.as_str() {
-                "pending" | "queued" => lucide("loader-circle", 12., c(theme::ACCENT)),
-                "fail" => lucide("x", 11., c(theme::DANGER)),
-                "pass" => lucide("check", 11., c(theme::OK)),
-                _ => lucide("ring", 10., c(theme::TEXT_FAINT)),
+                "pending" | "queued" => kit::spinner(SharedString::from(format!("ft-check-spin:{}:{i}", check.repo)), 12., c(theme::ACCENT)).into_any_element(),
+                "fail" => lucide("x", 11., c(theme::DANGER)).into_any_element(),
+                "pass" => lucide("check", 11., c(theme::OK)).into_any_element(),
+                _ => lucide("ring", 10., c(theme::TEXT_FAINT)).into_any_element(),
             };
             let (link, rerun) = (ch.link.clone(), ch.link.clone());
             div()
@@ -594,7 +595,7 @@ impl FeaturePage {
 
 impl Render for FeaturePage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let Some(first) = self.prs.first().cloned() else { return div().id("feature") };
+        let Some(first) = self.prs.first().cloned() else { return div().id("feature").into_any_element() };
         let multi = self.prs.len() > 1;
         let steps = self.steps();
         let next = steps.iter().position(|s| s.state == StepState::Fail);
@@ -710,7 +711,7 @@ impl Render for FeaturePage {
                             })
                             .child(div().w(px(1.)).h(px(22.)).mx(px(4.)).bg(c(theme::BORDER)))
                             .child(pr_ui::tip(
-                                pr_ui::icon_button("ft-refresh", if refreshing { "loader-circle" } else { "refresh-cw" }, 32., 15.)
+                                pr_ui::icon_button_busy("ft-refresh", "refresh-cw", 32., 15., refreshing, false)
                                     .on_click(cx.listener(|p, _, window, cx| p.load_checks(window, cx))),
                                 "Refresh checks",
                             )),
@@ -739,6 +740,7 @@ impl Render for FeaturePage {
             .child(flow)
             .child(div().mb(px(22.)).child(pr_ui::section_head("Repositories")).child(repos))
             .child(div().mb(px(22.)).child(pr_ui::section_head("Pull requests").child(pr_ui::section_count(self.prs.len()))).child(prs))
+            .map(|page| crate::motion::page_in(page, "feature-in"))
     }
 }
 

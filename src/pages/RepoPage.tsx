@@ -366,8 +366,8 @@ export function RepoPage({
   return (
     <div className="page repo-page">
       <RepoHeader repo={repo} ov={ov}>
-        <button className="ws-tool" onClick={onNewWorkspace} {...hint(`New workspace with ${repo}: a branch in its own worktree`)}>
-          <PlusIcon size={14} /> New workspace
+        <button className="secondary ws-tool" onClick={onNewWorkspace} {...hint(`New workspace with ${repo}: a branch in its own worktree`)}>
+          <span className="ws-tool-accent"><PlusIcon size={14} /></span> New workspace
         </button>
         <button className="secondary ws-tool" onClick={onOpenRalph} {...hint("Write a PRD and let the agent implement it story by story on this branch")}>
           <SparkIcon size={14} /> Ralph

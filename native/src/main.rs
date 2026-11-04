@@ -12,6 +12,7 @@ mod file_tree;
 mod git;
 mod icons;
 mod lsp;
+mod motion;
 mod nav;
 mod overlay;
 mod pages;

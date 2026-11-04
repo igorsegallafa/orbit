@@ -630,7 +630,15 @@ impl PageTab {
                     })
             })),
             Load::Failed(e) => div().px(px(6.)).text_size(px(12.)).text_color(c(theme::DANGER)).child(e.clone()),
-            _ => div().px(px(6.)).text_size(px(12.)).text_color(c(theme::TEXT_FAINT)).child("Loading…"),
+            // `.commit-file-skeleton`.
+            _ => div()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .px(px(6.))
+                .py(px(4.))
+                .child(crate::motion::skeleton(gpui::relative(0.7), 11.))
+                .child(crate::motion::skeleton(gpui::relative(0.5), 11.)),
         });
         let message = if r.state == RepoState::Drafting {
             div()

@@ -73,9 +73,13 @@ impl Panel {
             (s.view, build, run, s.build.as_ref().map(|b| b.counts()).unwrap_or_default())
         };
         let debug_status = debug::store(cx).read(cx).status;
-        let dot = |color: u32| div().size(px(7.)).rounded_full().bg(c(color));
+        // `.panel-status`; `-running` is info and pulses (`panel-pulse`, 1s).
+        let dot = |id: &'static str, color: u32| -> gpui::AnyElement {
+            let d = div().size(px(7.)).flex_none().rounded_full().bg(c(color));
+            if color == theme::INFO { crate::motion::blink(d, id, crate::motion::PANEL_PULSE, 0.35) } else { d.into_any_element() }
+        };
         let build_color = match build.map(|b| b.0) {
-            Some(BuildStatus::Running) => theme::ACCENT,
+            Some(BuildStatus::Running) => theme::INFO,
             Some(BuildStatus::Ok) => theme::OK,
             Some(BuildStatus::Failed) => theme::DANGER,
             Some(BuildStatus::Cancelled) => theme::WARN,
@@ -85,10 +89,10 @@ impl Panel {
             Some((name, _)) => format!("Run · {name}"),
             None => "Run".into(),
         };
-        let run_color = if run.as_ref().is_some_and(|r| !r.1) { theme::OK } else { theme::TEXT_FAINT };
+        let run_color = if run.as_ref().is_some_and(|r| !r.1) { theme::INFO } else { theme::TEXT_FAINT };
         let debug_color = match debug_status {
             DebugStatus::Stopped => theme::WARN,
-            DebugStatus::Starting | DebugStatus::Running => theme::OK,
+            DebugStatus::Starting | DebugStatus::Running => theme::INFO,
             _ => theme::TEXT_FAINT,
         };
         let count = |n: usize, color: u32| {
@@ -112,9 +116,9 @@ impl Panel {
             .text_size(px(size::TAB_FONT))
             .border_b_1()
             .border_color(c(theme::BORDER))
-            .child(self.tab("panel-build", PanelView::Build, view == PanelView::Build, div().flex().items_center().gap_1p5().child(dot(build_color)).child("Build").into_any_element(), cx))
-            .child(self.tab("panel-run", PanelView::Run, view == PanelView::Run, div().flex().items_center().gap_1p5().child(dot(run_color)).child(run_label).into_any_element(), cx))
-            .child(self.tab("panel-debug", PanelView::Debug, view == PanelView::Debug, div().flex().items_center().gap_1p5().child(dot(debug_color)).child("Debug").into_any_element(), cx))
+            .child(self.tab("panel-build", PanelView::Build, view == PanelView::Build, div().flex().items_center().gap_1p5().child(dot("panel-dot-build", build_color)).child("Build").into_any_element(), cx))
+            .child(self.tab("panel-run", PanelView::Run, view == PanelView::Run, div().flex().items_center().gap_1p5().child(dot("panel-dot-run", run_color)).child(run_label).into_any_element(), cx))
+            .child(self.tab("panel-debug", PanelView::Debug, view == PanelView::Debug, div().flex().items_center().gap_1p5().child(dot("panel-dot-debug", debug_color)).child("Debug").into_any_element(), cx))
             .child(self.tab(
                 "panel-problems",
                 PanelView::Problems,

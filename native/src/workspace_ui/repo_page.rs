@@ -9,6 +9,7 @@ use super::{plural, spawn, Page, PageTab};
 use crate::overlay::{ButtonStyle, Dialog, DialogButton};
 use crate::probe::probe;
 use crate::review::Load;
+use crate::motion::skeleton;
 use crate::theme::{self, c};
 use crate::toast::ToastKind;
 use gpui::{div, prelude::*, px, AnyElement, App, ClickEvent, Context, Div, Entity, Focusable, FontWeight, Window};
@@ -458,6 +459,32 @@ impl PageTab {
     }
 
     /// Squash and merge the branch's open PR.
+    /// `PrsModal` on the repo scope (React's `setPrCreateOpen`).
+    fn repo_create_pr(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(r) = self.repo_view() else { return };
+        let base = r.overview.ready().and_then(|o| o.default_branch.clone()).unwrap_or_else(|| "main".into());
+        let (scope, repos) = (format!("@{}", r.name), vec![r.name.clone()]);
+        self.open_create_prs(scope, base, None, repos, window, cx);
+    }
+
+    /// React's `openPrTab`: the PR review tab. Review tabs need a workspace,
+    /// so this uses the one on the PR's branch; GitHub when there is none.
+    fn repo_open_pr(&mut self, url: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(r) = self.repo_view() else { return };
+        let branch = r.overview.ready().and_then(|o| o.branch.clone());
+        let ws = r.workspaces.iter().find(|w| Some(&w.branch) == branch.as_ref()).map(|w| w.name.clone());
+        let Some(name) = ws else { return cx.open_url(&url) };
+        self.with_app(window, cx, move |a, w, cx| match a.workspaces.iter().position(|ws| ws.meta.name == name) {
+            Some(ix) => {
+                if a.selected != Some(ix) {
+                    a.select_workspace(ix, cx);
+                }
+                crate::review::open(a, crate::review::Page::PullRequests, w, cx);
+            }
+            None => cx.open_url(&url),
+        });
+    }
+
     fn repo_merge(&mut self, pr: WsPrStatus, cx: &mut Context<Self>) {
         let Some(r) = self.repo_view() else { return };
         let base = r.overview.ready().and_then(|o| o.default_branch.clone()).unwrap_or_else(|| "main".into());
@@ -550,7 +577,7 @@ impl PageTab {
         let ov = r.overview.ready();
         let wrap = div().id("repo-page").size_full().overflow_y_scroll().px(px(36.)).py(px(24.));
         if let Some(o) = ov.filter(|o| !o.cloned) {
-            return wrap
+            let page = wrap
                 .child(header(r, Some(o), cx))
                 .child(
                     panel()
@@ -577,13 +604,15 @@ impl PageTab {
                                 }))
                             })
                         }),
-                )
-                .into_any_element();
+                );
+            return crate::motion::page_in(page, gpui::ElementId::Name(format!("repo-page-in:{}", r.name).into()));
         }
         if let Load::Failed(e) = &r.overview {
-            return wrap.child(header(r, None, cx)).child(div().text_size(px(13.)).text_color(c(theme::DANGER)).child(e.clone())).into_any_element();
+            let page = wrap.child(header(r, None, cx)).child(div().text_size(px(13.)).text_color(c(theme::DANGER)).child(e.clone()));
+            return crate::motion::page_in(page, gpui::ElementId::Name(format!("repo-page-in:{}", r.name).into()));
         }
-        wrap.child(header(r, ov, cx))
+        let page = wrap
+            .child(header(r, ov, cx))
             .child(bar(r, ov, cx))
             .children(ov.map(|o| banners(r, o, cx)))
             .child(
@@ -600,8 +629,8 @@ impl PageTab {
                     .gap(px(12.))
                     .child(div().flex_basis(px(0.)).flex_grow(1.25).min_w_0().child(branches_panel(r, ov, cx)))
                     .child(div().flex_basis(px(0.)).flex_grow(1.).min_w_0().child(side_panel(r, ov, cx))),
-            )
-            .into_any_element()
+            );
+        crate::motion::page_in(page, gpui::ElementId::Name(format!("repo-page-in:{}", r.name).into()))
     }
 }
 
@@ -698,7 +727,7 @@ fn header(r: &RepoView, ov: Option<&RepoOverview>, cx: &mut Context<PageTab>) ->
                 .items_center()
                 .gap(px(6.))
                 .child(
-                    kit::hint(kit::button_icon("repo-new-ws", Some(("plus", 14.)), "New workspace", Kind::Primary, kit::TOOL), format!("New workspace with {name}: a branch in its own worktree"))
+                    kit::hint(kit::button_icon_tinted("repo-new-ws", Some(("plus", 14.)), "New workspace", Kind::Secondary, kit::TOOL, Some(c(theme::ACCENT))), format!("New workspace with {name}: a branch in its own worktree"))
                         .on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.open_create(Some(vec![name.clone()]), w, cx))),
                 )
                 .child(tool(
@@ -764,7 +793,8 @@ fn bar_cell(id: &'static str, icon_name: &'static str, label: String, value: Str
                         .text_size(px(13.5))
                         .font_weight(if muted { FontWeight::MEDIUM } else { FontWeight::SEMIBOLD })
                         .text_color(if muted { c(theme::TEXT_FAINT) } else { c(theme::TEXT) })
-                        .child(value),
+                        // Empty: still loading.
+                        .map(|d| if value.is_empty() { d.child(skeleton(px(90.), 12.)) } else { d.child(value) }),
                 ),
         )
         .child(probe(id))
@@ -772,7 +802,7 @@ fn bar_cell(id: &'static str, icon_name: &'static str, label: String, value: Str
 
 fn bar(r: &RepoView, ov: Option<&RepoOverview>, cx: &mut Context<PageTab>) -> impl IntoElement {
     let busy = r.busy.is_some();
-    let branch = ov.map(|o| o.branch.clone().unwrap_or_else(|| format!("detached at {}", o.head))).unwrap_or_else(|| "…".into());
+    let branch = ov.map(|o| o.branch.clone().unwrap_or_else(|| format!("detached at {}", o.head))).unwrap_or_default();
     let fetched = ago(ov.and_then(|o| o.last_fetch));
     let (sync_icon, sync_label, sync_detail, primary, sync_hint) = match ov.map(sync_of) {
         _ if r.fetching => ("refresh", "Fetch origin".to_string(), "Fetching…".to_string(), false, "Check origin for new commits".to_string()),
@@ -810,7 +840,7 @@ fn bar(r: &RepoView, ov: Option<&RepoOverview>, cx: &mut Context<PageTab>) -> im
         kit::hint(bar_cell("repo-pr", "pull-request", "Pull request · open".into(), format!("#{} {}", pr.number, pr.title), false, false), pr.title.clone())
             .cursor_pointer()
             .hover(|s| s.bg(c(theme::PANEL_RAISED)))
-            .on_click(move |_, _, cx| cx.open_url(&url))
+            .on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.repo_open_pr(url.clone(), w, cx)))
     } else if let Some(pr) = merged_pr {
         let url = pr.url.clone();
         kit::hint(bar_cell("repo-pr", "pull-request", "Pull request · merged".into(), format!("#{} {}", pr.number, pr.title), false, false), "Open on GitHub")
@@ -819,17 +849,12 @@ fn bar(r: &RepoView, ov: Option<&RepoOverview>, cx: &mut Context<PageTab>) -> im
             .on_click(move |_, _, cx| cx.open_url(&url))
     } else {
         let can = ov.is_some_and(|o| o.upstream.is_some() && !o.upstream_gone) && !busy;
-        let url = ov.and_then(|o| o.owner_repo.clone().map(|or| format!("https://github.com/{or}/compare/{default_branch}...{}?expand=1", o.branch.clone().unwrap_or_default())));
         let cell = kit::hint(
             bar_cell("repo-pr", "pull-request", "Pull request".into(), if prs.is_none() { "Checking…".into() } else { "Create pull request".into() }, false, false),
             if can { format!("Open a PR from {branch} into {default_branch}") } else { "Publish the branch first".into() },
         );
         if can {
-            cell.cursor_pointer().hover(|s| s.bg(c(theme::PANEL_RAISED))).on_click(move |_, _, cx| {
-                if let Some(u) = &url {
-                    cx.open_url(u)
-                }
-            })
+            cell.cursor_pointer().hover(|s| s.bg(c(theme::PANEL_RAISED))).on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.repo_create_pr(w, cx)))
         } else {
             cell.opacity(0.45)
         }
@@ -1226,7 +1251,7 @@ fn changes_panel(r: &RepoView, ov: Option<&RepoOverview>, cx: &mut Context<PageT
             }))
             .into_any_element(),
         Load::Failed(e) => empty(e.clone()).into_any_element(),
-        _ => div().px(px(14.)).py(px(9.)).child(div().w(gpui::relative(0.7)).h(px(12.)).rounded(px(4.)).bg(c(theme::PANEL_RAISED))).into_any_element(),
+        _ => div().px(px(14.)).py(px(9.)).child(skeleton(gpui::relative(0.7), 12.)).into_any_element(),
     };
     let none = changes.is_empty();
     let can = !selected.is_empty() && !busy && !op && !r.summary.read(cx).value().trim().is_empty();
@@ -1459,7 +1484,7 @@ fn history_panel(r: &RepoView, ov: Option<&RepoOverview>, cx: &mut Context<PageT
                 }))
                 .into_any_element(),
             Load::Failed(e) => empty(e.clone()).into_any_element(),
-            _ => div().px(px(14.)).py(px(9.)).child(div().w(gpui::relative(0.8)).h(px(12.)).rounded(px(4.)).bg(c(theme::PANEL_RAISED))).into_any_element(),
+            _ => div().px(px(14.)).py(px(9.)).child(skeleton(gpui::relative(0.8), 12.)).into_any_element(),
         }
     };
     let picker = (r.compare_tab && r.compare_picker).then(|| compare_picker(r, cx));
@@ -1480,7 +1505,7 @@ fn compare_list(r: &RepoView, ov: Option<&RepoOverview>, cx: &mut Context<PageTa
     let c_ = match &r.comparison {
         Load::Ready(b) if b.0 == target => &b.1,
         Load::Failed(e) => return empty(e.clone()).into_any_element(),
-        _ => return div().px(px(14.)).py(px(9.)).child(div().w(gpui::relative(0.7)).h(px(12.)).rounded(px(4.)).bg(c(theme::PANEL_RAISED))).into_any_element(),
+        _ => return div().px(px(14.)).py(px(9.)).child(skeleton(gpui::relative(0.7), 12.)).into_any_element(),
     };
     let group = |text: String| {
         div().px(px(14.)).pt(px(10.)).pb(px(4.)).text_size(px(10.5)).font_weight(FontWeight::SEMIBOLD).text_color(c(theme::TEXT_FAINT)).child(text.to_uppercase())
@@ -1661,6 +1686,9 @@ fn branches_panel(r: &RepoView, ov: Option<&RepoOverview>, cx: &mut Context<Page
             )
     };
     let mut list = div().id("repo-branches").max_h(px(360.)).overflow_y_scroll().py(px(4.)).flex().flex_col();
+    if ov.is_none() {
+        list = list.child(div().min_h(px(34.)).px(px(14.)).flex().items_center().child(skeleton(gpui::relative(0.6), 12.)));
+    }
     for b in locals.iter().filter(matches) {
         list = list.child(row(b, cx));
     }

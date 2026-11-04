@@ -8,6 +8,7 @@ use super::{plural, spawn, Page, PageTab};
 use crate::git::drift::Drift;
 use crate::git::merge::MergeItem;
 use crate::overlay::{ButtonStyle, Dialog, DialogButton};
+use crate::motion::TweenExt;
 use crate::probe::probe;
 use crate::review::Load;
 use crate::theme::{self, c};
@@ -448,7 +449,7 @@ impl PageTab {
         let done = p.statuses.ready().is_some() && d.merged > 0 && d.open == 0 && d.dirty.is_empty() && d.ahead == 0;
         let base = p.meta.as_ref().map(|m| m.base.clone()).unwrap_or_default();
         let variant_of = p.meta.as_ref().and_then(|m| m.variant_of.clone());
-        div()
+        let page = div()
             .id("ws-page")
             .size_full()
             .overflow_y_scroll()
@@ -515,8 +516,8 @@ impl PageTab {
             .child(section_head("Repositories", None))
             .child(repo_rows(p, &d, cx))
             .child(div().mt(px(22.)).child(section_head("Pull requests", p.prs.ready().map(Vec::len).filter(|n| *n > 0))))
-            .child(pr_section(p, &d, cx))
-            .into_any_element()
+            .child(pr_section(p, &d, cx));
+        crate::motion::page_in(page, gpui::ElementId::Name(format!("ws-page-in:{}", p.name).into()))
     }
 }
 
@@ -1031,7 +1032,7 @@ fn repo_rows(p: &WsPage, d: &Derived, cx: &mut Context<PageTab>) -> impl IntoEle
         _ => list.children(p.meta.iter().flat_map(|m| m.repos.clone()).enumerate().map(|(i, r)| {
             row(i)
                 .child(tile())
-                .child(name_col(r, div().w(px(140.)).h(px(10.)).rounded(px(4.)).bg(c(theme::PANEL_RAISED)).into_any_element()))
+                .child(name_col(r, crate::motion::skeleton(px(140.), 10.).into_any_element()))
                 .into_any_element()
         })),
     }
@@ -1108,7 +1109,7 @@ fn pr_section(p: &WsPage, d: &Derived, cx: &mut Context<PageTab>) -> gpui::AnyEl
             .bg(c(theme::PANEL))
             .px(px(14.))
             .py(px(12.))
-            .child(div().w(gpui::relative(0.6)).h(px(14.)).rounded(px(4.)).bg(c(theme::PANEL_RAISED)))
+            .child(crate::motion::skeleton(gpui::relative(0.6), 14.))
             .into_any_element(),
     }
 }
@@ -1232,7 +1233,14 @@ fn pr_row(p: &WsPage, pr: &WsPrStatus, i: usize, base: &str, cx: &mut Context<Pa
                     cx.stop_propagation();
                     cx.open_url(&url)
                 }))
-                .child(icon("disclosure", 13., c(theme::TEXT_FAINT)).when(open, |s| s.with_transformation(gpui::Transformation::rotate(gpui::percentage(0.25)))))
+                // `.disclosure-chevron`: rotates over `--transition`.
+                .child(icon("disclosure", 13., c(theme::TEXT_FAINT)).tween(
+                    gpui::ElementId::Name(format!("ws-pr-chevron:{key}").into()),
+                    if open { 0.25 } else { 0. },
+                    crate::motion::TRANSITION,
+                    crate::motion::standard(),
+                    |s, v| s.with_transformation(gpui::Transformation::rotate(gpui::percentage(v))),
+                ))
                 .child(probe(format!("ws-pr:{key}")))
                 .on_click(cx.listener(move |t, _: &ClickEvent, _, cx| {
                     if let Some(p) = t.ws_page() {

@@ -362,9 +362,33 @@ Caveats found:
 | `src/git/` | the git flows shown over a page: `commit.rs`, `push.rs`, `rebase.rs`, `merge.rs`, the branch drift banner (`drift.rs`); shared modal pieces in `mod.rs` |
 | `src/pages/` | tool tabs (`TabKind::Tool`; `mod.rs`: `PageTab`, `PageView`, `Host`, commands, sidebar entries, dump) · `settings.rs` (sections, AI, Languages, Appearance, Health, Updates) · `repos.rs` (Repositories, Folders, Groups) · `integrations.rs` · `ralph.rs` · `usage.rs` · `artifacts.rs` · `updates.rs` (update check) · `crash.rs` (panic hook) · `ui.rs` |
 | `src/script.rs` | self-test mode and dumps |
+| `src/motion.rs` | App.css's motion: durations and easings (`cubic-bezier`), shimmering skeletons, entry animations (page, card, modal, menu, toast), pulses and spinners, and `Tween` (a value or `:hover` transition) |
 | `src/theme.rs` | the seven themes of `src/lib/theme.ts` as colour tokens (`c(theme::PANEL)` resolves against the active theme), the gpui-component theme built from them, and the shell metrics (`src/App.css`) |
 | `vendor/gpui-pre-wgpu`, `vendor/PATCHES.md` | the wgpu renderer with the Vulkan-only patch, and how to re-apply it |
 | `packaging/linux/`, `scripts/package-linux.sh` | `.desktop` entry, `install.sh`, and the tarball / AppImage build |
+
+## Motion
+
+`src/motion.rs` ports every `@keyframes`, `animation` and the noticeable `transition`s of App.css
+with their durations and easings (`motion::bezier` is CSS's `cubic-bezier`). Repeating
+animations run only while their element is on screen (a skeleton, a spinner, a waiting session's
+pulse); one-shots and tweens stop requesting frames once settled, so an idle window draws nothing.
+
+| App.css | Where | Native |
+|---|---|---|
+| `skeleton-shimmer` 1.3s ease-in-out | `Skeleton`, `SkeletonTable`, `SkeletonCards` | `motion::skeleton` and friends: the highlight band is cut into gradient segments so rounded ends clip (GPUI gradients have two stops); the 10° tilt is dropped |
+| `page-in` 0.18s, `card-in` 0.2s (+ stagger) | `.page`, `.dash-card`, `.cr-row`, `.banner` | `page_in`, `card_in`: fade and rise |
+| `fade-in` 0.14s + `modal-in` 0.16s | modal overlay and card | `overlay_in` + `modal_in`, without the 0.97 scale (GPUI can't scale a div subtree) |
+| `modal-in` 0.1 / 0.14s | context menu, New Session menu, workspace switcher, search | `drop_in`, `popover_in` |
+| `toast-in` 180ms | toasts | `rise_in` with its curve (React has no exit animation) |
+| `width 0.22s` | sidebar / dock hide and show | `Tween` on a clipping wrapper; drags stay instant |
+| `spin`, `status-pulse` (opacity and scale), `rv-pulse`, `rv-blink`, `panel-pulse` | status indicators, Ralph dots and segments, bottom panel | `status_pulse`, `rv_pulse`, `blink`, spinners at 0.7 / 0.8s |
+| `width 0.3s` / `0.25s` | plan progress, PR viewed bar | `motion::fill` |
+| `transform`, `border`, `box-shadow` on hover | `.dash-card`, `.nav-chevron`, disclosure chevrons | `hover_tween` / `tween` |
+
+Short background and colour hovers (0.08–0.15s on rows and buttons) stay GPUI's instant `.hover()`;
+tooltips (`tooltip-in` 80ms) are gpui-component's and appear at once. React has no
+`prefers-reduced-motion` rule; GPUI's `App::reduce_motion` still settles every animation when set.
 
 ## Sharing the backend: `orbit-core`
 
@@ -859,7 +883,7 @@ and both repos of the modal (no newline added to a message); Enter in the switch
 *Clone repository* cloned `site`.
 
 Not done: tracker sources (Shortcut/Linear) in New workspace, Ralph on a repository (a toast points
-to the workspace), the open PR cell opens GitHub rather than the PR review tab, Review feedback /
+to the workspace), Review feedback /
 Investigate on the workspace page, the race comparison section. Commit inspection is a modal, not a
 review tab (the review tabs need a workspace).
 

@@ -134,7 +134,8 @@ impl ReviewTab {
                 }
             }
             Load::Failed(e) => side = side.child(div().px(px(6.)).text_size(px(11.5)).text_color(c(theme::DANGER)).child(e.clone())),
-            _ => side = side.child(div().px(px(6.)).text_size(px(11.5)).text_color(c(theme::TEXT_FAINT)).child("Loading…")),
+            // Two `.modal-row`s of bars, as `CommitReviewPane`.
+            _ => side = side.child(crate::motion::skeleton_line(30., 0.7, 11.)).child(crate::motion::skeleton_line(30., 0.55, 11.)),
         }
 
         let split = v.diff.read(cx).mode() == DiffMode::Split;

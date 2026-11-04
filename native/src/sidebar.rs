@@ -18,7 +18,7 @@ use gpui::{
 };
 use gpui_component::tooltip::Tooltip;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use crate::motion::{self, TweenExt};
 
 /// Recent sessions listed per scope (`RECENT_SHOWN`).
 const RECENT_SHOWN: usize = 5;
@@ -122,21 +122,10 @@ fn nav_ws(id: impl Into<SharedString>, icon: &'static str, label: SharedString, 
 
 /// `.nav-unread`: 7px; green when done, pulsing amber when waiting.
 fn unread_dot(id: impl Into<SharedString>, kind: InboxKind) -> AnyElement {
-    let dot = div().size(px(7.)).flex_none().rounded_full();
     match kind {
-        InboxKind::Done => dot.bg(c(theme::OK)).into_any_element(),
-        InboxKind::Waiting => pulse(id.into(), dot.bg(c(theme::WARN))),
+        InboxKind::Done => div().size(px(7.)).flex_none().rounded_full().bg(c(theme::OK)).into_any_element(),
+        InboxKind::Waiting => motion::status_pulse(id.into(), 7., c(theme::WARN), motion::STATUS_PULSE),
     }
-}
-
-/// `@keyframes status-pulse`: opacity 1 → .35 and back over 1.2s.
-fn pulse(id: SharedString, el: gpui::Div) -> AnyElement {
-    el.with_animation(
-        gpui::ElementId::Name(id),
-        Animation::new(Duration::from_millis(1200)).repeat().with_easing(gpui::pulsating_between(0.35, 1.)),
-        |d, t| d.opacity(t),
-    )
-    .into_any_element()
 }
 
 /// `StatusIndicator`: idle ring, spinning arc while working, pulsing dot
@@ -147,8 +136,8 @@ pub fn status_indicator(id: impl Into<SharedString>, status: Status) -> AnyEleme
     match status {
         Status::Idle => dot().border_2().border_color(c(theme::TEXT_FAINT)).into_any_element(),
         Status::Exited => dot().bg(c(theme::OK)).into_any_element(),
-        Status::Waiting => pulse(id, dot().bg(c(theme::WARN))),
-        Status::Busy => pulse(id, dot().bg(c(theme::ACCENT))),
+        Status::Waiting => motion::status_pulse(id, 8., c(theme::WARN), motion::STATUS_PULSE),
+        Status::Busy => motion::status_pulse(id, 8., c(theme::ACCENT), motion::STATUS_PULSE),
         // Thinking, running, editing.
         _ => div()
             .relative()
@@ -160,7 +149,7 @@ pub fn status_indicator(id: impl Into<SharedString>, status: Status) -> AnyEleme
                     .absolute()
                     .top_0()
                     .left_0()
-                    .with_animation(gpui::ElementId::Name(id), Animation::new(Duration::from_millis(800)).repeat(), |s, t| {
+                    .with_animation(gpui::ElementId::Name(id), Animation::new(motion::STATUS_SPIN).repeat_synced(), |s, t| {
                         s.with_transformation(Transformation::rotate(percentage(t)))
                     }),
             )
@@ -522,16 +511,18 @@ impl OrbitApp {
                     Some(base) => name.get(base.len() + 2..).unwrap_or(&name).to_string().into(),
                     None => name.clone().into(),
                 };
-                let kinds: Vec<InboxKind> = rows.iter().filter_map(|r| r.unread).collect();
+                let mut kinds: Vec<InboxKind> = rows.iter().filter_map(|r| r.unread).collect();
+                // A Ralph run's inbox item (`ralph:<ws>`), as App.tsx.
+                kinds.extend(sessions::store(cx).read(cx).unread(&format!("ralph:{name}")));
                 let unread = if kinds.contains(&InboxKind::Waiting) { Some(InboxKind::Waiting) } else { kinds.first().copied() };
                 let ralph = orbit_core::ralph::running().unwrap_or_default().iter().any(|k| k.starts_with(&format!("{name}/")));
                 let has_children = !rows.is_empty() || recent.is_some();
                 let row_id: SharedString = format!("ws:{name}").into();
-                let group: SharedString = format!("g-{row_id}").into();
                 let (n_click, n_chev, n_menu, dir) = (name.clone(), name.clone(), name.clone(), ws.dir.clone());
                 let chevron = has_children.then(|| {
                     let tip = if expanded { "Collapse sessions" } else { "Expand sessions" };
-                    div()
+                    let rot_id = SharedString::from(format!("chevron-rot:{name}"));
+                    let el = div()
                         .id(SharedString::from(format!("chevron:{name}")))
                         .relative()
                         .ml_auto()
@@ -542,15 +533,6 @@ impl OrbitApp {
                         .justify_center()
                         .rounded(px(5.))
                         .hover(|s| s.bg(c(theme::ACCENT_SOFT)))
-                        .child({
-                            let icon = orbit_icon("chevron-right", 8., c(if expanded { theme::TEXT } else { theme::TEXT_DIM }));
-                            if expanded {
-                                icon.with_transformation(Transformation::rotate(percentage(0.25)))
-                            } else {
-                                // Shown on row hover only (`.nav-chevron { opacity: 0 }`).
-                                icon.text_color(gpui::transparent_black()).group_hover(group.clone(), |s| s.text_color(c(theme::TEXT_DIM)))
-                            }
-                        })
                         .child(probe(format!("chevron:{name}")))
                         .tooltip(move |window, cx| Tooltip::new(tip).build(window, cx))
                         .on_click(cx.listener(move |a, _, _, cx| {
@@ -559,21 +541,34 @@ impl OrbitApp {
                                 a.ws_collapsed.insert(n_chev.clone());
                             }
                             cx.notify();
-                        }))
+                        }));
+                    // `.nav-chevron`: hidden at scale .6, shown on row hover (`h`), turned 90° when open.
+                    move |h: f32| {
+                        let shown = if expanded { 1. } else { h };
+                        let mut color = c(if expanded { theme::TEXT } else { theme::TEXT_DIM });
+                        color.a *= shown;
+                        let scale = 0.6 + 0.4 * shown;
+                        let icon = orbit_icon("chevron-right", 8., color).tween(rot_id, if expanded { 0.25 } else { 0. }, motion::TRANSITION, motion::standard(), move |s, r| {
+                            s.with_transformation(Transformation::rotate(percentage(r)).with_scaling(gpui::size(scale, scale)))
+                        });
+                        el.child(icon)
+                    }
                 });
                 let row = nav_ws(row_id, "satellite", label, active)
                     .tooltip({
                         let n = name.clone();
                         move |window, cx| Tooltip::new(n.clone()).build(window, cx)
                     })
-                    .when(ralph, |d| d.child(pulse(format!("ralph-{name}").into(), ralph_dot())))
+                    .when(ralph, |d| d.child(ralph_dot(format!("ralph-{name}"))))
                     .children(unread.map(|k| unread_dot(format!("ws-unread-{name}"), k)))
-                    .children(chevron)
                     .on_click(cx.listener(move |a, _, w, cx| a.open_workspace_page(&n_click, w, cx)))
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(move |a, ev: &MouseDownEvent, w, cx| a.workspace_menu(n_menu.clone(), dir.clone(), ev.position, w, cx)),
-                    );
+                    )
+                    .hover_tween(SharedString::from(format!("ws-hover:{name}")), motion::TRANSITION, motion::standard(), move |d, h| {
+                        d.children(chevron.map(|f| f(h)))
+                    });
                 div()
                     .flex()
                     .flex_col()
@@ -702,7 +697,7 @@ impl OrbitApp {
                 let ralph = orbit_core::ralph::running().unwrap_or_default().iter().any(|k| k.starts_with(&format!("@{name}/")));
                 let mut badges = div().ml_auto().flex_none().flex().items_center().gap(px(6.));
                 if ralph {
-                    badges = badges.child(pulse(format!("ralph-@{name}").into(), ralph_dot()));
+                    badges = badges.child(ralph_dot(format!("ralph-@{name}")));
                 }
                 if let Some(b) = b.filter(|b| b.cloned) {
                     if b.ahead > 0 || b.behind > 0 {
@@ -744,7 +739,7 @@ impl OrbitApp {
     }
 }
 
-/// `.nav-ralph`: a 7px accent dot with a 3px soft ring.
-fn ralph_dot() -> gpui::Div {
-    div().ml_auto().size(px(7.)).flex_none().rounded_full().bg(c(theme::ACCENT))
+/// `.nav-ralph`: a 7px accent dot with a 3px soft ring, `rv-pulse`.
+fn ralph_dot(id: String) -> gpui::Div {
+    div().ml_auto().flex_none().child(motion::rv_pulse(SharedString::from(id), 7., 3., c(theme::ACCENT), theme::accent_soft()))
 }

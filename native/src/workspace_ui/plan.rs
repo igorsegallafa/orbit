@@ -694,7 +694,8 @@ pub fn progress(p: &WsPage, cx: &mut Context<PageTab>) -> Option<impl IntoElemen
                             .rounded_full()
                             .bg(c(theme::PANEL_RAISED))
                             .overflow_hidden()
-                            .child(div().h_full().w(gpui::relative(pct as f32 / 100.)).rounded_full().bg(c(theme::ACCENT))),
+                            // `.plan-progress-fill`: width eased over 0.3s.
+                            .child(crate::motion::fill("plan-progress-fill", pct as f32 / 100., crate::motion::PLAN_FILL, crate::motion::standard(), div().h_full().rounded_full().bg(c(theme::ACCENT)))),
                     )
                     .child(div().text_size(px(11.5)).text_color(c(theme::TEXT_DIM)).child(format!("{done}/{total} · {pct}%"))),
             )

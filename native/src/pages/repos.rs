@@ -505,7 +505,7 @@ impl SettingsPage {
             let st = self.repos.clone.get(&s.name).copied();
             let (n1, n2, s1, s2, s3) = (s.name.clone(), s.name.clone(), s.clone(), s.clone(), s.clone());
             let status: AnyElement = match st {
-                None => kit::skeleton(px(70.), 12.).rounded_full().into_any_element(),
+                None => kit::skeleton(px(70.), 12.).pill().into_any_element(),
                 Some(CloneState::Cloned) => {
                     div().flex().items_center().gap(px(7.)).text_size(px(12.)).text_color(c(theme::TEXT_DIM)).child(super::settings::repo_dot()).child("Cloned").into_any_element()
                 }

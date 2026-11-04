@@ -255,6 +255,18 @@ export function TerminalPane({ tab, onError, onStatusChange, onSignal, active }:
       // Unhandled, the webview pastes into xterm (bracketed when the program asks).
       return key !== "v";
     });
+    // The webview only pastes text. With just an image on the clipboard, send
+    // ^V like a native terminal: Claude Code then reads the image itself.
+    const onPaste = (e: ClipboardEvent) => {
+      const data = e.clipboardData;
+      if (!data || data.getData("text/plain")) return;
+      if (![...data.items].some((i) => i.kind === "file" && i.type.startsWith("image/"))) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      term.input("\x16");
+    };
+    const pasteHost = hostRef.current;
+    pasteHost.addEventListener("paste", onPaste, true);
 
     let delivered = false;
     // Unmounted before the spawn resolved (StrictMode, fast tab close): that
@@ -409,6 +421,7 @@ export function TerminalPane({ tab, onError, onStatusChange, onSignal, active }:
     resizeObserver.observe(hostRef.current);
 
     return () => {
+      pasteHost.removeEventListener("paste", onPaste, true);
       disposed = true;
       if (ptyIdRef.current !== null) {
         invoke("pty_kill", { id: ptyIdRef.current }).catch(() => null);

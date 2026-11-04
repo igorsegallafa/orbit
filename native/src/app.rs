@@ -164,6 +164,8 @@ pub struct OrbitApp {
     /// Focused when no tab is, so app shortcuts always have a dispatch path.
     pub focus: FocusHandle,
     pub layout: Layout,
+    /// When the sidebar / dock was last shown or hidden (`.sidebar-anim`).
+    pub pane_anim: [Option<std::time::Instant>; 2],
     pub drag: Option<PaneDrag>,
     pub nav: NavHistory<NavTarget>,
     /// Set while back/forward switches tabs, so the switch isn't recorded.
@@ -335,6 +337,7 @@ impl OrbitApp {
             lsp: LspRegistry::new(tx),
             focus,
             layout: Layout::default(),
+            pane_anim: [None; 2],
             drag: None,
             nav: NavHistory::default(),
             applying_nav: false,
@@ -972,12 +975,35 @@ impl OrbitApp {
 
     pub fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         self.layout.sidebar_hidden = !self.layout.sidebar_hidden;
-        cx.notify();
+        self.animate_pane(0, cx);
     }
 
     pub fn toggle_dock(&mut self, cx: &mut Context<Self>) {
         self.layout.dock_hidden = !self.layout.dock_hidden;
+        self.animate_pane(1, cx);
+    }
+
+    /// Plays a pane's width transition, then drops the hidden pane.
+    fn animate_pane(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let at = std::time::Instant::now();
+        self.pane_anim[ix] = Some(at);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(crate::motion::PANE).await;
+            this.update(cx, |a, cx| {
+                if a.pane_anim[ix] == Some(at) {
+                    a.pane_anim[ix] = None;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
         cx.notify();
+    }
+
+    /// Whether a pane's show/hide transition is playing.
+    pub fn pane_animating(&self, ix: usize) -> bool {
+        self.pane_anim[ix].is_some_and(|t| t.elapsed() < crate::motion::PANE)
     }
 
     pub fn toggle_panel(&mut self, cx: &mut Context<Self>) {

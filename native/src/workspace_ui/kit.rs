@@ -57,6 +57,18 @@ pub fn button(id: impl Into<SharedString>, label: impl Into<SharedString>, kind:
 
 /// A button with a leading icon (`name`, px).
 pub fn button_icon(id: impl Into<SharedString>, icon_spec: Option<(&'static str, f32)>, label: impl Into<SharedString>, kind: Kind, size: Size) -> Stateful<Div> {
+    button_icon_tinted(id, icon_spec, label, kind, size, None)
+}
+
+/// `button_icon` with its icon in `tint` (a secondary button's accent "+").
+pub fn button_icon_tinted(
+    id: impl Into<SharedString>,
+    icon_spec: Option<(&'static str, f32)>,
+    label: impl Into<SharedString>,
+    kind: Kind,
+    size: Size,
+    tint: Option<gpui::Rgba>,
+) -> Stateful<Div> {
     let id: SharedString = id.into();
     let (bg, hover, fg) = colors(kind);
     let Size(h, font, pad, radius) = size;
@@ -80,7 +92,7 @@ pub fn button_icon(id: impl Into<SharedString>, icon_spec: Option<(&'static str,
         .whitespace_nowrap()
         .cursor_pointer()
         .hover(move |s| s.bg(hover))
-        .when_some(icon_spec, |d, (name, sz)| d.child(icon(name, sz, fg)))
+        .when_some(icon_spec, |d, (name, sz)| d.child(icon(name, sz, tint.unwrap_or(fg))))
         .child(label.into())
         .child(probe(id.to_string()))
 }
@@ -205,7 +217,7 @@ pub fn count(n: usize) -> Div {
 /// `.spinner` / `SpinnerIcon`: a ring with a turning arc.
 pub fn spinner(id: impl Into<ElementId>, size: f32, color: Rgba) -> impl IntoElement {
     use gpui::{percentage, Animation, AnimationExt, Transformation};
-    icon("spinner", size, color).with_animation(id, Animation::new(std::time::Duration::from_millis(700)).repeat(), |s, t| {
+    icon("spinner", size, color).with_animation(id, Animation::new(crate::motion::SPIN).repeat_synced(), |s, t| {
         s.with_transformation(Transformation::rotate(percentage(t)))
     })
 }

@@ -149,6 +149,8 @@ impl OrbitApp {
                                     }),
                                 ),
                         )
+                        // `toast-in`: 180ms, rising 8px.
+                        .map(|el| crate::motion::rise_in(el, ("toast-in", id), crate::motion::TOAST_IN, 8., Default::default(), crate::motion::toast_curve()))
                 })),
         )
     }

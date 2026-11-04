@@ -4,6 +4,7 @@
 use super::pr_ui::{self, lucide, Tone};
 use super::Load;
 use crate::app::OrbitApp;
+use crate::motion::{self, skeleton};
 use crate::pages::{Host, PageView};
 use crate::probe::probe;
 use crate::theme::{self, c};
@@ -339,7 +340,7 @@ impl CodeReviewPage {
         self.host.menu(items, window, cx);
     }
 
-    fn render_row(&self, ix: usize, g: &PrGroup, now: i64, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_row(&self, ix: usize, g: &PrGroup, now: i64, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
         let multi = g.prs.len() > 1;
         let first = &g.prs[0];
         let status = group_status(&g.prs);
@@ -484,7 +485,8 @@ impl CodeReviewPage {
                         div().w(px(14.)).flex().justify_center().children(checks.map(|ch| match ch {
                             "pass" => lucide("check", 13., c(theme::OK)).into_any_element(),
                             "fail" => lucide("x", 13., c(theme::DANGER)).into_any_element(),
-                            _ => div().size(px(7.)).rounded_full().bg(c(theme::WARN)).into_any_element(),
+                            // `.cr-row-pending`: status-pulse over 1.4s.
+                            _ => motion::status_pulse(SharedString::from(format!("cr-pending:{ix}")), 7., c(theme::WARN), motion::PENDING_PULSE),
                         })),
                     )
                     .child(
@@ -652,23 +654,29 @@ impl Render for CodeReviewPage {
                         .py(px(10.))
                         .min_h(px(56.))
                         .when(i > 0, |d| d.border_t_1().border_color(c(theme::BORDER)))
-                        .child(div().size(px(16.)).rounded(px(4.)).bg(c(theme::PANEL_RAISED)))
+                        .child(skeleton(px(16.), 16.))
                         .child(
                             div()
                                 .flex_1()
                                 .flex()
                                 .flex_col()
-                                .gap(px(6.))
-                                .child(div().w(gpui::relative(0.45)).h(px(12.)).rounded(px(4.)).bg(c(theme::PANEL_RAISED)))
-                                .child(div().w(gpui::relative(0.3)).h(px(10.)).rounded(px(4.)).bg(c(theme::PANEL_RAISED))),
+                                .gap(px(4.))
+                                .child(skeleton(gpui::relative(0.45), 12.))
+                                .child(skeleton(gpui::relative(0.3), 10.)),
                         )
                 }))
                 .into_any_element(),
             Some(list) if list.is_empty() => self.render_empty(searching).into_any_element(),
-            Some(list) => rows_card().children(list.iter().enumerate().map(|(i, g)| self.render_row(i, g, now, cx))).into_any_element(),
+            // `card-in`, delayed `min(i, 12) * 18ms`.
+            Some(list) => rows_card()
+                .children(list.iter().enumerate().map(|(i, g)| {
+                    let key = format!("cr-in:{}:{}:{}", g.branch, g.prs[0].repo, g.prs[0].number);
+                    motion::card_in(self.render_row(i, g, now, cx), SharedString::from(key), Duration::from_millis(i.min(12) as u64 * 18))
+                }))
+                .into_any_element(),
         };
         let refreshing = self.refreshing;
-        div()
+        let page = div()
             .id("code-review")
             .size_full()
             .overflow_y_scroll()
@@ -691,13 +699,14 @@ impl Render for CodeReviewPage {
                             .child(div().text_size(px(12.)).text_color(c(theme::TEXT_FAINT)).child("Open PRs across your repositories from the last 7 days")),
                     )
                     .child(pr_ui::tip(
-                        pr_ui::icon_button("cr-refresh", if refreshing { "loader-circle" } else { "refresh-cw" }, 28., 14.)
+                        pr_ui::icon_button_busy("cr-refresh", "refresh-cw", 28., 14., refreshing, true)
                             .on_click(cx.listener(|p, _, window, cx| p.load(true, window, cx))),
                         "Reload open PRs from the last 7 days",
                     )),
             )
             .child(self.render_toolbar(show_segments, cx))
-            .child(body)
+            .child(body);
+        motion::page_in(page, "code-review-in")
     }
 }
 

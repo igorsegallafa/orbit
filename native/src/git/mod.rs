@@ -88,9 +88,11 @@ impl PageTab {
 }
 
 /// The dimmed backdrop with the modal card centered on it.
-pub fn scrim(card: AnyElement) -> Div {
+pub fn scrim(card: AnyElement) -> AnyElement {
+    use crate::motion;
     // Occluded: clicks never reach the page under it.
-    div().occlude().absolute().top_0().left_0().size_full().bg(theme::scrim()).flex().items_center().justify_center().child(card)
+    let scrim = div().occlude().absolute().top_0().left_0().size_full().bg(theme::scrim()).flex().items_center().justify_center();
+    motion::overlay_in(scrim.child(motion::modal_in(div().flex().max_h_full().child(card), "modal-in")), "modal-overlay-in")
 }
 
 /// A modal card (`.modal`): title, hint, body and footer buttons.
