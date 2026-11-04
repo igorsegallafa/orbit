@@ -4,6 +4,8 @@
 // keeps running.
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { TerminalPane } from "./TerminalPane";
+import { DebugView } from "./DebugView";
+import { useDebugState } from "../lib/dap/session";
 import { XIcon } from "./Icons";
 import { BuildProblem, OutputLine, PanelView, clearRun, runExited, showPanel, togglePanel, useRunState } from "../lib/runStore";
 
@@ -24,6 +26,8 @@ const readHeight = () => {
 
 export function BottomPanel({ onOpenFile, onError }: Props) {
   const { build, run, panel } = useRunState();
+  const debug = useDebugState();
+  const hasDebug = debug.status !== "idle";
   const [height, setHeight] = useState(readHeight);
   const outputRef = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
@@ -34,7 +38,7 @@ export function BottomPanel({ onOpenFile, onError }: Props) {
     if (el && stick.current) el.scrollTop = el.scrollHeight;
   }, [build?.lines, panel.view, panel.open]);
 
-  if (!build && !run) return null;
+  if (!build && !run && !hasDebug) return null;
 
   const errors = build?.problems.filter((p) => p.severity === "error").length ?? 0;
   const warnings = (build?.problems.length ?? 0) - errors;
@@ -95,6 +99,14 @@ export function BottomPanel({ onOpenFile, onError }: Props) {
               Run · {run.tab.sessionName}
             </>,
           )}
+        {hasDebug &&
+          tab(
+            "debug",
+            <>
+              <span className={`panel-status ${debug.status === "stopped" ? "panel-status-cancelled" : debug.status === "ended" ? "panel-status-idle" : "panel-status-running"}`} />
+              Debug
+            </>,
+          )}
         {build &&
           tab(
             "problems",
@@ -143,6 +155,7 @@ export function BottomPanel({ onOpenFile, onError }: Props) {
           </div>
         )}
         {build && panel.view === "problems" && <ProblemList problems={build.problems} onOpen={open} />}
+        {hasDebug && panel.view === "debug" && <DebugView />}
       </div>
     </section>
   );

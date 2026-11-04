@@ -3,7 +3,8 @@
 // Configurations come from each repo's .orbit/run.json.
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Workspace } from "../types/config";
-import { HammerIcon, PlayIcon, StopIcon } from "./Icons";
+import { BugIcon, HammerIcon, PlayIcon, StopIcon } from "./Icons";
+import { isDebugging, pause, resume, startDebugging, stepInto, stepOut, stepOver, stopDebugging, useDebugState } from "../lib/dap/session";
 import { Select } from "./Select";
 import { tooltip } from "./Tooltip";
 import { useCommands } from "../lib/commands";
@@ -25,6 +26,7 @@ interface Props {
 
 export function RunWidget({ workspace }: Props) {
   const state = useRunState();
+  const debug = useDebugState();
   // Every repo of the workspace that has run configurations.
   const [setups, setSetups] = useState<Record<string, RunSetup>>({});
   const [target, setTarget] = useState<RunTarget | null>(null);
@@ -76,17 +78,30 @@ export function RunWidget({ workspace }: Props) {
   };
 
   // Shortcuts (JetBrains): Ctrl+F9 build, Shift+F10 run, Ctrl+F2 stop.
-  const actions = useRef({ build: () => {}, run: () => {} });
+  const actions = useRef({ build: () => {}, run: () => {}, debug: () => {} });
   actions.current = {
     build: () => target && setup && void build(target, setup),
     run: () => target && setup && void buildAndRun(target, setup),
+    debug: () => target && setup && void startDebugging(target, setup),
   };
+  const debugRef = useRef(debug.status);
+  debugRef.current = debug.status;
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const ctrl = e.ctrlKey || e.metaKey;
+      const paused = isDebugging() && debugRef.current === "stopped";
       if (e.key === "F9" && ctrl && !e.shiftKey) actions.current.build();
       else if (e.key === "F10" && e.shiftKey && !ctrl) actions.current.run();
-      else if (e.key === "F2" && ctrl) stop();
+      else if (e.key === "F9" && e.shiftKey && !ctrl) actions.current.debug();
+      else if (e.key === "F2" && ctrl) {
+        if (isDebugging()) stopDebugging();
+        else stop();
+      }
+      // While paused in the debugger (JetBrains keys).
+      else if (paused && e.key === "F9" && !ctrl && !e.shiftKey) resume();
+      else if (paused && e.key === "F8" && !ctrl && !e.shiftKey) stepOver();
+      else if (paused && e.key === "F7" && !ctrl && !e.shiftKey) stepInto();
+      else if (paused && e.key === "F8" && e.shiftKey && !ctrl) stepOut();
       else return;
       e.preventDefault();
       e.stopPropagation();
@@ -99,7 +114,9 @@ export function RunWidget({ workspace }: Props) {
   useCommands([
     { id: "run.build", title: `Build${config ? ` '${config.name}'` : ""}`, keys: "Ctrl+F9", enabled: () => ready() && !building, run: () => actions.current.build() },
     { id: "run.run", title: `Run${config ? ` '${config.name}'` : ""}`, keys: "Shift+F10", enabled: () => ready() && !!config?.program && !building, run: () => actions.current.run() },
-    { id: "run.stop", title: "Stop", keys: "Ctrl+F2", enabled: () => building || running, run: stop },
+    { id: "run.debug", title: `Debug${config ? ` '${config.name}'` : ""}`, keys: "Shift+F9", enabled: () => ready() && !!config?.program && !building && !isDebugging(), run: () => actions.current.debug() },
+    { id: "run.stop", title: "Stop", keys: "Ctrl+F2", enabled: () => building || running || isDebugging(), run: () => (isDebugging() ? stopDebugging() : stop()) },
+    { id: "debug.pause", title: "Pause Program", enabled: () => debug.status === "running", run: pause },
   ]);
 
   if (!workspace || !target || !setup || !config) return null;
@@ -141,7 +158,22 @@ export function RunWidget({ workspace }: Props) {
       >
         <PlayIcon size={13} />
       </button>
-      <button className="run-btn run-stop" disabled={!building && !running} aria-label="Stop" {...hint("Stop (Ctrl+F2)")} onClick={stop}>
+      <button
+        className="run-btn run-debug"
+        disabled={building || !config.program || isDebugging()}
+        aria-label="Debug"
+        {...hint(config.program ? "Debug (Shift+F9)" : "No program to debug in this configuration")}
+        onClick={actions.current.debug}
+      >
+        <BugIcon size={14} />
+      </button>
+      <button
+        className="run-btn run-stop"
+        disabled={!building && !running && !isDebugging()}
+        aria-label="Stop"
+        {...hint("Stop (Ctrl+F2)")}
+        onClick={() => (isDebugging() ? stopDebugging() : stop())}
+      >
         <StopIcon size={12} />
       </button>
     </div>

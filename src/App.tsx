@@ -25,6 +25,7 @@ import { PrCheckoutModal, workspaceForPrs } from "./components/PrCheckoutModal";
 import { SearchEverywhereModal, SearchTab } from "./components/SearchEverywhereModal";
 import { useCommands } from "./lib/commands";
 import { togglePanel } from "./lib/runStore";
+import { setDebugOpener } from "./lib/dap/session";
 import { UsageBar } from "./components/UsageBar";
 import { TooltipHost, tooltip } from "./components/Tooltip";
 import { WindowControls, isMac } from "./components/WindowControls";
@@ -830,6 +831,8 @@ function App() {
     revealInEditor({ workspace: ctx.workspace, repo: ctx.repo, path: ctx.path, line, col: column, length: 0 });
   };
   useEffect(() => lsp.setFileOpener((ctx, line, column) => openFileAtRef.current(ctx, line, column)), []);
+  // Where the debugger stopped opens like a definition.
+  useEffect(() => setDebugOpener((ctx, line, column) => openFileAtRef.current(ctx, line, column)), []);
 
   // Opens an interactive agent session seeded with a prompt (grill-me
   // interviews, plan application). claude takes the prompt as argv; the

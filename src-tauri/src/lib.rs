@@ -4,6 +4,7 @@ mod agent_hooks;
 mod artifacts;
 mod build;
 mod config;
+mod dap;
 mod files;
 mod git;
 mod github;
@@ -109,6 +110,10 @@ pub fn run() {
             commands::run_setup,
             commands::run_build,
             commands::run_cancel,
+            dap::dap_adapter,
+            dap::dap_start,
+            dap::dap_send,
+            dap::dap_stop,
             commands::health_check,
             commands::update_service_settings,
             commands::get_folders,

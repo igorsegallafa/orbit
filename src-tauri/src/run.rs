@@ -33,6 +33,9 @@ pub struct RunConfig {
     pub args: Vec<String>,
     pub cwd: String,
     pub env: HashMap<String, String>,
+    /// Debug adapter: "auto" (gdb on Linux, lldb-dap elsewhere), "gdb",
+    /// "lldb-dap", or a path to one.
+    pub debugger: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -55,6 +58,7 @@ pub struct ResolvedRun {
     pub args: Vec<String>,
     pub cwd: String,
     pub env: HashMap<String, String>,
+    pub debugger: String,
 }
 
 #[derive(Serialize, Debug)]
@@ -213,6 +217,7 @@ fn resolve(
         args: c.args.iter().map(|a| expand(a, &vars)).collect(),
         cwd: normalize(&cwd),
         env: c.env.iter().map(|(k, v)| (k.clone(), expand(v, &vars))).collect(),
+        debugger: c.debugger.clone(),
     }
 }
 

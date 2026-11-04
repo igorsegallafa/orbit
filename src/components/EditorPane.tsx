@@ -9,6 +9,7 @@ import { SymbolSearch } from "./SymbolSearch";
 import { tooltip } from "./Tooltip";
 import { toast } from "./Toast";
 import * as lsp from "../lib/lsp/manager";
+import { attachDebugGutter } from "../lib/dap/gutter";
 import { currentTheme, defineMonacoThemes, monacoThemeName, onThemeChange, useMonacoTheme } from "../lib/theme";
 import { touches, useFsChanges } from "../lib/useFsChanges";
 
@@ -426,7 +427,7 @@ export function EditorPane({ workspace, repo, path, onError, onApplyPlan, onRunI
     const model = editor.getModel();
     if (model && path) {
       const refresh = () => setLspStatus(lsp.status(model));
-      lspOff.current.push(lsp.attach(model, { workspace, repo, path }), lsp.onStatus(model, refresh));
+      lspOff.current.push(lsp.attach(model, { workspace, repo, path }), lsp.onStatus(model, refresh), attachDebugGutter(editor));
       refresh();
     }
   };

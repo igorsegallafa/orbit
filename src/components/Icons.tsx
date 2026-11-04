@@ -474,3 +474,12 @@ export function StopIcon({ size = 14 }: IconProps) {
     </svg>
   );
 }
+
+export function BugIcon({ size = 14 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="8" y="6" width="8" height="14" rx="4" />
+      <path d="M9 7.5 7 5M15 7.5 17 5M12 10v10M4 13h4M16 13h4M5 19l3-2M19 19l-3-2M5 8l3 2M19 8l-3 2" />
+    </svg>
+  );
+}

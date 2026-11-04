@@ -6977,3 +6977,90 @@ button.btn-plain.search-section:hover .search-section-more { opacity: 1; }
 .search-row-container { font-size: 11.5px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .search-row-keys { margin-left: auto; font-size: 11px; color: var(--text-faint); font-family: var(--mono); }
 .search-row-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 12px; }
+
+/* ---------- Debugger ---------- */
+
+button.run-debug:not(:disabled) { color: var(--ok); }
+
+/* Gutter: breakpoint dot and the paused line. */
+.dbg-glyph-bp::before {
+  content: "";
+  display: block;
+  width: 10px;
+  height: 10px;
+  margin: 4px 0 0 4px;
+  border-radius: 50%;
+  background: var(--danger);
+}
+.dbg-glyph-here::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 5px;
+  border-left: 8px solid var(--warn);
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+}
+.dbg-line-here { background: color-mix(in srgb, var(--warn) 16%, transparent); }
+.monaco-editor .margin-view-overlays .cgmr { cursor: pointer; }
+
+.dbg-view { flex: 1; min-height: 0; display: grid; grid-template-rows: auto 1fr auto; font-size: 12px; }
+.dbg-toolbar { display: flex; align-items: center; gap: 2px; padding: 3px 6px; border-bottom: 1px solid var(--border); }
+button.btn-plain.dbg-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 22px;
+  border-radius: 4px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+button.btn-plain.dbg-btn:hover:not(:disabled) { background: var(--panel-raised); color: var(--text); }
+button.btn-plain.dbg-btn:disabled { opacity: 0.35; cursor: default; }
+.dbg-icon { font-size: 13px; line-height: 1; }
+.dbg-state { margin-left: 8px; color: var(--text-faint); font-size: 11.5px; }
+.dbg-columns { display: grid; grid-template-columns: minmax(200px, 2fr) 3fr; min-height: 0; }
+.dbg-frames, .dbg-vars { overflow: auto; min-height: 0; padding: 3px 0; }
+.dbg-frames { border-right: 1px solid var(--border); }
+.dbg-thread { margin: 2px 8px 4px; height: 24px; font-size: 12px; }
+.dbg-empty { padding: 8px 10px; color: var(--text-faint); }
+button.btn-plain.dbg-frame {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+  padding: 2px 10px;
+  color: var(--text-dim);
+  cursor: pointer;
+  white-space: nowrap;
+}
+button.btn-plain.dbg-frame:hover:not(:disabled) { background: var(--panel-raised); color: var(--text); }
+button.btn-plain.dbg-frame-active { background: var(--accent-soft); color: var(--text); }
+.dbg-frame-external { opacity: 0.6; }
+.dbg-frame-name { overflow: hidden; text-overflow: ellipsis; font-family: var(--mono); font-size: 11.5px; }
+.dbg-frame-loc { margin-left: auto; color: var(--text-faint); font-size: 11px; flex-shrink: 0; }
+button.btn-plain.dbg-var {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  width: 100%;
+  padding: 1px 10px 1px 8px;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+button.btn-plain.dbg-var:hover:not(:disabled) { background: var(--panel-raised); }
+.dbg-scope { color: var(--text); font-family: inherit; font-weight: 600; }
+.dbg-var-chevron { width: 10px; flex-shrink: 0; color: var(--text-faint); }
+.dbg-var-name { color: var(--info); }
+.dbg-var-value { color: var(--text); overflow: hidden; text-overflow: ellipsis; }
+.dbg-var-type { margin-left: auto; color: var(--text-faint); padding-left: 10px; }
+.dbg-console { border-top: 1px solid var(--border); display: flex; flex-direction: column; max-height: 40%; min-height: 70px; }
+.dbg-console-lines { flex: 1; overflow: auto; padding: 4px 10px; font-family: var(--mono); font-size: 11.5px; white-space: pre-wrap; user-select: text; -webkit-user-select: text; }
+.dbg-line-info { color: var(--text-faint); }
+.dbg-line-err { color: var(--danger); }
+.dbg-line-input { color: var(--accent); }
+.dbg-line-result { color: var(--text); }
+.dbg-eval { height: 26px; border-radius: 0; border: none; border-top: 1px solid var(--border); font-family: var(--mono); font-size: 12px; background: var(--bg); }

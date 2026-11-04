@@ -337,7 +337,7 @@ pub struct StartInfo {
 }
 
 /// Reads LSP frames ("Content-Length: N\r\n\r\n<json>") until EOF.
-fn read_frames(stdout: impl Read, mut on_message: impl FnMut(String)) {
+pub(crate) fn read_frames(stdout: impl Read, mut on_message: impl FnMut(String)) {
     let mut reader = BufReader::new(stdout);
     loop {
         let mut len = None;
@@ -366,7 +366,7 @@ fn read_frames(stdout: impl Read, mut on_message: impl FnMut(String)) {
     }
 }
 
-fn write_frame(stdin: &Mutex<ChildStdin>, message: &str) -> Result<(), String> {
+pub(crate) fn write_frame(stdin: &Mutex<ChildStdin>, message: &str) -> Result<(), String> {
     let mut w = stdin.lock().unwrap();
     write!(w, "Content-Length: {}\r\n\r\n{message}", message.len()).map_err(|e| format!("language server is gone: {e}"))?;
     w.flush().map_err(|e| e.to_string())

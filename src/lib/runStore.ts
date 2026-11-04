@@ -21,6 +21,8 @@ export interface ResolvedRun {
   args: string[];
   cwd: string;
   env: Record<string, string>;
+  /** Debug adapter ("auto", "gdb", "lldb-dap" or a path). */
+  debugger: string;
 }
 
 export interface RunSetup {
@@ -52,7 +54,7 @@ export interface BuildProblem extends Problem {
 }
 
 export type BuildStatus = "idle" | "running" | "ok" | "failed" | "cancelled";
-export type PanelView = "build" | "run" | "problems";
+export type PanelView = "build" | "run" | "problems" | "debug";
 
 interface State {
   build: { key: string; target: RunTarget; status: BuildStatus; lines: OutputLine[]; problems: BuildProblem[]; startedAt: number } | null;
