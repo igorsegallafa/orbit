@@ -1266,6 +1266,20 @@ impl EditorTab {
             Some((_, root)) => (0..last).map(|i| Some(parts[1..=i].iter().fold(root.clone(), |p, part| p.join(part)))).collect(),
             None => vec![],
         };
+        // `.breadcrumb`, `button.crumb`, `.crumb-sep`.
+        let crumb = |id: gpui::ElementId| {
+            div()
+                .id(id)
+                .relative()
+                .h(px(22.))
+                .px(px(4.))
+                .flex()
+                .items_center()
+                .rounded(px(4.))
+                .text_size(px(13.))
+                .cursor_pointer()
+                .hover(|s| s.bg(c(theme::PANEL_RAISED)).text_color(c(theme::TEXT)))
+        };
         div()
             .flex_1()
             .min_w_0()
@@ -1273,36 +1287,27 @@ impl EditorTab {
             .items_center()
             .overflow_hidden()
             .whitespace_nowrap()
+            .text_size(px(12.))
+            .text_color(c(theme::TEXT_DIM))
             .children(parts.into_iter().enumerate().map(move |(i, part)| {
-                let crumb = div().flex().items_center().when(i > 0, |d| d.child(div().px_1().text_color(c(theme::TEXT_FAINT)).child("›")));
+                let wrap = div().flex().items_center().when(i > 0, |d| d.child(div().px(px(3.)).text_color(c(theme::TEXT_FAINT)).child("›")));
                 if i == last {
-                    crumb.child(
-                        div()
-                            .id("crumb-file")
-                            .px_1()
-                            .rounded_sm()
-                            .cursor_pointer()
+                    wrap.child(
+                        crumb("crumb-file".into())
                             .text_color(c(theme::TEXT))
-                            .hover(|s| s.bg(c(theme::PANEL_HOVER)))
                             .child(part)
                             .on_click(cx.listener(|this, _, window, cx| this.file_outline(&FileOutline, window, cx))),
                     )
                 } else if let Some(dir) = folders.get(i).cloned().flatten() {
                     // A folder: shown in the file tree.
-                    crumb.child(
-                        div()
-                            .id(("crumb-dir", i))
-                            .relative()
-                            .px_1()
-                            .rounded_sm()
-                            .cursor_pointer()
-                            .hover(|s| s.bg(c(theme::PANEL_HOVER)).text_color(c(theme::TEXT)))
+                    wrap.child(
+                        crumb(("crumb-dir", i).into())
                             .child(part)
                             .child(crate::probe::probe(format!("crumb:{i}")))
                             .on_click(move |_, window, cx| crate::file_ops::reveal_in_tree(dir.clone(), window, cx)),
                     )
                 } else {
-                    crumb.child(div().child(part))
+                    wrap.child(div().px(px(4.)).text_size(px(13.)).child(part))
                 }
             }))
     }
@@ -1313,17 +1318,22 @@ impl EditorTab {
         let button = |id: &'static str, label: String| {
             div()
                 .id(id)
-                .px_2()
-                .py(px(1.))
-                .rounded_sm()
+                .flex_none()
+                .h(px(24.))
+                .px(px(10.))
+                .flex()
+                .items_center()
+                .rounded(px(5.))
                 .cursor_pointer()
-                .bg(c(theme::PANEL_HOVER))
-                .text_color(c(theme::TEXT))
-                .hover(|s| s.bg(c(theme::BORDER_STRONG)))
+                .text_size(px(11.5))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .bg(c(theme::ACCENT))
+                .text_color(c(theme::ON_ACCENT))
+                .hover(|s| s.bg(c(theme::ACCENT_HOVER)))
                 .child(label)
         };
         let action: gpui::AnyElement = match &b.run {
-            CmakeRun::Running => div().text_color(c(theme::TEXT_DIM)).child("Running CMake…").into_any_element(),
+            CmakeRun::Running => div().text_color(c(theme::TEXT_FAINT)).child("Running CMake…").into_any_element(),
             CmakeRun::Done => button("cpp-restart", "Restart clangd".into())
                 .on_click(cx.listener(|this, _, _, cx| this.restart(cx)))
                 .into_any_element(),
@@ -1335,7 +1345,12 @@ impl EditorTab {
                     .items_center()
                     .when_some(preset.clone(), |d, p| {
                         d.child(
-                            button("cpp-preset", format!("Preset: {p} ▾"))
+                            button("cpp-preset", format!("{p} ▾"))
+                                .bg(c(theme::BG))
+                                .text_color(c(theme::TEXT))
+                                .border_1()
+                                .border_color(c(theme::BORDER_STRONG))
+                                .hover(|s| s.bg(c(theme::PANEL_RAISED)))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     if let Some(b) = &mut this.cpp {
                                         b.preset = (b.preset + 1) % b.setup.presets.len().max(1);
@@ -1354,20 +1369,20 @@ impl EditorTab {
                     .into_any_element()
             }
             _ => div()
-                .text_color(c(theme::TEXT_DIM))
+                .text_color(c(theme::TEXT_FAINT))
                 .child(if b.setup.cmake { "Install CMake to generate it." } else { "Generate it with your build system (CMake, or bear -- make)." })
                 .into_any_element(),
         };
         Some(
             div()
                 .flex_none()
-                .px_3()
-                .py_1()
+                .px(px(14.))
+                .py(px(8.))
                 .flex()
                 .items_center()
-                .gap_3()
-                .text_xs()
-                .bg(c(theme::PANEL_RAISED))
+                .gap(px(10.))
+                .text_size(px(12.))
+                .bg(theme::hsla(theme::WARN).opacity(0.07))
                 .border_b_1()
                 .border_color(c(theme::BORDER))
                 .text_color(c(theme::TEXT_DIM))
@@ -1375,16 +1390,28 @@ impl EditorTab {
                     div()
                         .flex_1()
                         .min_w_0()
-                        .child(format!("clangd has no compile_commands.json for {repo}, so it guesses include paths and flags: some navigation and errors will be off.")),
+                        .line_height(gpui::relative(1.45))
+                        .child(
+                            gpui::StyledText::new(format!(
+                                "clangd has no compile_commands.json for {repo}, so it guesses include paths and flags: some navigation and errors will be off."
+                            ))
+                            .with_highlights([(0..36, gpui::HighlightStyle { color: Some(theme::hsla(theme::TEXT)), font_weight: Some(gpui::FontWeight::SEMIBOLD), ..Default::default() })]),
+                        ),
                 )
                 .child(action)
                 .child(
                     div()
                         .id("cpp-dismiss")
+                        .flex_none()
+                        .size(px(22.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(6.))
                         .cursor_pointer()
-                        .px_1()
+                        .text_size(px(15.))
                         .text_color(c(theme::TEXT_FAINT))
-                        .hover(|s| s.text_color(c(theme::TEXT)))
+                        .hover(|s| s.bg(c(theme::PANEL_RAISED)).text_color(c(theme::TEXT)))
                         .child("×")
                         .on_click(cx.listener(|this, _, _, cx| {
                             if let Some(b) = &mut this.cpp {
@@ -1401,63 +1428,76 @@ impl EditorTab {
         let state = self.state.read(cx);
         let selected = state.selected_text().chars().count();
         let (line, col) = self.cursor(cx);
-        let item = |id: &'static str| div().id(id).px_2().h_full().flex().items_center().cursor_pointer().hover(|s| s.bg(c(theme::PANEL_HOVER)));
-        let chip_color = match &self.lsp_state {
-            LspState::Missing(_) => theme::WARN,
-            _ if self.chip_text().ends_with("Restart") => theme::DANGER,
-            _ => theme::TEXT_DIM,
+        let item = || div().h(px(20.)).px(px(6.)).flex().items_center().gap(px(4.)).rounded(px(4.)).flex_none();
+        let button = |id: &'static str| {
+            item().id(id).cursor_pointer().text_size(px(13.)).hover(|s| s.bg(c(theme::PANEL_RAISED)).text_color(c(theme::TEXT)))
         };
-        let ready = matches!(self.lsp_state, LspState::Ready(_));
+        let exited = self.chip_text().ends_with("Restart");
+        let missing = matches!(self.lsp_state, LspState::Missing(_));
+        let ready = matches!(self.lsp_state, LspState::Ready(_)) && !exited;
+        let progress = ready && self.chip_text().contains(" · ");
         div()
-            .h(px(22.))
+            .h(px(24.))
             .flex_none()
             .flex()
             .items_center()
-            .text_xs()
+            .gap(px(2.))
+            .px(px(6.))
+            .text_size(px(11.5))
             .text_color(c(theme::TEXT_DIM))
+            .whitespace_nowrap()
+            .overflow_hidden()
             .border_t_1()
             .border_color(c(theme::BORDER))
             .bg(c(theme::PANEL))
             .when(self.doc.is_some() || !self.diagnostics.is_empty(), |d| {
                 d.child(
-                    item("status-problems")
-                        .gap_1()
-                        .child(div().text_color(c(if errors > 0 { theme::DANGER } else { theme::TEXT_DIM })).child(format!("⨯ {errors}")))
-                        .child(div().text_color(c(if warnings > 0 { theme::WARN } else { theme::TEXT_DIM })).child(format!("⚠ {warnings}")))
+                    button("status-problems")
+                        .child(div().text_color(c(if errors > 0 { theme::DANGER } else { theme::TEXT_DIM })).child("⨯"))
+                        .child(errors.to_string())
+                        .child(div().ml(px(6.)).text_color(c(if errors + warnings > 0 { theme::WARN } else { theme::TEXT_DIM })).child("⚠"))
+                        .child(warnings.to_string())
                         .on_click(cx.listener(|this, _, window, cx| this.jump_to_problem(true, window, cx))),
                 )
             })
-            .when(self.dirty, |d| d.child(div().px_2().text_color(c(theme::WARN)).child("Unsaved")))
+            .when(self.dirty, |d| d.child(item().text_color(c(theme::WARN)).child("Unsaved")))
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
-                    .px_2()
+                    .px(px(6.))
                     .overflow_hidden()
-                    .whitespace_nowrap()
                     .children(self.last_error.clone().map(|e| div().text_color(c(theme::DANGER)).child(e)))
                     .children(self.message.clone()),
             )
             .child(
-                item("status-cursor")
+                button("status-cursor")
                     .child(if selected > 0 { format!("Ln {line}, Col {col} ({selected} selected)") } else { format!("Ln {line}, Col {col}") })
                     .on_click(cx.listener(|this, _, window, cx| this.go_to_line(&GoToLine, window, cx))),
             )
-            .child(div().px_2().child(if self.crlf { "CRLF" } else { "LF" }))
-            .child(div().px_2().child(self.indent_label()))
-            .child(div().px_2().child(self.language.name))
+            .child(item().child(if self.crlf { "CRLF" } else { "LF" }))
+            .child(item().child(self.indent_label()))
+            .child(item().child(self.language.name))
             .when(!matches!(self.lsp_state, LspState::Off), |d| {
                 let tip = match &self.lsp_state {
                     LspState::Missing(e) => e.clone(),
                     _ => "".into(),
                 };
                 d.child(
-                    item("status-lsp")
-                        .gap_1()
-                        .text_color(c(chip_color))
-                        .when(ready, |d| d.child(div().text_color(c(theme::OK)).child("●")))
-                        .child(self.chip_text())
-                        .when(!tip.is_empty(), |d| d.child(div().text_color(c(theme::TEXT_FAINT)).max_w(px(320.)).overflow_hidden().child(tip)))
+                    item()
+                        .id("status-lsp")
+                        .gap(px(6.))
+                        .max_w(px(320.))
+                        .rounded(px(11.))
+                        .cursor_pointer()
+                        .when(missing, |d| d.text_color(c(theme::TEXT_FAINT)).border_1().border_dashed().border_color(c(theme::BORDER_STRONG)))
+                        .when(exited, |d| d.text_color(c(theme::DANGER)))
+                        .when(ready && !progress, |d| d.child(div().size(px(6.)).flex_none().rounded_full().bg(c(theme::OK))))
+                        .when(progress || matches!(self.lsp_state, LspState::Starting), |d| {
+                            d.child(crate::icons::ui_icon("spinner", 10., c(theme::TEXT_DIM)))
+                        })
+                        .child(div().overflow_hidden().child(self.chip_text()))
+                        .when(!tip.is_empty(), |d| d.tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(tip.clone()).build(w, cx)))
                         .on_click(cx.listener(|this, _, _, cx| this.restart(cx))),
                 )
             })
@@ -1614,14 +1654,16 @@ impl Render for EditorTab {
             .bg(c(theme::BG))
             .child(
                 div()
-                    .h(px(26.))
+                    .min_h(px(30.))
                     .flex_none()
-                    .px_3()
+                    .px(px(10.))
+                    .py(px(3.))
                     .flex()
                     .items_center()
-                    .gap_3()
-                    .text_xs()
-                    .text_color(c(theme::TEXT_DIM))
+                    .gap(px(10.))
+                    .text_size(px(12.))
+                    .text_color(c(theme::TEXT_FAINT))
+                    .bg(c(theme::PANEL))
                     .border_b_1()
                     .border_color(c(theme::BORDER))
                     .child(self.render_breadcrumb(cx))
@@ -1629,9 +1671,9 @@ impl Render for EditorTab {
                         div()
                             .id("open-diff")
                             .cursor_pointer()
-                            .px_2()
-                            .rounded_sm()
-                            .hover(|s| s.bg(c(theme::PANEL_HOVER)).text_color(c(theme::TEXT)))
+                            .px(px(6.))
+                            .rounded(px(4.))
+                            .hover(|s| s.bg(c(theme::PANEL_RAISED)).text_color(c(theme::TEXT)))
                             .child("Diff")
                             .on_mouse_down(MouseButton::Left, cx.listener(|_, _, _, cx| cx.emit(EditorEvent::OpenDiff))),
                     ),

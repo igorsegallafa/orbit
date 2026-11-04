@@ -76,6 +76,9 @@ const GLYPHS: &[(&str, &str)] = &[
     ("play", r#"<path d="M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z"/>"#),
     ("bug", r#"<path d="M12 20v-9"/><path d="M14 7a4 4 0 0 1 4 4v3a6 6 0 0 1-12 0v-3a4 4 0 0 1 4-4z"/><path d="M14.12 3.88 16 2"/><path d="M21 21a4 4 0 0 0-3.81-4"/><path d="M21 5a4 4 0 0 1-3.55 3.97"/><path d="M22 13h-4"/><path d="M3 21a4 4 0 0 1 3.81-4"/><path d="M3 5a4 4 0 0 0 3.55 3.97"/><path d="M6 13H2"/><path d="m8 2 1.88 1.88"/><path d="M9 7.13V6a3 3 0 1 1 6 0v1.13"/>"#),
     ("stop", r#"<rect width="14" height="14" x="5" y="5" rx="2"/>"#),
+    // Filled, as RunWidget's Play and Stop.
+    ("play-fill", r#"<path fill="currentColor" stroke="none" d="M6 4.5v15a1 1 0 0 0 1.5.86l12.5-7.5a1 1 0 0 0 0-1.72L7.5 3.64A1 1 0 0 0 6 4.5z"/>"#),
+    ("stop-fill", r#"<rect fill="currentColor" stroke="none" width="14" height="14" x="5" y="5" rx="2"/>"#),
     ("spinner", r#"<path d="M21 12a9 9 0 1 1-6.219-8.56"/>"#),
     ("pause", r#"<rect x="14" y="4" width="4" height="16" rx="1"/><rect x="6" y="4" width="4" height="16" rx="1"/>"#),
     ("step-over", r#"<circle cx="12" cy="17" r="1"/><path d="M21 7v6h-6"/><path d="M3 17a9 9 0 0 1 9-9 9 9 0 0 1 6 2.3l3 2.7"/>"#),
