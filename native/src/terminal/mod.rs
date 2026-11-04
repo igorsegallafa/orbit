@@ -1,5 +1,8 @@
-//! Terminal tab: a PTY (`portable-pty`) parsed by `alacritty_terminal` on a
-//! reader thread, painted as a grid of cells by a GPUI canvas each frame.
+//! Terminal tab: a session on `orbit_core::pty`, parsed by `alacritty_terminal`
+//! on the PTY's output thread, painted as a grid of cells by a GPUI canvas
+//! each frame. Parsing holds the program back (the core's read queue is
+//! bounded), so a flooding program runs at the parser's pace and the UI only
+//! ever waits for one small slice of parsing.
 //! Mouse drags select text (double click: words, triple: lines) unless the
 //! application asked for mouse reports, which Shift overrides.
 mod grid;
@@ -7,6 +10,8 @@ mod input;
 
 pub use grid::{FRAMES, FRAME_US_MAX, FRAME_US_TOTAL};
 
+use crate::sessions::status::{self, Hook, Status, Tracker};
+use crate::sessions::SessionMeta;
 use crate::theme::{self, c, hsla};
 use alacritty_terminal::{
     event::{Event as TermEvent, EventListener, WindowSize},
@@ -20,19 +25,18 @@ use alacritty_terminal::{
 use futures::{channel::mpsc, StreamExt};
 use gpui::{
     canvas, div, fill, outline, point, prelude::*, px, size, App, Bounds, ClipboardItem, Context, FocusHandle,
-    Focusable, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollEvent,
+    EventEmitter, Focusable, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollEvent,
     SharedString, Task, Window,
 };
 use grid::Geometry;
 use input::{key_to_bytes, mouse_report, MouseReport};
-use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use orbit_core::pty;
 use std::{
-    io::{Read, Write},
-    path::Path,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
+    time::{Duration, Instant},
 };
 
 const LINE_HEIGHT: f32 = 17.;
@@ -59,13 +63,11 @@ impl Dimensions for GridSize {
     }
 }
 
-type Writer = Arc<Mutex<Box<dyn Write + Send>>>;
-
 /// Answers the terminal's queries (device attributes, colors, size) and
 /// records the title it sets.
 #[derive(Clone)]
 struct Listener {
-    writer: Writer,
+    pty_id: u32,
     title: Arc<Mutex<Option<String>>>,
     window_size: Arc<Mutex<WindowSize>>,
 }
@@ -95,65 +97,52 @@ impl EventListener for Listener {
             })),
             _ => return,
         };
-        let _ = self.writer.lock().unwrap().write_all(reply.as_bytes());
+        let _ = pty::write(self.pty_id, reply.as_bytes());
     }
 }
 
 pub struct Shared {
     term: FairMutex<Term<Listener>>,
-    master: Mutex<Box<dyn MasterPty + Send>>,
+    pty_id: u32,
     size: Mutex<GridSize>,
     window_size: Arc<Mutex<WindowSize>>,
     geometry: Mutex<Option<Geometry>>,
 }
 
-/// A spawned shell on a PTY, not yet attached to a view.
-pub struct Pty {
-    shared: Arc<Shared>,
-    reader: Box<dyn Read + Send>,
-    writer: Writer,
-    child: Box<dyn Child + Send + Sync>,
-    title: Arc<Mutex<Option<String>>>,
+/// The size the last painted terminal had: new sessions start at it, since
+/// TUIs size their canvas from the first PTY size.
+static LAST_SIZE: Mutex<Option<pty::Size>> = Mutex::new(None);
+
+pub fn spawn_size() -> pty::Size {
+    LAST_SIZE.lock().unwrap().unwrap_or(pty::Size { cols: 120, rows: 32, pixel_width: 0, pixel_height: 0 })
 }
 
-impl Pty {
-    pub fn spawn(cwd: &Path) -> anyhow::Result<Self> {
-        let size = GridSize { cols: 80, rows: 24 };
-        let pair = native_pty_system().openpty(PtySize { rows: size.rows as u16, cols: size.cols as u16, pixel_width: 0, pixel_height: 0 })?;
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
-        let mut cmd = CommandBuilder::new(&shell);
-        cmd.cwd(cwd);
-        cmd.env("TERM", "xterm-256color");
-        cmd.env("COLORTERM", "truecolor");
-        let child = pair.slave.spawn_command(cmd)?;
-        drop(pair.slave);
+/// Output is parsed in slices this big, so a frame waits for at most one
+/// slice's parse while a program floods the terminal.
+const PARSE_SLICE: usize = 16 * 1024;
 
-        let reader = pair.master.try_clone_reader()?;
-        let writer: Writer = Arc::new(Mutex::new(pair.master.take_writer()?));
-        let title = Arc::new(Mutex::new(None));
-        let window_size = Arc::new(Mutex::new(WindowSize {
-            num_lines: size.rows as u16,
-            num_cols: size.cols as u16,
-            cell_width: 8,
-            cell_height: LINE_HEIGHT as u16,
-        }));
-        let listener = Listener { writer: writer.clone(), title: title.clone(), window_size: window_size.clone() };
-        let term = Term::new(Config::default(), &size, listener);
-        let shared = Arc::new(Shared {
-            term: FairMutex::new(term),
-            master: Mutex::new(pair.master),
-            size: Mutex::new(size),
-            window_size,
-            geometry: Mutex::new(None),
-        });
-        Ok(Self { shared, reader, writer, child, title })
-    }
+pub enum TerminalEvent {
+    /// The agent status changed.
+    StatusChanged,
+    /// The agent finished a turn, or needs the user.
+    Signal(Signal),
 }
+
+#[derive(Clone, Debug)]
+pub enum Signal {
+    Done,
+    Waiting(Option<String>),
+}
+
+/// Agents without hooks: a stretch of activity this long ending in silence counts as "done".
+const FALLBACK_DONE: Duration = Duration::from_secs(10);
 
 pub struct TerminalView {
     shared: Arc<Shared>,
-    writer: Writer,
-    child: Box<dyn Child + Send + Sync>,
+    pub meta: SessionMeta,
+    tracker: Arc<Mutex<Tracker>>,
+    pub status: Status,
+    busy_since: Option<Instant>,
     title: Arc<Mutex<Option<String>>>,
     exited: Arc<AtomicBool>,
     focus: FocusHandle,
@@ -165,7 +154,10 @@ pub struct TerminalView {
     /// The last text copied (self-test dumps).
     pub last_copied: Option<String>,
     _pump: Task<()>,
+    _status_poll: Task<()>,
 }
+
+impl EventEmitter<TerminalEvent> for TerminalView {}
 
 impl Focusable for TerminalView {
     fn focus_handle(&self, _: &App) -> FocusHandle {
@@ -175,59 +167,108 @@ impl Focusable for TerminalView {
 
 impl Drop for TerminalView {
     fn drop(&mut self) {
-        let _ = self.child.kill();
+        let _ = pty::kill(self.shared.pty_id);
     }
 }
 
+/// Saved output made safe to replay above a new session: screen clears become
+/// pushes into scrollback (so the replay survives them and the new session's
+/// own clear), then a marker line.
+pub fn restored_output(saved: &[u8], rows: usize) -> Vec<u8> {
+    let push = "\r\n".repeat(rows).into_bytes();
+    let mut out = Vec::with_capacity(saved.len() + 256);
+    let mut rest = saved;
+    while let Some(at) = rest.windows(4).position(|w| w == b"\x1b[2J") {
+        out.extend_from_slice(&rest[..at]);
+        out.extend_from_slice(&push);
+        rest = &rest[at + 4..];
+    }
+    out.extend_from_slice(rest);
+    out.extend_from_slice("\r\n\x1b[90m── restored after restart ──\x1b[0m".as_bytes());
+    out.extend_from_slice(&push);
+    out
+}
+
 impl TerminalView {
-    pub fn new(pty: Pty, initial_input: Option<String>, cx: &mut Context<Self>) -> Self {
-        let Pty { shared, mut reader, writer, child, title } = pty;
-        // The reader thread parses everything it reads; the UI only learns that
-        // something changed (at most one pending wake-up) and repaints once per
-        // frame, so bursts of output cost one render, not one per read.
+    /// Starts `spec` on a PTY. `replay` is printed first (a restored tab's
+    /// previous output); `input` is typed once the program runs.
+    pub fn new(meta: SessionMeta, spec: pty::Spawn, replay: Option<Vec<u8>>, input: Option<String>, cx: &mut Context<Self>) -> Self {
+        let size = GridSize { cols: spec.size.cols.max(2) as usize, rows: spec.size.rows.max(1) as usize };
+        let pty_id = pty::reserve_id();
+        let title = Arc::new(Mutex::new(None));
+        let window_size = Arc::new(Mutex::new(WindowSize {
+            num_lines: size.rows as u16,
+            num_cols: size.cols as u16,
+            cell_width: 8,
+            cell_height: LINE_HEIGHT as u16,
+        }));
+        let listener = Listener { pty_id, title: title.clone(), window_size: window_size.clone() };
+        let term = Term::new(Config::default(), &size, listener);
+        let shared = Arc::new(Shared { term: FairMutex::new(term), pty_id, size: Mutex::new(size), window_size, geometry: Mutex::new(None) });
+        let mut parser: Processor = Processor::new();
+        if let Some(saved) = replay.filter(|r| !r.is_empty()) {
+            parser.advance(&mut *shared.term.lock(), &restored_output(&saved, size.rows));
+        }
+
+        // The output thread parses everything; the UI only learns that
+        // something changed (at most one pending wake-up) and repaints once
+        // per frame, so bursts of output cost one render, not one per read.
         let (tx, mut rx) = mpsc::unbounded::<()>();
         let dirty = Arc::new(AtomicBool::new(false));
         let exited = Arc::new(AtomicBool::new(false));
-        {
-            let shared = shared.clone();
-            let dirty = dirty.clone();
-            let exited = exited.clone();
-            std::thread::Builder::new()
-                .name("pty-reader".into())
-                .spawn(move || {
-                    let mut parser: Processor = Processor::new();
-                    let mut buf = vec![0u8; 64 * 1024];
-                    loop {
-                        match reader.read(&mut buf) {
-                            Ok(0) | Err(_) => break,
-                            Ok(n) => {
-                                parser.advance(&mut *shared.term.lock(), &buf[..n]);
-                                if !dirty.swap(true, Ordering::AcqRel) {
-                                    let _ = tx.unbounded_send(());
-                                }
-                            }
+        let tracker = Arc::new(Mutex::new(Tracker::default()));
+        let on_output = {
+            let (shared, dirty, exited, tracker) = (shared.clone(), dirty.clone(), exited.clone(), tracker.clone());
+            move |out: pty::Output| {
+                match out {
+                    pty::Output::Data(bytes) => {
+                        for slice in bytes.chunks(PARSE_SLICE) {
+                            parser.advance(&mut *shared.term.lock(), slice);
                         }
+                        let tail = &bytes[bytes.len().saturating_sub(status::TAIL_BYTES)..];
+                        tracker.lock().unwrap().feed(&String::from_utf8_lossy(tail), Instant::now());
                     }
-                    exited.store(true, Ordering::Release);
+                    pty::Output::Exit => {
+                        parser.advance(&mut *shared.term.lock(), b"\r\n\x1b[90m[process exited]\x1b[0m\r\n");
+                        tracker.lock().unwrap().mark_exited();
+                        exited.store(true, Ordering::Release);
+                    }
+                }
+                if !dirty.swap(true, Ordering::AcqRel) {
                     let _ = tx.unbounded_send(());
-                })
-                .expect("spawn pty reader thread");
+                }
+            }
+        };
+        if let Err(e) = pty::spawn(pty_id, spec, on_output) {
+            let msg = format!("\x1b[31mcould not start: {e}\x1b[0m\r\n");
+            Processor::<alacritty_terminal::vte::ansi::StdSyncHandler>::new().advance(&mut *shared.term.lock(), msg.as_bytes());
+            tracker.lock().unwrap().mark_exited();
+            exited.store(true, Ordering::Release);
         }
         let pump = cx.spawn(async move |this, cx| {
             while rx.next().await.is_some() {
                 dirty.store(false, Ordering::Release);
-                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                if this.update(cx, |this, cx| this.refresh_status(cx)).is_err() {
                     break;
                 }
             }
         });
-        if let Some(input) = initial_input {
-            let _ = writer.lock().unwrap().write_all(format!("{input}\r").as_bytes());
+        // Re-evaluates "idle" when output stops arriving.
+        let status_poll = cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(Duration::from_millis(500)).await;
+            if this.update(cx, |this, cx| this.publish_status(cx)).is_err() {
+                break;
+            }
+        });
+        if let Some(input) = input {
+            let _ = pty::write(pty_id, format!("{input}\r").as_bytes());
         }
         Self {
             shared,
-            writer,
-            child,
+            meta,
+            tracker,
+            status: Status::Idle,
+            busy_since: None,
             title,
             exited,
             focus: cx.focus_handle(),
@@ -236,16 +277,76 @@ impl TerminalView {
             last_motion_cell: None,
             last_copied: None,
             _pump: pump,
+            _status_poll: status_poll,
         }
     }
 
-    pub fn title(&self) -> SharedString {
-        let base = self.title.lock().unwrap().clone().unwrap_or_else(|| "Terminal".into());
-        if self.exited.load(Ordering::Acquire) {
-            format!("{base} [exited]").into()
-        } else {
-            base.into()
+    pub fn is_agent(&self) -> bool {
+        self.meta.cmd.is_some()
+    }
+
+    pub fn exited(&self) -> bool {
+        self.exited.load(Ordering::Acquire)
+    }
+
+    fn refresh_status(&mut self, cx: &mut Context<Self>) {
+        cx.notify();
+        self.publish_status(cx);
+    }
+
+    /// Recomputes the status; on a change tells the session list, and for
+    /// agents without hooks turns a long busy stretch ending in idle into "done".
+    fn publish_status(&mut self, cx: &mut Context<Self>) {
+        let (status, hooks) = {
+            let t = self.tracker.lock().unwrap();
+            (t.status(Instant::now()), t.has_hooks())
+        };
+        if self.is_agent() && !hooks {
+            if status != Status::Idle && status != Status::Exited {
+                self.busy_since.get_or_insert_with(Instant::now);
+            } else if let Some(since) = self.busy_since.take() {
+                if status == Status::Idle && since.elapsed() >= FALLBACK_DONE {
+                    cx.emit(TerminalEvent::Signal(Signal::Done));
+                }
+            }
         }
+        if status != self.status {
+            self.status = status;
+            cx.emit(TerminalEvent::StatusChanged);
+            cx.notify();
+        }
+    }
+
+    /// An `agent-event` from this session's Claude Code hooks.
+    pub fn on_hook(&mut self, hook: Hook, message: Option<String>, cx: &mut Context<Self>) {
+        self.tracker.lock().unwrap().set_hook(hook);
+        self.publish_status(cx);
+        match hook {
+            Hook::Done => cx.emit(TerminalEvent::Signal(Signal::Done)),
+            Hook::Waiting => cx.emit(TerminalEvent::Signal(Signal::Waiting(message))),
+            Hook::Working => {}
+        }
+    }
+
+    /// The program's own title (OSC 0/2), if it set one.
+    pub fn program_title(&self) -> Option<String> {
+        self.title.lock().unwrap().clone()
+    }
+
+    pub fn title(&self) -> SharedString {
+        let mut t = self.meta.session_name.clone();
+        if self.is_agent() && self.status != Status::Idle && self.status != Status::Exited {
+            t = format!("{t} · {}", self.status.label());
+        }
+        if self.exited() {
+            t.push_str(" [exited]");
+        }
+        t.into()
+    }
+
+    /// Types `bytes` into the program.
+    pub fn send(&self, bytes: &[u8]) {
+        let _ = pty::write(self.shared.pty_id, bytes);
     }
 
     /// The visible grid as text, one line per row (self-test dumps).
@@ -284,7 +385,7 @@ impl TerminalView {
     }
 
     fn write(&self, bytes: &[u8]) {
-        let _ = self.writer.lock().unwrap().write_all(bytes);
+        self.send(bytes);
     }
 
     fn paste(&self, text: &str) {

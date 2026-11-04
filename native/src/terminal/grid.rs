@@ -10,7 +10,6 @@ use alacritty_terminal::{
     vte::ansi::{Color, CursorShape, NamedColor, Rgb},
 };
 use gpui::{font, point, px, size, Bounds, FontStyle, FontWeight, Hsla, Pixels, ShapedLine, SharedString, TextRun, Window};
-use portable_pty::PtySize;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Frame statistics of every terminal canvas (layout + paint), for the self-test.
@@ -127,12 +126,14 @@ pub fn layout(shared: &Shared, bounds: Bounds<Pixels>, window: &mut Window) -> F
         if *size != new_size {
             *size = new_size;
             shared.term.lock().resize(new_size);
-            let _ = shared.master.lock().unwrap().resize(PtySize {
+            let pty_size = orbit_core::pty::Size {
                 rows: rows as u16,
                 cols: cols as u16,
                 pixel_width: (f32::from(cell_w) * cols as f32) as u16,
                 pixel_height: (LINE_HEIGHT * rows as f32) as u16,
-            });
+            };
+            *super::LAST_SIZE.lock().unwrap() = Some(pty_size);
+            let _ = orbit_core::pty::resize(shared.pty_id, pty_size);
             *shared.window_size.lock().unwrap() = WindowSize {
                 num_lines: rows as u16,
                 num_cols: cols as u16,

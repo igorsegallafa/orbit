@@ -5,7 +5,7 @@ use crate::diff_view::DiffTab;
 use crate::editor::{self, EditorEvent, EditorTab};
 use crate::file_tree::{FileTree, FileTreeEvent};
 use crate::lsp::{uri_to_path, LspRegistry, Notification, RepoKey};
-use crate::terminal::{self, TerminalView};
+use crate::terminal::TerminalView;
 use crate::theme::{self, c};
 use crate::workspace::{self, Workspace};
 use futures::StreamExt;
@@ -75,6 +75,7 @@ pub struct OrbitApp {
     pub lsp: LspRegistry,
     /// A one-line message in the status bar (errors, refusals).
     pub notice: Option<SharedString>,
+    pub sessions: Entity<crate::sessions::SessionsPanel>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -96,6 +97,7 @@ impl OrbitApp {
             }
         })
         .detach();
+        let sessions = crate::sessions::init(window, cx);
         Self {
             workspaces: workspace::list_workspaces(),
             selected: None,
@@ -104,6 +106,7 @@ impl OrbitApp {
             active: None,
             lsp: LspRegistry::new(tx),
             notice: None,
+            sessions,
             _subscriptions: vec![sub],
         }
     }
@@ -118,10 +121,6 @@ impl OrbitApp {
 
     pub fn workspace(&self) -> Option<&Workspace> {
         self.selected.map(|ix| &self.workspaces[ix])
-    }
-
-    fn cwd(&self) -> PathBuf {
-        self.workspace().map(|w| w.dir.clone()).unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from("/")))
     }
 
     /// The selected workspace's repo holding `path`, and its folder in the workspace.
@@ -150,7 +149,7 @@ impl OrbitApp {
     }
 
     /// Adds a tab in its group (sessions before files) and returns its index.
-    fn insert_tab(&mut self, tab: Tab) -> usize {
+    pub(crate) fn insert_tab(&mut self, tab: Tab) -> usize {
         let ix = if tab.is_file() { self.tabs.len() } else { self.tabs.iter().take_while(|t| !t.is_file()).count() };
         self.tabs.insert(ix, tab);
         if let Some(active) = self.active.as_mut().filter(|a| **a >= ix) {
@@ -159,7 +158,7 @@ impl OrbitApp {
         ix
     }
 
-    fn activate(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn activate(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.active = Some(ix);
         if let Some(tab) = self.tabs.get(ix) {
             window.focus(&tab.focus_handle(cx), cx);
@@ -168,17 +167,7 @@ impl OrbitApp {
     }
 
     pub fn new_terminal(&mut self, input: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
-        let pty = match terminal::Pty::spawn(&self.cwd()) {
-            Ok(pty) => pty,
-            Err(e) => {
-                self.notice = Some(format!("terminal failed: {e}").into());
-                return;
-            }
-        };
-        let view = cx.new(|cx| TerminalView::new(pty, input, cx));
-        cx.observe(&view, |_, _, cx| cx.notify()).detach();
-        let ix = self.insert_tab(Tab { kind: TabKind::Terminal(view), preview: false });
-        self.activate(ix, window, cx);
+        crate::sessions::new_session(self, None, input, window, cx);
     }
 
     /// Opens (or focuses) a file's editor tab. `preview` reuses the preview
@@ -263,6 +252,9 @@ impl OrbitApp {
             cx.notify();
             return;
         }
+        if let TabKind::Terminal(t) = &tab.kind {
+            crate::sessions::closed(t, cx);
+        }
         self.tabs.remove(ix);
         self.active = match self.active {
             _ if self.tabs.is_empty() => None,
@@ -326,6 +318,7 @@ impl OrbitApp {
                     )
                     .on_click(cx.listener(move |this, _, _, cx| this.select_workspace(ix, cx)))
             }))
+            .child(self.sessions.clone())
     }
 
     fn render_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {

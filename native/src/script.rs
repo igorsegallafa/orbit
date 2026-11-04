@@ -3,10 +3,11 @@
 //! writes a state dump, so features can be verified without a person.
 //!
 //! The steps run in a fixed order, each one optional:
-//! workspace → expand → terminals → open (+cursor) → wait for the language
-//! server → type → keys → ctrl-click → hover → diff → terminal drag → dump.
+//! workspace → expand → terminals and sessions → open (+cursor) → wait for
+//! the language server → type → keys → ctrl-click → hover → diff → terminal
+//! drag → steps → dump.
 use crate::app::{OrbitApp, TabKind};
-use crate::terminal;
+use crate::{sessions, terminal};
 use gpui::{
     AnyWindowHandle, AsyncApp, Entity, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, PlatformInput, Point, Pixels, WindowHandle,
@@ -42,6 +43,10 @@ pub struct Script {
     /// Drag-select in the active terminal: `col,row:col,row` (0-based cells).
     pub term_drag: Option<((usize, usize), (usize, usize))>,
     pub scroll: i32,
+    /// Sessions to open at start: "shell", "claude", "opencode", "omp" or any command.
+    pub sessions: Vec<String>,
+    /// `--steps "a; b; …"`, run in order last (see [`run_steps`]).
+    pub steps: Vec<String>,
     pub exit_after: Option<u64>,
     pub dump: Option<PathBuf>,
 }
@@ -87,6 +92,8 @@ impl Script {
                         Some((cell(a)?, cell(b)?))
                     })
                 }
+                "--session" => s.sessions.extend(args.next()),
+                "--steps" => s.steps.extend(args.next().unwrap_or_default().split(';').map(|t| t.trim().to_string()).filter(|t| !t.is_empty())),
                 "--scroll" => s.scroll = args.next().and_then(|v| v.parse().ok()).unwrap_or(0),
                 "--exit-after" => s.exit_after = args.next().and_then(|v| v.parse().ok()),
                 "--dump" => s.dump = args.next().map(PathBuf::from),
@@ -204,7 +211,8 @@ fn dump(app: &OrbitApp, log: &str, cx: &gpui::App) -> String {
             let _ = writeln!(out, "--- active terminal: {}", t.title());
             let _ = writeln!(out, "selection: {:?}", t.selection_text());
             let _ = writeln!(out, "copied: {:?}", t.last_copied);
-            out.push_str(&t.grid_text());
+            out.push_str(t.grid_text().trim_end());
+            out.push('\n');
         }
         Some(TabKind::Diff(d)) => {
             let d = d.read(cx);
@@ -219,7 +227,40 @@ fn dump(app: &OrbitApp, log: &str, cx: &gpui::App) -> String {
     if let Some(n) = &app.notice {
         let _ = writeln!(out, "--- notice: {n}");
     }
+    dump_sessions(&mut out, cx);
     out
+}
+
+fn dump_sessions(out: &mut String, cx: &gpui::App) {
+    let store = sessions::store(cx);
+    let store = store.read(cx);
+    let _ = writeln!(out, "--- sessions:");
+    for (meta, view) in store.sessions() {
+        let (status, exited, osc) = view.map_or(("closed", false, None), |v| {
+            let v = v.read(cx);
+            (v.status.label(), v.exited(), v.program_title())
+        });
+        let _ = writeln!(
+            out,
+            "  {} {} [{}] {} in {} args {:?}{}{}",
+            meta.id,
+            meta.session_name,
+            meta.label,
+            status,
+            meta.workspace,
+            meta.args,
+            if exited { " (exited)" } else { "" },
+            osc.map(|t| format!(" title {t:?}")).unwrap_or_default(),
+        );
+    }
+    let _ = writeln!(out, "--- inbox ({} unread):", store.inbox.iter().filter(|i| !i.read).count());
+    for i in &store.inbox {
+        let _ = writeln!(out, "  {:?} {} | {} | {}{}", i.kind, i.key, i.title, i.detail, if i.read { " (read)" } else { "" });
+    }
+    let _ = writeln!(out, "--- recent:");
+    for r in &store.recent {
+        let _ = writeln!(out, "  {} {} {} in {}", r.agent, r.resume_id, r.session_name, r.workspace);
+    }
 }
 
 /// Starts the scripted steps that happen at window creation.
@@ -235,6 +276,10 @@ pub fn start(script: &Script, app: &mut OrbitApp, window: &mut gpui::Window, cx:
     }
     for _ in 0..script.terminals {
         app.new_terminal(script.cmd.clone(), window, cx);
+    }
+    for cmd in &script.sessions {
+        let cmd = (cmd != "shell").then_some(cmd.as_str());
+        sessions::new_session(app, cmd, None, window, cx);
     }
 }
 
@@ -362,7 +407,80 @@ pub async fn run(script: Script, window: WindowHandle<Root>, app: Entity<OrbitAp
         });
     }
 
+    run_steps(&script.steps, any_window, &app, &mut log, cx).await;
     finish(script, &app, log, started, cx).await
+}
+
+/// Free-form steps, `;`-separated:
+/// `wait:<text>[@secs]` until the active terminal shows `text` ·
+/// `status:<status>[@secs]` until some session has that status ·
+/// `action:<name>` dispatches a GPUI action by name (`sessions::NextSessionNeedingInput`) ·
+/// `type:<text>` types into the focused view, `keys:<specs>` presses keys (`ctrl-c`) (`\n` is Enter) · `sleep:<ms>` ·
+/// `dump` writes the sessions, inbox and recent list into the log.
+/// Waits also record how late the UI thread ran its timers (a blocked UI).
+async fn run_steps(steps: &[String], window: AnyWindowHandle, app: &Entity<OrbitApp>, log: &mut String, cx: &mut AsyncApp) {
+    let mut worst_lag = Duration::ZERO;
+    for step in steps {
+        let (kind, arg) = step.split_once(':').unwrap_or((step.as_str(), ""));
+        let (arg, secs) = match arg.rsplit_once('@') {
+            Some((a, n)) if n.parse::<u64>().is_ok() => (a, n.parse().unwrap()),
+            _ => (arg, 30),
+        };
+        match kind {
+            "wait" | "status" => {
+                let t = Instant::now();
+                let mut found = false;
+                while t.elapsed() < Duration::from_secs(secs) {
+                    found = app.read_with(cx, |a, cx| match kind {
+                        "wait" => a.active_terminal().is_some_and(|v| v.read(cx).grid_text().contains(arg)),
+                        _ => sessions::store(cx).read(cx).sessions().any(|(_, v)| v.is_some_and(|v| v.read(cx).status.label() == arg)),
+                    });
+                    if found {
+                        break;
+                    }
+                    let tick = Instant::now();
+                    sleep(cx, 50).await;
+                    worst_lag = worst_lag.max(tick.elapsed().saturating_sub(Duration::from_millis(50)));
+                }
+                let _ = writeln!(log, "step {step}: {} after {} ms", if found { "found" } else { "TIMED OUT" }, t.elapsed().as_millis());
+            }
+            "action" => {
+                let built = cx.update(|cx| cx.build_action(arg, None));
+                match built {
+                    Ok(action) => {
+                        let _ = window.update(cx, |_, window, cx| window.dispatch_action(action, cx));
+                        let _ = writeln!(log, "step {step}: dispatched");
+                    }
+                    Err(e) => {
+                        let _ = writeln!(log, "step {step}: {e}");
+                    }
+                }
+                sleep(cx, 300).await;
+            }
+            "type" | "keys" => {
+                let typed = match kind {
+                    "type" => Script { typed: Some(arg.replace("\\n", "\n")), ..Default::default() },
+                    _ => Script { keys: arg.split_whitespace().map(str::to_string).collect(), ..Default::default() },
+                };
+                for ks in keystrokes(&typed) {
+                    let _ = window.update(cx, |_, window, cx| window.dispatch_keystroke(ks, cx));
+                    sleep(cx, 4).await;
+                }
+                let _ = writeln!(log, "step {step}: typed");
+            }
+            "sleep" => sleep(cx, arg.parse().unwrap_or(0)).await,
+            "dump" => {
+                let _ = writeln!(log, "step dump:");
+                cx.update(|cx| dump_sessions(log, cx));
+            }
+            _ => {
+                let _ = writeln!(log, "step {step}: unknown");
+            }
+        }
+    }
+    if !steps.is_empty() {
+        let _ = writeln!(log, "ui timer lag while waiting: max {} ms", worst_lag.as_millis());
+    }
 }
 
 fn send(window: AnyWindowHandle, event: PlatformInput, cx: &mut AsyncApp) {
