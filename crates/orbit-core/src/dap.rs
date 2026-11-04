@@ -95,6 +95,10 @@ pub fn send(id: u32, message: &str) -> Result<(), String> {
 pub fn stop(id: u32) {
     if let Some(mut s) = sessions().lock().unwrap().remove(&id) {
         let _ = s.child.kill();
+        // Reaped here: the reader thread no longer finds the session to wait on.
+        std::thread::spawn(move || {
+            let _ = s.child.wait();
+        });
     }
 }
 

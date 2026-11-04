@@ -3,6 +3,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 //! Orbit's native UI (GPUI + gpui-component): the shell, terminals, file
 //! tree, and the editor with language servers; see README.md.
+mod ansi;
 mod app;
 mod commands;
 mod debug;
@@ -13,6 +14,7 @@ mod file_ops;
 mod file_tree;
 mod git;
 mod icons;
+mod logview;
 mod lsp;
 mod motion;
 mod nav;

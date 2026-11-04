@@ -4,7 +4,8 @@
 //! instead of filling memory. Sessions with a key keep the tail of
 //! their output on disk so a restarted app can show it again.
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -42,6 +43,10 @@ pub struct Spawn {
     pub scrollback: bool,
     /// `TERM_PROGRAM_VERSION` for the child.
     pub program_version: String,
+    /// Start nothing: the terminal waits for a program another process starts
+    /// on it ([`tty_path`]; the debugger's `set inferior-tty`). It ends once
+    /// [`release_tty`] was called and that program has closed it.
+    pub tty_only: bool,
 }
 
 pub enum Output {
@@ -53,7 +58,9 @@ pub enum Output {
 
 struct Session {
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
-    child: Box<dyn Child + Send + Sync>,
+    child: Option<Box<dyn Child + Send + Sync>>,
+    /// Held open for a `tty_only` session until [`release_tty`].
+    slave: Option<Box<dyn portable_pty::SlavePty + Send>>,
     master: Box<dyn MasterPty + Send>,
 }
 
@@ -124,15 +131,20 @@ pub fn spawn(id: u32, spec: Spawn, mut on_output: impl FnMut(Output) + Send + 's
     // SIGWINCH, so a wrong default leaves a small box in the corner.
     let size = Size { rows: spec.size.rows.max(4), cols: spec.size.cols.max(20), ..spec.size };
     let pair = native_pty_system().openpty(size.into()).map_err(|e| e.to_string())?;
-    let child = pair.slave.spawn_command(command(&spec)).map_err(|e| e.to_string())?;
-    drop(pair.slave);
+    let (child, slave) = if spec.tty_only {
+        (None, Some(pair.slave))
+    } else {
+        let child = pair.slave.spawn_command(command(&spec)).map_err(|e| e.to_string())?;
+        drop(pair.slave);
+        (Some(child), None)
+    };
     let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
     let writer = Arc::new(Mutex::new(pair.master.take_writer().map_err(|e| e.to_string())?));
     SESSIONS
         .lock()
         .unwrap()
         .get_or_insert_with(HashMap::new)
-        .insert(id, Session { writer, child, master: pair.master });
+        .insert(id, Session { writer, child, slave, master: pair.master });
 
     let scrollback = spec.key.as_deref().filter(|_| spec.scrollback).map(Scrollback::start);
     let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(READ_QUEUE);
@@ -188,31 +200,54 @@ fn command(spec: &Spawn) -> CommandBuilder {
         b.arg(a);
     }
     b.cwd(&spec.cwd);
-    for (k, _) in std::env::vars_os() {
-        let k = k.to_string_lossy();
-        if OUTER_TERMINAL_ENV.contains(&k.as_ref()) || OUTER_TERMINAL_PREFIXES.iter().any(|p| k.starts_with(p)) {
-            b.env_remove(k.as_ref());
-        }
-    }
-    b.env("TERM", "xterm-256color");
-    b.env("COLORTERM", "truecolor");
-    b.env("TERM_PROGRAM", "Orbit");
-    b.env("TERM_PROGRAM_VERSION", &spec.program_version);
-    // Claude Code only detects kitty graphics support in kitty and Ghostty.
-    b.env("CLAUDE_CODE_FORCE_TERMINAL_IMAGES", "1");
-    for k in crate::proc::CLAUDE_SESSION_ENV {
-        b.env_remove(k);
-    }
-    for (k, v) in crate::proc::host_env() {
-        match v {
-            Some(v) => b.env(k, v),
-            None => b.env_remove(k),
-        }
-    }
-    for (k, v) in &spec.env {
+    b.env_clear();
+    for (k, v) in child_env(&spec.env, &spec.program_version) {
         b.env(k, v);
     }
     b
+}
+
+/// The environment of a program Orbit starts (a session, Run, the program
+/// under the debugger): Orbit's own, without what belongs to its launcher
+/// (`proc::host_env`: an AppImage's mount), to the terminal Orbit was started
+/// from, or to a Claude session; then the terminal's `TERM` and friends; then
+/// `extra`, which wins.
+pub fn child_env(extra: &[(String, String)], program_version: &str) -> Vec<(OsString, OsString)> {
+    merge_env(std::env::vars_os(), crate::proc::host_env(), extra, program_version)
+}
+
+fn merge_env(
+    inherited: impl Iterator<Item = (OsString, OsString)>,
+    host: Vec<(OsString, Option<OsString>)>,
+    extra: &[(String, String)],
+    program_version: &str,
+) -> Vec<(OsString, OsString)> {
+    let mut env: BTreeMap<OsString, OsString> = inherited
+        .filter(|(k, _)| {
+            let k = k.to_string_lossy();
+            !OUTER_TERMINAL_ENV.contains(&k.as_ref())
+                && !OUTER_TERMINAL_PREFIXES.iter().any(|p| k.starts_with(p))
+                && !crate::proc::CLAUDE_SESSION_ENV.contains(&k.as_ref())
+        })
+        .collect();
+    for (k, v) in host {
+        match v {
+            Some(v) => env.insert(k, v),
+            None => env.remove(&k),
+        };
+    }
+    let terminal = [
+        ("TERM", "xterm-256color"),
+        ("COLORTERM", "truecolor"),
+        ("TERM_PROGRAM", "Orbit"),
+        ("TERM_PROGRAM_VERSION", program_version),
+        // Claude Code only detects kitty graphics support in kitty and Ghostty.
+        ("CLAUDE_CODE_FORCE_TERMINAL_IMAGES", "1"),
+    ];
+    for (k, v) in terminal.into_iter().chain(extra.iter().map(|(k, v)| (k.as_str(), v.as_str()))) {
+        env.insert(k.into(), v.into());
+    }
+    env.into_iter().collect()
 }
 
 /// False once the reader has ended.
@@ -249,9 +284,23 @@ pub fn resize(id: u32, size: Size) -> Result<(), String> {
 
 pub fn kill(id: u32) -> Result<(), String> {
     let removed = SESSIONS.lock().unwrap().as_mut().and_then(|m| m.remove(&id));
-    let mut s = removed.ok_or_else(|| format!("pty session {id} not found"))?;
-    let _ = s.child.kill();
+    let s = removed.ok_or_else(|| format!("pty session {id} not found"))?;
+    if let Some(mut child) = s.child {
+        let _ = child.kill();
+    }
     Ok(())
+}
+
+/// The terminal device of a `tty_only` session, for a program to run on.
+#[cfg(unix)]
+pub fn tty_path(id: u32) -> Option<PathBuf> {
+    with_session(id, |s| s.master.tty_name()).ok().flatten()
+}
+
+/// A `tty_only` session stops holding its terminal open: it ends once the
+/// program on it has closed it too.
+pub fn release_tty(id: u32) {
+    let _ = with_session(id, |s| s.slave.take());
 }
 
 const SCROLLBACK_MAX: usize = 256 * 1024;
@@ -410,6 +459,72 @@ mod tests {
         assert_eq!(sb.data.len(), SCROLLBACK_MAX);
         assert!(scrollback_path("../../etc").is_none());
         assert!(scrollback_path("").is_none());
+    }
+
+    #[test]
+    fn child_env_inherits_scrubs_and_lets_the_config_win() {
+        let vars = [
+            ("HOME", "/home/u"),
+            ("XDG_RUNTIME_DIR", "/run/user/1000"),
+            ("WAYLAND_DISPLAY", "wayland-0"),
+            ("PATH", "/tmp/.mount_X/usr/bin:/usr/bin"),
+            ("LD_LIBRARY_PATH", "/tmp/.mount_X/usr/lib"),
+            ("APPIMAGE", "/a/Orbit.AppImage"),
+            ("APPDIR", "/tmp/.mount_X"),
+            ("CLAUDECODE", "1"),
+            ("KITTY_WINDOW_ID", "3"),
+            ("GHOSTTY_RESOURCES_DIR", "/g"),
+            ("TERM", "dumb"),
+            ("MODE", "inherited"),
+        ]
+        .map(|(k, v)| (OsString::from(k), OsString::from(v)));
+        let host = vec![
+            ("PATH".into(), Some("/usr/bin".into())),
+            ("LD_LIBRARY_PATH".into(), None),
+            ("APPIMAGE".into(), None),
+            ("APPDIR".into(), None),
+        ];
+        let extra = [("MODE".to_string(), "config".to_string()), ("CACHE".to_string(), "/c".to_string())];
+        let env = merge_env(vars.into_iter(), host, &extra, "1.2.3");
+        let get = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.to_string_lossy().into_owned());
+        assert_eq!(get("HOME").as_deref(), Some("/home/u"));
+        assert_eq!(get("XDG_RUNTIME_DIR").as_deref(), Some("/run/user/1000"));
+        assert_eq!(get("WAYLAND_DISPLAY").as_deref(), Some("wayland-0"));
+        assert_eq!(get("PATH").as_deref(), Some("/usr/bin"));
+        assert_eq!(get("MODE").as_deref(), Some("config"));
+        assert_eq!(get("CACHE").as_deref(), Some("/c"));
+        assert_eq!(get("TERM").as_deref(), Some("xterm-256color"));
+        assert_eq!(get("TERM_PROGRAM_VERSION").as_deref(), Some("1.2.3"));
+        for gone in ["LD_LIBRARY_PATH", "APPIMAGE", "APPDIR", "CLAUDECODE", "KITTY_WINDOW_ID", "GHOSTTY_RESOURCES_DIR"] {
+            assert_eq!(get(gone), None, "{gone}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_tty_only_session_shows_what_another_process_writes_to_its_tty() {
+        let (tx, rx) = mpsc::channel();
+        let id = reserve_id();
+        let spec = Spawn { tty_only: true, size: Size { cols: 80, rows: 24, ..Default::default() }, ..Default::default() };
+        spawn(id, spec, move |o| {
+            let _ = tx.send(match o {
+                Output::Data(d) => Some(d),
+                Output::Exit => None,
+            });
+        })
+        .unwrap();
+        let tty = tty_path(id).expect("a tty path");
+        let status = std::process::Command::new("/bin/sh")
+            .args(["-c", "printf 'from-the-debuggee' > \"$0\"", &tty.to_string_lossy()])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        release_tty(id);
+        let mut out = Vec::new();
+        while let Ok(Some(d)) = rx.recv_timeout(Duration::from_secs(10)) {
+            out.extend(d);
+        }
+        assert!(String::from_utf8_lossy(&out).contains("from-the-debuggee"));
     }
 
     #[cfg(unix)]

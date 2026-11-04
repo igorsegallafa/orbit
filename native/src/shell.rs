@@ -132,6 +132,8 @@ fn pane_slide(id: &'static str, width: f32, hidden: bool, animating: bool, pane:
     tween.jump(!animating)
 }
 
+const PANEL_GRAB: f32 = 8.;
+
 fn resizer(pane: Pane, lit: bool, cx: &mut Context<OrbitApp>) -> impl IntoElement {
     let vertical = pane != Pane::Panel;
     let id = match pane {
@@ -144,7 +146,8 @@ fn resizer(pane: Pane, lit: bool, cx: &mut Context<OrbitApp>) -> impl IntoElemen
         .id(id)
         .absolute()
         .when(vertical, |d| d.top_0().bottom_0().left(px(-2.)).w(px(size::RESIZER)).cursor(CursorStyle::ResizeLeftRight))
-        .when(!vertical, |d| d.left_0().right_0().top(px(-2.)).h(px(size::RESIZER)).cursor(CursorStyle::ResizeUpDown))
+        // The panel's edge is long and thin: a taller grab area than the side panes'.
+        .when(!vertical, |d| d.left_0().right_0().top(px(-PANEL_GRAB / 2.)).h(px(PANEL_GRAB)).cursor(CursorStyle::ResizeUpDown))
         .when(lit, |d| d.bg(c(theme::ACCENT)))
         .hover(|s| s.bg(c(theme::ACCENT)))
         .child(probe(id))
@@ -1440,7 +1443,16 @@ impl Render for OrbitApp {
             .flex_col()
             .when(show_strip, |d| d.child(self.render_tabs(cx)))
             .child(div().flex_1().min_h_0().bg(c(theme::BG)).child(self.render_content()))
-            .when(self.layout.panel_open, |d| d.child(resizer(Pane::Panel, false, cx)).child(self.render_panel(cx)));
+            // The handle after the panel, so it stays on top of the panel's tabs it overlaps.
+            .when(self.layout.panel_open, |d| {
+                d.child(
+                    div()
+                        .relative()
+                        .flex_none()
+                        .child(self.render_panel(cx))
+                        .child(div().absolute().top_0().left_0().right_0().child(resizer(Pane::Panel, false, cx))),
+                )
+            });
         let sidebar_lit = self.layout.sidebar_width <= SIDEBAR.min + 1.;
         div()
             .id("orbit-app")

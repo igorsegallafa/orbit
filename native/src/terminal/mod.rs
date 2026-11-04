@@ -385,6 +385,19 @@ impl TerminalView {
         t.into()
     }
 
+    /// The terminal device of a `tty_only` terminal (see `pty::Spawn`).
+    pub fn tty_path(&self) -> Option<std::path::PathBuf> {
+        #[cfg(unix)]
+        return pty::tty_path(self.shared.pty_id);
+        #[cfg(not(unix))]
+        None
+    }
+
+    /// A `tty_only` terminal ends once its program has closed it.
+    pub fn release_tty(&self) {
+        pty::release_tty(self.shared.pty_id);
+    }
+
     /// Types `bytes` into the program.
     pub fn send(&self, bytes: &[u8]) {
         let _ = pty::write(self.shared.pty_id, bytes);

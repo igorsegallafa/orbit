@@ -115,10 +115,12 @@ Build/Run/Debug adds (`src/run/script.rs`) `until:<text>[@secs]` (wait until the
 editor's breakpoint strip at that line); its probes are `run-config`, `run-preset`, `run-build`,
 `run-run`, `run-debug`, `run-stop`, `panel-build|run|debug|problems`, `panel-clear`, `problem:<ix>`,
 `dbg-resume|pause|over|into|out|stop`, `dbg-eval` (the console input), `frame:<ix>`, `thread:<id>`,
+`dbg-tab-output|console` (the Debug tab's main area), `dbg-split-side|frames` (its splitters), the log
+views `build-output` and `dbg-console` (drag in them selects, `<probe>@x,y` picks the start),
 `var:<name>`; `run-build-menu` (the build chevron), `run-build-split`, and in Edit Configurations
 `rc-item:<name>`, `rc-input:name|program|args|cwd|build|env-key:<n>|env-value:<n>`, `rc-target`,
 `rc-add|dup|remove`, `rc-env-add`, `rc-env-remove:<n>`, `rc-shared`, `rc-build-first`,
-`rc-cancel|apply|ok`. `move:<probe>` hovers a probe, `paste:<text>` inserts text in one go as a
+`rc-cancel|apply|ok`, `rc-status` (the footer's saved or error line). `move:<probe>` hovers a probe, `paste:<text>` inserts text in one go as a
 paste does, and `\;` puts a `;` inside a `--do` step. The git and workspace pages' probes are listed in *Stage: git and workspace flows*.
 
 ## Commands and keymap (the extension point)
@@ -838,7 +840,21 @@ not run (it needs GitHub).
   file's line endings (aether-engine's files are CRLF), indent and final newline. Values expand
   `${repo}`, `${buildDir}`, `${preset}`, `${exe}`, `$HOME`/`${VAR}` and a leading `~`, for Run (the
   PTY's cwd and env) and Debug (the DAP launch's `cwd`, and `env` as a dict for gdb, a list for
-  lldb-dap). **`run.local.json` should be gitignored** in each repo (`.orbit/run.local.json`); Orbit
+  lldb-dap). Apply is enabled only with unsaved changes; an edited, new or removed configuration is
+  marked (`●`, italic) until saved. A save says what went where in the footer ("Saved 'game' to
+  .orbit/run.local.json") and in a toast; a failure (an empty or duplicate name, an environment row
+  with a value but no name, an invalid or repeated variable name, a write error) shows in the footer,
+  selects the configuration it is in and keeps every edit; OK closes only when the save worked.
+- **The program's environment** (`orbit_core::pty::child_env`, one function for sessions, Run and
+  Debug): Orbit's own environment, without its AppImage launcher's variables (`proc::host_env`:
+  `APPIMAGE`, `APPDIR`, the mount's `LD_LIBRARY_PATH`/`PATH` entries), the terminal Orbit was started
+  from (`TERM_PROGRAM`, `KITTY_*`, `GHOSTTY_*`…) and a parent Claude session's markers; then
+  `TERM=xterm-256color` and friends; then the configuration's variables, which win. A DAP launch's
+  `env` gets this whole environment: gdb's `launch` **replaces** the program's environment with
+  `env` (`python/lib/gdb/dap/launch.py` runs `inf.clear_env()` first), so sending only the
+  configuration's variables started the program without `XDG_RUNTIME_DIR`, `WAYLAND_DISPLAY`,
+  `DISPLAY`, `PATH` or `HOME`, and SDL could not open a window (aether-engine's `game` exited with
+  255 at once). lldb-dap adds `env` to its own environment, so the full list gives the same result. **`run.local.json` should be gitignored** in each repo (`.orbit/run.local.json`); Orbit
   doesn't edit repos' `.gitignore`.
 - **Build All** (`run.buildAll`, `Ctrl+Shift+F9`): the build button is a split button — the hammer
   builds the configuration's target (`Ctrl+F9`); its chevron half, or a right click on the hammer,
@@ -847,20 +863,31 @@ not run (it needs GitHub).
   same output panel, with Problems and Stop. Rider's Build Solution is `Ctrl+F9` and CLion's Build
   Project `Ctrl+F9`; with `Ctrl+F9` taken by the configuration's build, Build All gets the Shift
   variant.
-- **Bottom panel** (`layout.panel_height`, resizable, saved): Build output (virtualized, follows the
-  end unless scrolled up; compiler lines are links), Run (the program on `orbit_core::pty` with the
-  configuration's cwd, args and env), Problems (grouped by file, errors first), Debug. A build opens
-  it; a failed build with problems switches to Problems.
+- **Bottom panel** (`layout.panel_height`, resizable from an 8 px handle on its top edge, saved):
+  Build output, Run (the program on `orbit_core::pty` with the configuration's cwd, args and env),
+  Problems (grouped by file, errors first), Debug. A build opens it; a failed build with problems
+  switches to Problems. Build output and the Debug Console are log views (`src/logview.rs`): ANSI
+  SGR colours (16 from the theme, 256, truecolor, bold, dim, italic, underline, inverse; `ansi.rs`
+  drops every other escape and control code), lines wrap at the panel's width, the view follows the
+  end while output arrives unless scrolled up, drag selects (double click a line), `Ctrl+C` /
+  `Ctrl+Shift+C` copy, `Ctrl+A` selects all; compiler lines are links to their problem.
 - **Problems**: `problems.rs` is `problems.ts` with its tests. Problems under the repo's real root
   are mapped to the workspace path and set on open editors as diagnostics with source `build`,
   next to clangd's (`EditorTab::set_build_diagnostics`), so they count in the status bar and `F8`.
 - **Debugger**: gdb `-i dap` (or lldb-dap, as `dap::adapter` picks). The launch is `session.ts`'s:
   initialize → launch (not awaited) → initialized → setBreakpoints → configurationDone → launch's
-  answer. Paths are rebased between the workspace path and the real repo path both ways. Stops show
-  threads, the call stack (the innermost repo frame is opened and highlighted), lazy variables and a
-  console; Enter in its input evaluates (gdb gets `context: "watch"`: its `"repl"` runs CLI
-  commands). `F9`/`F8`/`F7`/`Shift+F8` resume/step while paused; in the editor `F8`/`Shift+F8` fall
-  back to next/previous problem otherwise, and `F7` to the review's next change.
+  answer. Paths are rebased between the workspace path and the real repo path both ways. With gdb
+  the program runs in a terminal of its own, as Rider's Console: a PTY with no process
+  (`pty::Spawn::tty_only`) whose device goes to gdb as `set inferior-tty` before
+  configurationDone, so the program's colours, cursor movement and input are a real terminal's
+  (`Ctrl+C` there interrupts it, and gdb pauses). gdb 18's DAP has no `runInTerminal`; lldb-dap's
+  output stays in the Debug Console. The Debug tab is laid out as Rider's Debug tool window: the
+  controls, then a left column with Frames over Variables (both splitters drag; the sizes are
+  `layout.debug_side_width` and `layout.debug_frames_ratio`, saved), and the main area with
+  **Program Output** (the terminal) and **Debug Console** (the debugger's messages, output pieces
+  joined into lines, and the evaluate input; Enter evaluates, gdb gets `context: "watch"`: its
+  `"repl"` runs CLI commands). `F9`/`F8`/`F7`/`Shift+F8` resume/step while paused; in the editor
+  `F8`/`Shift+F8` fall back to next/previous problem otherwise, and `F7` to the review's next change.
 - **Breakpoints in the editor.** gpui-component's editor has no glyph margin and no gutter click
   hook. The least invasive route: every editor gets an 8 px `GutterDecoration` strip (set up from
   `observe_new::<EditorTab>`, no editor code), breakpoints are red bars there, the paused line is
@@ -899,6 +926,18 @@ tiny CMake project reached through a symlinked workspace repo:
   `hello` and `tool`; the dialog set `hello`'s cwd, args and pasted `K=V;K2=V2` env, Run printed
   `cwd=…/rundir cache=/home/igors/.cache/nvidia-aether-dev mode=from-orbit`, and Debug stopped at a
   breakpoint with locals `cwd`, `cache` and `mode` showing the same values.
+- The debugged program's environment and the panel (a scratch CMake program printing its cwd, env
+  and ANSI-coloured log lines, and aether-engine's `game` with its saved `client-runtime` cwd and
+  `__GL_SHADER_DISK_CACHE_PATH`): before, under gdb the program saw only the configuration's
+  variable (`XDG_RUNTIME_DIR` and `PATH` null) and `game` printed `XDG_RUNTIME_DIR is invalid or not
+  set`, `Failed to Initialize Window Handle` and exited with 255; after, it gets the full environment
+  (`XDG_RUNTIME_DIR=/run/user/1000`, `PATH` set, `APPIMAGE` unset, the configured cache path, the
+  configured cwd), `game` ran under the debugger past window and GPU setup until stopped, and its
+  output showed in Program Output with colours. Build output keeps a build script's colours, wraps,
+  and a drag over three lines copied them. Edit Configurations: Apply disabled until an edit,
+  the edited entry marked, `Saved 'colors' to .orbit/run.json` after Apply (and a toast), and a
+  value without a name, an empty name or a read-only `.orbit` each kept the dialog open with the
+  reason.
 
 ## Stage: git and workspace flows
 

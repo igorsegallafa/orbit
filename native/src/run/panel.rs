@@ -5,13 +5,12 @@
 use super::{open_location, store, BuildStatus, Stream};
 use crate::app::OrbitApp;
 use crate::debug::{self, view::DebugView, DebugStatus};
+use crate::logview::{Link, LogView};
 use crate::probe::probe;
 use crate::run::problems::Severity;
 use crate::theme::{self, c, size};
-use gpui::{
-    div, prelude::*, px, uniform_list, AnyElement, Context, Entity, ScrollEvent, ScrollStrategy,
-    SharedString, Subscription, UniformListScrollHandle, WeakEntity, Window,
-};
+use gpui::{div, prelude::*, px, AnyElement, App, Context, Entity, Subscription, WeakEntity, Window};
+use std::rc::Rc;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PanelView {
@@ -24,24 +23,20 @@ pub enum PanelView {
 pub struct Panel {
     app: WeakEntity<OrbitApp>,
     debug: Entity<DebugView>,
-    output: UniformListScrollHandle,
-    /// Follow the output while it streams, unless scrolled up to read.
-    stick: bool,
-    shown_lines: usize,
+    output: Entity<LogView>,
+    /// The build the output shows.
+    shown_build: Option<String>,
     _subscriptions: Vec<Subscription>,
 }
-
-const LINE: f32 = 18.;
 
 impl Panel {
     pub fn new(app: WeakEntity<OrbitApp>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let subs = vec![cx.observe(&store(cx), |_, _, cx| cx.notify()), cx.observe(&debug::store(cx), |_, _, cx| cx.notify())];
         Self {
+            debug: cx.new(|cx| DebugView::new(app.clone(), window, cx)),
             app,
-            debug: cx.new(|cx| DebugView::new(window, cx)),
-            output: UniformListScrollHandle::new(),
-            stick: true,
-            shown_lines: 0,
+            output: cx.new(|cx| LogView::new("build-output", super::MAX_LINES, cx)),
+            shown_build: None,
             _subscriptions: subs,
         }
     }
@@ -160,71 +155,48 @@ impl Panel {
             )
     }
 
+    /// The output views, for the self-test dump.
+    pub fn dump(&self, cx: &App) -> String {
+        let d = self.debug.read(cx);
+        format!("--- panel\n  {}\n  {}\n  debug tab {:?}\n", self.output.read(cx).dump(), d.console.read(cx).dump(), d.tab)
+    }
+
     fn empty(text: &'static str) -> AnyElement {
         div().size_full().flex().items_center().justify_center().text_color(c(theme::TEXT_FAINT)).child(text).into_any_element()
     }
 
     fn render_output(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let count = store(cx).read(cx).build.as_ref().map_or(0, |b| b.lines.len());
-        if store(cx).read(cx).build.is_none() {
+        let Some((key, total, tail)) = store(cx).read(cx).build.as_ref().map(|b| {
+            let seen = if self.shown_build.as_deref() == Some(b.key.as_str()) { self.output.read(cx).seen() } else { 0 };
+            let fresh = b.total.saturating_sub(seen).min(b.lines.len());
+            let tail: Vec<(String, u32, Option<Link>)> = b.lines[b.lines.len() - fresh..]
+                .iter()
+                .map(|l| {
+                    let problem = l.problem.and_then(|p| b.problems.get(p));
+                    let color = match (l.stream, problem.map(|p| p.problem.severity)) {
+                        (_, Some(Severity::Error)) => theme::DANGER,
+                        (_, Some(Severity::Warning)) => theme::WARN,
+                        (Stream::Info, _) => theme::TEXT_FAINT,
+                        (Stream::Err, _) => theme::TEXT_DIM,
+                        (Stream::Out, _) => theme::TEXT,
+                    };
+                    let link = problem.and_then(|p| Some((p.open.clone()?, p.problem.line, p.problem.column))).map(|(path, line, col)| {
+                        Rc::new(move |_: &mut Window, cx: &mut App| open_location(path.clone(), line, col, cx)) as Link
+                    });
+                    (l.raw.to_string(), color, link)
+                })
+                .collect();
+            (b.key.clone(), b.total, tail)
+        }) else {
             return Self::empty("No build yet · Ctrl+F9 builds the selected configuration");
+        };
+        if self.shown_build.as_deref() != Some(key.as_str()) {
+            self.shown_build = Some(key);
+            self.output.update(cx, |v, cx| v.clear(cx));
         }
-        if count != self.shown_lines {
-            self.shown_lines = count;
-            if self.stick && count > 0 {
-                self.output.scroll_to_item(count - 1, ScrollStrategy::Bottom);
-            }
-        }
-        uniform_list(
-            "build-output",
-            count,
-            cx.processor(|_, range: std::ops::Range<usize>, _, cx| {
-                let s = store(cx).read(cx);
-                let Some(b) = &s.build else { return vec![] };
-                range
-                    .filter_map(|ix| {
-                        let l = b.lines.get(ix)?;
-                        let problem = l.problem.and_then(|p| b.problems.get(p));
-                        let color = match (l.stream, problem.map(|p| p.problem.severity)) {
-                            (_, Some(Severity::Error)) => theme::DANGER,
-                            (_, Some(Severity::Warning)) => theme::WARN,
-                            (Stream::Info, _) => theme::TEXT_FAINT,
-                            (Stream::Err, _) => theme::TEXT_DIM,
-                            (Stream::Out, _) => theme::TEXT,
-                        };
-                        let target = problem.and_then(|p| Some((p.open.clone()?, p.problem.line, p.problem.column)));
-                        let text: SharedString = l.text.clone();
-                        Some(
-                            div()
-                                .id(ix)
-                                .h(px(LINE))
-                                .px_3()
-                                .whitespace_nowrap()
-                                .text_color(c(color))
-                                .child(text)
-                                .when_some(target, |d, (path, line, col)| {
-                                    d.cursor_pointer().hover(|s| s.underline()).on_click(move |_, _, cx| open_location(path.clone(), line, col, cx))
-                                })
-                                .into_any_element(),
-                        )
-                    })
-                    .collect()
-            }),
-        )
-        .track_scroll(&self.output)
-        .size_full()
-        .font_family(theme::MONO_FONT)
-        .text_size(px(12.))
-        .on_scroll(cx.listener(|this, ev: &ScrollEvent, _, _| {
-            // Up: stop following; down: follow again.
-            let dy = f32::from(ev.delta.pixel_delta(px(LINE)).y);
-            if dy > 0. {
-                this.stick = false;
-            } else if dy < 0. {
-                this.stick = true;
-            }
-        }))
-        .into_any_element()
+        // Build lines never change once printed: `tail` holds only the new ones.
+        self.output.update(cx, |v, cx| v.sync(total, &tail, |(text, color, link)| (text.clone(), *color, link.clone()), cx));
+        self.output.clone().into_any_element()
     }
 
     fn render_problems(&self, cx: &mut Context<Self>) -> AnyElement {

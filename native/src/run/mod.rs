@@ -68,6 +68,8 @@ pub enum Stream {
 pub struct OutputLine {
     pub stream: Stream,
     pub text: SharedString,
+    /// As printed, colours included (the panel shows them).
+    pub raw: SharedString,
     /// The problem this line reports (index into `Build::problems`).
     pub problem: Option<usize>,
 }
@@ -85,6 +87,8 @@ pub struct Build {
     pub all: bool,
     pub status: BuildStatus,
     pub lines: Vec<OutputLine>,
+    /// Lines ever printed (`lines` keeps the last `MAX_LINES`).
+    pub total: usize,
     pub problems: Vec<BuildProblem>,
     keys: HashMap<String, usize>,
     pub started: Instant,
@@ -569,6 +573,7 @@ impl RunStore {
             all,
             status: BuildStatus::Running,
             lines: vec![],
+            total: 0,
             problems: vec![],
             keys: HashMap::new(),
             started: Instant::now(),
@@ -626,7 +631,8 @@ impl RunStore {
                     problem = Some(ix);
                 }
             }
-            b.lines.push(OutputLine { stream, text: text.into(), problem });
+            b.lines.push(OutputLine { stream, text: text.into(), raw: raw.into(), problem });
+            b.total += 1;
         }
         if b.lines.len() > MAX_LINES {
             b.lines.drain(..b.lines.len() - MAX_LINES);
@@ -644,7 +650,9 @@ impl RunStore {
             Ok(exit) if exit.success => BuildStatus::Ok,
             Ok(_) => BuildStatus::Failed,
             Err(e) => {
-                b.lines.push(OutputLine { stream: Stream::Err, text: e.into(), problem: None });
+                let text: SharedString = e.into();
+                b.lines.push(OutputLine { stream: Stream::Err, text: text.clone(), raw: text, problem: None });
+                b.total += 1;
                 BuildStatus::Failed
             }
         };
@@ -705,6 +713,7 @@ impl RunStore {
             key: None,
             scrollback: false,
             program_version: env!("CARGO_PKG_VERSION").into(),
+            tty_only: false,
         };
         let view = cx.new(|cx| TerminalView::new(meta, spec, None, None, cx));
         let watch = cx.observe(&view, |s: &mut RunStore, view, cx| {
@@ -817,7 +826,10 @@ fn debug_rebase(path: &Path, from: &Path, to: &Path) -> Option<PathBuf> {
 /// The whole Build/Run/Debug state, for the self-test dump.
 pub fn dump(cx: &App) -> String {
     let mut out = store(cx).read(cx).dump(cx);
-    out.push_str(&debug::store(cx).read(cx).dump());
+    out.push_str(&debug::store(cx).read(cx).dump(cx));
+    if let Some(p) = store(cx).read(cx).panel.as_ref() {
+        out.push_str(&p.read(cx).dump(cx));
+    }
     out.push_str(&debug::gutter::dump(cx));
     out
 }

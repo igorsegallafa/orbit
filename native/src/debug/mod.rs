@@ -6,6 +6,7 @@ pub mod gutter;
 pub mod view;
 
 use crate::run::{self, RunTarget};
+use crate::terminal::TerminalView;
 use client::{DapClient, DapEvent};
 use futures::{FutureExt, StreamExt};
 use gpui::{App, AppContext, Context, Entity, Global, Task};
@@ -79,6 +80,13 @@ pub struct DebugStore {
     /// Expanded scopes and variables.
     pub open: HashSet<i64>,
     pub console: Vec<(ConsoleKind, String)>,
+    /// Lines ever logged (the console view follows it; the list drops old lines).
+    pub console_total: usize,
+    /// The last output line is still open (its piece had no line break).
+    open_line: Option<ConsoleKind>,
+    /// The program's terminal (gdb runs it there: `set inferior-tty`), as
+    /// Rider's Console: its colours and input are a real terminal's.
+    pub program: Option<Entity<TerminalView>>,
     pub stop_reason: Option<String>,
     /// Breakpoint lines (1-based) by the file's workspace path.
     pub breakpoints: BTreeMap<PathBuf, Vec<u32>>,
@@ -123,10 +131,34 @@ impl DebugStore {
 
     pub fn log(&mut self, kind: ConsoleKind, text: &str) {
         let text = text.strip_suffix('\n').unwrap_or(text);
+        let before = self.console.len();
         self.console.extend(text.split('\n').map(|l| (kind, l.trim_end_matches('\r').to_string())));
+        self.console_total += self.console.len() - before;
         if self.console.len() > MAX_CONSOLE {
             self.console.drain(..self.console.len() - MAX_CONSOLE);
         }
+    }
+
+    /// Program or debugger output, which arrives in pieces: a piece that
+    /// didn't end its line is continued by the next one of the same kind.
+    fn output(&mut self, kind: ConsoleKind, text: &str) {
+        let mut text = text;
+        if self.open_line == Some(kind) {
+            if let Some((_, last)) = self.console.last_mut().filter(|(k, _)| *k == kind) {
+                let (first, rest) = text.split_once('\n').map_or((text, None), |(a, b)| (a, Some(b)));
+                last.push_str(first.trim_end_matches('\r'));
+                match rest {
+                    Some(rest) => text = rest,
+                    None => return,
+                }
+                if text.is_empty() {
+                    self.open_line = None;
+                    return;
+                }
+            }
+        }
+        self.open_line = (!text.ends_with('\n')).then_some(kind);
+        self.log(kind, text);
     }
 
     // ---------- breakpoints ----------
@@ -222,6 +254,9 @@ impl DebugStore {
                 match DapClient::start(requested, &config.cwd) {
                     Ok((c, events)) => {
                         s.log(ConsoleKind::Info, &format!("{} {} · {program}", c.adapter.command, c.adapter.args.join(" ")));
+                        if cfg!(unix) && c.adapter.kind == "gdb" {
+                            s.program = Some(program_terminal(&config, cx));
+                        }
                         s.adapter = Some(c.adapter.kind.clone());
                         s.client = Some(c.clone());
                         cx.notify();
@@ -246,7 +281,8 @@ impl DebugStore {
                 }
             })
             .detach();
-            if let Err(e) = launch(&this, &c, &config, &program, cx).await {
+            let tty = this.read_with(cx, |s, cx| s.program.as_ref().and_then(|p| p.read(cx).tty_path())).ok().flatten();
+            if let Err(e) = launch(&this, &c, &config, &program, tty, cx).await {
                 let _ = this.update(cx, |s, cx| {
                     s.log(ConsoleKind::Err, &e);
                     s.stop(cx);
@@ -265,7 +301,7 @@ impl DebugStore {
                         Some("console") => ConsoleKind::Info,
                         _ => ConsoleKind::Out,
                     };
-                    self.log(kind, body["output"].as_str().unwrap_or_default());
+                    self.output(kind, body["output"].as_str().unwrap_or_default());
                 }
                 "stopped" => self.on_stopped(body, cx),
                 "continued" => {
@@ -295,6 +331,9 @@ impl DebugStore {
         }
         if let Some(c) = self.client.take() {
             c.kill();
+        }
+        if let Some(p) = &self.program {
+            p.read(cx).release_tty();
         }
         self.status = DebugStatus::Ended;
         self.clear_stop();
@@ -545,7 +584,7 @@ impl DebugStore {
     }
 
     /// The state for the self-test dump.
-    pub fn dump(&self) -> String {
+    pub fn dump(&self, cx: &App) -> String {
         use std::fmt::Write as _;
         let mut out = String::new();
         let _ = writeln!(
@@ -582,6 +621,12 @@ impl DebugStore {
         for (kind, text) in self.console.iter().rev().take(12).rev() {
             let _ = writeln!(out, "  console {kind:?}: {text}");
         }
+        if let Some(p) = &self.program {
+            let _ = writeln!(out, "  program terminal{}:", if p.read(cx).exited() { " (closed)" } else { "" });
+            for line in p.read(cx).grid_text().trim_end().lines().filter(|l| !l.trim().is_empty()).take(24) {
+                let _ = writeln!(out, "    | {line}");
+            }
+        }
         out
     }
 }
@@ -601,6 +646,9 @@ fn empty() -> DebugStore {
         vars: HashMap::new(),
         open: HashSet::new(),
         console: vec![],
+        console_total: 0,
+        open_line: None,
+        program: None,
         stop_reason: None,
         breakpoints: BTreeMap::new(),
         _session: Task::ready(()),
@@ -610,11 +658,51 @@ fn empty() -> DebugStore {
 /// The launch sequence of `session.ts`. gdb answers `launch` only after
 /// `configurationDone`, so: initialize → launch (not awaited) → initialized
 /// → setBreakpoints → configurationDone → launch's answer.
+/// The program's terminal: a PTY with no process, which gdb starts the program on.
+fn program_terminal(config: &orbit_core::run::ResolvedRun, cx: &mut Context<DebugStore>) -> Entity<TerminalView> {
+    let meta = crate::sessions::SessionMeta {
+        id: format!("debug:{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis())),
+        workspace: String::new(),
+        label: "debug".into(),
+        session_name: config.name.clone(),
+        codename: None,
+        cmd: None,
+        args: vec![],
+        repo: None,
+        agent_session_id: None,
+        cwd: Some(config.cwd.clone()),
+    };
+    let spec = orbit_core::pty::Spawn {
+        cwd: config.cwd.clone().into(),
+        size: crate::terminal::spawn_size(),
+        program_version: env!("CARGO_PKG_VERSION").into(),
+        tty_only: true,
+        ..Default::default()
+    };
+    cx.new(|cx| TerminalView::new(meta, spec, None, None, cx))
+}
+
+/// The launch's `env`. gdb's replaces the program's whole environment
+/// (`launch.py` clears it first) and lldb-dap's adds to its own, so both get
+/// the full one a Run gets: Orbit's, scrubbed, plus the configuration's.
+/// gdb takes a dict, lldb-dap a `K=V` list.
+fn launch_env(adapter: &str, config: &[(String, String)]) -> Value {
+    let full = orbit_core::pty::child_env(config, env!("CARGO_PKG_VERSION"))
+        .into_iter()
+        .map(|(k, v)| (k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned()));
+    if adapter == "gdb" {
+        Value::Object(full.map(|(k, v)| (k, Value::String(v))).collect())
+    } else {
+        Value::Array(full.map(|(k, v)| Value::String(format!("{k}={v}"))).collect())
+    }
+}
+
 async fn launch(
     this: &gpui::WeakEntity<DebugStore>,
     c: &Arc<DapClient>,
     config: &orbit_core::run::ResolvedRun,
     program: &str,
+    tty: Option<PathBuf>,
     cx: &mut gpui::AsyncApp,
 ) -> Result<(), String> {
     let initialized = c.initialized();
@@ -626,11 +714,18 @@ async fn launch(
         }),
     )
     .await?;
-    let env: Value = if c.adapter.kind == "gdb" {
-        json!(config.env)
-    } else {
-        json!(config.env.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>())
-    };
+    if let Some(tty) = tty {
+        // Before configurationDone, which is when gdb starts the program. "repl" runs CLI commands.
+        let set = c.request("evaluate", json!({ "expression": format!("set inferior-tty {}", tty.display()), "context": "repl" }));
+        if let Err(e) = set.await {
+            let _ = this.update(cx, |s, cx| {
+                s.log(ConsoleKind::Err, &format!("set inferior-tty failed, the program's output shows here: {e}"));
+                s.program = None;
+                cx.notify();
+            });
+        }
+    }
+    let env = launch_env(&c.adapter.kind, &config.env.clone().into_iter().collect::<Vec<_>>());
     let launched = c.request("launch", json!({ "program": program, "args": config.args, "cwd": config.cwd, "env": env }));
     let mut launched = launched.boxed_local().fuse();
     let mut initialized = initialized.boxed_local().fuse();
@@ -656,4 +751,46 @@ async fn launch(
         }
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn output_pieces_continue_their_line() {
+        let mut s = empty();
+        s.output(ConsoleKind::Out, "\x1b[32mIN");
+        s.output(ConsoleKind::Out, "FO\x1b[0m ready\nnext ");
+        s.output(ConsoleKind::Err, "oops\n");
+        s.output(ConsoleKind::Out, "line\n");
+        s.output(ConsoleKind::Out, "last\n");
+        let lines: Vec<(ConsoleKind, &str)> = s.console.iter().map(|(k, t)| (*k, t.as_str())).collect();
+        assert_eq!(
+            lines,
+            vec![
+                (ConsoleKind::Out, "\x1b[32mINFO\x1b[0m ready"),
+                (ConsoleKind::Out, "next "),
+                (ConsoleKind::Err, "oops"),
+                (ConsoleKind::Out, "line"),
+                (ConsoleKind::Out, "last"),
+            ]
+        );
+        assert_eq!(s.console_total, 5);
+    }
+
+    #[test]
+    fn the_launch_env_is_the_full_environment_plus_the_config() {
+        let config = [("ORBIT_TEST_LAUNCH_VAR".to_string(), "from-config".to_string())];
+        let gdb = launch_env("gdb", &config);
+        assert_eq!(gdb["ORBIT_TEST_LAUNCH_VAR"], "from-config");
+        assert_eq!(gdb["TERM"], "xterm-256color");
+        if let Ok(home) = std::env::var("HOME") {
+            assert_eq!(gdb["HOME"], home.as_str());
+        }
+        let lldb = launch_env("lldb-dap", &config);
+        let list: Vec<&str> = lldb.as_array().unwrap().iter().filter_map(|v| v.as_str()).collect();
+        assert!(list.contains(&"ORBIT_TEST_LAUNCH_VAR=from-config"));
+        assert_eq!(list.len(), gdb.as_object().unwrap().len());
+    }
 }

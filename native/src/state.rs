@@ -15,6 +15,9 @@ pub struct Layout {
     pub dock_hidden: bool,
     pub panel_height: f32,
     pub panel_open: bool,
+    /// The Debug tab's Frames and Variables column, and the Frames part of its height.
+    pub debug_side_width: f32,
+    pub debug_frames_ratio: f32,
 }
 
 impl Default for Layout {
@@ -26,6 +29,8 @@ impl Default for Layout {
             dock_hidden: false,
             panel_height: PANEL.default,
             panel_open: false,
+            debug_side_width: DEBUG_SIDE.default,
+            debug_frames_ratio: DEBUG_FRAMES.default,
         }
     }
 }
@@ -43,6 +48,11 @@ pub const SIDEBAR_SNAP: f32 = 110.;
 pub const DOCK: Limits = Limits { default: 240., min: 180., max: 460. };
 /// `BottomPanel.tsx`: at least 120, and 200 px left for the rest.
 pub const PANEL: Limits = Limits { default: 240., min: 120., max: 2000. };
+
+/// The Debug tab's Frames and Variables column (the console takes the rest).
+pub const DEBUG_SIDE: Limits = Limits { default: 460., min: 200., max: 1600. };
+/// The Frames list's share of that column's height.
+pub const DEBUG_FRAMES: Limits = Limits { default: 0.4, min: 0.12, max: 0.88 };
 
 impl Limits {
     pub fn clamp(&self, v: f32) -> f32 {
@@ -73,6 +83,8 @@ impl Layout {
         self.sidebar_width = SIDEBAR.clamp(self.sidebar_width);
         self.dock_width = DOCK.clamp(self.dock_width);
         self.panel_height = PANEL.clamp(self.panel_height);
+        self.debug_side_width = DEBUG_SIDE.clamp(self.debug_side_width);
+        self.debug_frames_ratio = DEBUG_FRAMES.clamp(self.debug_frames_ratio);
         self
     }
 }

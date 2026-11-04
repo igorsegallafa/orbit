@@ -542,6 +542,7 @@ fn open(
         key: Some(meta.id.clone()),
         scrollback: persist,
         program_version: env!("CARGO_PKG_VERSION").into(),
+        tty_only: false,
     };
     let view = cx.new(|cx| TerminalView::new(meta.clone(), spec, replay, input, cx));
     cx.observe(&view, |_, _, cx| cx.notify()).detach();
