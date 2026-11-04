@@ -3,8 +3,9 @@
 use crate::app::OrbitApp;
 use crate::probe::probe;
 use crate::theme::{self, c};
-use gpui::{div, prelude::*, px, Context, FontWeight, IntoElement, MouseButton, SharedString};
+use gpui::{div, prelude::*, px, App, Context, FontWeight, IntoElement, MouseButton, SharedString};
 use gpui_component::{Icon, IconName};
+use std::rc::Rc;
 use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -31,6 +32,20 @@ pub struct Toast {
     pub kind: ToastKind,
     pub title: SharedString,
     pub description: Option<SharedString>,
+    pub action: Option<ToastAction>,
+}
+
+/// A toast's button (`action` in `Toast.tsx`); clicking it also dismisses the toast.
+#[derive(Clone)]
+pub struct ToastAction {
+    pub label: SharedString,
+    pub run: Rc<dyn Fn(&mut App)>,
+}
+
+impl std::fmt::Debug for ToastAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToastAction").field("label", &self.label).finish()
+    }
 }
 
 const MAX_VISIBLE: usize = 4;
@@ -42,9 +57,9 @@ pub struct Toasts {
 }
 
 impl Toasts {
-    fn push(&mut self, kind: ToastKind, title: SharedString, description: Option<SharedString>) -> usize {
+    fn push(&mut self, kind: ToastKind, title: SharedString, description: Option<SharedString>, action: Option<ToastAction>) -> usize {
         self.next += 1;
-        self.items.push(Toast { id: self.next, kind, title, description });
+        self.items.push(Toast { id: self.next, kind, title, description, action });
         let excess = self.items.len().saturating_sub(MAX_VISIBLE);
         self.items.drain(..excess);
         self.next
@@ -60,7 +75,7 @@ impl OrbitApp {
     pub fn toast(&mut self, kind: ToastKind, title: impl Into<SharedString>, description: Option<SharedString>, cx: &mut Context<Self>) {
         let title = title.into();
         eprintln!("toast {kind:?}: {title}{}", description.as_ref().map(|d| format!(" — {d}")).unwrap_or_default());
-        let id = self.toasts.push(kind, title, description);
+        let id = self.toasts.push(kind, title, description, None);
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(kind.duration()).await;
             let _ = this.update(cx, |this, cx| {
@@ -69,6 +84,14 @@ impl OrbitApp {
             });
         })
         .detach();
+        cx.notify();
+    }
+
+    /// A toast with a button; it stays until clicked or closed (`duration: 0`).
+    pub fn toast_action(&mut self, title: impl Into<SharedString>, description: Option<SharedString>, action: ToastAction, cx: &mut Context<Self>) {
+        let title = title.into();
+        eprintln!("toast Info: {title}{} [{}]", description.as_ref().map(|d| format!(" — {d}")).unwrap_or_default(), action.label);
+        self.toasts.push(ToastKind::Info, title, description, Some(action));
         cx.notify();
     }
 
@@ -125,6 +148,17 @@ impl OrbitApp {
                                     div().mt(px(2.)).text_size(px(12.)).text_color(c(theme::TEXT_DIM)).line_height(px(17.)).child(d)
                                 })),
                         )
+                        .children(t.action.clone().map(|a| {
+                            crate::pages::kit::mini(format!("toast-action:{id}"), a.label.clone(), crate::pages::kit::Kind::Primary).on_click(cx.listener(
+                                move |this, _, window, cx| {
+                                    cx.stop_propagation();
+                                    this.toasts.dismiss(id);
+                                    cx.notify();
+                                    let run = a.run.clone();
+                                    window.defer(cx, move |_, cx| run(cx));
+                                },
+                            ))
+                        }))
                         .child(
                             div()
                                 .id(("toast-close", id))

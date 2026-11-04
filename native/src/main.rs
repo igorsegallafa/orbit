@@ -1,4 +1,6 @@
 #![recursion_limit = "512"]
+// No console window behind the app on Windows (release builds).
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 //! Orbit's native UI (GPUI + gpui-component): the shell, terminals, file
 //! tree, and the editor with language servers; see README.md.
 mod app;
@@ -48,6 +50,8 @@ fn main() {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
         Some("--orbit-statusline") => return orbit_core::agent_hooks::statusline_helper(args.next()),
+        Some("--version") => return println!("Orbit {}", pages::updates::version()),
+        Some("--update") => return update_from_cli(),
         Some(flag) if flag.starts_with("--orbit-") => {
             eprintln!("orbit-native: unknown helper flag {flag}");
             std::process::exit(2);
@@ -55,6 +59,31 @@ fn main() {
         _ => {}
     }
     run();
+}
+
+/// `orbit --update`: the in-app update without the window.
+fn update_from_cli() {
+    use orbit_core::updates;
+    let fail = |e: String| -> ! {
+        eprintln!("update failed: {e}");
+        std::process::exit(1)
+    };
+    let current = pages::updates::version();
+    let Some(release) = updates::check(current).unwrap_or_else(|e| fail(e)) else {
+        return println!("Orbit {current} is the latest version");
+    };
+    let target = updates::Target::detect().unwrap_or_else(|e| fail(e));
+    println!("updating {} from {current} to {}", target.path.display(), release.version);
+    let mut last = None;
+    updates::install(&release, &target, &updates::public_key(), |done, total| {
+        let p = total.filter(|t| *t > 0).map(|t| done.min(t) * 100 / t);
+        if p != last {
+            last = p;
+            eprintln!("downloaded {done} of {}", total.map(|t| t.to_string()).unwrap_or("?".into()));
+        }
+    })
+    .unwrap_or_else(|e| fail(e));
+    println!("installed Orbit {}: restart Orbit to use it", release.version);
 }
 
 fn run() {
@@ -91,7 +120,7 @@ fn run() {
         let bounds = Bounds::centered(None, size(px(w), px(h)), cx);
         let options = WindowOptions {
             window_bounds: Some(if script.window_size.is_some() { WindowBounds::Windowed(bounds) } else { WindowBounds::Maximized(bounds) }),
-            app_id: Some("orbit-native".into()),
+            app_id: Some("orbit".into()),
             // Our own titlebar (TitleBar draws the window controls and moves the window).
             window_decorations: Some(WindowDecorations::Client),
             window_min_size: Some(size(px(720.), px(480.))),

@@ -174,7 +174,7 @@ impl SettingsPage {
             logs: HashMap::new(),
             health: Load::Idle,
             _poll: poll,
-            _subs: vec![sub],
+            _subs: vec![sub, cx.observe_global::<updates::Updater>(|_, cx| cx.notify())],
         };
         page.load_config(window, cx);
         page.select(section, window, cx);
@@ -897,8 +897,12 @@ impl SettingsPage {
     fn render_updates(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let st = updates::state(cx);
         let busy = matches!(st.status, updates::Status::Checking);
+        let installable = updates::target().is_ok();
         let action = match &st.status {
+            updates::Status::Available(_) if installable => kit::button("updates-install", "Install update", Kind::Primary).on_click(|_, _, cx| updates::install(cx)),
             updates::Status::Available(_) => kit::button("updates-open", "Open release page", Kind::Primary).on_click(|_, _, cx| cx.open_url(updates::RELEASES_URL)),
+            updates::Status::Downloading { .. } => kit::disabled(kit::button("updates-install", "Installing…", Kind::Primary), true),
+            updates::Status::Ready(_) => kit::button("updates-restart", "Restart to update", Kind::Primary).on_click(|_, _, cx| updates::restart(cx)),
             _ => kit::disabled(kit::button("updates-check", if busy { "Checking…" } else { "Check for updates" }, Kind::Secondary), busy)
                 .on_click(|_, _, cx| updates::check(true, cx)),
         };

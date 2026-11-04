@@ -17,6 +17,9 @@ notify = "8"
 ignore = "0.4"
 trash = "5.2.9"
 portable-pty = "0.9"
+# Update signatures (minisign, as the Tauri updater) and their base64 wrapping.
+minisign-verify = "0.2"
+base64 = "0.22"
 
 [target."cfg(windows)".dependencies]
 winreg = "0.55"
