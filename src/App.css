@@ -6790,3 +6790,146 @@ button.btn-plain.status-item:hover:not(:disabled) { background: var(--panel-rais
 /* Keyboard focus in the file tree (arrow keys). */
 .tree-item:focus { outline: none; }
 .tree-item:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+
+/* ---------- Run widget (title bar) ---------- */
+
+.run-widget {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-right: 10px;
+  -webkit-app-region: no-drag;
+}
+.run-select { width: auto; }
+.run-select .select-trigger {
+  height: 26px;
+  min-width: 90px;
+  max-width: 200px;
+  font-size: 12px;
+  background: transparent;
+  border-color: transparent;
+  padding: 0 8px;
+}
+.run-select .select-trigger:hover { background: var(--panel-raised); border-color: var(--border); }
+.run-preset .select-trigger { color: var(--text-dim); max-width: 220px; }
+button.run-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 26px;
+  padding: 0;
+  background: transparent;
+  color: var(--text-dim);
+  border-radius: 5px;
+}
+button.run-btn:hover:not(:disabled) { background: var(--panel-raised); color: var(--text); }
+button.run-btn:active:not(:disabled) { transform: none; }
+button.run-btn:disabled { opacity: 0.35; }
+button.run-btn .spinner { width: 12px; height: 12px; margin: 0; }
+button.run-play:not(:disabled) { color: var(--ok); }
+button.run-stop:not(:disabled) { color: var(--danger); }
+
+/* ---------- Bottom panel (Build / Run / Problems) ---------- */
+
+.bottom-panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  min-height: 0;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+}
+.bottom-panel-closed { height: auto; }
+.panel-resizer {
+  position: absolute;
+  top: -3px;
+  left: 0;
+  right: 0;
+  height: 6px;
+  cursor: row-resize;
+  z-index: 2;
+}
+.panel-header {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 30px;
+  padding: 0 6px;
+  flex-shrink: 0;
+  font-size: 12px;
+}
+button.btn-plain.panel-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 10px;
+  border-radius: 5px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+button.btn-plain.panel-tab:hover:not(:disabled) { background: var(--panel-raised); color: var(--text); }
+button.btn-plain.panel-tab-active { background: var(--panel-raised); color: var(--text); }
+.panel-status { width: 7px; height: 7px; border-radius: 50%; background: var(--text-faint); }
+.panel-status-running { background: var(--info); animation: panel-pulse 1s ease-in-out infinite; }
+.panel-status-ok { background: var(--ok); }
+.panel-status-failed { background: var(--danger); }
+.panel-status-cancelled { background: var(--warn); }
+@keyframes panel-pulse { 50% { opacity: 0.35; } }
+.panel-count { font-size: 10.5px; padding: 0 5px; border-radius: 8px; line-height: 16px; }
+.panel-count-error { background: var(--danger-soft); color: var(--danger); }
+.panel-count-warning { background: color-mix(in srgb, var(--warn) 14%, transparent); color: var(--warn); }
+.panel-spacer { flex: 1; }
+.panel-meta { color: var(--text-faint); font-size: 11.5px; margin-right: 6px; }
+button.btn-plain.panel-action {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 7px;
+  border-radius: 4px;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+button.btn-plain.panel-action:hover:not(:disabled) { background: var(--panel-raised); color: var(--text); }
+.panel-body { flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--bg); }
+.panel-body[hidden], .panel-output[hidden], .panel-run[hidden] { display: none; }
+.panel-output {
+  flex: 1;
+  overflow: auto;
+  padding: 6px 10px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre;
+  color: var(--text-dim);
+  user-select: text;
+  -webkit-user-select: text;
+}
+.out-info { color: var(--text-faint); }
+.out-error { color: var(--danger); }
+.out-warning { color: var(--warn); }
+button.btn-plain.out-link { font: inherit; color: inherit; white-space: pre; cursor: pointer; text-align: left; }
+button.btn-plain.out-link:hover:not(:disabled) { text-decoration: underline; }
+.panel-run { flex: 1; min-height: 0; display: flex; }
+.panel-run > .terminal-pane { flex: 1; min-height: 0; }
+.panel-problems { flex: 1; overflow: auto; padding: 4px 0; font-size: 12px; }
+.panel-empty { padding: 14px; color: var(--text-faint); font-size: 12px; }
+.problem-file { padding: 4px 12px 2px; color: var(--text); font-family: var(--mono); font-size: 11.5px; }
+button.btn-plain.problem-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 2px 12px 2px 26px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+button.btn-plain.problem-row:hover:not(:disabled) { background: var(--panel-raised); color: var(--text); }
+button.btn-plain.problem-row:disabled { cursor: default; opacity: 1; }
+.problem-icon { flex-shrink: 0; width: 12px; }
+.problem-error { color: var(--danger); }
+.problem-warning { color: var(--warn); }
+.problem-message { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.problem-code, .problem-loc { color: var(--text-faint); font-family: var(--mono); font-size: 11px; flex-shrink: 0; }

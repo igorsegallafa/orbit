@@ -196,7 +196,7 @@ pub fn find_compile_commands(root: &Path) -> Option<PathBuf> {
 
 /// Configure presets CMake offers on this machine (it hides the ones whose
 /// condition fails, e.g. other OSes).
-fn cmake_presets(root: &Path) -> Vec<String> {
+pub(crate) fn cmake_presets(root: &Path) -> Vec<String> {
     let has_presets = root.join("CMakePresets.json").is_file() || root.join("CMakeUserPresets.json").is_file();
     if !has_presets || !crate::proc::exists("cmake") {
         return vec![];
@@ -226,7 +226,7 @@ pub struct CppSetup {
 
 /// The newest Visual Studio with the C++ tools, via vswhere.
 #[cfg(windows)]
-fn find_vcvars() -> Option<PathBuf> {
+pub(crate) fn find_vcvars() -> Option<PathBuf> {
     let pf = std::env::var_os("ProgramFiles(x86)").or_else(|| std::env::var_os("ProgramFiles"))?;
     let vswhere = PathBuf::from(pf).join(r"Microsoft Visual Studio\Installer\vswhere.exe");
     if !vswhere.is_file() {
@@ -251,13 +251,13 @@ fn find_vcvars() -> Option<PathBuf> {
 }
 
 #[cfg(not(windows))]
-fn find_vcvars() -> Option<PathBuf> {
+pub(crate) fn find_vcvars() -> Option<PathBuf> {
     None
 }
 
 /// A batch file that loads the VS developer environment, then runs
 /// `cmake args` in the directory it was started from.
-fn vcvars_script(vcvars: &str, args: &[String]) -> String {
+pub(crate) fn vcvars_script(vcvars: &str, args: &[String]) -> String {
     let quoted: Vec<String> = args
         .iter()
         .map(|a| {

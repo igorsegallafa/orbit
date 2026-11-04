@@ -16,6 +16,8 @@ import { InboxButton, InboxItem, InboxKind, notifyOs } from "./components/Inbox"
 import { FileTreePanel } from "./components/FileTreePanel";
 import { useStableHandlers } from "./lib/useStableHandlers";
 import { placeFileTab } from "./lib/previewTabs";
+import { RunWidget } from "./components/RunWidget";
+import { BottomPanel } from "./components/BottomPanel";
 import { ReviewPane } from "./components/ReviewPane";
 import { CommitReviewPane } from "./components/CommitReviewPane";
 import { PrReviewPane } from "./components/PrReviewPane";
@@ -1375,6 +1377,7 @@ function App() {
           <ArrowRightIcon />
         </button>
         <span className="titlebar-spacer" data-tauri-drag-region />
+        <RunWidget workspace={focusWorkspace} />
         <InboxButton
           items={inbox}
           onOpen={(it) => {
@@ -1864,6 +1867,13 @@ function App() {
           onClose={() => setPlusMenu(null)}
         />
       )}
+      <BottomPanel
+        onOpenFile={(ws, repo, path, line, column) => {
+          openFileTab(ws, repo, path);
+          revealInEditor({ workspace: ws, repo, path, line, col: column, length: 0 });
+        }}
+        onError={setError}
+      />
       </main>
 
       {/* Fixed right dock, full height, visible while a workspace is in focus.

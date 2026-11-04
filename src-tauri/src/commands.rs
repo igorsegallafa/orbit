@@ -371,6 +371,31 @@ pub async fn cancel_build(workspace: Option<String>, repo: String) -> Result<boo
     Ok(crate::build::cancel(workspace.as_deref(), &repo))
 }
 
+/// A repo's run configurations (`.orbit/run.json`), resolved for `preset`
+/// (or the one picked automatically).
+#[tauri::command]
+pub async fn run_setup(workspace: String, repo: String, preset: Option<String>) -> Result<crate::run::RunSetup, String> {
+    blocking(move || crate::run::setup(&workspace, &repo, preset.as_deref())).await
+}
+
+/// Builds a run configuration, streaming `run-output {key, stream, line}`.
+#[tauri::command]
+pub async fn run_build(
+    app: tauri::AppHandle,
+    workspace: String,
+    repo: String,
+    name: String,
+    preset: Option<String>,
+    key: String,
+) -> Result<crate::run::BuildExit, String> {
+    blocking(move || crate::run::build(&app, &workspace, &repo, &name, preset.as_deref(), &key)).await
+}
+
+#[tauri::command]
+pub async fn run_cancel(key: String) -> Result<bool, String> {
+    Ok(crate::run::cancel(&key))
+}
+
 /// Environment checks (git, gh, agents, build toolchain).
 #[tauri::command]
 pub async fn health_check() -> Result<Vec<crate::health::Check>, String> {

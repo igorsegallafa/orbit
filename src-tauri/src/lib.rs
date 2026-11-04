@@ -16,6 +16,7 @@ mod proc;
 mod pty;
 mod ralph;
 mod repo;
+mod run;
 mod review;
 mod search;
 mod term_image;
@@ -105,6 +106,9 @@ pub fn run() {
             ralph::ralph_run_events,
             commands::build_repo,
             commands::cancel_build,
+            commands::run_setup,
+            commands::run_build,
+            commands::run_cancel,
             commands::health_check,
             commands::update_service_settings,
             commands::get_folders,

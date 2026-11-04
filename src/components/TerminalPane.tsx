@@ -20,6 +20,10 @@ export interface TerminalTab {
   args?: string[]; // extra argv (claude initial prompt)
   /** Run in this repo's folder instead of the workspace root (e.g. cmake). */
   repo?: string;
+  /** Working folder, over `repo` (a run configuration's cwd). */
+  cwd?: string;
+  /** Extra environment variables (a run configuration's env). */
+  env?: Record<string, string>;
   /**
    * Text typed into the PTY right after launch (opencode TUI takes no
    * initial prompt as argv, so we inject it as keystrokes).
@@ -64,6 +68,14 @@ export function dropFilesIntoTerminal(sessionId: string, paths: string[]) {
 
 /** Types a prompt into a running session and submits it. False when the
  *  session isn't open. */
+/** Ctrl+C to the program in a terminal (stops a run). */
+export function interruptTerminal(sessionId: string): boolean {
+  const entry = livePtys.get(sessionId);
+  if (!entry) return false;
+  entry.inject("\x03");
+  return true;
+}
+
 export function sendToTerminal(sessionId: string, text: string): boolean {
   const entry = livePtys.get(sessionId);
   if (!entry) return false;
@@ -309,6 +321,8 @@ export function TerminalPane({ tab, onError, onStatusChange, onSignal, active }:
               rows: term.rows,
               ...pixelSize(term),
               key: tab.id,
+              cwd: tab.cwd ?? null,
+              env: tab.env ?? null,
               onOutput: output,
             }).then((id) => ({ id, initialInput })),
       )

@@ -457,3 +457,20 @@ export function PaletteIcon({ size = 14 }: IconProps) {
     </svg>
   );
 }
+
+export function HammerIcon({ size = 14 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="m15 12-8.4 8.4a2 2 0 0 1-2.8-2.8L12.2 9.2" />
+      <path d="M17.6 15 22 10.6l-5.3-5.3a4 4 0 0 0-5.7 0L9.5 6.8l1.4 1.4 1.1-1.1 3.6 3.6-.9.9z" />
+    </svg>
+  );
+}
+
+export function StopIcon({ size = 14 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" stroke="none">
+      <rect x="6" y="6" width="12" height="12" rx="1.5" />
+    </svg>
+  );
+}

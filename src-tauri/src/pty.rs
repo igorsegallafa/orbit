@@ -90,13 +90,18 @@ pub async fn pty_spawn(
     pixel_width: Option<u16>,
     pixel_height: Option<u16>,
     key: Option<String>,
+    // A run configuration's working folder and variables (the game runs in
+    // its data folder, outside the repo).
+    cwd: Option<String>,
+    env: Option<std::collections::HashMap<String, String>>,
     on_output: Channel<InvokeResponseBody>,
 ) -> Result<u32, String> {
     let id = next_id();
     let app_for_reader = app.clone();
-    let cwd = match repo.filter(|r| !r.is_empty()) {
-        Some(r) => crate::workspace::repo_path(&workspace, &r)?,
-        None => crate::workspace::scope_dir(&workspace)?,
+    let cwd = match (cwd.filter(|c| !c.is_empty()), repo.filter(|r| !r.is_empty())) {
+        (Some(c), _) => std::path::PathBuf::from(c),
+        (None, Some(r)) => crate::workspace::repo_path(&workspace, &r)?,
+        (None, None) => crate::workspace::scope_dir(&workspace)?,
     }
     .to_string_lossy()
     .to_string();
@@ -165,6 +170,9 @@ pub async fn pty_spawn(
                 Some(v) => cmd_builder.env(k, v),
                 None => cmd_builder.env_remove(k),
             }
+        }
+        for (k, v) in env.iter().flatten() {
+            cmd_builder.env(k, v);
         }
 
         let child = match pair.slave.spawn_command(cmd_builder) {
