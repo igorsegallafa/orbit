@@ -73,6 +73,7 @@ struct Listener {
 }
 
 fn rgb_of(hex: u32) -> Rgb {
+    let hex = theme::hex(hex);
     Rgb { r: (hex >> 16) as u8, g: (hex >> 8) as u8, b: hex as u8 }
 }
 

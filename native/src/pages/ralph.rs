@@ -39,12 +39,6 @@ fn events() -> Events {
     })
 }
 
-/// Whether a run of this workspace is in progress (for the sidebar).
-pub fn is_running(workspace: &str) -> bool {
-    let prefix = format!("{workspace}/");
-    ralph::running().unwrap_or_default().iter().any(|k| k.starts_with(&prefix))
-}
-
 pub struct RalphPage {
     host: Host,
     ws: Workspace,
