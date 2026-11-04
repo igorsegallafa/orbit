@@ -6,7 +6,7 @@ import "@xterm/xterm/css/xterm.css";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { AgentStatus, AgentStatusTracker, HookState } from "../lib/agentStatus";
-import { KittyGraphics } from "../lib/kittyGraphics";
+import { KittyGraphics, PlaceholderMask } from "../lib/kittyGraphics";
 import { StatusIndicator } from "./StatusIndicator";
 import { isMac } from "./WindowControls";
 import { currentTheme, onThemeChange, terminalTheme } from "../lib/theme";
@@ -226,7 +226,7 @@ export function TerminalPane({ tab, onError, onStatusChange, onSignal, active }:
         // replay: turn each into a push of the viewport into scrollback, and
         // push once more so the new session's clear keeps the last screen too.
         const push = "\r\n".repeat(term.rows);
-        const text = new TextDecoder().decode(new Uint8Array(saved)).split("\x1b[2J").join(push);
+        const text = new TextDecoder().decode(new PlaceholderMask().apply(new Uint8Array(saved))).split("\x1b[2J").join(push);
         term.write(`${text}\r\n\x1b[90m── restored after restart ──\x1b[0m${push}`);
       }
       return {};
@@ -234,6 +234,7 @@ export function TerminalPane({ tab, onError, onStatusChange, onSignal, active }:
     // An empty message means the program ended.
     let statusTimer = 0;
     let queued = 0;
+    const mask = new PlaceholderMask();
     let paused = false;
     const setFlow = (pause: boolean) => {
       paused = pause;
@@ -246,7 +247,7 @@ export function TerminalPane({ tab, onError, onStatusChange, onSignal, active }:
         term.write("\r\n\x1b[90m[process exited]\x1b[0m\r\n");
         return;
       }
-      const bytes = new Uint8Array(buf);
+      const bytes = mask.apply(new Uint8Array(buf));
       queued += bytes.length;
       term.write(bytes, () => {
         queued -= bytes.length;

@@ -4,10 +4,89 @@ import type { IBufferCell, IDisposable, Terminal } from "@xterm/xterm";
 import { KITTY_DIACRITICS } from "./kittyDiacritics";
 
 export const PLACEHOLDER = 0x10eeee;
-const PLACEHOLDER_TEXT = String.fromCodePoint(PLACEHOLDER);
 const DIACRITIC_INDEX = new Map(KITTY_DIACRITICS.map((cp, i) => [cp, i]));
+// Fonts lack U+10EEEE and many diacritics, and their missing-glyph boxes spill past the picture:
+// xterm.js gets a blank braille cell with each diacritic as three variation selectors (hex digits).
+export const SHOWN_PLACEHOLDER = 0x2800;
+const SHOWN_TEXT = String.fromCodePoint(SHOWN_PLACEHOLDER);
+const DIGIT0 = 0xfe00;
+const PLACEHOLDER_UTF8 = [0xf4, 0x8e, 0xbb, 0xae];
+const SHOWN_UTF8 = [0xe2, 0xa0, 0x80];
 /** Decoded RGBA bytes kept; the oldest pictures are dropped past it. */
 const STORAGE_LIMIT = 320 * 1024 * 1024;
+
+/** The code point and its length at `at`, or null when the bytes stop mid-sequence. */
+function codePointAt(bytes: Uint8Array, at: number): [number, number] | null {
+  const lead = bytes[at];
+  const n = lead < 0x80 ? 1 : lead < 0xe0 ? 2 : lead < 0xf0 ? 3 : 4;
+  if (at + n > bytes.length) return null;
+  let cp = n === 1 ? lead : lead & (0xff >> (n + 1));
+  for (let k = 1; k < n; k++) cp = (cp << 6) | (bytes[at + k] & 0x3f);
+  return [cp, n];
+}
+
+/** Rewrites placeholders in PTY output before xterm.js sees them. */
+export class PlaceholderMask {
+  private held: Uint8Array | null = null;
+
+  apply(input: Uint8Array): Uint8Array {
+    let bytes = input;
+    if (this.held) {
+      bytes = new Uint8Array(this.held.length + input.length);
+      bytes.set(this.held);
+      bytes.set(input, this.held.length);
+      this.held = null;
+    }
+    let at = bytes.indexOf(PLACEHOLDER_UTF8[0]);
+    if (at < 0) return bytes;
+    // A diacritic (2 bytes at least) grows to 9.
+    const out = new Uint8Array(bytes.length * 5);
+    let o = 0;
+    let from = 0;
+    const put = (b: ArrayLike<number>) => {
+      out.set(b, o);
+      o += b.length;
+    };
+    while (at >= 0) {
+      put(bytes.subarray(from, at));
+      from = at;
+      let k = 1;
+      while (k < 4 && at + k < bytes.length && bytes[at + k] === PLACEHOLDER_UTF8[k]) k++;
+      if (k < 4) {
+        if (at + k === bytes.length) break;
+        at = bytes.indexOf(PLACEHOLDER_UTF8[0], at + 1);
+        continue;
+      }
+      const marks: number[] = [];
+      let p = at + 4;
+      let cut = false;
+      while (marks.length < 3) {
+        if (p === bytes.length) {
+          cut = true;
+          break;
+        }
+        const next = codePointAt(bytes, p);
+        if (!next) {
+          cut = true;
+          break;
+        }
+        const n = DIACRITIC_INDEX.get(next[0]);
+        if (n === undefined) break;
+        marks.push(n);
+        p += next[1];
+      }
+      // Its diacritics may still be on the way in the next chunk.
+      if (cut) break;
+      put(SHOWN_UTF8);
+      for (const n of marks) for (const d of [n >> 8, (n >> 4) & 15, n & 15]) put([0xef, 0xb8, 0x80 + d]);
+      from = p;
+      at = bytes.indexOf(PLACEHOLDER_UTF8[0], p);
+    }
+    if (at >= 0 && from === at) this.held = bytes.slice(at);
+    else put(bytes.subarray(from));
+    return out.subarray(0, o);
+  }
+}
 
 export interface KittyCommand {
   keys: Record<string, string>;
@@ -33,14 +112,16 @@ export interface PlaceholderCell {
 
 /** Diacritics left out are taken from the cell to the left, as the protocol allows. */
 export function readPlaceholder(chars: string, colourId: number, prev: PlaceholderCell | null): PlaceholderCell | null {
-  if (chars.codePointAt(0) !== PLACEHOLDER) return null;
+  if (chars.codePointAt(0) !== SHOWN_PLACEHOLDER) return null;
   const marks: number[] = [];
-  for (const ch of chars.slice(2)) {
-    const n = DIACRITIC_INDEX.get(ch.codePointAt(0)!);
-    if (n === undefined) break;
-    marks.push(n);
+  for (let i = 1; i + 3 <= chars.length; i += 3) {
+    const digits = [0, 1, 2].map((k) => chars.charCodeAt(i + k) - DIGIT0);
+    if (digits.some((d) => d < 0 || d > 15)) break;
+    marks.push((digits[0] << 8) | (digits[1] << 4) | digits[2]);
   }
   const sameLow = prev !== null && (prev.id & 0xffffff) === colourId;
+  // A bare U+2800 is ordinary text unless it continues a picture.
+  if (marks.length === 0 && !sameLow) return null;
   const id = marks.length > 2 ? colourId | (marks[2] << 24) : sameLow ? prev!.id : colourId;
   const row = marks.length > 0 ? marks[0] : sameLow ? prev!.row : 0;
   const col = marks.length > 1 ? marks[1] : sameLow && prev!.row === row ? prev!.col + 1 : 0;
@@ -300,7 +381,7 @@ export class KittyGraphics implements IDisposable {
 
     for (let y = 0; y < term.rows; y++) {
       const line = buffer.getLine(buffer.viewportY + y);
-      if (!line || !line.translateToString(false).includes(PLACEHOLDER_TEXT)) continue;
+      if (!line || !line.translateToString(false).includes(SHOWN_TEXT)) continue;
       let prev: PlaceholderCell | null = null;
       let run: { x: number; count: number; at: PlaceholderCell } | null = null;
       const flush = () => {
@@ -309,11 +390,8 @@ export class KittyGraphics implements IDisposable {
       };
       for (let x = 0; x < term.cols; x++) {
         const cell = (this.cell = line.getCell(x, this.cell));
-        const chars = cell?.getChars() ?? "";
-        const here: PlaceholderCell | null = cell ? readPlaceholder(chars, colourId(cell), prev) : null;
+        const here: PlaceholderCell | null = cell ? readPlaceholder(cell.getChars(), colourId(cell), prev) : null;
         if (!here) {
-          // The placeholder's missing-glyph box spills into the next cell.
-          if (run && (chars === "" || chars === " ") && cell?.isBgDefault()) this.coverCell(ctx, x, y, cw, ch, background);
           prev = null;
           flush();
           continue;
@@ -328,13 +406,6 @@ export class KittyGraphics implements IDisposable {
       }
       flush();
     }
-  }
-
-  private coverCell(ctx: CanvasRenderingContext2D, x: number, y: number, cw: number, ch: number, background: string) {
-    const x0 = Math.round(x * cw);
-    const y0 = Math.round(y * ch);
-    ctx.fillStyle = background;
-    ctx.fillRect(x0, y0, Math.round((x + 1) * cw) - x0, Math.round((y + 1) * ch) - y0);
   }
 
   private paintRun(ctx: CanvasRenderingContext2D, at: PlaceholderCell, x: number, y: number, count: number, cw: number, ch: number, background: string) {
