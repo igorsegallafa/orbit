@@ -2,17 +2,17 @@
 # Builds orbit-native and packages it for Linux, into native/dist/:
 #   orbit-native-<version>-linux-<arch>.tar.gz   always (bin/, share/, install.sh)
 #   orbit-native-<version>-<arch>.AppImage       when appimagetool is found ($APPIMAGETOOL or PATH)
-# The version is native/Cargo.toml's, unless ORBIT_VERSION is set.
+# The version is the root package.json's (the Tauri app's), unless ORBIT_VERSION is set.
 #   scripts/package-linux.sh [--no-build]
 set -euo pipefail
 native=$(cd "$(dirname "$0")/.." && pwd)
 root=$(dirname "$native")
-icons=$native/packaging/icons
-version=${ORBIT_VERSION:-$(sed -n 's/^version = "\(.*\)"/\1/p' "$native/Cargo.toml" | head -n1)}
+icons=$root/src-tauri/icons
+version=${ORBIT_VERSION:-$(sed -n 's/^ *"version": *"\([^"]*\)".*/\1/p' "$root/package.json" | head -n1)}
 arch=$(uname -m)
 
-[[ ${1:-} == --no-build ]] || cargo build --release --locked -p orbit-native --manifest-path "$root/Cargo.toml"
-bin=$root/target/release/orbit-native
+[[ ${1:-} == --no-build ]] || cargo build --release --locked --manifest-path "$native/Cargo.toml"
+bin=$native/target/release/orbit-native
 [[ -x $bin ]] || { echo "missing $bin" >&2; exit 1; }
 
 dist=$native/dist

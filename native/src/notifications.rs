@@ -279,7 +279,7 @@ mod xdg {
         PATH.get_or_init(|| {
             let path = dirs::runtime_dir().unwrap_or_else(std::env::temp_dir).join("orbit-native-icon.png");
             if !path.exists() {
-                std::fs::write(&path, include_bytes!("../../src-tauri/icons/128x128.png")).ok()?;
+                std::fs::write(&path, include_bytes!("../packaging/icons/128x128.png")).ok()?;
             }
             path.to_str().map(str::to_string)
         })
