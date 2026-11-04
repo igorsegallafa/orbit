@@ -12,7 +12,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::Duration;
-use tauri::{AppHandle, Emitter};
+use crate::events::Events;
 
 static ADDR: OnceLock<(u16, String)> = OnceLock::new();
 
@@ -28,7 +28,7 @@ pub struct AgentEvent {
 
 /// Binds the loopback listener. Without it sessions still run, just
 /// without hook-driven status.
-pub fn start(app: AppHandle) {
+pub fn start(app: Events) {
     let Ok(listener) = TcpListener::bind("127.0.0.1:0") else { return };
     let Ok(port) = listener.local_addr().map(|a| a.port()) else { return };
     let token = random_token();
@@ -250,8 +250,8 @@ fn parse_rate_limits(raw: &str, now: u64) -> RateLimits {
     RateLimits { five_hour: window("five_hour"), seven_day: window("seven_day"), updated_at: v.get("updatedAt").and_then(Value::as_u64) }
 }
 
-#[tauri::command]
-pub fn claude_rate_limits() -> RateLimits {
+/// Claude's rate-limit windows, as the status line helper last saw them.
+pub fn rate_limits() -> RateLimits {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     rate_limits_file()
         .ok()

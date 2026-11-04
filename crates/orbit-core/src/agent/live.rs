@@ -8,7 +8,7 @@ use runner::Line;
 use serde::Serialize;
 use std::path::Path;
 use std::time::Duration;
-use tauri::{AppHandle, Emitter};
+use crate::events::Events;
 use stream::Event;
 
 pub const FEED_EVENT: &str = "agent-feed";
@@ -58,7 +58,7 @@ fn relative(summary: &str, dir: &str) -> String {
 /// was cancelled ("cancelled").
 #[allow(clippy::too_many_arguments)]
 pub fn run_live(
-    app: &AppHandle,
+    app: &Events,
     run: &str,
     ai: &AiSettings,
     dir: &Path,

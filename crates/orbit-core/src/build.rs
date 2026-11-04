@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
-use tauri::{AppHandle, Emitter};
+use crate::events::Events;
 
 // ponytail: generous fixed ceiling; make it per-repo config if a build
 // legitimately runs longer.
@@ -99,7 +99,7 @@ fn log_file_name(key: &str) -> String {
 /// Builds `repo` in a workspace (or its base clone when `workspace` is
 /// None), streaming `build-output` events. Skips when nothing changed
 /// since the last successful build unless `force`.
-pub fn build(app: &AppHandle, workspace: Option<&str>, repo: &str, force: bool) -> Result<BuildResult, String> {
+pub fn build(app: &Events, workspace: Option<&str>, repo: &str, force: bool) -> Result<BuildResult, String> {
     let cfg = Config::load()?;
     let svc = cfg
         .services

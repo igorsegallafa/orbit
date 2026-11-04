@@ -9,7 +9,7 @@ use crate::integrations::{fetch_card, TrackerKind};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use tauri::AppHandle;
+use crate::events::Events;
 
 /// Drafting explores every repo: a long leash, it's visible and cancellable.
 const DRAFT_TIMEOUT: Duration = Duration::from_secs(20 * 60);
@@ -178,7 +178,7 @@ fn keep_previous(ctx: &Context) {
 }
 
 /// Drafts PLAN.md with the configured agent; returns its path.
-pub fn draft(app: &AppHandle, run: &str, ws_name: &str, goal: &str, decisions: &str) -> Result<String, String> {
+pub fn draft(app: &Events, run: &str, ws_name: &str, goal: &str, decisions: &str) -> Result<String, String> {
     let ctx = Context::load(ws_name, goal)?;
     let ai = crate::config::Config::load()?.ai;
     let prompt = draft_prompt(&ctx, ws_name, goal, decisions);
@@ -213,7 +213,7 @@ fn settle_plan_file(ctx: &Context, reply: &str, before: Option<std::time::System
 
 /// The largest markdown block of a reply: a ```markdown / ```md fence, else
 /// everything from the first "# " heading.
-pub(crate) fn extract_markdown(reply: &str) -> String {
+pub fn extract_markdown(reply: &str) -> String {
     for fence in ["```markdown", "```md"] {
         if let Some(start) = reply.find(fence) {
             let body = &reply[start + fence.len()..];
@@ -305,7 +305,7 @@ fn interview_followup(new_answers: &[Answer], finish: bool) -> String {
 /// agent that can't resume) the full context and history go out.
 #[allow(clippy::too_many_arguments)]
 pub fn interview(
-    app: &AppHandle,
+    app: &Events,
     run: &str,
     ws_name: &str,
     goal: &str,

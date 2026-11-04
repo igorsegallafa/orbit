@@ -16,7 +16,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
-use tauri::AppHandle;
+use crate::events::Events;
 
 /// The run key's "repo" part for plan runs: `<workspace>/plan`.
 pub const PLAN_REPO: &str = "plan";
@@ -113,7 +113,7 @@ fn plan_title(ws_dir: &std::path::Path) -> String {
 }
 
 struct PlanEnv {
-    app: AppHandle,
+    app: Events,
     key: String,
     workspace: String,
     ws_dir: PathBuf,
@@ -412,7 +412,7 @@ pub fn state(workspace: &str) -> Result<RalphState, String> {
     })
 }
 
-pub fn start(app: AppHandle, workspace: String, config: RunConfig) -> Result<(), String> {
+pub fn start(app: Events, workspace: String, config: RunConfig) -> Result<(), String> {
     let key = super::run_key(&workspace, PLAN_REPO);
     let (ws_dir, meta) = workspace_dir(&workspace)?;
     if !plan_path(&ws_dir).exists() {

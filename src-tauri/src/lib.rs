@@ -1,17 +1,13 @@
 mod commands;
-use orbit_core::{config, git, github, health, integrations, links, proc, usage, workspace};
-mod agent;
-mod agent_hooks;
-mod artifacts;
-mod build;
 mod dap;
+use orbit_core::{agent, agent_hooks, build, config, git, github, health, integrations, proc, run, usage, workspace};
+mod artifacts;
 mod files;
 mod lsp;
 mod notes;
 mod pty;
 mod ralph;
 mod repo;
-mod run;
 mod review;
 mod search;
 mod term_image;
@@ -56,7 +52,7 @@ pub fn run() {
                 let _ = w.maximize();
                 let _ = w.show();
             }
-            agent_hooks::start(app.handle().clone());
+            agent_hooks::start(events(app.handle().clone()));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -238,7 +234,7 @@ pub fn run() {
             pty::opencode_session_id,
             artifacts::branch_artifacts,
             artifacts::artifact_download,
-            agent_hooks::claude_rate_limits,
+            commands::claude_rate_limits,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

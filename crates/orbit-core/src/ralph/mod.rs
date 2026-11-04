@@ -2,7 +2,7 @@
 // iteration (snarktank/ralph pattern), run natively by Orbit so every tool
 // call is visible live instead of only when a story finishes.
 mod plan_run;
-mod prd;
+pub mod prd;
 mod prompts;
 mod supervisor;
 
@@ -19,7 +19,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use crate::agent::stream::{self, Event};
 use supervisor::{Iteration, Limits, RalphEnv, StopReason};
-use tauri::{AppHandle, Emitter};
+use crate::events::Events;
 
 const MAX_EVENTS_IN_MEMORY: usize = 600;
 const GENERATE_TIMEOUT: Duration = Duration::from_secs(20 * 60);
@@ -139,7 +139,7 @@ fn iteration_template(workspace: &str) -> (String, bool) {
 
 /// Records an event: memory buffer, events.jsonl on disk and the
 /// `ralph-event` channel for the UI.
-fn record(app: &AppHandle, key: &str, mut ev: Value, update: impl FnOnce(&mut RunState)) {
+fn record(app: &Events, key: &str, mut ev: Value, update: impl FnOnce(&mut RunState)) {
     ev["ts"] = json!(now());
     let dir = {
         let mut map = runs().lock().unwrap();
@@ -159,7 +159,7 @@ fn record(app: &AppHandle, key: &str, mut ev: Value, update: impl FnOnce(&mut Ru
 
 /// The model an iteration's agent reported; an event only when it changes,
 /// so the feed shows it once per run (and again if it ever switches).
-fn record_model(app: &AppHandle, key: &str, name: &str) {
+fn record_model(app: &Events, key: &str, name: &str) {
     if snapshot(key).is_some_and(|s| s.model.as_deref() == Some(name)) {
         return;
     }
@@ -180,7 +180,7 @@ fn save_summary(key: &str) {
 }
 
 struct RealEnv {
-    app: AppHandle,
+    app: Events,
     key: String,
     dir: PathBuf,
     branch: String,
@@ -429,58 +429,42 @@ fn default_config() -> RunConfig {
     }
 }
 
-async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
-    tauri::async_runtime::spawn_blocking(f)
-        .await
-        .map_err(|e| format!("background task failed: {e}"))?
-}
-
-#[tauri::command]
-pub async fn ralph_state(workspace: String, repo: String) -> Result<RalphState, String> {
-    blocking(move || {
-        let dir = repo_dir(&workspace, &repo)?;
-        let (prompt, prompt_custom) = iteration_template(&workspace);
-        Ok(RalphState {
-            prd: prd::read(&dir)?,
-            progress: prd::read_progress(&dir),
-            run: snapshot(&run_key(&workspace, &repo)),
-            prompt,
-            prompt_custom,
-            default_config: default_config(),
-            plan_exists: false,
-            warnings: vec![],
-        })
+pub fn state(workspace: String, repo: String) -> Result<RalphState, String> {
+    let dir = repo_dir(&workspace, &repo)?;
+    let (prompt, prompt_custom) = iteration_template(&workspace);
+    Ok(RalphState {
+        prd: prd::read(&dir)?,
+        progress: prd::read_progress(&dir),
+        run: snapshot(&run_key(&workspace, &repo)),
+        prompt,
+        prompt_custom,
+        default_config: default_config(),
+        plan_exists: false,
+        warnings: vec![],
     })
-    .await
 }
 
-#[tauri::command]
-pub async fn ralph_save_prd(workspace: String, repo: String, prd: Prd) -> Result<(), String> {
-    blocking(move || prd::write(&repo_dir(&workspace, &repo)?, &prd)).await
+pub fn save_prd(workspace: String, repo: String, prd: Prd) -> Result<(), String> {
+    prd::write(&repo_dir(&workspace, &repo)?, &prd)
 }
 
 /// Saves the workspace's iteration prompt; None/empty restores the default.
-#[tauri::command]
-pub async fn ralph_save_prompt(workspace: String, prompt: Option<String>) -> Result<(), String> {
-    blocking(move || {
-        let p = custom_prompt_path(&workspace)?;
-        match prompt.filter(|t| !t.trim().is_empty() && t.trim() != prompts::ITERATION.trim()) {
-            Some(t) => {
-                std::fs::create_dir_all(p.parent().unwrap()).map_err(|e| e.to_string())?;
-                std::fs::write(&p, t).map_err(|e| e.to_string())
-            }
-            None => {
-                let _ = std::fs::remove_file(&p);
-                Ok(())
-            }
+pub fn save_prompt(workspace: String, prompt: Option<String>) -> Result<(), String> {
+    let p = custom_prompt_path(&workspace)?;
+    match prompt.filter(|t| !t.trim().is_empty() && t.trim() != prompts::ITERATION.trim()) {
+        Some(t) => {
+            std::fs::create_dir_all(p.parent().unwrap()).map_err(|e| e.to_string())?;
+            std::fs::write(&p, t).map_err(|e| e.to_string())
         }
-    })
-    .await
+        None => {
+            let _ = std::fs::remove_file(&p);
+            Ok(())
+        }
+    }
 }
 
 /// One round of the PRD clarifying interview (same stepper as Plan's grill).
-#[tauri::command]
-pub async fn ralph_interview(
+pub fn interview(
     workspace: String,
     repo: String,
     brief: String,
@@ -488,94 +472,85 @@ pub async fn ralph_interview(
     rounds_done: usize,
     max_rounds: Option<usize>,
 ) -> Result<GrillRound, String> {
-    blocking(move || {
-        let dir = repo_dir(&workspace, &repo)?;
-        let history = if answers.is_empty() {
-            "None yet, this is round 1.".to_string()
-        } else {
-            answers.iter().map(|(q, a)| format!("- Q: {q}\n  A: {a}")).collect::<Vec<_>>().join("\n")
-        };
-        let cap = match max_rounds {
-            Some(max) if rounds_done + 1 >= max => {
-                "\n# HARD LIMIT\nThis is the LAST round: set done=true with a summary of everything decided.".to_string()
-            }
-            Some(max) => format!("\n# Round budget\nRound {} of {max}.", rounds_done + 1),
-            None => String::new(),
-        };
-        let ai = Config::load()?.ai;
-        let reply = runner::run_capture(
-            agent_cmd(&ai, &prompts::interview(&brief, &repo, &history, &cap), Access::ReadOnly, false),
-            &dir,
-            INTERVIEW_TIMEOUT,
-        )?;
-        crate::agent::parse_grill_json(&reply)
-    })
-    .await
+    let dir = repo_dir(&workspace, &repo)?;
+    let history = if answers.is_empty() {
+        "None yet, this is round 1.".to_string()
+    } else {
+        answers.iter().map(|(q, a)| format!("- Q: {q}\n  A: {a}")).collect::<Vec<_>>().join("\n")
+    };
+    let cap = match max_rounds {
+        Some(max) if rounds_done + 1 >= max => {
+            "\n# HARD LIMIT\nThis is the LAST round: set done=true with a summary of everything decided.".to_string()
+        }
+        Some(max) => format!("\n# Round budget\nRound {} of {max}.", rounds_done + 1),
+        None => String::new(),
+    };
+    let ai = Config::load()?.ai;
+    let reply = runner::run_capture(
+        agent_cmd(&ai, &prompts::interview(&brief, &repo, &history, &cap), Access::ReadOnly, false),
+        &dir,
+        INTERVIEW_TIMEOUT,
+    )?;
+    crate::agent::parse_grill_json(&reply)
 }
 
 /// Writes tasks/prd-<workspace>.md and scripts/ralph/prd.json with the
 /// agent (streams `ralph-prd-progress`), then normalizes the JSON.
-#[tauri::command]
-pub async fn ralph_generate_prd(
-    app: AppHandle,
+pub fn generate_prd(
+    app: Events,
     workspace: String,
     repo: String,
     brief: String,
     decisions: String,
 ) -> Result<Prd, String> {
-    blocking(move || {
-        let dir = repo_dir(&workspace, &repo)?;
-        let branch = crate::workspace::scope_branch(&workspace)?;
-        let date = human_time(now())[..10].to_string();
-        if let Some(dest) = prd::archive_if_other_branch(&dir, &branch, &date)? {
-            let _ = app.emit("ralph-prd-progress", format!("[orbit] archived the previous PRD to {}", dest.display()));
-        }
-        let md = dir.join("tasks").join(format!("prd-{}.md", workspace.trim_start_matches('@')));
-        std::fs::create_dir_all(md.parent().unwrap()).map_err(|e| e.to_string())?;
-        std::fs::create_dir_all(prd::ralph_dir(&dir)).map_err(|e| e.to_string())?;
-        let prompt = prompts::write_prd(
-            &brief,
-            if decisions.trim().is_empty() { "(none: use your judgment and list assumptions under Open Questions)" } else { &decisions },
-            &md.to_string_lossy(),
-            &prd::prd_path(&dir).to_string_lossy(),
-            &branch,
-            &repo,
-        );
-        let ai = Config::load()?.ai;
-        let o = runner::run_streaming(
-            agent_cmd(&ai, &prompt, Access::Edit, false),
-            &dir,
-            GENERATE_TIMEOUT,
-            Some(&format!("ralph-prd:{}", run_key(&workspace, &repo))),
-            |l| {
-                let (Line::Out(s) | Line::Err(s)) = l;
-                let _ = app.emit("ralph-prd-progress", s);
-            },
-        )?;
-        if o.cancelled {
-            return Err("cancelled".into());
-        }
-        if !o.success {
-            return Err(format!("agent failed: {}", o.stderr.trim()));
-        }
-        let mut prd = prd::read(&dir)?.ok_or("the agent did not write scripts/ralph/prd.json")?;
-        if prd.user_stories.is_empty() {
-            return Err("the generated PRD has no user stories".into());
-        }
-        prd::normalize(&mut prd, &branch);
-        prd::write(&dir, &prd)?;
-        Ok(prd)
-    })
-    .await
+    let dir = repo_dir(&workspace, &repo)?;
+    let branch = crate::workspace::scope_branch(&workspace)?;
+    let date = human_time(now())[..10].to_string();
+    if let Some(dest) = prd::archive_if_other_branch(&dir, &branch, &date)? {
+        let _ = app.emit("ralph-prd-progress", format!("[orbit] archived the previous PRD to {}", dest.display()));
+    }
+    let md = dir.join("tasks").join(format!("prd-{}.md", workspace.trim_start_matches('@')));
+    std::fs::create_dir_all(md.parent().unwrap()).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(prd::ralph_dir(&dir)).map_err(|e| e.to_string())?;
+    let prompt = prompts::write_prd(
+        &brief,
+        if decisions.trim().is_empty() { "(none: use your judgment and list assumptions under Open Questions)" } else { &decisions },
+        &md.to_string_lossy(),
+        &prd::prd_path(&dir).to_string_lossy(),
+        &branch,
+        &repo,
+    );
+    let ai = Config::load()?.ai;
+    let o = runner::run_streaming(
+        agent_cmd(&ai, &prompt, Access::Edit, false),
+        &dir,
+        GENERATE_TIMEOUT,
+        Some(&format!("ralph-prd:{}", run_key(&workspace, &repo))),
+        |l| {
+            let (Line::Out(s) | Line::Err(s)) = l;
+            let _ = app.emit("ralph-prd-progress", s);
+        },
+    )?;
+    if o.cancelled {
+        return Err("cancelled".into());
+    }
+    if !o.success {
+        return Err(format!("agent failed: {}", o.stderr.trim()));
+    }
+    let mut prd = prd::read(&dir)?.ok_or("the agent did not write scripts/ralph/prd.json")?;
+    if prd.user_stories.is_empty() {
+        return Err("the generated PRD has no user stories".into());
+    }
+    prd::normalize(&mut prd, &branch);
+    prd::write(&dir, &prd)?;
+    Ok(prd)
 }
 
-#[tauri::command]
-pub async fn ralph_cancel_generate(workspace: String, repo: String) -> Result<bool, String> {
+pub fn cancel_generate(workspace: String, repo: String) -> Result<bool, String> {
     Ok(runner::cancel(&format!("ralph-prd:{}", run_key(&workspace, &repo))))
 }
 
-#[tauri::command]
-pub async fn ralph_start(app: AppHandle, workspace: String, repo: String, config: RunConfig) -> Result<(), String> {
+pub fn start(app: Events, workspace: String, repo: String, config: RunConfig) -> Result<(), String> {
     let key = run_key(&workspace, &repo);
     let dir = repo_dir(&workspace, &repo)?;
     let prd = prd::read(&dir)?.ok_or("no scripts/ralph/prd.json yet: create the PRD first")?;
@@ -663,27 +638,23 @@ pub async fn ralph_start(app: AppHandle, workspace: String, repo: String, config
 }
 
 /// Ralph over the feature plan: the plan's tasks (as a PRD) and the run.
-#[tauri::command]
-pub async fn ralph_plan_state(workspace: String) -> Result<RalphState, String> {
-    blocking(move || plan_run::state(&workspace)).await
+pub fn plan_state(workspace: String) -> Result<RalphState, String> {
+    plan_run::state(&workspace)
 }
 
 /// Starts Ralph on the plan's open tasks (key `<workspace>/plan`; stop,
 /// pause and history take repo "plan").
-#[tauri::command]
-pub async fn ralph_plan_start(app: AppHandle, workspace: String, config: RunConfig) -> Result<(), String> {
-    blocking(move || plan_run::start(app, workspace, config)).await
+pub fn plan_start(app: Events, workspace: String, config: RunConfig) -> Result<(), String> {
+    plan_run::start(app, workspace, config)
 }
 
 /// Keys (`workspace/repo`) of the runs in progress, for app-wide indicators.
-#[tauri::command]
-pub async fn ralph_running() -> Result<Vec<String>, String> {
+pub fn running() -> Result<Vec<String>, String> {
     Ok(runs().lock().unwrap().iter().filter(|(_, st)| st.running).map(|(k, _)| k.clone()).collect())
 }
 
 /// Stops now: kills the running iteration (its commits stay).
-#[tauri::command]
-pub async fn ralph_stop(workspace: String, repo: String) -> Result<(), String> {
+pub fn stop(workspace: String, repo: String) -> Result<(), String> {
     let key = run_key(&workspace, &repo);
     if let Some(st) = runs().lock().unwrap().get_mut(&key) {
         st.stop = true;
@@ -693,8 +664,7 @@ pub async fn ralph_stop(workspace: String, repo: String) -> Result<(), String> {
 }
 
 /// Stops after the current iteration finishes.
-#[tauri::command]
-pub async fn ralph_pause(workspace: String, repo: String) -> Result<(), String> {
+pub fn pause(workspace: String, repo: String) -> Result<(), String> {
     if let Some(st) = runs().lock().unwrap().get_mut(&run_key(&workspace, &repo)) {
         st.pause = true;
     }
@@ -702,35 +672,27 @@ pub async fn ralph_pause(workspace: String, repo: String) -> Result<(), String> 
 }
 
 /// Past runs of this workspace (newest first), from their run.json.
-#[tauri::command]
-pub async fn ralph_runs(workspace: String) -> Result<Vec<Value>, String> {
-    blocking(move || {
-        let dir = runs_dir(&workspace)?;
-        let mut out: Vec<Value> = std::fs::read_dir(&dir)
-            .map(|rd| {
-                rd.flatten()
-                    .filter_map(|e| std::fs::read_to_string(e.path().join("run.json")).ok())
-                    .filter_map(|raw| serde_json::from_str(&raw).ok())
-                    .collect()
-            })
-            .unwrap_or_default();
-        out.sort_by_key(|v: &Value| std::cmp::Reverse(v["startedAt"].as_u64().unwrap_or(0)));
-        Ok(out)
-    })
-    .await
+pub fn past_runs(workspace: String) -> Result<Vec<Value>, String> {
+    let dir = runs_dir(&workspace)?;
+    let mut out: Vec<Value> = std::fs::read_dir(&dir)
+        .map(|rd| {
+            rd.flatten()
+                .filter_map(|e| std::fs::read_to_string(e.path().join("run.json")).ok())
+                .filter_map(|raw| serde_json::from_str(&raw).ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    out.sort_by_key(|v: &Value| std::cmp::Reverse(v["startedAt"].as_u64().unwrap_or(0)));
+    Ok(out)
 }
 
 /// Events of a past run (events.jsonl), for replaying its feed.
-#[tauri::command]
-pub async fn ralph_run_events(workspace: String, id: String) -> Result<Vec<Value>, String> {
-    blocking(move || {
-        if id.contains(['/', '\\']) || id.contains("..") {
-            return Err("invalid run id".into());
-        }
-        let p: PathBuf = runs_dir(&workspace)?.join(&id).join("events.jsonl");
-        Ok(read_jsonl(&p))
-    })
-    .await
+pub fn run_events(workspace: String, id: String) -> Result<Vec<Value>, String> {
+    if id.contains(['/', '\\']) || id.contains("..") {
+        return Err("invalid run id".into());
+    }
+    let p: PathBuf = runs_dir(&workspace)?.join(&id).join("events.jsonl");
+    Ok(read_jsonl(&p))
 }
 
 /// Drops the worktree prefix from paths in a tool summary (agents use

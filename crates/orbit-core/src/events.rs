@@ -37,3 +37,27 @@ impl<F: Fn(&str, Value) + Send + Sync + 'static> EventSink for F {
         self(event, payload)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    #[test]
+    fn closures_receive_serialized_payloads() {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Line<'a> {
+            build_key: &'a str,
+            n: u32,
+        }
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let sink = got.clone();
+        let events = Events::new(move |event: &str, payload: Value| sink.lock().unwrap().push((event.to_string(), payload)));
+        events.emit("build-output", Line { build_key: "k", n: 2 }).unwrap();
+        events.clone().emit("plain", "text").unwrap();
+        let got = got.lock().unwrap();
+        assert_eq!(got[0], ("build-output".to_string(), serde_json::json!({ "buildKey": "k", "n": 2 })));
+        assert_eq!(got[1].1, Value::String("text".into()));
+    }
+}

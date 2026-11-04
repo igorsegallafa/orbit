@@ -363,7 +363,7 @@ pub async fn build_repo(
     repo: String,
     force: bool,
 ) -> Result<crate::build::BuildResult, String> {
-    blocking(move || crate::build::build(&app, workspace.as_deref(), &repo, force)).await
+    blocking(move || crate::build::build(&crate::events(app), workspace.as_deref(), &repo, force)).await
 }
 
 #[tauri::command]
@@ -388,7 +388,7 @@ pub async fn run_build(
     preset: Option<String>,
     key: String,
 ) -> Result<crate::run::BuildExit, String> {
-    blocking(move || crate::run::build(&app, &workspace, &repo, &name, preset.as_deref(), &key)).await
+    blocking(move || crate::run::build(&crate::events(app), &workspace, &repo, &name, preset.as_deref(), &key)).await
 }
 
 #[tauri::command]
@@ -441,7 +441,7 @@ pub async fn workspace_plan_exists(name: String) -> Result<bool, String> {
 /// events tagged `run`; `agent_cancel(run)` stops it. Returns the path.
 #[tauri::command]
 pub async fn plan_draft(app: tauri::AppHandle, run: String, name: String, goal: String, decisions: String) -> Result<String, String> {
-    blocking(move || agent::plan::draft(&app, &run, &name, &goal, &decisions)).await
+    blocking(move || agent::plan::draft(&crate::events(app), &run, &name, &goal, &decisions)).await
 }
 
 /// One interview round (see agent::plan::interview): `answers` is the whole
@@ -458,7 +458,7 @@ pub async fn plan_interview(
     session: Option<String>,
     finish: bool,
 ) -> Result<agent::plan::InterviewTurn, String> {
-    blocking(move || agent::plan::interview(&app, &run, &name, &goal, &answers, &new_answers, session.as_deref(), finish)).await
+    blocking(move || agent::plan::interview(&crate::events(app), &run, &name, &goal, &answers, &new_answers, session.as_deref(), finish)).await
 }
 
 /// Creates PLAN.md from the template (never overwrites); returns the path.
@@ -1076,7 +1076,7 @@ pub async fn ws_address_review(
 ) -> Result<Vec<agent::ThreadReply>, String> {
     blocking(move || {
         let owner_repo = remote_of(&worktree_of(&workspace, &repo)?).ok_or_else(|| format!("{repo}: origin is not a GitHub repository"))?;
-        agent::address_review(&app, &run, &workspace, &repo, &owner_repo, number, &thread_ids, &notes)
+        agent::address_review(&crate::events(app), &run, &workspace, &repo, &owner_repo, number, &thread_ids, &notes)
     })
     .await
 }
@@ -1384,4 +1384,9 @@ pub async fn apply_check_fix(
     instruction: String,
 ) -> Result<(), String> {
     blocking(move || agent::apply_check_fix(&workspace, &repo, &instruction)).await
+}
+
+#[tauri::command]
+pub fn claude_rate_limits() -> crate::agent_hooks::RateLimits {
+    crate::agent_hooks::rate_limits()
 }
