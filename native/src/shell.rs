@@ -1415,6 +1415,14 @@ impl Render for OrbitApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.schedule_save(cx);
         terminal_title(window, self.active_terminal().is_some());
+        if crate::terminal::inhibit::sync(window, cx) {
+            self.toast(
+                crate::toast::ToastKind::Info,
+                "Terminal keys over GNOME shortcuts",
+                Some("While a terminal has focus, Orbit asks GNOME to pass Super+V, Super+A… to it (Ctrl+V, Ctrl+A under Toshy). GNOME asks once to allow it; GNOME Settings → Apps → Orbit changes the answer, Orbit's Settings → Keyboard turns it off.".into()),
+                cx,
+            );
+        }
         let focus = self.focus_workspace(cx).is_some();
         // Settings is its own screen: no tabs over it, and its nav replaces the
         // sidebar (the page draws it). No tabs at all: no strip.

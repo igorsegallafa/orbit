@@ -137,6 +137,12 @@ pub struct SavedState {
     /// Desktop notifications (Settings → Notifications); None is on.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notifications: Option<bool>,
+    /// Terminals inhibit GNOME's shortcuts (Settings → Keyboard); None is the default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_shortcuts: Option<bool>,
+    /// The toast about GNOME's permission prompt was shown.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub shortcuts_explained: bool,
     /// Workspaces whose sessions are collapsed in the sidebar (`orbit.ws-expanded` false).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub ws_collapsed: Vec<String>,
@@ -221,6 +227,8 @@ mod tests {
             layout: Layout { sidebar_width: 300., ..Default::default() },
             theme: Some("nord".into()),
             notifications: Some(false),
+            terminal_shortcuts: Some(false),
+            shortcuts_explained: true,
             ws_collapsed: vec!["ws".into()],
         };
         let json = serde_json::to_string(&s).unwrap();

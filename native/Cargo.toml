@@ -46,6 +46,11 @@ memchr = "2"
 [target.'cfg(target_os = "linux")'.dependencies]
 # Desktop notifications over D-Bus (already in the lock via gpui's Linux platform).
 notify-rust = "4"
+# Terminal shortcut inhibition on GPUI's Wayland connection (terminal/inhibit.rs); all in the lock via gpui.
+raw-window-handle = "0.6"
+wayland-backend = { version = "0.3", features = ["client_system"] }
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
 gpui-pre-wgpu = { version = "=0.3.11", optional = true, features = ["orbit-capture"] }
 
 [features]

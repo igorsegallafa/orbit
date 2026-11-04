@@ -209,6 +209,7 @@ pub fn dump(app: &OrbitApp, log: &str, cx: &gpui::App) -> String {
         app.minimized.len(),
         app.ws_collapsed,
     );
+    let _ = writeln!(out, "--- shortcuts inhibit: {}", crate::terminal::inhibit::status());
     let scope_name = |s: &crate::scope::Scope| s.clone().unwrap_or_else(|| "global".into());
     let strip = app.strip_tabs(cx);
     let _ = writeln!(

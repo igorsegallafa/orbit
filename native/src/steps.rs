@@ -163,6 +163,13 @@ pub async fn run(steps: &[String], window: AnyWindowHandle, app: &Entity<OrbitAp
                 }
                 sleep(cx, 150).await;
             }
+            // `mods:alt` holds Alt, `mods:` releases every modifier.
+            "mods" => {
+                let modifiers = Modifiers { alt: arg.contains("alt"), shift: arg.contains("shift"), control: arg.contains("ctrl"), ..Default::default() };
+                let event = gpui::ModifiersChangedEvent { modifiers, capslock: Default::default() };
+                send(window, PlatformInput::ModifiersChanged(event), cx);
+                sleep(cx, 150).await;
+            }
             "type" => {
                 for ch in arg.chars() {
                     let ks = Keystroke { key: ch.to_lowercase().to_string(), key_char: Some(ch.to_string()), ..Default::default() };

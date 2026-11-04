@@ -26,6 +26,7 @@ pub enum Section {
     Languages,
     Appearance,
     Notifications,
+    Keyboard,
     Health,
     Updates,
 }
@@ -102,6 +103,14 @@ const NAV: &[(&str, &[SectionDef])] = &[
                 title: "Notifications",
                 description: "Desktop notifications when an agent or a Ralph run needs you.",
                 keywords: "notify alert desktop os toast inbox",
+            },
+            SectionDef {
+                id: Section::Keyboard,
+                icon: "terminal",
+                slug: "keyboard",
+                title: "Keyboard",
+                description: "How terminals get keys the desktop would otherwise take.",
+                keywords: "keys shortcuts gnome super toshy inhibit terminal",
             },
             SectionDef {
                 id: Section::Health,
@@ -855,6 +864,23 @@ impl SettingsPage {
             .into_any_element()
     }
 
+    fn render_keyboard(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        use crate::terminal::inhibit;
+        let on = inhibit::enabled();
+        kit::section()
+            .child(kit::rows([
+                kit::setting(
+                    "Terminal keys over GNOME shortcuts",
+                    kit::hint("While a terminal has focus, GNOME's Super shortcuts (Super+V, Super+A, Super+S…) go to the terminal; under Toshy those are Ctrl+V, Ctrl+A, Ctrl+S. Alt+Tab still switches windows. GNOME asks once to allow it; GNOME Settings → Apps → Orbit changes the answer. Wayland only: on X11 GNOME's grabs cannot be lifted by an app."),
+                    kit::check("keys-inhibit", if on { "On" } else { "Off" }, on).on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
+                        inhibit::set_enabled(!inhibit::enabled(), cx);
+                        cx.notify();
+                    })),
+                ),
+            ]))
+            .into_any_element()
+    }
+
     fn render_health(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let checks = self.health.ready();
         let failing = checks.map(|l| l.iter().filter(|c| c.required && !c.ok).count());
@@ -1042,6 +1068,7 @@ impl Render for SettingsPage {
             Section::Languages => self.render_languages(window, cx),
             Section::Appearance => self.render_appearance(cx),
             Section::Notifications => self.render_notifications(cx),
+            Section::Keyboard => self.render_keyboard(cx),
             Section::Health => self.render_health(cx),
             Section::Updates => self.render_updates(cx),
         };
