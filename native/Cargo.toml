@@ -1,0 +1,43 @@
+[package]
+name = "orbit-native"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "Orbit's native (GPUI) UI, replacing the Tauri + WebKitGTK frontend"
+
+[dependencies]
+# gpui-component pins its GPUI snapshot (crates.io `gpui-pre`); use the same one.
+gpui = { package = "gpui-pre", version = "=0.3.11" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.11", features = ["wayland", "x11"] }
+gpui-component = { version = "=0.9.0", features = [
+    "tree-sitter-c",
+    "tree-sitter-cpp",
+    "tree-sitter-rust",
+    "tree-sitter-typescript",
+    "tree-sitter-tsx",
+    "tree-sitter-javascript",
+] }
+# Lucide icons used by gpui-component widgets.
+gpui-kit-assets = "=0.9.0"
+# Must match gpui-component's, whose provider traits take these types.
+lsp-types = "=0.97.0"
+alacritty_terminal = "0.26"
+portable-pty = "0.9"
+ignore = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+url = "2"
+dirs = "6"
+futures = "0.3"
+anyhow = "1"
+
+[profile.release]
+debug = false
+strip = true
+lto = "thin"
+codegen-units = 16
+
+[profile.dev]
+debug = 0

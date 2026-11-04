@@ -24,3 +24,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Native (GPUI) app build output
+native/target/
