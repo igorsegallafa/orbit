@@ -341,6 +341,7 @@ Caveats found:
 | `src/debug/` | the DAP session (`mod.rs`: launch sequence, stops, frames, variables, console, breakpoints), the DAP client over `orbit_core::dap` (`client.rs`), editor breakpoints and paused line (`gutter.rs`), the Debug tab (`view.rs`) |
 | `src/workspace_ui/` | page tabs (`mod.rs`: `PageTab`, its in-tab modal, commands, sidebar entries, dump) · `dashboard.rs` · `workspace_page.rs` (delivery flow, repos, PRs) · `repo_page.rs` (a repo's base clone) · `forms.rs` (new workspace, add repositories) |
 | `src/git/` | the git flows shown over a page: `commit.rs`, `push.rs`, `rebase.rs`, `merge.rs`, the branch drift banner (`drift.rs`); shared modal pieces in `mod.rs` |
+| `src/pages/` | tool tabs (`TabKind::Tool`; `mod.rs`: `PageTab`, `PageView`, `Host`, commands, sidebar entries, dump) · `settings.rs` (sections, AI, Languages, Appearance, Health, Updates) · `repos.rs` (Repositories, Folders, Groups) · `integrations.rs` · `ralph.rs` · `usage.rs` · `artifacts.rs` · `updates.rs` (update check) · `crash.rs` (panic hook) · `ui.rs` |
 | `src/script.rs` | self-test mode and dumps |
 | `src/theme.rs`, `src/orbit-dark.json` | Orbit Dark colours and shell metrics (`src/App.css`) |
 
@@ -384,9 +385,9 @@ held logic became core functions (`notes::add`, `lsp::cpp_setup`, `ralph::start`
 
 - `term_image.rs`: reads files named by kitty graphics commands for the webview.
   (`pty.rs` moved to core in stage 3 and is now a thin adapter, see *Stage 3*.)
-- `commands.rs` (93 commands): most are one-line wrappers over core, but some still hold logic
-  inline: service/folder/group editing in the config and `open_in_editor`. (The PR commands moved
-  to `orbit_core::prs` in the review stage, the git and workspace ones in the git flows stage.)
+- `commands.rs` (93 commands): one-line wrappers over core. (The PR commands moved to
+  `orbit_core::prs` in the review stage, the git and workspace ones in the git flows stage, the
+  config edits, `open_in_editor`, usage and integrations in the settings stage.)
 - `lib.rs`: the Tauri builder, plugins, the handler list, `events()` and `blocking()`.
 - Plugin calls (`tauri_plugin_opener` for reveal/open after an artifact download) stay in the wrappers.
 
@@ -744,10 +745,89 @@ cloned from local bare remotes (`api` linked, `worktree: false`), a stub `gh` an
   flow, upstream `origin/topic`), Switch to main, Delete `topic` (confirmed).
 - Remove workspace `other`: confirmed, removed, and its tab closed.
 
-Not done: tracker sources (Shortcut/Linear) in New workspace (the integrations stage's), the
+Not done: tracker sources (Shortcut/Linear) in New workspace, the
 commit modal's side-by-side diff (a file opens its diff tab instead), compare / cherry-pick on the
-repo page, Ctrl+Enter to commit, Race, Plan, Ralph, artifacts and usage on the workspace page,
-"Open in editor" / "Open folder" (owned by the settings stage), the dashboard's context menu.
+repo page, Ctrl+Enter to commit, Race, Plan, the dashboard's context menu. Ralph, artifacts and
+usage are their own tabs (settings stage), and "Open in editor" / "Open folder" are commands.
+
+## Stage: settings, Ralph, integrations, usage, artifacts, updates, crash log
+
+`src/pages/`: tool tabs (`TabKind::Tool`, a `PageTab` wrapping any `PageView`) opened from the
+sidebar (*WORKSPACE*: Ralph, AI usage, CI artifacts; *ORBIT*: Integrations, Settings) or the palette.
+
+- **Settings** (`Ctrl+,`, `app.settings`; `settings.languages|health|ai`): its own section list
+  with the filter (`Enter` opens the first match). Repositories (folders, add manually / local clone
+  / from GitHub, edit, clone, open folder, remove with confirm; the modals are inline cards; per-OS
+  build commands are kept but edited in the Tauri app only), Groups (create, edit members, remove),
+  AI (agent, model and fast model from a menu of the agent's models, Remote Control, Test agent),
+  Languages (state, custom command on Enter/blur, enabled, errors only, hidden codes, running
+  servers with log and stop), Appearance (Orbit Dark only; the others listed as Tauri-only),
+  Health (`health::run`, git identity included), Updates.
+  All of it reads and writes `config.yaml` through `orbit_core::settings` / `lsp`, so the two apps
+  share settings.
+- **Integrations**: Shortcut, Linear, Figma; masked token, Show/Hide, Connect (validated by the
+  provider, then saved), Disconnect.
+- **Ralph** (`ralph.open`): target *Plan* (PLAN.md, one agent per task) or a repo's PRD
+  (`scripts/ralph/prd.json`); iterations 3/5/10/until done, push toggle, Start / Pause after
+  iteration / Stop; the stories with the current one highlighted, the run's counters, the live feed
+  (`ralph-event`s fanned out from one `Events` sink to every open Ralph tab) and past runs. Writing
+  and editing a PRD (interview, generation, editor) and the custom iteration prompt are not ported.
+- **AI usage** (`workspace.usage`): per model tokens and cost, sessions on click, the Claude 5h/7d
+  windows; every 30 s. **CI artifacts** (`workspace.artifacts`): latest run per workflow of each
+  repo's branch; Download extracts into `~/Downloads/Orbit/<workspace>/` and opens the folder.
+- **Updates**: `orbit_core::updates::check` reads the updater's `latest.json` (curl) and compares it
+  with `package.json`'s version; at start and hourly, a toast once per new version, and Settings →
+  Updates (*Check for updates*, *Open release page*). No install: that is the packaging stage.
+- **Crash log**: a panic hook appends the message, place, version and backtrace to
+  `<config dir>/native-crash.log` and leaves a marker; the next start toasts "Orbit closed after a
+  crash" with the log's path. `ORBIT_TEST_PANIC=<ms>` panics on purpose.
+- **Open in editor / folder**: `workspace.openInEditor` (a menu: whole workspace or one repo, VS
+  Code or Zed) and `workspace.revealFolder`.
+
+**Core move.** The config edits of `commands.rs` (`add_service`, `update_service(_settings)`,
+`remove_service`, `clone_service`, `service_clone_status`, `local_repo_origin`, folders, groups,
+`set_ai_settings`, `open_in_editor`) are `orbit_core::settings`; `workspace_ai_usage` is
+`usage::for_scope`, `integration_connect` is `integrations::connect`, `log_render_crash` is
+`crash::append`. New: `updates`. `RalphState`'s fields are public and `Limits`/`StopReason`
+re-exported. Test hooks: integration tokens follow `ORBIT_CONFIG_DIR` when set, usage reads
+`CLAUDE_CONFIG_DIR` (as Claude Code does), `ORBIT_DOWNLOADS_DIR` and `ORBIT_UPDATE_URL` redirect
+downloads and the release check. The Tauri commands keep their names, arguments and results.
+
+**Verified** by self-tests with `ORBIT_CONFIG_DIR`, `ORBIT_WORKSPACE_ROOT`, `CLAUDE_CONFIG_DIR`,
+`ORBIT_DOWNLOADS_DIR` and `ORBIT_UPDATE_URL` in a scratch folder (a workspace with one repo cloned
+from a local bare origin) and stubs first on `PATH` for `claude`, `gh` and `curl`. No paid agent,
+GitHub or tracker was called.
+
+- Repositories: Add manually (`api`, build `cargo build`, branch in base clone) wrote it to
+  config.yaml; Add local clone read the checkout's origin; Save folders set `reposDir`; removing a
+  repo in a group was refused with a toast; Groups: create `core`, add `web`, remove.
+- AI: model and fast model picked from the menu, Remote Control on, agent → OpenCode (model reset to
+  `aihub/aihub/best`); Test agent with the stub shows the failure and its output.
+- Languages: cpp disabled / enabled, errors only on, rust custom command `rust-analyzer` (Enter)
+  saved in `languageServers`. Health listed every check, git identity included.
+- Integrations: a bad Shortcut token shows the provider's "Unauthorized"; `good-token` connected as
+  "Stub User" (credentials in the scratch config dir); Disconnect.
+- Updates: a `9.9.0` manifest gave the toast at start and "Orbit 9.9.0 is available" in Settings.
+- Usage: a Claude log in the scratch `CLAUDE_CONFIG_DIR` → `claude-sonnet-5-5 2.0k in / 4.0k out /
+  50.0k cache · 1 sessions`. Artifacts: the stub's `game-linux` (5.0 MB) listed and downloaded
+  (`gh run download 5 -R o/web -n game-linux -D …`).
+- Ralph with a **stub `claude`** (it ticks the next story in prd.json and commits): target `web`,
+  3 iterations, Start → `US-001` then `US-002` pass, 2 commits, `■ stopped: complete after 2
+  iterations` and a toast; the plan target lists PLAN.md's tasks (1/2 done). *Until done* + Stop
+  ended the run with reason `stopped`.
+- Crash: `ORBIT_TEST_PANIC=1500` wrote `native-crash.log` (message, place, version, backtrace) and
+  the marker; the next start showed the toast and removed the marker.
+
+Self-test probes: `nav-settings`, `nav-integrations`, `nav-ralph`, `nav-usage`, `nav-artifacts`,
+`settings-filter`, `settings-nav:<section>`, `folders-repos|workspaces|save`, `repo-add`,
+`repo-add-local`, `repo-add-github`, `repo:<name>:clone|reveal|edit|remove`, `form-name|url|path|build|
+output|shared|worktree|branch-only|auto-switch|clone-now|save|cancel`, `local-path`, `local-add`,
+`github-filter`, `github:<owner/repo>`, `group-new`, `group-create`, `group:<g>:edit|remove`,
+`group-member:<repo>`, `group-save`, `ai-agent:<label>`, `ai-model`, `ai-fast-model`, `ai-remote:on|off`,
+`ai-test`, `lang:<id>:command|enabled|errors-only`, `lsp:<id>:log|stop`, `health-recheck`,
+`updates-check`, `integration:<kind>:token|show|connect|disconnect`, `ralph-target:<plan|repo>`,
+`ralph-iterations:<n|until-done>`, `ralph-push`, `ralph-start|pause|stop`, `usage:<model>`,
+`artifact:<repo>:<name>`. Inputs inside the pages fill through `click:<probe>` then `type:`.
 
 ## Next stages
 
@@ -773,10 +853,12 @@ Ordered by dependency, with rough sizes (one focused agent-day ≈ 1 unit).
    PRs, checks and logs); left: commit review, GitHub PR review with threads, address review.
 7. ~~**Git and workspace flows**~~: mostly done (see *Stage: git and workspace flows*); left:
    tracker cards in New workspace, compare and cherry-pick on the repo page, the commit modal's
-   inline diff, the workspace page's Plan, Race, Ralph, artifacts and usage sections.
+   inline diff, the workspace page's Plan and Race.
 8. ~~**Run/Build/Debug**~~: done (see *Build / Run / Debug*); left: the multi-repo build modal,
    breakpoint conditions, a round breakpoint glyph (needs an editor gutter hook upstream).
-9. **Settings, Ralph, integrations, usage, artifacts, updates** (3–4).
+9. ~~**Settings, Ralph, integrations, usage, artifacts, updates**~~: mostly done (see *Stage:
+   settings, …*); left: writing/editing a Ralph PRD and its prompt, the themes, tracker cards in
+   New workspace, per-OS build commands in the repo form, installing updates (packaging).
 10. **Packaging** (1): the Vulkan-only wgpu patch (or a launcher with the restricted env),
     `.desktop` and icon, an updater.
 
@@ -794,7 +876,7 @@ Status of everything the React app does: **done**, **partial** (with what's miss
 - [x] done: persisted state: open workspace, editor and diff tabs (preview flag, cursor), active tab, pane sizes, restored on start. Terminal tabs are not restored (Sessions stage).
 - [x] done: command registry and keymap; Find Action (`Ctrl+Shift+A`, `src/lib/commands.ts`) is Search Everywhere's Actions tab
 - [x] done: bottom panel with Build, Run, Debug and Problems tabs (see *Build / Run / Debug*)
-- [ ] — Error boundary / crash log (`ErrorBoundary.tsx`)
+- [x] done: crash log: a panic hook writes `<config dir>/native-crash.log`; the next start toasts it (`ErrorBoundary.tsx`). No in-app recovery: a panic ends the process.
 - [x] done: Dashboard page: workspace cards with status summary, onboarding, the repositories with their brief (`src/pages/DashboardPage.tsx`). No context menu, Ralph or editor/folder buttons.
 - [ ] partial: ConfirmDialog and ContextMenu (`src/overlay.rs`, keyboard: ↑/↓/Enter/Esc). Skeletons, Select, CheckBox, PathInput, Tooltip not yet (gpui-component has equivalents)
 - [ ] partial: icons. File-type icons in the tree (`FileIcons.tsx`), tab icons (`Icons.tsx`), Lucide for the titlebar and toasts. No activity bar or brand icons yet (`BrandIcons.tsx`).
@@ -810,12 +892,13 @@ Status of everything the React app does: **done**, **partial** (with what's miss
 - [ ] — Folders card (`FoldersCard.tsx`) and folder scopes `dir:<path>` (`src/lib/folderScope.ts`)
 - [ ] — Open in an external editor / reveal folder
 - [x] done: Workspace pull (fast-forward from a repo row) and status summary (dashboard, delivery flow)
-- [ ] — Race (`Race.tsx`), CI artifacts (`ArtifactsSection.tsx`), AI usage bar (`UsageBar.tsx`)
+- [ ] partial: CI artifacts and AI usage as tool tabs per workspace (`ArtifactsSection.tsx`, `UsageBar.tsx`); Race (`Race.tsx`) not ported
 - [ ] — Plan modal and PLAN.md progress (`PlanModal.tsx`, `PlanProgress.tsx`)
-- [ ] — Integrations page (`IntegrationsPage.tsx`)
+- [x] done: Integrations page: Shortcut, Linear, Figma tokens, connect / disconnect (`IntegrationsPage.tsx`)
+- [x] done: open the workspace or a repo in VS Code / Zed, reveal the workspace folder
 
 ### Repos / worktrees
-- [ ] — Settings → Repos, repo form, GitHub repo picker, groups (`ReposSection.tsx`, `RepoFormModal.tsx`, `GithubRepoModal.tsx`, `GroupsSection.tsx`)
+- [x] done: Settings → Repositories, folders, repo form (inline), GitHub repo picker, local clones, groups (`ReposSection.tsx`, `FoldersCard.tsx`, `RepoFormModal.tsx`, `GithubRepoModal.tsx`, `GroupsSection.tsx`). Per-OS build commands are kept, not edited.
 - [ ] partial: Repo page: branches (switch, create, delete), pull, push/publish, commit, stash, history (undo, revert), stashes, a paused operation, prune (`RepoPage.tsx`). No compare or cherry-pick.
 - [ ] partial: repo briefs on the dashboard (`src/lib/useRepoBriefs.ts`); no sidebar list or background fetch timer
 
@@ -824,7 +907,7 @@ Status of everything the React app does: **done**, **partial** (with what's miss
 - [x] done: agent status from spinner lines and Claude hooks, in tab titles and the sidebar (`src/lib/agentStatus.ts`, backend `agent_hooks.rs`)
 - [ ] partial: resume claude/opencode sessions (Recent per scope, restart with `--resume`). No initial prompt injection (`TerminalPane.tsx`), no minimized agent tabs (`App.tsx`).
 - [ ] — Live agent feed (`AgentFeed.tsx`)
-- [ ] — Ralph view, PRD and run modals (`RalphView.tsx`, `RalphPrdModal.tsx`, `RalphRunModal.tsx`)
+- [ ] partial: Ralph view: plan or repo PRD, stories, start (iterations, push) / pause / stop, run state, live feed, past runs (`RalphView.tsx`, `RalphRunModal.tsx`). PRD writing and editing (`RalphPrdModal.tsx`), run overrides of agent/model, the custom prompt are not ported.
 
 ### Terminal
 - [x] done: PTY terminal on `orbit_core::pty` with spawn at the real size, write, resize, 10k scrollback, 256/true colour, cursor shapes, OSC title, bracketed paste, alternate-screen wheel, flow control, scrollback restore after restart and forget on close (`TerminalPane.tsx`)
@@ -862,7 +945,7 @@ Status of everything the React app does: **done**, **partial** (with what's miss
 - [x] done: references, implementation, type definition, document and workspace symbols, completion, signature help, code actions (with `workspace/applyEdit`), formatting, rename across files, `$/progress`, restart
 - [ ] — declaration, document highlights, semantic tokens, snippets, completion resolve
 - [ ] partial: servers for Python, Go, C#, Lua are mapped like C++/Rust/TS (orbit-core's table), untested (only clangd here)
-- [ ] — Diagnostics filter from config; Languages settings (server per language, logs, restart) (`LanguagesSection.tsx`)
+- [ ] partial: Languages settings (server per language, custom command, enabled, errors only, hidden codes, running servers with log and stop) (`LanguagesSection.tsx`). The editor doesn't apply the diagnostics filter yet.
 
 ### Search
 - [x] done: Search Everywhere (double Shift toggles, `Ctrl+Shift+A` on Actions): tabs All/Files/Symbols/Actions/Text with Tab/Shift+Tab, fuzzy-ranked files, `workspace/symbol` over the workspace's running servers, registry actions, text through orbit-core's search (debounced), "more ›" section headers (`SearchEverywhereModal.tsx`, `src/lib/fuzzy.ts`, `src/lib/commands.ts`)
@@ -888,7 +971,8 @@ Status of everything the React app does: **done**, **partial** (with what's miss
 - [x] done: DAP debugger: session (gdb `-i dap` / lldb-dap), gutter breakpoints (click, `Ctrl+F8`, persisted), paused line, threads, call stack, lazy variables, console with evaluate, `F9`/`F8`/`F7`/`Shift+F8`, symlink path mapping (`src/lib/dap/*`, `DebugView.tsx`). lldb-dap is wired but untested (not installed here).
 
 ### Settings / themes
-- [ ] — Settings page and sections: AI, Appearance, Health, Updates (`SettingsPage.tsx`, `AiSection.tsx`, `AppearanceSection.tsx`, `HealthSection.tsx`, `UpdatesSection.tsx`)
+- [x] done: Settings page with its filtered section list and every section: Repositories, Groups, AI, Languages, Appearance, Health, Updates (`SettingsPage.tsx`, `AiSection.tsx`, `AppearanceSection.tsx`, `HealthSection.tsx`, `UpdatesSection.tsx`). Appearance shows Orbit Dark only.
+- [x] done: update check at start, hourly and on demand, with a toast once per version (`src/lib/updater.ts`); no install yet (packaging)
 - [ ] partial: themes. Orbit Dark only, with the shell's metrics (titlebar, tabs, menus, modals, toasts, buttons) from App.css (tokens from `src/App.css` / `src/lib/theme.ts`, gpui-component theme JSON); the other six themes and the picker are not ported.
 
 ### Notifications
