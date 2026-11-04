@@ -355,7 +355,7 @@ fn register_actions(cx: &mut App) {
             let last = store(cx).read(cx).recent.iter().find(|r| r.workspace == scope).cloned();
             match last {
                 Some(r) => resume(a, &r, w, cx),
-                None => a.notice = Some("No ended session to resume here".into()),
+                None => a.toast(crate::toast::ToastKind::Info, "No ended session to resume here", None, cx),
             }
         })
     });
@@ -403,8 +403,7 @@ fn open(
     let cwd = match pty::session_dir(&meta.workspace, meta.repo.as_deref(), None) {
         Ok(dir) => dir,
         Err(e) => {
-            app.notice = Some(format!("{}: {e}", meta.session_name).into());
-            cx.notify();
+            app.toast_error(format!("{}: {e}", meta.session_name), cx);
             return None;
         }
     };
@@ -536,6 +535,8 @@ fn restore(app: &mut OrbitApp, saved: Vec<SessionMeta>, window: &mut Window, cx:
     ];
     let store = store(cx);
     store.update(cx, |s, _| s._app_observers = observers);
+    // The shell restored the files first: their active tab stays active.
+    let active = app.active_tab().map(|t| t.key(cx));
     let first = app.tabs.len();
     for meta in saved {
         let (args, replay) = match (&meta.cmd, &meta.agent_session_id) {
@@ -547,8 +548,11 @@ fn restore(app: &mut OrbitApp, saved: Vec<SessionMeta>, window: &mut Window, cx:
         };
         open(app, meta, args, replay, None, window, cx);
     }
-    if app.tabs.len() > first {
-        app.activate(first, window, cx);
+    match active.and_then(|k| app.tab_index(&k, cx)) {
+        Some(ix) => app.activate(ix, window, cx),
+        // Sessions go before files: the first one is at 0.
+        None if app.tabs.len() > first => app.activate(0, window, cx),
+        None => {}
     }
 }
 
@@ -592,8 +596,7 @@ fn next_needing_input(app: &mut OrbitApp, window: &mut Window, cx: &mut Context<
             activate(app, &key, window, cx);
         }
         None => {
-            app.notice = Some("No session is waiting for input".into());
-            cx.notify();
+            app.toast(crate::toast::ToastKind::Info, "No session is waiting for input", None, cx);
         }
     }
 }

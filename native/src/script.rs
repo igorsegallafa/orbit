@@ -5,7 +5,7 @@
 //! The steps run in a fixed order, each one optional:
 //! workspace → expand → terminals and sessions → open (+cursor) → wait for
 //! the language server → type → keys → ctrl-click → hover → diff → terminal
-//! drag → steps → dump.
+//! drag → steps → shell steps (`--do`, see `steps.rs`) → dump.
 //!
 //! Besides key specs, `--keys` takes `@namespace::Action` (dispatched to the
 //! focused element, like a key binding would), `wait` (100 ms, `wait*20` for
@@ -53,6 +53,10 @@ pub struct Script {
     pub steps: Vec<String>,
     pub exit_after: Option<u64>,
     pub dump: Option<PathBuf>,
+    /// State file to restore from and save to (a self-test uses none otherwise).
+    pub state: Option<PathBuf>,
+    /// Shell steps run last (`steps.rs`): `--do "rclick:tab:0;click:menu:Close"`.
+    pub shell_steps: Vec<String>,
 }
 
 fn cell(spec: &str) -> Option<(usize, usize)> {
@@ -101,6 +105,8 @@ impl Script {
                 "--scroll" => s.scroll = args.next().and_then(|v| v.parse().ok()).unwrap_or(0),
                 "--exit-after" => s.exit_after = args.next().and_then(|v| v.parse().ok()),
                 "--dump" => s.dump = args.next().map(PathBuf::from),
+                "--state" => s.state = args.next().map(PathBuf::from),
+                "--do" => s.shell_steps.extend(args.next().unwrap_or_default().split(';').map(|x| x.trim().to_string()).filter(|x| !x.is_empty())),
                 _ => eprintln!("unknown argument {a}"),
             }
         }
@@ -108,7 +114,7 @@ impl Script {
     }
 
     pub fn is_active(&self) -> bool {
-        self.exit_after.is_some() || self.dump.is_some()
+        self.exit_after.is_some() || self.dump.is_some() || !self.steps.is_empty() || !self.shell_steps.is_empty()
     }
 }
 
@@ -166,7 +172,7 @@ async fn wait_until(cx: &mut AsyncApp, secs: u64, mut cond: impl FnMut(&mut Asyn
 }
 
 /// The state after the script, as text.
-fn dump(app: &OrbitApp, log: &str, cx: &gpui::App) -> String {
+pub fn dump(app: &OrbitApp, log: &str, cx: &gpui::App) -> String {
     let mut out = String::new();
     let frames = terminal::FRAMES.load(Ordering::Relaxed).max(1);
     let _ = writeln!(
@@ -278,9 +284,7 @@ fn dump(app: &OrbitApp, log: &str, cx: &gpui::App) -> String {
     for c in &commands {
         let _ = writeln!(out, "  {:40} {:32} {} ({})", c.id, c.title, c.keys.join(" "), c.context);
     }
-    if let Some(n) = &app.notice {
-        let _ = writeln!(out, "--- notice: {n}");
-    }
+    out.push_str(&crate::steps::shell_dump(app, cx));
     dump_sessions(&mut out, cx);
     out
 }
@@ -480,6 +484,8 @@ pub async fn run(script: Script, window: WindowHandle<Root>, app: Entity<OrbitAp
     }
 
     run_steps(&script.steps, any_window, &app, &mut log, cx).await;
+    crate::steps::run(&script.shell_steps, any_window, &app, &mut log, cx).await;
+
     finish(script, &app, log, started, cx).await
 }
 
