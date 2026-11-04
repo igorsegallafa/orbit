@@ -699,7 +699,7 @@ pub fn progress(p: &WsPage, cx: &mut Context<PageTab>) -> Option<impl IntoElemen
                     )
                     .child(div().text_size(px(11.5)).text_color(c(theme::TEXT_DIM)).child(format!("{done}/{total} · {pct}%"))),
             )
-            .child(div().id("plan-tasks").max_h(px(220.)).overflow_y_scroll().flex().flex_col().gap(px(6.)).children(tasks.iter().enumerate().map(|(i, t)| {
+            .child(crate::scroll::contain(&p.plan_scroll, div().id("plan-tasks").max_h(px(220.)).overflow_y_scroll().track_scroll(&p.plan_scroll).relative().child(crate::probe::probe("plan-tasks")).flex().flex_col().gap(px(6.)).children(tasks.iter().enumerate().map(|(i, t)| {
                 div()
                     .id(gpui::ElementId::Name(format!("plan-task:{i}").into()))
                     .relative()
@@ -719,6 +719,6 @@ pub fn progress(p: &WsPage, cx: &mut Context<PageTab>) -> Option<impl IntoElemen
                     )
                     .child(probe(format!("plan-task:{i}")))
                     .on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.toggle_task(i, w, cx)))
-            }))),
+            })))),
     )
 }

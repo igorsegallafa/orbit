@@ -39,6 +39,8 @@ pub struct WsPage {
     /// The check being re-run.
     pub rerunning: Option<String>,
     pub scroll: ScrollHandle,
+    /// The plan checklist, which scrolls inside the page.
+    pub plan_scroll: ScrollHandle,
 }
 
 impl WsPage {
@@ -58,6 +60,7 @@ impl WsPage {
             expanded: None,
             rerunning: None,
             scroll: ScrollHandle::new(),
+            plan_scroll: ScrollHandle::new(),
         }
     }
 
@@ -105,6 +108,7 @@ impl WsPage {
     }
 
     pub fn dump(&self, out: &mut String) {
+        let _ = writeln!(out, "  scroll page {:.0} · plan {:.0} of {:.0}", -f32::from(self.scroll.offset().y), -f32::from(self.plan_scroll.offset().y), f32::from(self.plan_scroll.max_offset().y));
         if let Some(m) = &self.meta {
             let _ = writeln!(out, "  branch {} from {} · repos {:?}", m.branch, m.base, m.repos);
         }

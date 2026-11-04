@@ -21,7 +21,7 @@ use crate::probe;
 use crate::toast::ToastKind;
 use gpui::{
     px, AnyWindowHandle, AsyncApp, Focusable, Entity, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, NavigationDirection, PlatformInput, Pixels, Point,
+    MouseUpEvent, NavigationDirection, PlatformInput, Pixels, Point, ScrollDelta, ScrollEvent,
 };
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -91,6 +91,27 @@ pub async fn run(steps: &[String], window: AnyWindowHandle, app: &Entity<OrbitAp
                     Some(at) => click(window, at, button, count, cx).await,
                     None => {
                         let _ = writeln!(log, "  no element {arg:?} on screen");
+                    }
+                }
+            }
+            // wheel:<element>:<dy> scrolls with the mouse over the element.
+            "wheel" => {
+                let parsed = arg.rsplit_once(':').and_then(|(name, d)| Some((name, d.parse::<f32>().ok()?)));
+                let Some((name, dy)) = parsed else {
+                    let _ = writeln!(log, "  bad wheel {arg:?}");
+                    continue;
+                };
+                match locate(window, name, cx).await {
+                    Some(at) => {
+                        let modifiers = Modifiers::default();
+                        send(window, PlatformInput::MouseMove(MouseMoveEvent { position: at, pressed_button: None, modifiers }), cx);
+                        sleep(cx, 50).await;
+                        let delta = ScrollDelta::Pixels(gpui::point(px(0.), px(dy)));
+                        send(window, PlatformInput::Scroll(ScrollEvent { position: at, delta, modifiers, ..Default::default() }), cx);
+                        sleep(cx, 150).await;
+                    }
+                    None => {
+                        let _ = writeln!(log, "  no element {name:?} on screen");
                     }
                 }
             }
