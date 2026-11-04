@@ -11,7 +11,7 @@ use crate::review::ui;
 use crate::theme::{self, c};
 use crate::toast::ToastKind;
 use gpui::{div, prelude::*, px, App, ClickEvent, Context, Entity, Window};
-use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::input::{InputEvent, InputState};
 use orbit_core::config::Config;
 use orbit_core::integrations::{self, CardInfo, TrackerKind};
 use orbit_core::workspace::{self, CardRef};
@@ -477,7 +477,7 @@ impl PageTab {
             let b = f.effective_branch(cx);
             if b.is_empty() || !f.branch.read(cx).value().trim().is_empty() { String::new() } else { format!("Branch: {b}") }
         };
-        let input = |id: &'static str, state: &Entity<InputState>| div().id(id).relative().child(Input::new(state)).child(crate::probe::probe(id));
+        let input = |id: &'static str, state: &Entity<InputState>| div().id(id).relative().child(kit::input(state)).child(crate::probe::probe(id));
         let mut body = div()
             .id("create-body")
             .flex()
@@ -510,7 +510,7 @@ impl PageTab {
                             div()
                                 .id("create-base")
                                 .relative()
-                                .h(px(34.))
+                                .h(px(theme::size::CONTROL))
                                 .px(px(10.))
                                 .flex()
                                 .items_center()
@@ -596,7 +596,7 @@ impl PageTab {
             .flex_col()
             .gap_1()
             .child(field("Pick a card"))
-            .child(div().id("create-card-search").relative().child(Input::new(&p.query)).child(crate::probe::probe("create-card-search")))
+            .child(div().id("create-card-search").relative().child(kit::input(&p.query)).child(crate::probe::probe("create-card-search")))
             .child(div().id("create-cards").flex().flex_col().max_h(px(220.)).overflow_y_scroll().children(rows))
             .when_some(p.picked.as_ref(), |d, card| {
                 d.child(div().text_xs().text_color(c(theme::TEXT_DIM)).child(format!("Selected {}: name and branch filled from the card.", card.id)))

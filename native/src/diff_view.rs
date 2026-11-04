@@ -17,7 +17,7 @@ use gpui_component::diff::{
     Diff, DiffAnnotation, DiffDecoration, DiffFile, DiffLinePosition, DiffLineRange, DiffMode, DiffSide, DiffState,
 };
 use gpui_component::highlighter::SyntaxHighlighter;
-use gpui_component::input::{Input, InputEvent, InputState, Rope};
+use gpui_component::input::{InputEvent, InputState, Rope};
 use gpui_component::ActiveTheme;
 use orbit_core::notes::Note;
 use std::path::{Path, PathBuf};
@@ -590,7 +590,7 @@ fn composer_box(tab: &WeakEntity<DiffTab>, composer: &Composer, submit: &str) ->
                 let _ = t3.update(cx, |t, cx| t.cancel_composer(window, cx));
             }
         })
-        .child(div().relative().child(Input::new(&composer.input)).child(probe("composer:input")))
+        .child(div().relative().child(crate::workspace_ui::kit::input(&composer.input)).child(probe("composer:input")))
         .child(
             div()
                 .flex()

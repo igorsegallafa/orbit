@@ -1284,7 +1284,7 @@ fn changes_panel(r: &RepoView, ov: Option<&RepoOverview>, cx: &mut Context<PageT
                     div()
                         .flex()
                         .gap(px(6.))
-                        .child(div().id("repo-summary").relative().flex_1().child(Input::new(&r.summary).disabled(none || op)).child(probe("repo-summary")))
+                        .child(div().id("repo-summary").relative().flex_1().child(kit::input(&r.summary).disabled(none || op)).child(probe("repo-summary")))
                         .child(if r.drafting {
                             div()
                                 .id("repo-draft")

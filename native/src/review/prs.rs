@@ -5,7 +5,7 @@ use super::ui::{self, Tone};
 use super::{toolbar, Load, ReviewTab};
 use crate::theme::{self, c};
 use gpui::{div, prelude::*, px, ClickEvent, Context, Entity, Window};
-use gpui_component::input::{Input, InputState};
+use gpui_component::input::InputState;
 use orbit_core::prs::{self, PrSpec};
 
 /// A repo PRs can be created for, with its title and description.
@@ -324,7 +324,7 @@ impl ReviewTab {
                                         .on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.draft(ix, w, cx))),
                                 ),
                         )
-                        .when(include, |d| d.child(Input::new(&row.title)).child(Input::new(&row.body))),
+                        .when(include, |d| d.child(crate::workspace_ui::kit::input(&row.title)).child(crate::workspace_ui::kit::input(&row.body))),
                 );
             }
             body = body.child(

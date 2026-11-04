@@ -15,7 +15,7 @@ use gpui_component::diff::{
     Diff, DiffAnnotation, DiffDecoration, DiffFile, DiffHunkSeparator, DiffLinePosition, DiffLineRange, DiffMode, DiffSide, DiffState,
 };
 use gpui_component::highlighter::SyntaxHighlighter;
-use gpui_component::input::{Input, InputEvent, InputState, Rope};
+use gpui_component::input::{InputEvent, InputState, Rope};
 use gpui_component::{ActiveTheme, IconName};
 use orbit_core::git::ChangeEntry;
 use orbit_core::notes::{Note, NotesFile};
@@ -917,7 +917,7 @@ fn composer_box(tab: &WeakEntity<ReviewTab>, composer: &Composer, submit: &'stat
                 let _ = t3.update(cx, |t, cx| t.cancel_composer(cx));
             }
         })
-        .child(div().relative().child(Input::new(&composer.input)).child(crate::probe::probe("composer:input")))
+        .child(div().relative().child(crate::workspace_ui::kit::input(&composer.input)).child(crate::probe::probe("composer:input")))
         .child(
             div()
                 .flex()

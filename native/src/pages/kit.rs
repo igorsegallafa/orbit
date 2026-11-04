@@ -299,7 +299,7 @@ pub fn select(name: impl Into<SharedString>, label: impl Into<SharedString>) -> 
         .id(name.clone())
         .relative()
         .w_full()
-        .h(px(34.))
+        .h(px(theme::size::CONTROL))
         .px(px(10.))
         .flex()
         .items_center()
@@ -353,7 +353,7 @@ pub fn check(name: impl Into<SharedString>, label: impl Into<SharedString>, on: 
 /// A text input styled like the app's `input` (34px, `--bg`, strong border;
 /// accent border while focused).
 pub fn field(name: impl Into<String>, state: &Entity<InputState>, window: &Window, cx: &App) -> Div {
-    field_sized(name, state, 34., 13., window, cx)
+    field_sized(name, state, theme::size::CONTROL, 13., window, cx)
 }
 
 pub fn field_sized(name: impl Into<String>, state: &Entity<InputState>, h: f32, text: f32, window: &Window, cx: &App) -> Div {

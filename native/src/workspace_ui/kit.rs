@@ -257,3 +257,10 @@ pub fn modal_header(title: impl Into<SharedString>) -> Div {
 pub fn modal_footer() -> Div {
     div().flex_none().flex().items_center().justify_end().gap(px(8.)).px(px(16.)).py(px(12.)).border_t_1().border_color(c(theme::BORDER))
 }
+
+/// `input`: a text field at the control height (`--control-height`, 34px),
+/// level with the selects and buttons beside it.
+pub fn input(state: &gpui::Entity<gpui_component::input::InputState>) -> gpui_component::input::Input {
+    // `Styled::h`: the Input's own `h` sets a multi-line height only.
+    Styled::h(gpui_component::input::Input::new(state), px(theme::size::CONTROL))
+}

@@ -11,7 +11,7 @@ use crate::workspace_ui::icons::icon;
 use crate::workspace_ui::kit::{self, Kind};
 use crate::workspace_ui::{plural, spawn, PageTab};
 use gpui::{div, prelude::*, px, ClickEvent, Context, Entity, FocusHandle, Focusable, FontWeight, KeyDownEvent, Rgba, SharedString, Window};
-use gpui_component::input::{Input, InputState, Textarea, TextareaState};
+use gpui_component::input::{InputState, Textarea, TextareaState};
 use orbit_core::prs::{PlanState, PrPlan, PrSpec};
 use std::fmt::Write as _;
 use std::rc::Rc;
@@ -689,7 +689,7 @@ impl PageTab {
         out.when(p.state == PlanState::NeedsPush, |d| d.child(div().text_size(px(12.)).text_color(c(theme::WARN)).child(format!("{}.", p.reason))))
             .when_some(r.error.clone(), |d, e| d.child(error_box(e)))
             .child(label("Title"))
-            .child(div().id("prs-title").relative().child(Input::new(&r.title).disabled(busy)).child(crate::probe::probe("prs-title")))
+            .child(div().id("prs-title").relative().child(kit::input(&r.title).disabled(busy)).child(crate::probe::probe("prs-title")))
             .child(
                 div()
                     .mt(px(6.))
