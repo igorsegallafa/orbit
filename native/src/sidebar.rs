@@ -343,11 +343,7 @@ impl OrbitApp {
                                 .tooltip(|window, cx| Tooltip::new("Remove from recent").build(window, cx))
                                 .on_click(cx.listener(move |_, _, _, cx| {
                                     cx.stop_propagation();
-                                    let id = r2.resume_id.clone();
-                                    sessions::store(cx).update(cx, |s, cx| {
-                                        s.recent.retain(|x| x.resume_id != id);
-                                        cx.notify();
-                                    });
+                                    sessions::forget_recent(&r2.resume_id, cx);
                                 })),
                         )
                         .child(probe(id.to_string()))

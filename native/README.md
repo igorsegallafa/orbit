@@ -378,7 +378,7 @@ Caveats found:
 | `src/debug/` | the DAP session (`mod.rs`: launch sequence, stops, frames, variables, console, breakpoints), the DAP client over `orbit_core::dap` (`client.rs`), editor breakpoints and paused line (`gutter.rs`), the Debug tab (`view.rs`) |
 | `src/workspace_ui/` | page tabs (`mod.rs`: `PageTab`, its modal, commands, dump) · `dashboard.rs` · `workspace_page.rs` (header tools, delivery flow, repos, PRs) · `plan.rs` (Plan · progress, Plan modal) · `race.rs` · `repo_page.rs` (a repo's base clone) · `forms.rs` (new workspace, add repositories) · `kit.rs` (buttons, badges, checkbox, modal shell) · `icons.rs` (Icons.tsx) |
 | `src/git/` | the git flows shown over a page: `commit.rs`, `push.rs`, `rebase.rs`, `merge.rs`, the branch drift banner (`drift.rs`); shared modal pieces in `mod.rs` |
-| `src/pages/` | tool tabs (`TabKind::Tool`; `mod.rs`: `PageTab`, `PageView`, `Host`, commands, sidebar entries, dump) · `settings.rs` (sections, AI, Languages, Appearance, Health, Updates) · `repos.rs` (Repositories, Folders, Groups) · `integrations.rs` · `ralph.rs` · `usage.rs` · `artifacts.rs` · `updates.rs` (update check) · `crash.rs` (panic hook) · `ui.rs` |
+| `src/pages/` | tool tabs (`TabKind::Tool`; `mod.rs`: `PageTab`, `PageView`, `Host`, commands, sidebar entries, dump) · `settings.rs` (sections, AI, Languages, Appearance, Health, Updates) · `repos.rs` (Repositories, Folders, Groups) · `integrations.rs` · `ralph.rs` · `usage.rs` · `updates.rs` (update check) · `crash.rs` (panic hook) · `ui.rs` |
 | `src/script.rs` | self-test mode and dumps |
 | `src/motion.rs` | App.css's motion: durations and easings (`cubic-bezier`), shimmering skeletons, entry animations (page, card, modal, menu, toast), pulses and spinners, and `Tween` (a value or `:hover` transition) |
 | `src/theme.rs` | the seven themes of `src/lib/theme.ts` as colour tokens (`c(theme::PANEL)` resolves against the active theme), the gpui-component theme built from them, and the shell metrics (`src/App.css`) |
@@ -434,7 +434,7 @@ Any `Fn(&str, Value)` closure is a sink; the app passes closures that send into 
 
 **What moved** (with their tests, 124 Rust tests in total, as before plus one for `events`):
 `config`, `proc`, `git`, `github`, `links`, `workspace`, `health`, `integrations`, `usage`, `repo`,
-`review`, `search`, `notes`, `files`, `artifacts`, `lsp`, `dap`, `watch`, `build`, `run`,
+`review`, `search`, `notes`, `files`, `lsp`, `dap`, `watch`, `build`, `run`,
 `agent_hooks`, `agent/*` (plan, live feed, runner, stream parsing) and `ralph/*`. Command bodies that
 held logic became core functions (`notes::add`, `lsp::cpp_setup`, `ralph::start`, `repo::briefs`,
 `files::*`…); the wrappers only call them.
@@ -1119,10 +1119,10 @@ to the workspace), Review feedback /
 Investigate on the workspace page, the race comparison section. Commit inspection is a modal, not a
 review tab (the review tabs need a workspace).
 
-## Stage: settings, Ralph, integrations, usage, artifacts, updates, crash log
+## Stage: settings, Ralph, integrations, usage, updates, crash log
 
 `src/pages/`: tool tabs (`TabKind::Tool`, a `PageTab` wrapping any `PageView`) opened from the
-sidebar (*WORKSPACE*: Ralph, AI usage, CI artifacts; *ORBIT*: Integrations, Settings) or the palette.
+sidebar (*WORKSPACE*: Ralph, AI usage; *ORBIT*: Integrations, Settings) or the palette.
 
 - **Settings** (`Ctrl+,`, `app.settings`; `settings.languages|health|ai`): its own section list
   with the filter (`Enter` opens the first match). Repositories (folders, add manually / local clone
@@ -1156,9 +1156,12 @@ sidebar (*WORKSPACE*: Ralph, AI usage, CI artifacts; *ORBIT*: Integrations, Sett
   running and background commands, tool chips, `**bold**`/`` `code` ``,
   follows the end, *↓ Latest*) and past runs. A run ending toasts and adds an inbox item even with
   no Ralph tab open. An empty plan offers *Plan this feature* (`workspace.plan`, the Plan modal).
-- **AI usage** (`workspace.usage`): per model tokens and cost, sessions on click, the Claude 5h/7d
-  windows; every 30 s. **CI artifacts** (`workspace.artifacts`): latest run per workflow of each
-  repo's branch; Download extracts into `~/Downloads/Orbit/<workspace>/` and opens the folder.
+- **AI usage** (`workspace.usage`): totals, the Claude 5h/7d windows, and the sessions per model
+  (title, else the Orbit tab's name, else the short id); every 30 s. A session open in Orbit can be
+  ended (×), an ended one dropped from Recent; *Close all sessions* ends the workspace's open ones
+  (confirmed). *Clean temporary files* deletes, after a confirm with the size, the scrollback and
+  agent-settings files under the config dir whose session is no longer open or saved
+  (`orbit_core::pty::leftovers`); agents' own transcripts are never touched.
 - **Updates**: `orbit_core::updates::check` reads the release's `latest.json` (curl) and compares it
   with the app's version; at start and hourly, a toast once per new version, and Settings →
   Updates. Installing is described in *Release and in-app update*.
@@ -1193,8 +1196,7 @@ GitHub or tracker was called.
   "Stub User" (credentials in the scratch config dir); Disconnect.
 - Updates: a `9.9.0` manifest gave the toast at start and "Orbit 9.9.0 is available" in Settings.
 - Usage: a Claude log in the scratch `CLAUDE_CONFIG_DIR` → `claude-sonnet-5-5 2.0k in / 4.0k out /
-  50.0k cache · 1 sessions`. Artifacts: the stub's `game-linux` (5.0 MB) listed and downloaded
-  (`gh run download 5 -R o/web -n game-linux -D …`).
+  50.0k cache · 1 sessions`.
 - Ralph with a **stub `claude`** (it ticks the next story in prd.json and commits): target `web`,
   3 iterations, Start → `US-001` then `US-002` pass, 2 commits, `■ stopped: complete after 2
   iterations` and a toast; the plan target lists PLAN.md's tasks (1/2 done). *Until done* + Stop
@@ -1202,7 +1204,7 @@ GitHub or tracker was called.
 - Crash: `ORBIT_TEST_PANIC=1500` wrote `native-crash.log` (message, place, version, backtrace) and
   the marker; the next start showed the toast and removed the marker.
 
-Self-test probes: `nav-settings`, `nav-integrations`, `nav-ralph`, `nav-usage`, `nav-artifacts`,
+Self-test probes: `nav-settings`, `nav-integrations`, `nav-ralph`, `nav-usage`,
 `settings-filter`, `settings-nav:<section>`, `folders-repos|workspaces|save`, `repo-add`,
 `repo-add-local`, `repo-add-github`, `repo:<name>:clone|reveal|edit|remove`, `form-name|url|path|build|
 output|shared|worktree|branch-only|auto-switch|clone-now|save|cancel`, `local-path`, `local-add`,
@@ -1215,8 +1217,7 @@ output|shared|worktree|branch-only|auto-switch|clone-now|save|cancel`, `local-pa
 `ralph-edit-rules`, the run form's `ralph-run-fixed|until|iterations|stop-after|agent|model|extra|
 prompt-toggle|prompt|hours|stall|timeout|idle|grace|wait|wait-min|push|cancel|start`, `ralph-prompt-save|restore`,
 the PRD form's `prd-brief|write-now|interview|opt:<i>|answer|ready|next|summary|write|gen-cancel|cancel|close`,
-`usage:<model>`,
-`artifact:<repo>:<name>`. Inputs inside the pages fill through `click:<probe>` then `type:`.
+`usage-refresh|clean|close-all`, `usage-close:<n>`. Inputs inside the pages fill through `click:<probe>` then `type:`.
 
 ## Stage: shell parity (themes, sidebar, frame, dock)
 
@@ -1546,13 +1547,13 @@ Status of everything the React app did: **done**, **partial** (with what's missi
 ### Workspaces & sidebar
 - [ ] partial: workspace list from `config.yaml` / `.workspace.yaml`, with sessions, status indicators, recent sessions, repos (`src/App.tsx`, `StatusIndicator.tsx`). No variant (race) grouping beyond the sort, no sidebar width animation.
 - [x] done: Create workspace: blank (manual), from an existing branch, or from a Shortcut/Linear card (searched, pre-fills name and branch, saved as the workspace's card), groups, base branch menu, linked repos noted (`WorkspaceCreateModal.tsx`)
-- [ ] partial: Workspace detail page: delivery flow, repos with badges and pull, PRs with check aggregates, remove (`WorkspaceDetailPage.tsx`). No plan, race, artifacts, usage, investigate/fix checks with AI, review feedback.
+- [ ] partial: Workspace detail page: delivery flow, repos with badges and pull, PRs with check aggregates, remove (`WorkspaceDetailPage.tsx`). No plan, race, usage, investigate/fix checks with AI, review feedback.
 - [x] done: Add repositories (`AddReposModal.tsx`)
 - [x] done: Branch drift banner: switch back, stash and switch, auto-switch (`BranchDriftBanner.tsx`)
 - [ ] — Folders card (`FoldersCard.tsx`) and folder scopes `dir:<path>` (`src/lib/folderScope.ts`)
 - [ ] — Open in an external editor / reveal folder
 - [x] done: Workspace pull (fast-forward from a repo row) and status summary (dashboard, delivery flow)
-- [ ] partial: CI artifacts and AI usage as tool tabs per workspace (`ArtifactsSection.tsx`, `UsageBar.tsx`); Race (`Race.tsx`) not ported
+- [ ] partial: AI usage as a tool tab per workspace (`UsageBar.tsx`); Race (`Race.tsx`) not ported
 - [ ] — Plan modal and PLAN.md progress (`PlanModal.tsx`, `PlanProgress.tsx`)
 - [x] done: Integrations page: Shortcut, Linear, Figma tokens, connect / disconnect (`IntegrationsPage.tsx`)
 - [x] done: open the workspace or a repo in VS Code / Zed, reveal the workspace folder

@@ -651,6 +651,27 @@ pub fn closed(view: &Entity<TerminalView>, cx: &mut App) {
     }
 }
 
+/// Ends the open sessions `which` picks, as the sidebar's "End session" does.
+pub fn end(app: &mut OrbitApp, which: impl Fn(&SessionMeta) -> bool, window: &mut Window, cx: &mut Context<OrbitApp>) {
+    while let Some(ix) = app.tabs.iter().position(|t| matches!(&t.kind, TabKind::Terminal(v) if which(&v.read(cx).meta))) {
+        app.close_tab(ix, true, window, cx);
+    }
+}
+
+pub fn forget_recent(resume_id: &str, cx: &mut App) {
+    store(cx).update(cx, |s, cx| {
+        s.recent.retain(|r| r.resume_id != resume_id);
+        s.save();
+        cx.notify();
+    });
+}
+
+/// Keys of the sessions open here or saved by any Orbit window: their files are in use.
+pub fn live_keys(cx: &App) -> Vec<String> {
+    let saved: Saved = saved_path().and_then(|p| std::fs::read(p).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    store(cx).read(cx).open.iter().map(|(m, _)| m.id.clone()).chain(saved.sessions.into_iter().map(|m| m.id)).collect()
+}
+
 /// Reopens a recent session in a new tab, picking the conversation up.
 pub fn resume(app: &mut OrbitApp, r: &RecentSession, window: &mut Window, cx: &mut Context<OrbitApp>) {
     store(cx).update(cx, |s, cx| {

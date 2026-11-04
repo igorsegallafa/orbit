@@ -10,6 +10,7 @@
 //! | `key:<spec>` | one keystroke (`ctrl-shift-a`, `escape`) |
 //! | `type:<text>` | typed text |
 //! | `shift:<n>` | `n` bare Shift taps (modifier events; `shift:2` is a double Shift) |
+//! | `move:<probe>` | move the mouse over the probe (hover) |
 //! | `mouse:back` `mouse:forward` | the mouse's side buttons |
 //! | `cmd:<id>` | run a command by id |
 //! | `open:<path>` `preview:<path>` | open a file (relative to the workspace) |
@@ -180,6 +181,15 @@ pub async fn run(steps: &[String], window: AnyWindowHandle, app: &Entity<OrbitAp
                 }
                 sleep(cx, 150).await;
             }
+            "move" => match locate(window, arg, cx).await {
+                Some(position) => {
+                    send(window, PlatformInput::MouseMove(MouseMoveEvent { position, pressed_button: None, modifiers: Modifiers::default() }), cx);
+                    sleep(cx, 150).await;
+                }
+                None => {
+                    let _ = writeln!(log, "  no element {arg:?} on screen");
+                }
+            },
             "mouse" => {
                 let dir = if arg == "forward" { NavigationDirection::Forward } else { NavigationDirection::Back };
                 let at = gpui::point(px(700.), px(400.));
