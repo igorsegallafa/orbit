@@ -89,6 +89,17 @@ pub fn editor_actions() -> Vec<EditorCommand> {
     ]
 }
 
+/// tree-sitter-cpp's highlight query only adds C++ on top of C's (editors load both);
+/// gpui-component registers it alone, so includes, strings and most tokens stay plain.
+pub fn register_languages() {
+    use gpui_component::highlighter::LanguageRegistry;
+    let registry = LanguageRegistry::singleton();
+    if let (Some(c), Some(mut cpp)) = (registry.language("c"), registry.language("cpp")) {
+        cpp.highlights = format!("{}\n{}", cpp.highlights, c.highlights).into();
+        registry.register("cpp", &cpp);
+    }
+}
+
 pub fn bind_keys(cx: &mut App) {
     let editor = Some("OrbitEditor");
     cx.bind_keys([
@@ -1693,5 +1704,23 @@ mod tests {
         let items = outline_items(&v, Path::new("/x/Game.h"));
         assert_eq!(items.len(), 2);
         assert_eq!((items[1].label.as_ref(), items[1].depth, items[1].detail.as_ref()), ("Initialize", 1, "function · void ()"));
+    }
+}
+
+#[cfg(test)]
+mod highlight_tests {
+    #[test]
+    fn cpp_highlights_strings_and_numbers() {
+        use gpui_component::highlighter::{HighlightTheme, SyntaxHighlighter};
+        super::register_languages();
+        let code = "#include \"a.h\"\nint main() { foo(\"x\"); return 42; }\n";
+        let mut h = SyntaxHighlighter::new("cpp");
+        h.update(None, &gpui_component::Rope::from(code), None);
+        let theme = HighlightTheme::default_dark();
+        let styles = h.styles(&(0..code.len()), &*theme);
+        let colored = |text: &str| styles.iter().any(|(r, s)| &code[r.clone()] == text && s.color.is_some());
+        for token in ["#include", "\"a.h\"", "\"x\"", "42", "return"] {
+            assert!(colored(token), "{token} has no colour");
+        }
     }
 }

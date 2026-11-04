@@ -77,8 +77,9 @@ const GLYPHS: &[(&str, &str)] = &[
 ];
 
 /// One of Orbit's own UI glyphs (`doc`, `terminal`, `diff`), tinted by the text colour.
-pub fn ui_icon(name: &'static str, size: f32) -> gpui::Svg {
-    svg().path(format!("filetypes/{name}.svg")).size(px(size)).flex_none()
+/// GPUI's `svg()` doesn't inherit the text colour, so it is passed in.
+pub fn ui_icon(name: &'static str, size: f32, color: impl Into<gpui::Hsla>) -> gpui::Svg {
+    svg().path(format!("filetypes/{name}.svg")).size(px(size)).flex_none().text_color(color)
 }
 
 fn glyph(name: &str) -> Option<&'static str> {

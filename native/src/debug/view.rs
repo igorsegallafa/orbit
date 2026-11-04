@@ -89,7 +89,7 @@ fn tool(
         .text_color(c(theme::TEXT_DIM))
         .when(enabled, |d| d.cursor_pointer().hover(|s| s.bg(c(theme::PANEL_HOVER)).text_color(c(theme::TEXT))))
         .when(!enabled, |d| d.opacity(0.35))
-        .child(crate::icons::ui_icon(glyph, 13.))
+        .child(crate::icons::ui_icon(glyph, 13., c(theme::TEXT_DIM)))
         .child(probe(id))
         .tooltip(move |window, cx| Tooltip::new(hint).build(window, cx))
         .on_click(cx.listener(move |_, _, _, cx| {

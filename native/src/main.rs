@@ -54,6 +54,7 @@ fn main() {
         // Commands and keys, per stage.
         app::init(cx);
         file_tree::bind_keys(cx);
+        editor::register_languages();
         editor::bind_keys(cx);
         editor::load_diagnostic_filters(cx);
         search::init(cx);

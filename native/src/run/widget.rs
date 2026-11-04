@@ -136,7 +136,7 @@ fn button(
         .text_color(c(color))
         .when(enabled, |d| d.cursor_pointer().hover(|s| s.bg(c(theme::PANEL_RAISED))))
         .when(!enabled, |d| d.opacity(0.35))
-        .child(crate::icons::ui_icon(glyph, 14.))
+        .child(crate::icons::ui_icon(glyph, 14., c(color)))
         .child(probe(id))
         .tooltip(move |window, cx| Tooltip::new(hint.clone()).build(window, cx))
         .on_mouse_down(

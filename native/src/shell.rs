@@ -266,7 +266,7 @@ impl OrbitApp {
                     .text_color(c(theme::TEXT_DIM))
                     .hover(|s| s.bg(c(theme::PANEL_RAISED)).text_color(c(theme::TEXT)))
                     .when(active, |d| d.bg(c(theme::BG)).text_color(c(theme::TEXT)).border_color(c(theme::ACCENT)))
-                    .child(div().text_color(c(theme::TEXT_DIM)).child(icons::ui_icon(icon, 13.)))
+                    .child(icons::ui_icon(icon, 13., c(theme::TEXT_DIM)))
                     .child(div().when(tab.preview, |d| d.italic()).child(tab.title(cx)))
                     .child(
                         div()
