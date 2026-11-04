@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { FolderIcon, HomeIcon, RepoIcon, SatelliteIcon } from "./Icons";
+import { CheckIcon, FolderIcon, HomeIcon, RepoIcon, SatelliteIcon } from "./Icons";
 import { HOME_SCOPE, folderLabel, folderPath, folderScope, isFolderScope, recentFolders, rememberFolder } from "../lib/folderScope";
 
 /** What the session runs: null cmd = the user's shell. */
@@ -105,10 +105,12 @@ export function NewSessionMenu({ x, y, focus, repos, onOpen, onClose }: Props) {
       className={`context-menu-item nsm-loc ${target === scope ? "nsm-loc-on" : ""}`}
       onClick={() => setPicked(scope)}
       title={isFolderScope(scope) ? folderPath(scope) : undefined}
+      aria-pressed={target === scope}
     >
       <span className="nsm-icon">{icon}</span>
       <span className="nsm-name">{label}</span>
       {hint && <span className="nsm-hint">{hint}</span>}
+      <span className="nsm-check">{target === scope && <CheckIcon />}</span>
     </button>
   );
 

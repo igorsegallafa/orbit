@@ -146,7 +146,7 @@ mod tests {
     use super::*;
 
     fn ai(agent: &str) -> AiSettings {
-        AiSettings { agent: agent.into(), model: "m".into(), fast_model: None }
+        AiSettings { agent: agent.into(), model: "m".into(), ..Default::default() }
     }
 
     #[test]

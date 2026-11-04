@@ -6676,8 +6676,12 @@ button.lsp-chip-restart:hover:not(:disabled) { color: var(--text); }
 .nsm-icon { display: inline-flex; color: var(--text-faint); flex-shrink: 0; }
 .nsm-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .nsm-hint { margin-left: auto; padding-left: 8px; font-size: 11px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 45%; }
-.context-menu-item.nsm-loc-on { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--text); }
-.nsm-loc-on .nsm-icon { color: var(--accent); }
+.context-menu-item.nsm-loc-on,
+.context-menu-item.nsm-loc-on:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 24%, transparent) !important; color: var(--accent); font-weight: 600; box-shadow: inset 3px 0 0 var(--accent); }
+.nsm-loc-on .nsm-icon, .nsm-loc-on .nsm-hint { color: var(--accent); }
+.nsm-check { display: inline-flex; width: 12px; flex-shrink: 0; color: var(--accent); }
+.nsm-hint + .nsm-check { margin-left: 6px; }
+.nsm-name + .nsm-check { margin-left: auto; }
 .nsm-sep { height: 1px; margin: 4px 0; background: var(--border); }
 
 /* ---------- Review tab: all local changes + notes (ChangesReview) ---------- */
