@@ -17,6 +17,7 @@ pub mod links;
 pub mod lsp;
 pub mod notes;
 pub mod proc;
+pub mod prs;
 pub mod pty;
 pub mod ralph;
 pub mod repo;

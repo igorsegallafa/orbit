@@ -494,19 +494,13 @@ pub async fn set_plan_task(name: String, index: usize, done: bool) -> Result<(),
 // ---------- Git review (dock Git tab) ----------
 
 pub(crate) fn worktree_of(workspace: &str, repo: &str) -> Result<PathBuf, String> {
-    let dir = crate::workspace::repo_path(workspace, repo)?;
-    if !dir.exists() {
-        return Err(format!("worktree for '{repo}' not found in '{workspace}'"));
-    }
-    Ok(dir)
+    crate::prs::worktree_of(workspace, repo)
 }
 
 /// `worktree_of`, for actions that write to the branch (commit, push,
 /// pull, rebase, PR): refuses a repo that isn't on the workspace's branch.
 fn worktree_on_branch(workspace: &str, repo: &str) -> Result<PathBuf, String> {
-    let dir = worktree_of(workspace, repo)?;
-    workspace::ensure_on_branch(workspace, repo)?;
-    Ok(dir)
+    crate::prs::worktree_on_branch(workspace, repo)
 }
 
 /// Working-tree changes of a workspace repo.
@@ -864,13 +858,7 @@ pub async fn ws_create_pr(
     title: String,
     body: String,
 ) -> Result<String, String> {
-    blocking(move || {
-        let r = create_pr_for_repo(&workspace, &repo, &base, &title, &body)?;
-        let url = r.url.clone();
-        workspace::save_pr_refs(&workspace, &[r])?;
-        Ok(url)
-    })
-    .await
+    blocking(move || crate::prs::create(&workspace, &repo, &base, &title, &body)).await
 }
 
 /// AI-drafted PR title + description for one repo (reads the repo's own
@@ -880,185 +868,36 @@ pub async fn ws_pr_draft(workspace: String, repo: String) -> Result<agent::PrDra
     blocking(move || agent::pr_draft(&workspace, &repo)).await
 }
 
-fn create_pr_for_repo(
-    workspace: &str,
-    repo: &str,
-    base: &str,
-    title: &str,
-    body: &str,
-) -> Result<workspace::PrRef, String> {
-    let dir = worktree_on_branch(workspace, repo)?;
-    let owner_repo = remote_of(&dir).ok_or_else(|| format!("{repo}: cannot resolve origin remote"))?;
-    let branch = git::current_branch(&dir)
-        .ok_or_else(|| format!("{repo}: detached HEAD"))?;
-    let base = git::base_branch(&dir, base);
-    let out = crate::proc::cmd("gh")
-        .args([
-            "pr",
-            "create",
-            "-R",
-            &owner_repo,
-            "--base",
-            &base,
-            "--head",
-            &branch,
-            "--title",
-            title,
-            "--body",
-            body,
-        ])
-        .current_dir(&dir)
-        .output()
-        .map_err(|e| format!("failed to run gh: {e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "{repo}: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    // "https://github.com/owner/repo/pull/123" → number
-    let number = url
-        .rsplit('/')
-        .next()
-        .and_then(|s| s.parse::<u64>().ok())
-        .ok_or_else(|| format!("{repo}: cannot parse PR number from '{url}'"))?;
-    Ok(workspace::PrRef {
-        repo: repo.to_string(),
-        number,
-        url,
-    })
-}
-
-/// Per-repo PR content as decided in the PR modal.
-#[derive(serde::Deserialize, Clone)]
-pub struct PrSpec {
-    pub repo: String,
-    pub title: String,
-    #[serde(default)]
-    pub body: String,
-}
-
 /// Creates PRs per the modal's specs (title/body per repo), in parallel.
 /// Returns the full PullRequest list (existing + newly created) so the
-/// review tab can open directly. Repos with nothing to PR are skipped
-/// silently; real failures are collected into one error so one broken
-/// repo doesn't hide the others' PRs.
+/// review tab can open directly.
 #[tauri::command]
 pub async fn ws_create_prs(
     workspace: String,
     base: String,
-    specs: Vec<PrSpec>,
+    specs: Vec<crate::prs::PrSpec>,
 ) -> Result<Vec<github::PullRequest>, String> {
-    blocking(move || {
-        let created: Vec<Result<workspace::PrRef, String>> = std::thread::scope(|scope| {
-            let handles: Vec<_> = specs
-                .iter()
-                .map(|spec| {
-                    let (ws, base, spec) = (workspace.clone(), base.clone(), spec.clone());
-                    scope.spawn(move || {
-                        create_pr_for_repo(&ws, &spec.repo, &base, &spec.title, &spec.body)
-                    })
-                })
-                .collect();
-            handles
-                .into_iter()
-                .map(|h| h.join().unwrap_or_else(|_| Err("thread panicked".into())))
-                .collect()
-        });
-
-        // Collect failures that are NOT "no commits/diff" — repos with
-        // nothing to PR are fine to skip.
-        let mut real_errors: Vec<String> = Vec::new();
-        let mut ok_refs: Vec<workspace::PrRef> = Vec::new();
-        for r in created {
-            match r {
-                Ok(r) => ok_refs.push(r),
-                Err(e) => {
-                    let benign = e.contains("No commits between")
-                        || e.contains("already exists")
-                        || e.contains("diff between the head and base")
-                        || e.contains("nothing to compare");
-                    if !benign {
-                        real_errors.push(e);
-                    }
-                }
-            }
-        }
-
-        // The workspace now knows its own PRs — persist them (a repo view
-        // has no meta: it finds its PRs by the clone's current branch).
-        if !ok_refs.is_empty() && workspace::repo_scope(&workspace).is_none() {
-            workspace::save_pr_refs(&workspace, &ok_refs)?;
-        }
-
-        // List the PRs (whatever exists now) and hand them to the caller.
-        let prs = ws_prs_list(&workspace)?;
-        if prs.is_empty() && !real_errors.is_empty() {
-            return Err(real_errors.join("\n"));
-        }
-        Ok(prs)
-    })
-    .await
-}
-
-fn ws_prs_list(workspace: &str) -> Result<Vec<github::PullRequest>, String> {
-    // (repo, folder, branch) to look up; a repo view uses the clone's branch.
-    let targets: Vec<(String, PathBuf, String)> = match workspace::repo_scope(workspace) {
-        Some(repo) => {
-            let dir = workspace::clone_dir_of(repo)?;
-            let branch = git::current_branch(&dir).unwrap_or_default();
-            vec![(repo.to_string(), dir, branch)]
-        }
-        None => {
-            let ws_dir = crate::workspace::ws_dir(workspace)?;
-            let meta = workspace::load_meta(&ws_dir)?;
-            meta.repos.iter().map(|r| (r.clone(), ws_dir.join(r), meta.branch.clone())).collect()
-        }
-    };
-    // Repos in parallel — 5 repos sequential is ~10s of dead air.
-    let prs: Vec<github::PullRequest> = std::thread::scope(|scope| {
-        let handles: Vec<_> = targets
-            .iter()
-            .map(|(repo, dir, branch)| {
-                scope.spawn(move || {
-                    if !dir.exists() {
-                        return vec![];
-                    }
-                    let Some(owner_repo) = remote_of(dir) else {
-                        return vec![];
-                    };
-                    github::prs_for_branch(repo, &owner_repo, branch).unwrap_or_default()
-                })
-            })
-            .collect();
-        handles
-            .into_iter()
-            .filter_map(|h| h.join().ok())
-            .flatten()
-            .collect()
-    });
-    Ok(prs)
+    blocking(move || crate::prs::create_all(&workspace, &base, &specs)).await
 }
 
 /// Open PRs of this workspace's branch across its repos (for the PR
 /// review tab). Returns the same shape as pr_search.
 #[tauri::command]
 pub async fn ws_prs(workspace: String) -> Result<Vec<github::PrGroup>, String> {
-    blocking(move || Ok(github::group_prs_pub(ws_prs_list(&workspace)?))).await
+    blocking(move || Ok(github::group_prs_pub(crate::prs::list(&workspace)?))).await
 }
 
 /// Same as ws_prs but flat — the push modal checks "any PRs?" and feeds
 /// the review tab directly; grouping buys nothing there.
 #[tauri::command]
 pub async fn ws_prs_flat(workspace: String) -> Result<Vec<github::PullRequest>, String> {
-    blocking(move || ws_prs_list(&workspace)).await
+    blocking(move || crate::prs::list(&workspace)).await
 }
 
 /// `owner/repo` of a workspace repo (for the review commands).
 #[tauri::command]
 pub fn ws_owner_repo(workspace: String, repo: String) -> Result<String, String> {
-    remote_of(&worktree_of(&workspace, &repo)?).ok_or_else(|| format!("{repo}: origin is not a GitHub repository"))
+    crate::prs::owner_repo(&workspace, &repo)
 }
 
 /// Applies the selected review threads of a PR with the agent (no commit)
@@ -1111,258 +950,42 @@ fn origin_url(dir: &std::path::Path) -> Option<String> {
 }
 
 fn remote_of(dir: &std::path::Path) -> Option<String> {
-    github::parse_owner_repo(&origin_url(dir)?).ok()
+    crate::prs::remote_of(dir)
 }
 
 /// PR status rows for the workspace home tracker. Source of truth is the
-/// saved pr_refs in the meta (fast, direct view by number); when the
-/// meta has none it falls back to scanning the branch. GitHub is only
-/// asked for live state (open/merged/closed), in parallel.
+/// saved pr_refs in the meta; when the meta has none it falls back to
+/// scanning the branch. GitHub is only asked for live state, in parallel.
 #[tauri::command]
 pub async fn ws_pr_status(workspace: String) -> Result<Vec<github::WsPrStatus>, String> {
-    blocking(move || {
-        let ws_dir = crate::workspace::ws_dir(&workspace)?;
-        let meta = workspace::load_meta(&ws_dir)?;
-
-        // Which repos to look at: saved refs win; scan only as fallback.
-        let scan = meta.pr_refs.is_empty();
-        let rows: Vec<github::WsPrStatus> = std::thread::scope(|scope| {
-            let handles: Vec<_> = if scan {
-                meta.repos
-                    .iter()
-                    .map(|repo| {
-                        let (branch, dir) = (meta.branch.clone(), ws_dir.join(repo));
-                        scope.spawn(move || {
-                            if !dir.exists() {
-                                return vec![];
-                            }
-                            let Some(owner_repo) = remote_of(&dir) else {
-                                return vec![];
-                            };
-                            github::pr_status_for_branch(&owner_repo, &branch).unwrap_or_default()
-                        })
-                    })
-                    .collect()
-            } else {
-                meta.pr_refs
-                    .iter()
-                    .map(|r| {
-                        let dir = ws_dir.join(&r.repo);
-                        let pr = r.clone();
-                        scope.spawn(move || {
-                            let Some(owner_repo) = remote_of(&dir) else {
-                                return vec![];
-                            };
-                            github::pr_status_by_number(&owner_repo, &pr).unwrap_or_default()
-                        })
-                    })
-                    .collect()
-            };
-            handles
-                .into_iter()
-                .filter_map(|h| h.join().ok())
-                .flatten()
-                .collect()
-        });
-        // First-ever scan found PRs? Adopt them into the meta so next
-        // loads go through the saved refs (fast path).
-        if scan && !rows.is_empty() {
-            let refs: Vec<workspace::PrRef> = rows
-                .iter()
-                .map(|r| workspace::PrRef {
-                    repo: r.repo.clone(),
-                    number: r.number,
-                    url: r.url.clone(),
-                })
-                .collect();
-            let _ = workspace::save_pr_refs(&workspace, &refs);
-        }
-        Ok(rows)
-    })
-    .await
+    blocking(move || crate::prs::status(&workspace)).await
 }
 
 // ---------- CI checks (tracker) ----------
 
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WsCheck {
-    pub repo: String,
-    pub pr_number: u64,
-    pub checks: Vec<github::PrCheck>,
-    /// Aggregated bucket for the row indicator: pass | fail | running | none
-    pub status: String,
-}
-
-fn aggregate(checks: &[github::PrCheck]) -> String {
-    if checks.is_empty() {
-        return "none".into();
-    }
-    if checks
-        .iter()
-        .any(|c| matches!(c.bucket.as_str(), "pending" | "queued"))
-    {
-        return "running".into();
-    }
-    if checks.iter().any(|c| c.bucket == "fail") {
-        return "fail".into();
-    }
-    if checks.iter().all(|c| c.bucket == "pass" || c.bucket == "skipping") {
-        "pass".into()
-    } else {
-        "none".into()
-    }
-}
-
 /// CI checks for every saved PR of the workspace, in parallel.
 #[tauri::command]
-pub async fn ws_checks(workspace: String) -> Result<Vec<WsCheck>, String> {
-    blocking(move || {
-        let ws_dir = crate::workspace::ws_dir(&workspace)?;
-        let meta = workspace::load_meta(&ws_dir)?;
-        let rows: Vec<WsCheck> = std::thread::scope(|scope| {
-            let handles: Vec<_> = meta
-                .pr_refs
-                .iter()
-                .map(|r| {
-                    let (dir, pr) = (ws_dir.join(&r.repo), r.clone());
-                    scope.spawn(move || {
-                        let checks = remote_of(&dir)
-                            .and_then(|or| github::pr_checks(&or, pr.number).ok())
-                            .unwrap_or_default();
-                        let status = aggregate(&checks);
-                        WsCheck {
-                            repo: pr.repo,
-                            pr_number: pr.number,
-                            checks,
-                            status,
-                        }
-                    })
-                })
-                .collect();
-            handles
-                .into_iter()
-                .filter_map(|h| h.join().ok())
-                .collect()
-        });
-        Ok(rows)
-    })
-    .await
-}
-
-/// A PR addressed on GitHub alone (no local worktree): a Code Review
-/// feature that wasn't checked out yet.
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RemotePr {
-    pub repo: String,
-    pub owner_repo: String,
-    pub number: u64,
+pub async fn ws_checks(workspace: String) -> Result<Vec<crate::prs::WsCheck>, String> {
+    blocking(move || crate::prs::checks(&workspace)).await
 }
 
 /// CI checks for a list of PRs straight from GitHub, in parallel.
 #[tauri::command]
-pub async fn pr_group_checks(prs: Vec<RemotePr>) -> Result<Vec<WsCheck>, String> {
-    blocking(move || {
-        let rows: Vec<WsCheck> = std::thread::scope(|scope| {
-            let handles: Vec<_> = prs
-                .into_iter()
-                .map(|pr| {
-                    scope.spawn(move || {
-                        let checks = github::pr_checks(&pr.owner_repo, pr.number).unwrap_or_default();
-                        let status = aggregate(&checks);
-                        WsCheck {
-                            repo: pr.repo,
-                            pr_number: pr.number,
-                            checks,
-                            status,
-                        }
-                    })
-                })
-                .collect();
-            handles.into_iter().filter_map(|h| h.join().ok()).collect()
-        });
-        Ok(rows)
-    })
-    .await
+pub async fn pr_group_checks(prs: Vec<crate::prs::RemotePr>) -> Result<Vec<crate::prs::WsCheck>, String> {
+    blocking(move || Ok(crate::prs::group_checks(prs))).await
 }
 
 /// Re-runs a failed workflow run (failed jobs only). `link` is the check's
 /// job URL — owner/repo and run id are both extracted from it.
 #[tauri::command]
 pub async fn check_rerun(link: String) -> Result<(), String> {
-    blocking(move || {
-        let run_id = github::run_id_from_link(&link)
-            .ok_or_else(|| "check has no GitHub Actions run to re-run".to_string())?;
-        let owner_repo = github::owner_repo_from_link(&link)
-            .ok_or_else(|| "cannot derive repository from link".to_string())?;
-        let out = crate::proc::cmd("gh")
-            .args([
-                "api",
-                "-X",
-                "POST",
-                &format!("repos/{owner_repo}/actions/runs/{run_id}/rerun-failed-jobs"),
-            ])
-            .output()
-            .map_err(|e| format!("failed to run gh: {e}"))?;
-        if !out.status.success() {
-            return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
-        }
-        Ok(())
-    })
-    .await
+    blocking(move || crate::prs::rerun(&link)).await
 }
 
 /// Bounded failure log of the job behind `link` (for AI investigation).
 #[tauri::command]
 pub async fn check_logs(link: String) -> Result<String, String> {
-    blocking(move || {
-        let run_id = github::run_id_from_link(&link)
-            .ok_or_else(|| "check has no GitHub Actions run".to_string())?;
-        let owner_repo = github::owner_repo_from_link(&link)
-            .ok_or_else(|| "cannot derive repository from link".to_string())?;
-        let job_id = link
-            .rsplit('/')
-            .next()
-            .and_then(|s| s.parse::<u64>().ok())
-            .ok_or_else(|| "cannot parse job id from link".to_string())?;
-        // Failed jobs of the run → the requested job's log url.
-        let out = crate::proc::cmd("gh")
-            .args([
-                "api",
-                &format!("repos/{owner_repo}/actions/jobs/{job_id}"),
-                "--jq",
-                ".steps[] | select(.conclusion == \"failure\") | .name",
-            ])
-            .output()
-            .map_err(|e| format!("failed to run gh: {e}"))?;
-        let failed_step = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        let log = crate::proc::cmd("gh")
-            .args([
-                "run",
-                "view",
-                &run_id.to_string(),
-                "-R",
-                &owner_repo,
-                "--log-failed",
-            ])
-            .output()
-            .map_err(|e| format!("failed to run gh: {e}"))?;
-        if !log.status.success() {
-            return Err(String::from_utf8_lossy(&log.stderr).trim().to_string());
-        }
-        // ponytail: tail of the failed log — full logs blow the prompt
-        // budget; if diagnosis needs more context, raise to 400 lines.
-        let text = String::from_utf8_lossy(&log.stdout);
-        let lines: Vec<&str> = text.lines().collect();
-        let start = lines.len().saturating_sub(200);
-        let mut bounded = lines[start..].join("\n");
-        if !failed_step.is_empty() {
-            bounded = format!("failed step: {failed_step}\n{bounded}");
-        }
-        Ok(bounded)
-    })
-    .await
+    blocking(move || crate::prs::check_logs(&link)).await
 }
 
 /// AI analysis of a failed CI check (problem + proposed fix).

@@ -12,6 +12,7 @@ mod nav;
 mod overlay;
 mod palette;
 mod probe;
+mod review;
 mod script;
 mod search;
 mod sessions;
@@ -50,6 +51,7 @@ fn main() {
         editor::bind_keys(cx);
         search::init(cx);
         file_ops::init(cx);
+        review::init(cx);
 
         let bounds = Bounds::centered(None, size(px(1400.), px(900.)), cx);
         let options = WindowOptions {
