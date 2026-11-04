@@ -4,29 +4,25 @@ A desktop workspace for shipping features that span several repositories with AI
 
 A feature in Orbit is a **workspace**: one branch across every repo it touches, each checked out as a git worktree. From there Orbit runs the whole loop in one window: plan the work from a tracker card, let agents (Claude Code, OpenCode or OMP) implement it, review the diff, then commit, push, open PRs, watch CI and squash-merge, with AI drafting the boring parts.
 
+Orbit is a native Rust app: the UI is built on [GPUI](https://www.gpui.rs/) and [gpui-component](https://github.com/longbridge/gpui-kit) (`native/`), over a backend crate with no UI dependency (`crates/orbit-core/`).
+
 ## Features
 
 - **Multi-repo workspaces**: one branch, many repos, as git worktrees next to each other. Dependency folders (`node_modules`, build output) are shared with the base clone instead of reinstalled.
-- **Agent sessions**: terminals running `claude`, `opencode` or `omp` inside the workspace, with live status (thinking, editing, waiting for you) and notifications when an agent finishes or needs attention.
-- **Planning**: generate a `PLAN.md` from a Shortcut or Linear card, or get grilled by the agent first in an interview that surfaces the decisions you silently assumed.
+- **Agent sessions**: terminals running `claude`, `opencode` or `omp` inside the workspace, with live status (thinking, editing, waiting for you).
 - **Ralph**: write a PRD and let the agent implement it story by story in a loop.
-- **Race**: run the same task with several agents in parallel variants and keep the best result.
-- **Delivery pipeline**: commit (AI-drafted message), push, pull requests (AI-drafted title and description that follow the repo's PR template), CI checks with re-run and AI investigation of failures, squash and merge, and rebase with AI conflict resolution. Merged work is detected even after a squash.
-- **Code review**: review GitHub PRs inside Orbit with inline comments, existing threads and pending reviews, and apply review feedback with an agent.
-- **Editor and search**: Monaco editor tabs, file tree, git changes and history, Search Everywhere (double Shift) and Find in Files (Ctrl/Cmd+Shift+F).
-- **Builds**: each repo's build command, skipped when nothing changed since the last build.
-- **Auto-update**: new releases install from Settings → Updates or from the prompt Orbit shows when one is out.
+- **Delivery pipeline**: commit (AI-drafted message), push, pull requests (AI-drafted title and description that follow the repo's PR template), CI checks with re-run, squash and merge, and rebase with AI conflict resolution. Merged work is detected even after a squash.
+- **Code review**: review the workspace's changes with notes, and send them to the PR.
+- **Editor and search**: code editor tabs with language servers (go to definition, hover, completion, references, rename…), file tree, git changes and history, Search Everywhere (double Shift) and Find in Files (Ctrl+Shift+F).
+- **Build, run and debug**: each repo's build command, run configurations, and a debugger (DAP).
+
+`native/README.md` has the keymap, the architecture and what is left to port from the earlier Tauri app.
 
 ## Install
 
-Download from the [latest release](https://github.com/igorsegallafa/orbit/releases/latest). Later versions install through the in-app updater.
+Linux (x64): download the AppImage or the tarball from the [latest release](https://github.com/igorsegallafa/orbit/releases/latest). The AppImage runs as is (`chmod +x`); the tarball installs into `~/.local` with `./install.sh` (`./install.sh --uninstall` removes it).
 
-- **Windows**: `Orbit_x.y.z_x64-setup.exe`.
-- **macOS (Apple Silicon)**: `Orbit_x.y.z_aarch64.dmg`, then drag Orbit to Applications. The app isn't notarized by Apple yet, so the first launch is blocked: open **System Settings → Privacy & Security** and click **Open Anyway** next to the Orbit message (or run `xattr -dr com.apple.quarantine /Applications/Orbit.app`). Updates don't need this again.
-
-- **Linux (x64)**: `Orbit_x.y.z_amd64.AppImage` (any distro; `chmod +x` and run, updates in-app), or the `.deb` / `.rpm` (updates by installing the new package).
-
-On Intel Macs, build from source (below).
+Windows and macOS: the app compiles for both, but has not been run there yet.
 
 ### Requirements
 
@@ -36,6 +32,8 @@ Orbit drives these CLIs, which must be on your `PATH` (Settings → Health check
 - [GitHub CLI](https://cli.github.com), logged in with `gh auth login`
 - An agent CLI: [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [OpenCode](https://opencode.ai) or OMP (pick it in Settings → AI)
 - `curl`, only for the Linear, Shortcut and Figma integrations
+
+A Vulkan driver is used when present, OpenGL otherwise.
 
 ## Getting started
 
@@ -48,22 +46,23 @@ Orbit keeps its settings in `~/.config/orbit/config.yaml` (`~/Library/Applicatio
 
 ## Development
 
-Orbit is a [Tauri 2](https://tauri.app) app: a Rust backend (`src-tauri/`) and a React + TypeScript frontend (`src/`). You need [Node.js](https://nodejs.org) and [Rust](https://rustup.rs), plus the [Tauri prerequisites](https://tauri.app/start/prerequisites/) for your OS.
+You need [Rust](https://rustup.rs). On Linux, also the headers GPUI builds against (Debian/Ubuntu: `libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libfontconfig-dev libfreetype-dev libx11-xcb-dev libxcb1-dev libvulkan-dev`).
+
+The repository is one Cargo workspace (`crates/orbit-core`, `native`) with one `Cargo.lock` and one `target/`:
 
 ```sh
-npm install
-npm run tauri dev     # run the app with hot reload
-npm run check         # typecheck, frontend tests, clippy and Rust tests
-npm run tauri build   # installers in src-tauri/target/release/bundle
+cargo run --release -p orbit-native        # build and start the app
+cargo build --release -p orbit-native      # target/release/orbit-native
+native/scripts/package-linux.sh            # native/dist/: the tarball, and an AppImage when appimagetool is found
 ```
 
-On Arch-based distros the AppImage step can fail in `linuxdeploy` (its bundled `strip` predates the system's binaries); build with `NO_STRIP=true npm run tauri build`.
+Before a pull request, run the checks (clippy on every crate and target, then every test):
 
-## Releasing
+```sh
+cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace
+```
 
-Publishing a GitHub release tagged `vX.Y.Z` builds the Windows installers, the macOS (Apple Silicon) app and dmg, and the Linux AppImage, deb and rpm, plus the updater manifest (`latest.json`) covering all three, and attaches them to the release (`.github/workflows/release.yml`). macOS builds are ad-hoc signed; to sign with a Developer ID and notarize, add the `APPLE_*` secrets Tauri documents and pass them to the `tauri-action` step. The tag is the version; nothing needs bumping in the code.
-
-Updates are signed: the workflow needs the `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` secrets, matching the public key in `src-tauri/tauri.conf.json`.
+`native/vendor/gpui-pre-wgpu` is a patched copy of GPUI's renderer crate (Vulkan only, GL as a fallback), wired in by `[patch.crates-io]` in the root `Cargo.toml`; `native/vendor/PATCHES.md` says what changed. `--features capture` with `ORBIT_CAPTURE=shot.png` saves each frame as a PNG, and the app has a self-test mode that drives it without OS input (`native/README.md`, *Self-test mode*).
 
 ## License
 

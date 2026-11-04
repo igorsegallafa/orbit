@@ -1,0 +1,184 @@
+{
+  "data": {
+    "viewer": { "login": "igorsegallafa" },
+    "repository": {
+      "pullRequest": {
+        "author": { "login": "igorsegallafa" },
+        "reviewDecision": "CHANGES_REQUESTED",
+        "reviews": {
+          "nodes": [
+            {
+              "state": "COMMENTED",
+              "body": "",
+              "submittedAt": "2026-10-28T14:02:11Z",
+              "author": { "login": "marina-dev", "avatarUrl": "https://avatars.githubusercontent.com/u/1000001?v=4" }
+            },
+            {
+              "state": "CHANGES_REQUESTED",
+              "body": "Looks good overall. Please cover the **whitespace-only** case before merging.",
+              "submittedAt": "2026-10-29T09:41:57Z",
+              "author": { "login": "marina-dev", "avatarUrl": "https://avatars.githubusercontent.com/u/1000001?v=4" }
+            }
+          ]
+        },
+        "reviewThreads": {
+          "nodes": [
+            {
+              "id": "PRRT_kwDONx2Hfc5h1aA1",
+              "isResolved": false,
+              "isOutdated": false,
+              "path": "src-tauri/src/health.rs",
+              "line": 66,
+              "startLine": 61,
+              "originalLine": 66,
+              "originalStartLine": 61,
+              "diffSide": "RIGHT",
+              "comments": {
+                "nodes": [
+                  {
+                    "id": "PRRC_kwDONx2Hfc6Aa001",
+                    "databaseId": 2461000101,
+                    "body": "Should `git_identity` live in `proc.rs`? It reads like a generic helper.\n\n```rust\nfn git_identity(name: Option<String>, email: Option<String>)\n```",
+                    "createdAt": "2026-10-28T14:01:40Z",
+                    "url": "https://github.com/igorsegallafa/orbit/pull/26#discussion_r2461000101",
+                    "state": "SUBMITTED",
+                    "author": { "login": "marina-dev", "avatarUrl": "https://avatars.githubusercontent.com/u/1000001?v=4" }
+                  },
+                  {
+                    "id": "PRRC_kwDONx2Hfc6Aa002",
+                    "databaseId": 2461000102,
+                    "body": "It only formats the health check's message, so I kept it next to `run()`.",
+                    "createdAt": "2026-10-28T15:20:03Z",
+                    "url": "https://github.com/igorsegallafa/orbit/pull/26#discussion_r2461000102",
+                    "state": "SUBMITTED",
+                    "author": { "login": "igorsegallafa", "avatarUrl": "https://avatars.githubusercontent.com/u/36571229?v=4" }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "PRRT_kwDONx2Hfc5h1aA2",
+              "isResolved": true,
+              "isOutdated": false,
+              "path": "src-tauri/src/health.rs",
+              "line": 77,
+              "startLine": null,
+              "originalLine": 77,
+              "originalStartLine": null,
+              "diffSide": "RIGHT",
+              "comments": {
+                "nodes": [
+                  {
+                    "id": "PRRC_kwDONx2Hfc6Aa003",
+                    "databaseId": 2461000103,
+                    "body": "Nit: `--get` is the default for a single key.",
+                    "createdAt": "2026-10-28T14:03:12Z",
+                    "url": "https://github.com/igorsegallafa/orbit/pull/26#discussion_r2461000103",
+                    "state": "SUBMITTED",
+                    "author": { "login": "marina-dev", "avatarUrl": "https://avatars.githubusercontent.com/u/1000001?v=4" }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "PRRT_kwDONx2Hfc5h1aA3",
+              "isResolved": false,
+              "isOutdated": false,
+              "path": "src-tauri/src/health.rs",
+              "line": 132,
+              "startLine": null,
+              "originalLine": 132,
+              "originalStartLine": null,
+              "diffSide": "LEFT",
+              "comments": {
+                "nodes": [
+                  {
+                    "id": "PRRC_kwDONx2Hfc6Aa004",
+                    "databaseId": 2461000104,
+                    "body": "Was this import used by anything else?",
+                    "createdAt": "2026-10-29T09:40:30Z",
+                    "url": "https://github.com/igorsegallafa/orbit/pull/26#discussion_r2461000104",
+                    "state": "SUBMITTED",
+                    "author": { "login": "marina-dev", "avatarUrl": "https://avatars.githubusercontent.com/u/1000001?v=4" }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "PRRT_kwDONx2Hfc5h1aA4",
+              "isResolved": false,
+              "isOutdated": true,
+              "path": "src-tauri/src/health.rs",
+              "line": null,
+              "startLine": null,
+              "originalLine": 70,
+              "originalStartLine": null,
+              "diffSide": "RIGHT",
+              "comments": {
+                "nodes": [
+                  {
+                    "id": "PRRC_kwDONx2Hfc6Aa005",
+                    "databaseId": 2461000105,
+                    "body": "This line moved in a later push; is the trim still needed?",
+                    "createdAt": "2026-10-27T18:12:44Z",
+                    "url": "https://github.com/igorsegallafa/orbit/pull/26#discussion_r2461000105",
+                    "state": "SUBMITTED",
+                    "author": { "login": "marina-dev", "avatarUrl": "https://avatars.githubusercontent.com/u/1000001?v=4" }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "PRRT_kwDONx2Hfc5h1aA5",
+              "isResolved": false,
+              "isOutdated": true,
+              "path": "src-tauri/src/health.rs",
+              "line": 157,
+              "startLine": null,
+              "originalLine": 155,
+              "originalStartLine": null,
+              "diffSide": "RIGHT",
+              "comments": {
+                "nodes": [
+                  {
+                    "id": "PRRC_kwDONx2Hfc6Aa006",
+                    "databaseId": 2461000106,
+                    "body": "Add a case with surrounding whitespace only.",
+                    "createdAt": "2026-10-27T18:15:02Z",
+                    "url": "https://github.com/igorsegallafa/orbit/pull/26#discussion_r2461000106",
+                    "state": "SUBMITTED",
+                    "author": { "login": "marina-dev", "avatarUrl": "https://avatars.githubusercontent.com/u/1000001?v=4" }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "PRRT_kwDONx2Hfc5h1aA6",
+              "isResolved": false,
+              "isOutdated": false,
+              "path": "src/App.tsx",
+              "line": 12,
+              "startLine": null,
+              "originalLine": 12,
+              "originalStartLine": null,
+              "diffSide": "RIGHT",
+              "comments": {
+                "nodes": [
+                  {
+                    "id": "PRRC_kwDONx2Hfc6Aa007",
+                    "databaseId": 2461000107,
+                    "body": "Draft note I haven't submitted yet.",
+                    "createdAt": "2026-10-29T10:00:00Z",
+                    "url": "https://github.com/igorsegallafa/orbit/pull/26#discussion_r2461000107",
+                    "state": "PENDING",
+                    "author": { "login": "igorsegallafa", "avatarUrl": "https://avatars.githubusercontent.com/u/36571229?v=4" }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

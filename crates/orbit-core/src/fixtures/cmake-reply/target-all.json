@@ -1,0 +1,1 @@
+{ "name": "ALL_BUILD", "type": "UTILITY", "isGeneratorProvided": true, "paths": { "source": ".", "build": "." } }

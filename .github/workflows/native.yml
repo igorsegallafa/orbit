@@ -1,0 +1,85 @@
+name: Native app
+
+# Orbit (native/) and its backend crate (crates/orbit-core) on PRs and main.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: native-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libfontconfig-dev libfreetype-dev libx11-xcb-dev libxcb1-dev libvulkan-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            native/tools/sign -> target
+          shared-key: native-linux
+
+      - run: cargo build --locked --workspace
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked --workspace
+      - name: Release signer
+        run: cargo clippy --locked --manifest-path native/tools/sign/Cargo.toml -- -D warnings
+
+      # The tarball and AppImage, kept for a week to try a PR's build. Built on
+      # ubuntu-latest here; the release builds on ubuntu-22.04 (glibc).
+      - name: Package
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: 1
+        run: |
+          cargo build --release --locked -p orbit-native
+          curl -fsSL -o "$RUNNER_TEMP/appimagetool" \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x "$RUNNER_TEMP/appimagetool"
+          APPIMAGETOOL="$RUNNER_TEMP/appimagetool" native/scripts/package-linux.sh --no-build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: orbit-linux
+          path: |
+            native/dist/*.tar.gz
+            native/dist/*.AppImage
+          retention-days: 7
+
+  # Does it compile where the team builds? (Windows uses GPUI's DirectX renderer,
+  # macOS Metal.)
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            features: ""
+          # Shaders compiled at run time: no Metal toolchain needed on the runner.
+          - platform: macos-latest
+            features: "--features gpui_platform/runtime_shaders"
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          shared-key: native-${{ matrix.platform }}
+
+      - run: cargo check --locked -p orbit-native --all-targets ${{ matrix.features }}

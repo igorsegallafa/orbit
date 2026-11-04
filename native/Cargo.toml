@@ -1,0 +1,59 @@
+[package]
+name = "orbit-native"
+version = "0.2.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "Orbit: a desktop workspace for shipping features across repositories with AI agents"
+
+[dependencies]
+# Local time for the usage bar's reset times; already in the lock via gpui-component.
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+# Orbit's backend.
+orbit-core = { path = "../crates/orbit-core" }
+# gpui-component pins its GPUI snapshot (crates.io `gpui-pre`); use the same one.
+gpui = { package = "gpui-pre", version = "=0.3.11" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.11", features = ["wayland", "x11"] }
+gpui-component = { version = "=0.9.0", features = [
+    "tree-sitter-c",
+    "tree-sitter-cpp",
+    "tree-sitter-rust",
+    "tree-sitter-typescript",
+    "tree-sitter-tsx",
+    "tree-sitter-javascript",
+] }
+# Lucide icons used by gpui-component widgets.
+gpui-kit-assets = "=0.9.0"
+# Must match gpui-component's, whose provider traits take these types.
+lsp-types = "=0.97.0"
+alacritty_terminal = "0.26"
+ignore = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+url = "2"
+dirs = "6"
+futures = "0.3"
+anyhow = "1"
+regex = "1"
+# kitty graphics in the terminal (versions already in the lock via gpui).
+base64 = "0.22"
+flate2 = "1"
+image = { version = "0.25", default-features = false, features = ["png"] }
+memchr = "2"
+
+# Vulkan-only renderer on Linux (GL fallback), patched in the root Cargo.toml; see vendor/PATCHES.md.
+# `cargo run --release --features capture` + `ORBIT_CAPTURE=shot.png` saves each frame
+# (vendor/PATCHES.md); for looking at the UI without a screenshot tool.
+[target.'cfg(target_os = "linux")'.dependencies]
+# Desktop notifications over D-Bus (already in the lock via gpui's Linux platform).
+notify-rust = "4"
+# Terminal shortcut inhibition on GPUI's Wayland connection (terminal/inhibit.rs); all in the lock via gpui.
+raw-window-handle = "0.6"
+wayland-backend = { version = "0.3", features = ["client_system"] }
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
+gpui-pre-wgpu = { version = "=0.3.11", optional = true, features = ["orbit-capture"] }
+
+[features]
+capture = ["dep:gpui-pre-wgpu"]

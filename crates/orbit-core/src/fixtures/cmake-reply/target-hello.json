@@ -1,0 +1,1 @@
+{ "name": "hello", "type": "EXECUTABLE", "paths": { "source": "src/hello", "build": "src/hello" }, "artifacts": [ { "path": "src/hello/hello" } ] }

@@ -1,0 +1,14 @@
+{
+  "cmake": { "version": { "string": "3.31.0" } },
+  "objects": [
+    { "kind": "codemodel", "version": { "major": 2, "minor": 7 }, "jsonFile": "codemodel-v2-1.json" }
+  ],
+  "reply": {
+    "client-orbit": {
+      "query.json": {
+        "requests": [ { "kind": "codemodel", "version": 2 } ],
+        "responses": [ { "kind": "codemodel", "version": { "major": 2, "minor": 7 }, "jsonFile": "codemodel-v2-1.json" } ]
+      }
+    }
+  }
+}

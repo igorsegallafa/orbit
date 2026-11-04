@@ -1,0 +1,1 @@
+{ "name": "dep_demo", "type": "EXECUTABLE", "paths": { "source": "build/dev/_deps/dep-src", "build": "_deps/dep-build" }, "artifacts": [ { "path": "_deps/dep-build/dep_demo" } ] }

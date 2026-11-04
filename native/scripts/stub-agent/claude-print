@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+# `claude -p` stand-in for the self-tests (no login, no cost). The prompt
+# arrives on stdin; the reply depends on which Orbit prompt it is:
+# - the Ralph PRD interview: one round of two questions, then done;
+# - the PRD writer: writes the markdown PRD and scripts/ralph/prd.json;
+# - a Ralph iteration (stream-json): ticks the next story, commits.
+# ORBIT_STUB_LOG, when set, records each call's kind and argv.
+import json, os, re, subprocess, sys, time
+
+args = sys.argv[1:]
+prompt = sys.stdin.read()
+
+
+def log(kind):
+    path = os.environ.get("ORBIT_STUB_LOG")
+    if path:
+        with open(path, "a") as f:
+            marks = [l.strip() for l in prompt.splitlines() if "MARK" in l]
+            f.write(f"{kind} {json.dumps(args)}{' marks ' + json.dumps(marks) if marks else ''}\n")
+
+
+def commit(msg):
+    subprocess.run(["git", "add", "-A"], check=True)
+    subprocess.run(["git", "-c", "user.name=stub", "-c", "user.email=stub@x", "commit", "-qm", msg], check=True)
+
+
+if "Product Requirements Document for an autonomous coding loop" in prompt:
+    log("interview")
+    time.sleep(0.5)
+    if prompt.count("- Q: ") == 0:
+        print(json.dumps({"done": False, "questions": [
+            {"id": "q1", "text": "Who sees the greeting?", "options": [
+                {"label": "Every visitor", "description": "Simplest: one message for all.", "recommended": True},
+                {"label": "Signed-in users", "description": "Needs the session."},
+                {"label": "Admins only", "description": "Smallest audience."}]},
+            {"id": "q2", "text": "Where does it show?", "options": [
+                {"label": "Top banner", "description": "Visible, dismissible.", "recommended": True},
+                {"label": "Footer", "description": "Quiet."},
+                {"label": "Console", "description": "Developers only."}]}]}))
+    else:
+        print(json.dumps({"done": True, "questions": [],
+                          "summary": "- Every visitor sees the greeting\n- It shows in a top banner"}))
+elif "Write a Product Requirements Document and its Ralph task file" in prompt:
+    log("write-prd")
+    md = re.search(r"Markdown PRD → `([^`]+)`", prompt).group(1)
+    js = re.search(r"Ralph task file → `([^`]+)`", prompt).group(1)
+    branch = re.search(r'"branchName": "([^"]*)"', prompt).group(1)
+    project = re.search(r'"project": "([^"]*)"', prompt).group(1)
+    for line in ["Reading the repository…", "Writing " + md, "Splitting into stories…"]:
+        print(line, flush=True)
+        time.sleep(0.4)
+    os.makedirs(os.path.dirname(md), exist_ok=True)
+    os.makedirs(os.path.dirname(js), exist_ok=True)
+    with open(md, "w") as f:
+        f.write("# PRD: Greeting\n\n## User Stories\n\n### US-001: Add a greeting\n")
+    titles = ["Add the greeting text", "Show it in a top banner", "Let visitors dismiss it"]
+    stories = [{"id": f"US-00{i + 1}", "title": t, "description": f"As a visitor, I want {t.lower()}.",
+                "acceptanceCriteria": ["Typecheck passes"], "priority": i + 1, "passes": False, "notes": ""}
+               for i, t in enumerate(titles)]
+    with open(js, "w") as f:
+        json.dump({"project": project, "branchName": branch, "description": "A greeting for visitors.",
+                   "userStories": stories}, f, indent=2)
+    print(len(stories))
+elif "stream-json" in args:
+    log("iteration")
+    print(json.dumps({"type": "system", "subtype": "init", "session_id": "stub", "model": "stub-model"}), flush=True)
+    path = "scripts/ralph/prd.json"
+    done = False
+    if os.path.exists(path):
+        prd = json.load(open(path))
+        for s in sorted(prd["userStories"], key=lambda s: s.get("priority", 0)):
+            if not s.get("passes"):
+                print(json.dumps({"type": "assistant", "message": {"content": [
+                    {"type": "text", "text": "Implementing **" + s["id"] + "** in `impl.txt`"},
+                    {"type": "tool_use", "name": "Read", "input": {"file_path": os.path.join(os.getcwd(), path)}},
+                    {"type": "tool_use", "name": "Edit", "input": {"file_path": os.path.join(os.getcwd(), "impl.txt")}},
+                    {"type": "tool_use", "name": "Bash", "input": {"command": "make check"}},
+                ]}}), flush=True)
+                time.sleep(1.5)
+                with open("impl.txt", "a") as f:
+                    f.write(s["id"] + "\n")
+                s["passes"] = True
+                with open(path, "w") as f:
+                    json.dump(prd, f, indent=2)
+                commit("feat: " + s["id"])
+                break
+        done = all(s.get("passes") for s in prd["userStories"])
+        text = "ok" + (" <promise>COMPLETE</promise>" if done else "")
+    else:
+        # A plan task: one commit, then the done mark.
+        with open("impl.txt", "a") as f:
+            f.write("task\n")
+        commit("feat: plan task")
+        text = "Done.\n<task-done/>"
+    print(json.dumps({"type": "result", "is_error": False, "result": text,
+                      "total_cost_usd": 0.01, "duration_ms": 1500, "num_turns": 2}), flush=True)
+else:
+    log("other")
+    print("stub-claude: " + prompt[:80])

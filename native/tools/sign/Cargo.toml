@@ -1,0 +1,14 @@
+[package]
+name = "orbit-sign"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "Signs release files for Orbit's updater (minisign, in the Tauri updater's format)"
+
+# Not part of the app's build.
+[workspace]
+
+[dependencies]
+minisign = "0.7"
+base64 = "0.22"

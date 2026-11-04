@@ -1,0 +1,1 @@
+{ "name": "tool", "type": "EXECUTABLE", "paths": { "source": "tools", "build": "tools" }, "artifacts": [ { "path": "/src/demo/build/dev/bin/tool" } ] }
