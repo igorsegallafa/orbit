@@ -411,7 +411,7 @@ impl OrbitApp {
         let collapsed = self.layout.sidebar_collapsed();
         let on = |p: &dyn Fn(&str) -> bool| self.is_active_key(p, cx);
         let dashboard_on = on(&|k| k == "page:dashboard");
-        let review_on = on(&|k| k.starts_with("review:prs:"));
+        let review_on = on(&|k| k == "page:code-review");
         let settings_on = on(&|k| k == "page:settings");
         let integrations_on = on(&|k| k == "page:integrations");
         let label = |s: &'static str| (!collapsed).then(|| SharedString::from(s));
@@ -421,13 +421,7 @@ impl OrbitApp {
             .on_click(cx.listener(|a, _, w, cx| a.show_dashboard(w, cx)));
         let code_review = nav_item("review-prs", "git", label("Code Review"), review_on)
             .tooltip(|window, cx| Tooltip::new("Code Review").build(window, cx))
-            .on_click(cx.listener(|a, _, w, cx| {
-                // The PR list needs a workspace; the first one stands in when none is in focus.
-                if a.selected.is_none() && !a.workspaces.is_empty() {
-                    a.select_workspace(0, cx);
-                }
-                crate::review::open(a, crate::review::Page::PullRequests, w, cx);
-            }));
+            .on_click(cx.listener(|a, _, w, cx| crate::review::open_code_review(a, w, cx)));
         let settings = nav_item("nav-settings", "settings", label("Settings"), settings_on)
             .tooltip(|window, cx| Tooltip::new("Settings").build(window, cx))
             .on_click(cx.listener(|a, _, w, cx| {

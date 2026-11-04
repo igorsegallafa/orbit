@@ -66,6 +66,7 @@ impl Tab {
             || key == "page:integrations"
             || key.starts_with("page:repo:")
             || key.starts_with("review:prs:")
+            || key == "page:code-review"
     }
 
     /// An agent session: its × minimizes instead of ending it.
