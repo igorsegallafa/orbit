@@ -172,7 +172,7 @@ impl PageTab {
             let (r1, r2) = (repo.clone(), repo.clone());
             list = list.child(status_row(mark, repo.clone(), detail).when(conflicts, |d| {
                 d.child(
-                    crate::git::btn(format!("rebase-ai:{repo}"), "Resolve with AI", Tone::Plain)
+                    crate::workspace_ui::kit::hint(crate::git::btn(format!("rebase-ai:{repo}"), "Resolve with AI", Tone::Plain), "AI resolves and stages; continue runs here")
                         .on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.rebase_resolve(r1.clone(), w, cx))),
                 )
                 .child(crate::git::btn(format!("rebase-abort:{repo}"), "Abort", Tone::Danger).on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.rebase_abort(r2.clone(), w, cx))))

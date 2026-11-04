@@ -186,13 +186,16 @@ impl PageTab {
                 .when(r.dropped, |d| {
                     let repo = repo.clone();
                     d.child(
-                        crate::git::btn(format!("push-anyway:{repo}"), "Push anyway", Tone::Plain)
+                        crate::workspace_ui::kit::hint(crate::git::btn(format!("push-anyway:{repo}"), "Push anyway", Tone::Plain), "Pushes the branch again, recreating it on origin if it was deleted")
                             .on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.push_run(vec![repo.clone()], false, w, cx))),
                     )
                 })
                 .when(r.status == PushStatus::Rejected, |d| {
                     d.child(
-                        crate::git::btn(format!("push-force:{repo}"), "Force push", Tone::Danger)
+                        crate::workspace_ui::kit::hint(
+                            crate::git::btn(format!("push-force:{repo}"), "Force push", Tone::Danger),
+                            "git push --force-with-lease: overwrites origin's branch, but refuses if someone else pushed to it since your last fetch",
+                        )
                             .on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.push_run(vec![repo.clone()], true, w, cx))),
                     )
                 });

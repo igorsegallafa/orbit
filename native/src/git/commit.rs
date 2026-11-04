@@ -1,9 +1,9 @@
 //! Commit: per repo, the changed files with a checkbox each (all in by
 //! default) and a message, typed or drafted by the AI agent from the selected
 //! files. Repos with files selected commit in parallel; the rest stays in the
-//! working tree. A file's name opens its diff tab (the React modal shows it
-//! in a side pane).
-use super::{card, cancel_button, footer, Flow};
+//! working tree. The focused file's diff shows on the right; Ctrl+Enter commits.
+use super::diff_pane::{DiffPane, Source};
+use super::{cancel_button, Flow};
 use crate::overlay::{ButtonStyle, Dialog, DialogButton};
 use crate::review::ui::{self, Tone};
 use crate::review::Load;
@@ -63,6 +63,9 @@ pub struct CommitFlow {
     pub scope: String,
     pub repos: Vec<RepoCommit>,
     pub committing: bool,
+    /// The file whose diff shows: (repo, path).
+    pub focus: Option<(String, String)>,
+    pub pane: Entity<DiffPane>,
 }
 
 impl CommitFlow {
@@ -76,6 +79,7 @@ impl CommitFlow {
 
     pub fn dump(&self, out: &mut String, cx: &App) {
         let _ = writeln!(out, "  commit flow ({}){}", self.scope, if self.committing { " committing" } else { "" });
+        let _ = writeln!(out, "    focus {:?} diff {:?}", self.focus, self.pane.read(cx).source());
         for r in &self.repos {
             let files = match &r.files {
                 Load::Ready(list) => list
@@ -116,7 +120,8 @@ impl PageTab {
                 open: i == 0,
             })
             .collect();
-        self.modal = Some(Modal::Flow(Flow::Commit(CommitFlow { scope, repos: rows, committing: false })));
+        let pane = cx.new(|cx| DiffPane::new("Select a file to see its changes", cx));
+        self.modal = Some(Modal::Flow(Flow::Commit(CommitFlow { scope, repos: rows, committing: false, focus: None, pane })));
         for repo in repos {
             self.commit_load(repo, true, window, cx);
         }
@@ -141,13 +146,19 @@ impl PageTab {
                         if first {
                             t.toast(ToastKind::Info, "Nothing to commit", None, window, cx);
                         }
+                    } else if f.focus.as_ref().is_some_and(|(r, _)| r == &repo) {
+                        t.commit_refocus(cx);
                     }
                 }
                 Ok(files) => {
                     let Some(r) = f.repo_mut(&repo) else { return };
                     let paths: BTreeSet<String> = files.iter().map(|x| x.path.clone()).collect();
-                    r.selected = if first { paths } else { r.selected.intersection(&paths).cloned().collect() };
+                    r.selected = if first { paths.clone() } else { r.selected.intersection(&paths).cloned().collect() };
                     r.files = Load::Ready(files);
+                    let gone = f.focus.as_ref().is_some_and(|(fr, fp)| fr == &repo && !paths.contains(fp));
+                    if f.focus.is_none() || gone {
+                        t.commit_refocus(cx);
+                    }
                 }
                 Err(e) => {
                     if let Some(r) = f.repo_mut(&repo) {
@@ -318,11 +329,49 @@ impl PageTab {
         });
     }
 
-    fn commit_open_diff(&mut self, repo: &str, path: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(scope) = self.commit_flow().map(|f| f.scope.clone()) else { return };
-        let Ok(dir) = orbit_core::workspace::repo_path(&scope, repo) else { return };
-        let file = dir.join(path);
-        self.with_app(window, cx, move |a, w, cx| crate::review::open_diff_at(a, file, None, w, cx));
+    /// Shows `path` of `repo` in the diff pane.
+    fn commit_focus(&mut self, repo: &str, path: &str, cx: &mut Context<Self>) {
+        let Some(f) = self.commit_flow() else { return };
+        let Ok(dir) = orbit_core::workspace::repo_path(&f.scope, repo) else { return };
+        f.focus = Some((repo.to_string(), path.to_string()));
+        let label = format!("{repo}/{path}");
+        let source = Source::Working { dir, rel: path.to_string() };
+        f.pane.update(cx, |p, cx| p.show(label, source, cx));
+        cx.notify();
+    }
+
+    /// Focuses the first file of the first repo that has one (or nothing).
+    fn commit_refocus(&mut self, cx: &mut Context<Self>) {
+        let Some(f) = self.commit_flow() else { return };
+        let mut first = None;
+        for r in &f.repos {
+            match &r.files {
+                Load::Ready(l) if !l.is_empty() => {
+                    first = Some((r.repo.clone(), l[0].path.clone()));
+                    break;
+                }
+                Load::Ready(_) | Load::Failed(_) => {}
+                // An earlier repo is still loading: it gets the focus then.
+                _ => return,
+            }
+        }
+        match first {
+            Some((repo, path)) => self.commit_focus(&repo, &path, cx),
+            None => {
+                f.focus = None;
+                f.pane.update(cx, |p, cx| p.clear(cx));
+            }
+        }
+    }
+
+    /// Ctrl+Enter in the modal: commits when the button would.
+    pub fn commit_shortcut(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(f) = self.commit_flow() else { return };
+        let pending: Vec<&RepoCommit> = f.repos.iter().filter(|r| r.pending()).collect();
+        let missing = pending.iter().any(|r| r.message.read(cx).value().trim().is_empty());
+        if !f.busy() && !pending.is_empty() && !missing {
+            self.commit_submit(window, cx);
+        }
     }
 
     pub(super) fn render_commit(&self, f: &CommitFlow, cx: &mut Context<Self>) -> impl IntoElement {
@@ -339,166 +388,292 @@ impl PageTab {
             format!("Commit {}", plural(pending.len(), "repo"))
         };
         let can_commit = !busy && !pending.is_empty() && missing.is_none();
-        let mut body = div().flex().flex_col().gap_2();
-        for r in &f.repos {
-            body = body.child(self.render_commit_repo(r, f.committing, cx));
+        let mut list = div()
+            .id("commit-list")
+            .w(px(420.))
+            .flex_none()
+            .h_full()
+            .overflow_y_scroll()
+            .p(px(8.))
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .border_r_1()
+            .border_color(c(theme::BORDER));
+        if f.repos.is_empty() {
+            list = list.child(div().p(px(6.)).text_size(px(12.)).text_color(c(theme::TEXT_FAINT)).child("Reading changes…"));
         }
-        card(720., "Commit changes", Some("Pick the files that go in, write or draft each message. Unselected changes stay uncommitted.".into()))
+        for r in &f.repos {
+            list = list.child(self.render_commit_repo(r, f, cx));
+        }
+        let head = div()
+            .flex_none()
+            .flex()
+            .items_start()
+            .justify_between()
+            .gap(px(16.))
+            .px(px(18.))
+            .pt(px(16.))
+            .pb(px(12.))
+            .border_b_1()
+            .border_color(c(theme::BORDER))
             .child(
-                div().flex().justify_end().child(
-                    kit::button_icon("commit-draft-all", Some(("spark", 13.)), "Draft all with AI", kit::Kind::Secondary, kit::TOOL)
-                        .when(busy || pending.is_empty(), |d| d.opacity(0.5))
-                        .on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.commit_draft_all(w, cx))),
-                ),
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .child(div().text_size(px(15.)).font_weight(gpui::FontWeight::SEMIBOLD).child("Commit changes"))
+                    .child(
+                        div()
+                            .text_size(px(12.5))
+                            .text_color(c(theme::TEXT_DIM))
+                            .child("Pick the files that go in, write or draft each message. Unselected changes stay uncommitted."),
+                    ),
             )
-            .when(f.repos.is_empty(), |d| d.child(div().text_xs().text_color(c(theme::TEXT_DIM)).child("Reading changes…")))
-            .child(body)
             .child(
-                footer().child(cancel_button("Cancel", cx)).child(
-                    crate::git::btn("commit-submit", label, if can_commit { Tone::Primary } else { Tone::Plain })
-                        .on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.commit_submit(w, cx))),
-                ),
-            )
+                kit::disabled(kit::button_icon("commit-draft-all", Some(("spark", 12.)), "Draft all with AI", kit::Kind::Secondary, kit::NORMAL), busy || pending.is_empty())
+                    .when(!busy && !pending.is_empty(), |b| b.on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.commit_draft_all(w, cx)))),
+            );
+        let foot = kit::modal_footer()
+            .px(px(18.))
+            .child(div().mr_auto().text_size(px(11.5)).text_color(c(theme::TEXT_FAINT)).child("⌘/Ctrl + Enter to commit"))
+            .child(cancel_button("Cancel", cx))
+            .child(
+                kit::disabled(crate::git::btn("commit-submit", label, Tone::Primary), !can_commit)
+                    .when(can_commit, |b| b.on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.commit_submit(w, cx)))),
+            );
+        kit::modal("modal-card", 1180.)
+            .key_context(super::COMMIT_CONTEXT)
+            .on_action(cx.listener(|t, _: &super::SubmitCommit, w, cx| t.commit_shortcut(w, cx)))
+            .max_w(gpui::relative(0.94))
+            .h(px(780.))
+            .max_h(gpui::relative(0.94))
+            .text_size(px(13.))
+            .child(head)
+            .child(div().flex_1().min_h_0().flex().child(list).child(div().flex_1().min_w_0().h_full().flex().bg(c(theme::BG)).child(f.pane.clone())))
+            .child(foot)
     }
 
-    fn render_commit_repo(&self, r: &RepoCommit, committing: bool, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_commit_repo(&self, r: &RepoCommit, f: &CommitFlow, cx: &mut Context<Self>) -> impl IntoElement {
+        let committing = f.committing;
         let total = r.total();
         let count = r.selected.len();
         let done = r.state == RepoState::Done;
         let locked = done || committing;
         let repo = r.repo.clone();
+        let toggle_open = |repo: String| {
+            move |t: &mut PageTab, _: &ClickEvent, _: &mut Window, cx: &mut Context<PageTab>| {
+                if let Some(r) = t.commit_flow().and_then(|f| f.repo_mut(&repo)) {
+                    r.open = !r.open;
+                }
+                cx.notify();
+            }
+        };
         let state = match &r.state {
-            RepoState::Drafting => "drafting…",
-            RepoState::Committing => "committing…",
-            RepoState::Done => "✓ committed",
-            RepoState::Failed(_) => "✕ failed",
-            RepoState::Ready => "",
+            RepoState::Drafting => Some(kit::spinner(gpui::ElementId::Name(format!("commit-spin:{repo}").into()), 12., c(theme::ACCENT)).into_any_element()),
+            RepoState::Committing => Some(div().child("committing…").into_any_element()),
+            RepoState::Done => Some(div().flex().gap(px(4.)).child(div().text_color(c(theme::OK)).child("✓")).child("committed").into_any_element()),
+            RepoState::Failed(_) => Some(div().flex().gap(px(4.)).child(div().text_color(c(theme::DANGER)).child("✕")).child("failed").into_any_element()),
+            RepoState::Ready => None,
         };
         let head = div()
             .flex()
             .items_center()
-            .gap_2()
-            .text_sm()
+            .gap(px(7.))
+            .min_w_0()
             .child(
                 div()
                     .id(gpui::ElementId::Name(format!("commit-open:{repo}").into()))
                     .relative()
-                    .size(px(18.))
+                    .size(px(16.))
                     .flex()
                     .items_center()
                     .justify_center()
                     .cursor_pointer()
                     .child(icon("disclosure", 11., c(theme::TEXT_FAINT)).when(r.open, |s| s.with_transformation(gpui::Transformation::rotate(gpui::percentage(0.25)))))
                     .child(crate::probe::probe(format!("commit-open:{repo}")))
-                    .on_click(cx.listener({
-                    let repo = repo.clone();
-                    move |t, _: &ClickEvent, _, cx| {
-                        if let Some(r) = t.commit_flow().and_then(|f| f.repo_mut(&repo)) {
-                            r.open = !r.open;
-                        }
-                        cx.notify();
-                    }
-                })),
+                    .on_click(cx.listener(toggle_open(repo.clone()))),
             )
-            .child(div().id(gpui::ElementId::Name(format!("commit-repo:{repo}").into())).relative().cursor_pointer().child(kit::check(total > 0 && count == total, count > 0 && count < total)).child(crate::probe::probe(format!("commit-repo:{repo}"))).on_click(cx.listener({
-                let repo = repo.clone();
-                move |t, _: &ClickEvent, _, cx| {
-                    if !locked {
-                        t.commit_toggle_repo(&repo, cx)
-                    }
-                }
-            })))
-            .child(div().font_family(theme::MONO_FONT).font_weight(gpui::FontWeight::BOLD).child(repo.clone()))
-            .child(div().text_xs().text_color(c(theme::TEXT_FAINT)).child(match &r.files {
+            .child(
+                div()
+                    .id(gpui::ElementId::Name(format!("commit-repo:{repo}").into()))
+                    .relative()
+                    .cursor_pointer()
+                    .child(kit::check(total > 0 && count == total, count > 0 && count < total))
+                    .child(crate::probe::probe(format!("commit-repo:{repo}")))
+                    .on_click(cx.listener({
+                        let repo = repo.clone();
+                        move |t, _: &ClickEvent, _, cx| {
+                            if !locked {
+                                t.commit_toggle_repo(&repo, cx)
+                            }
+                        }
+                    })),
+            )
+            .child(
+                div()
+                    .id(gpui::ElementId::Name(format!("commit-name:{repo}").into()))
+                    .min_w_0()
+                    .truncate()
+                    .cursor_pointer()
+                    .font_family(theme::MONO_FONT)
+                    .text_size(px(12.5))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child(repo.clone())
+                    .on_click(cx.listener(toggle_open(repo.clone()))),
+            )
+            .child(div().flex_none().text_size(px(11.)).text_color(c(theme::TEXT_FAINT)).child(match &r.files {
                 Load::Ready(_) => format!("{count} of {}", plural(total, "file")),
                 Load::Failed(_) => "unreadable".into(),
                 _ => "…".into(),
             }))
-            .child(div().flex_1().text_xs().text_color(c(theme::TEXT_DIM)).child(state))
+            .child(div().ml_auto().flex().items_center().gap(px(4.)).text_size(px(11.)).text_color(c(theme::TEXT_DIM)).children(state))
             .when(!locked && total > 0, |d| {
                 let (repo, paths) = (repo.clone(), r.files.ready().into_iter().flatten().map(|f| f.path.clone()).collect::<Vec<_>>());
-                d.child(crate::git::btn(format!("commit-discard-all:{repo}"), "Discard all", Tone::Danger).on_click(cx.listener(move |t, _: &ClickEvent, w, cx| {
-                    t.commit_discard(repo.clone(), paths.clone(), format!("every change in {repo}"), w, cx)
-                })))
+                d.child(
+                    kit::hint(
+                        kit::button(format!("commit-discard-all:{repo}"), "Discard all", kit::Kind::Secondary, kit::MINI)
+                            .bg(gpui::transparent_black())
+                            .border_1()
+                            .border_color(kit::alpha(c(theme::DANGER), 0.4))
+                            .hover(|s| s.bg(kit::alpha(c(theme::DANGER), 0.15))),
+                        "Discard every change in this repo",
+                    )
+                        .on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.commit_discard(repo.clone(), paths.clone(), format!("every change in {repo}"), w, cx))),
+                )
             })
             .when(!locked, |d| {
                 let repo = repo.clone();
-                d.child(kit::hint(kit::icon_button(format!("commit-draft:{repo}"), "spark", 24., 12., false).border_color(gpui::transparent_black()), "Draft with AI").on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.commit_draft(repo.clone(), w, cx))))
+                let off = r.state == RepoState::Drafting || count == 0;
+                d.child(
+                    kit::hint(
+                        kit::disabled(kit::icon_button(format!("commit-draft:{repo}"), "spark", 24., 12., false).border_color(gpui::transparent_black()), off),
+                        "Draft this message with AI, from the selected files",
+                    )
+                    .when(!off, |b| b.on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.commit_draft(repo.clone(), w, cx)))),
+                )
             });
         let files = r.open.then(|| match &r.files {
-            Load::Ready(list) => div().pl_6().flex().flex_col().children(list.iter().map(|f| {
-                let (letter, color) = ui::status_letter(&f.status);
-                let on = r.selected.contains(&f.path);
-                let (name, dir) = match f.path.rsplit_once('/') {
+            Load::Ready(list) => div().flex().flex_col().gap(px(1.)).children(list.iter().map(|file| {
+                let on = r.selected.contains(&file.path);
+                let focused = f.focus.as_ref().is_some_and(|(fr, fp)| fr == &repo && fp == &file.path);
+                let (name, dir) = match file.path.rsplit_once('/') {
                     Some((d, n)) => (n.to_string(), d.to_string()),
-                    None => (f.path.clone(), String::new()),
+                    None => (file.path.clone(), String::new()),
                 };
-                let id = format!("{repo}/{}", f.path);
-                let (repo1, repo2, repo3, path1, path2, path3) = (repo.clone(), repo.clone(), repo.clone(), f.path.clone(), f.path.clone(), f.path.clone());
+                let id = format!("{repo}/{}", file.path);
+                let group = format!("commit-row:{id}");
+                let (repo1, repo2, repo3, path1, path2, path3) = (repo.clone(), repo.clone(), repo.clone(), file.path.clone(), file.path.clone(), file.path.clone());
                 div()
+                    .id(gpui::ElementId::Name(format!("commit-diff:{id}").into()))
+                    .group(group.clone())
+                    .relative()
                     .flex()
                     .items_center()
-                    .gap_2()
-                    .text_xs()
-                    .child(div().id(gpui::ElementId::Name(format!("commit-file:{id}").into())).relative().cursor_pointer().child(kit::check(on, false)).child(crate::probe::probe(format!("commit-file:{id}"))).on_click(cx.listener(
-                        move |t, _: &ClickEvent, _, cx| {
-                            if !locked {
-                                t.commit_toggle_file(&repo1, &path1, cx)
-                            }
-                        },
-                    )))
-                    .child(div().w(px(12.)).text_color(color).child(letter))
+                    .gap(px(7.))
+                    .min_w_0()
+                    .px(px(6.))
+                    .py(px(3.))
+                    .rounded(px(5.))
+                    .text_size(px(12.))
+                    .cursor_pointer()
+                    .map(|d| if focused { d.bg(theme::accent_soft()) } else { d.hover(|s| s.bg(c(theme::PANEL_HOVER))) })
+                    .child(crate::probe::probe(format!("commit-diff:{id}")))
+                    .on_click(cx.listener(move |t, _: &ClickEvent, _, cx| t.commit_focus(&repo2, &path2, cx)))
                     .child(
-                        ui::row(format!("commit-diff:{id}"))
+                        div()
+                            .id(gpui::ElementId::Name(format!("commit-file:{id}").into()))
+                            .relative()
+                            .child(kit::check(on, false))
+                            .child(crate::probe::probe(format!("commit-file:{id}")))
+                            .on_click(cx.listener(move |t, _: &ClickEvent, _, cx| {
+                                cx.stop_propagation();
+                                if !locked {
+                                    t.commit_toggle_file(&repo1, &path1, cx)
+                                }
+                            })),
+                    )
+                    .child(ui::status_badge(&file.status))
+                    .child(
+                        div()
                             .flex_1()
                             .min_w_0()
                             .flex()
-                            .gap_2()
-                            .child(div().text_color(c(theme::TEXT)).child(name))
-                            .child(div().truncate().text_color(c(theme::TEXT_FAINT)).child(dir))
-                            .on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.commit_open_diff(&repo2, &path2, w, cx))),
+                            .items_baseline()
+                            .overflow_hidden()
+                            .child(div().flex_none().text_color(c(theme::TEXT)).child(name))
+                            .when(!dir.is_empty(), |d| d.child(div().ml(px(6.)).min_w_0().truncate().text_size(px(11.)).text_color(c(theme::TEXT_FAINT)).child(dir))),
                     )
-                    .when(f.added > 0, |d| d.child(div().text_color(c(theme::OK)).child(format!("+{}", f.added))))
-                    .when(f.deleted > 0, |d| d.child(div().text_color(c(theme::DANGER)).child(format!("−{}", f.deleted))))
+                    .when(file.added > 0 || file.deleted > 0, |d| {
+                        d.child(
+                            div()
+                                .flex_none()
+                                .flex()
+                                .gap(px(5.))
+                                .text_size(px(11.))
+                                .when(file.added > 0, |d| d.child(div().text_color(c(theme::OK)).child(format!("+{}", file.added))))
+                                .when(file.deleted > 0, |d| d.child(div().text_color(c(theme::DANGER)).child(format!("−{}", file.deleted)))),
+                        )
+                    })
                     .when(!locked, |d| {
-                        d.child(kit::hint(kit::icon_button(format!("commit-discard:{id}"), "undo", 24., 12., true).border_color(gpui::transparent_black()), "Discard changes").on_click(cx.listener(move |t, _: &ClickEvent, w, cx| {
-                            let label = path3.rsplit('/').next().unwrap_or(&path3).to_string();
-                            t.commit_discard(repo3.clone(), vec![path3.clone()], label, w, cx)
-                        })))
+                        d.child(
+                            div().opacity(0.).group_hover(group, |s| s.opacity(1.)).child(
+                                kit::hint(kit::icon_button(format!("commit-discard:{id}"), "undo", 22., 12., true).border_color(gpui::transparent_black()), "Discard this file's changes")
+                                    .on_click(cx.listener(move |t, _: &ClickEvent, w, cx| {
+                                        cx.stop_propagation();
+                                        let label = path3.rsplit('/').next().unwrap_or(&path3).to_string();
+                                        t.commit_discard(repo3.clone(), vec![path3.clone()], label, w, cx)
+                                    })),
+                            ),
+                        )
                     })
             })),
-            Load::Failed(e) => div().pl_6().text_xs().text_color(c(theme::DANGER)).child(e.clone()),
-            _ => div().pl_6().text_xs().text_color(c(theme::TEXT_FAINT)).child("Loading…"),
+            Load::Failed(e) => div().px(px(6.)).text_size(px(12.)).text_color(c(theme::DANGER)).child(e.clone()),
+            _ => div().px(px(6.)).text_size(px(12.)).text_color(c(theme::TEXT_FAINT)).child("Loading…"),
         });
+        let message = if r.state == RepoState::Drafting {
+            div()
+                .min_h(px(52.))
+                .px(px(8.))
+                .py(px(6.))
+                .rounded(px(6.))
+                .border_1()
+                .border_dashed()
+                .border_color(c(theme::BORDER_STRONG))
+                .text_size(px(12.))
+                .text_color(c(theme::TEXT_FAINT))
+                .child("The agent is drafting…")
+                .into_any_element()
+        } else {
+            div()
+                .id(gpui::ElementId::Name(format!("commit-msg:{repo}").into()))
+                .relative()
+                .font_family(theme::MONO_FONT)
+                .text_size(px(12.))
+                .child(Textarea::new(&r.message).bg(c(theme::BG)).disabled(committing || count == 0))
+                .child(crate::probe::probe(format!("commit-msg:{repo}")))
+                .into_any_element()
+        };
         div()
-            .p(px(10.))
+            .p(px(8.))
             .rounded(px(8.))
             .border_1()
             .border_color(c(theme::BORDER))
             .bg(c(theme::PANEL_RAISED))
-            .when(done, |d| d.opacity(0.6))
+            .when(done, |d| d.opacity(0.7))
             .flex()
             .flex_col()
-            .gap_1()
+            .gap(px(6.))
             .child(head)
             .children(files)
-            .when(!done, |d| {
-                d.child(
-                    div()
-                        .id(gpui::ElementId::Name(format!("commit-msg:{repo}").into()))
-                        .relative()
-                        .child(Textarea::new(&r.message).disabled(committing || count == 0))
-                        .child(crate::probe::probe(format!("commit-msg:{repo}"))),
-                )
-            })
+            .when(!done, |d| d.child(message))
             .when(done, |d| {
-                d.child(div().text_xs().text_color(c(theme::TEXT_DIM)).child(r.message.read(cx).value().lines().next().unwrap_or_default().to_string()))
+                d.child(div().px(px(4.)).truncate().text_size(px(12.)).text_color(c(theme::TEXT_DIM)).child(r.message.read(cx).value().lines().next().unwrap_or_default().to_string()))
             })
-            .when_some(if let RepoState::Failed(e) = &r.state { Some(e.clone()) } else { None }, |d, e| {
-                d.child(div().text_xs().text_color(c(theme::DANGER)).child(e))
-            })
+            .when_some(if let RepoState::Failed(e) = &r.state { Some(e.clone()) } else { None }, |d, e| d.child(div().text_size(px(11.5)).text_color(c(theme::DANGER)).child(e)))
             .when_some(r.draft_error.clone(), |d, e| {
-                d.child(div().text_xs().text_color(c(theme::WARN)).child(format!("Couldn't draft with AI ({e}). Write the message yourself.")))
+                let e = e.split_once(": ").map_or(e.as_str(), |(_, b)| b).to_string();
+                d.child(div().text_size(px(11.5)).text_color(c(theme::WARN)).child(format!("Couldn't draft with AI ({e}). Write the message yourself.")))
             })
     }
 }
