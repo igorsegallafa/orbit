@@ -222,6 +222,7 @@ pub fn init(cx: &mut App) {
         Command::new("app.settings", "Open Settings").keys(["ctrl-,"]).run(|a, w, cx| open_settings(a, Section::Repos, w, cx)),
         Command::new("settings.languages", "Settings: Languages").run(|a, w, cx| open_settings(a, Section::Languages, w, cx)),
         Command::new("settings.health", "Settings: Health").run(|a, w, cx| open_settings(a, Section::Health, w, cx)),
+        Command::new("settings.keyboard", "Settings: Keyboard").run(|a, w, cx| open_settings(a, Section::Keyboard, w, cx)),
         Command::new("settings.ai", "Settings: AI").run(|a, w, cx| open_settings(a, Section::Ai, w, cx)),
         Command::new("app.integrations", "Open Integrations").run(open_integrations),
         Command::new("app.checkForUpdates", "Check for Updates").run(|a, w, cx| {

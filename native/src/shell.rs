@@ -1461,18 +1461,42 @@ impl OrbitApp {
     }
 }
 
+impl OrbitApp {
+    /// The first terminal focus asks GNOME; say what that prompt is, or why it won't come.
+    fn explain_shortcuts(&mut self, cx: &mut Context<Self>) {
+        use crate::terminal::inhibit::{self, Gnome};
+        cx.spawn(async move |this, cx| {
+            let status = cx.background_executor().spawn(async { inhibit::gnome_status() }).await;
+            let _ = this.update(cx, |a, cx| match status {
+                Gnome::Allowed => {}
+                Gnome::Denied => a.toast_action(
+                    "GNOME blocks terminal keys for Orbit",
+                    Some("It was denied once, so GNOME won't ask again and Super+V, Super+A… (Ctrl+V, Ctrl+A under Toshy) stay GNOME shortcuts in the terminal.".into()),
+                    crate::toast::ToastAction {
+                        label: "Ask again".into(),
+                        run: std::rc::Rc::new(|cx| cx.background_executor().spawn(async { inhibit::gnome_forget() }).detach()),
+                    },
+                    cx,
+                ),
+                Gnome::NotAsked | Gnome::Unknown => a.toast(
+                    crate::toast::ToastKind::Info,
+                    "Terminal keys over GNOME shortcuts",
+                    Some("GNOME will ask to let Orbit pass Super+V, Super+A… (Ctrl+V, Ctrl+A under Toshy) to the terminal. Choose Allow. Settings → Keyboard shows the answer.".into()),
+                    cx,
+                ),
+            });
+        })
+        .detach();
+    }
+}
+
 impl Render for OrbitApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.schedule_save(cx);
         terminal_title(window, self.active_terminal().is_some());
         if crate::terminal::inhibit::sync(window, cx) {
-            self.toast(
-                crate::toast::ToastKind::Info,
-                "Terminal keys over GNOME shortcuts",
-                Some("While a terminal has focus, Orbit asks GNOME to pass Super+V, Super+A… to it (Ctrl+V, Ctrl+A under Toshy). GNOME asks once to allow it; GNOME Settings → Apps → Orbit changes the answer, Orbit's Settings → Keyboard turns it off.".into()),
-                cx,
-            );
+            self.explain_shortcuts(cx);
         }
+        self.schedule_save(cx);
         let focus = self.focus_workspace(cx).is_some();
         // Settings is its own screen: no tabs over it, and its nav replaces the
         // sidebar (the page draws it). No tabs at all: no strip.

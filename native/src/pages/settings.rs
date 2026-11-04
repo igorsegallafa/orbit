@@ -151,6 +151,7 @@ pub struct SettingsPage {
     drafts: HashMap<String, Entity<InputState>>,
     logs: HashMap<u32, Vec<String>>,
     health: Load<Vec<Check>>,
+    gnome: Option<crate::terminal::inhibit::Gnome>,
     _poll: Task<()>,
     _subs: Vec<Subscription>,
 }
@@ -191,6 +192,7 @@ impl SettingsPage {
             drafts: HashMap::new(),
             logs: HashMap::new(),
             health: Load::Idle,
+            gnome: None,
             _poll: poll,
             _subs: vec![sub, cx.observe_global::<updates::Updater>(|_, cx| cx.notify())],
         };
@@ -208,6 +210,7 @@ impl SettingsPage {
                 self.load_languages(cx);
             }
             Section::Health if !matches!(self.health, Load::Ready(_)) => self.load_health(window, cx),
+            Section::Keyboard => self.load_gnome(window, cx),
             Section::Ai if matches!(self.models, Load::Idle) => self.load_models(window, cx),
             _ => {}
         }
@@ -417,6 +420,10 @@ impl SettingsPage {
     }
 
     // ---------- health ----------
+
+    fn load_gnome(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        ui::bg(cx, crate::terminal::inhibit::gnome_status, |t: &mut Self, g, _, _| t.gnome = Some(g), window);
+    }
 
     fn load_health(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.health = Load::Loading;
@@ -868,16 +875,33 @@ impl SettingsPage {
         use crate::terminal::inhibit;
         let on = inhibit::enabled();
         kit::section()
-            .child(kit::rows([
-                kit::setting(
+            .child(kit::rows(
+                [kit::setting(
                     "Terminal keys over GNOME shortcuts",
                     kit::hint("While a terminal has focus, GNOME's Super shortcuts (Super+V, Super+A, Super+S…) go to the terminal; under Toshy those are Ctrl+V, Ctrl+A, Ctrl+S. Alt+Tab still switches windows. GNOME asks once to allow it; GNOME Settings → Apps → Orbit changes the answer. Wayland only: on X11 GNOME's grabs cannot be lifted by an app."),
                     kit::check("keys-inhibit", if on { "On" } else { "Off" }, on).on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
                         inhibit::set_enabled(!inhibit::enabled(), cx);
                         cx.notify();
                     })),
-                ),
-            ]))
+                )]
+            .into_iter()
+            .chain(self.gnome.filter(|g| *g != inhibit::Gnome::Unknown).map(|g| {
+                let (label, hint) = match g {
+                    inhibit::Gnome::Allowed => ("Allowed", "GNOME lets Orbit's terminals take these keys."),
+                    inhibit::Gnome::Denied => ("Denied", "GNOME keeps these keys and won't ask again. Ask again resets the answer: GNOME asks the next time a terminal takes focus."),
+                    _ => ("Not asked yet", "GNOME asks the first time a terminal takes focus."),
+                };
+                kit::setting(
+                    format!("GNOME permission: {label}"),
+                    kit::hint(hint),
+                    kit::disabled(kit::button("keys-ask-again", "Ask again", Kind::Secondary), g != inhibit::Gnome::Denied).on_click(cx.listener(|t, _: &ClickEvent, w, cx| {
+                        t.gnome = None;
+                        ui::bg(cx, || { inhibit::gnome_forget(); inhibit::gnome_status() }, |t: &mut Self, g, _, _| t.gnome = Some(g), w);
+                        cx.notify();
+                    })),
+                )
+            })),
+            ))
             .into_any_element()
     }
 
