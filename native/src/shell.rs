@@ -1118,9 +1118,10 @@ impl Render for OrbitApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.schedule_save(cx);
         let focus = self.focus_workspace(cx).is_some();
-        let show_dock = focus && !self.layout.dock_hidden;
-        // Settings is its own screen: no tabs over it. No tabs at all: no strip.
-        let on_settings = self.active_tab().is_some_and(|t| t.key(cx) == "page:settings");
+        // Settings is its own screen: no tabs over it, and its nav replaces the
+        // sidebar (the page draws it). No tabs at all: no strip.
+        let on_settings = self.active_tab().is_some_and(|t| t.key(cx) == crate::pages::SETTINGS_KEY);
+        let show_dock = focus && !self.layout.dock_hidden && !on_settings;
         let show_strip = !on_settings && !self.strip_tabs(cx).is_empty();
         let main = div()
             .flex_1()
@@ -1168,11 +1169,11 @@ impl Render for OrbitApp {
                     .flex_1()
                     .min_h_0()
                     .flex()
-                    .when(!self.layout.sidebar_hidden, |d| d.child(self.render_sidebar(cx)).child(resizer(Pane::Sidebar, sidebar_lit, cx)))
+                    .when(!self.layout.sidebar_hidden && !on_settings, |d| d.child(self.render_sidebar(cx)).child(resizer(Pane::Sidebar, sidebar_lit, cx)))
                     .child(main)
                     .when(show_dock, |d| d.child(resizer(Pane::Dock, false, cx)).child(self.render_dock(cx))),
             )
-            .when(focus, |d| d.child(self.render_status(cx)))
+            .when(focus && !on_settings, |d| d.child(self.render_status(cx)))
             .children(self.render_drag_layer(cx))
             .children(self.render_toasts(cx))
             .children(self.render_palette(cx))
