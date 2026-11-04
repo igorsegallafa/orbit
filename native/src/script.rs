@@ -355,9 +355,10 @@ fn dump_sessions(out: &mut String, cx: &gpui::App) {
         });
         let _ = writeln!(
             out,
-            "  {} {} [{}] {} in {} args {:?}{}{}",
+            "  {} {}{} [{}] {} in {} args {:?}{}{}",
             meta.id,
             meta.session_name,
+            meta.codename.as_ref().map(|n| format!(" (codename {n})")).unwrap_or_default(),
             meta.label,
             status,
             meta.workspace,
@@ -372,7 +373,8 @@ fn dump_sessions(out: &mut String, cx: &gpui::App) {
     }
     let _ = writeln!(out, "--- recent:");
     for r in &store.recent {
-        let _ = writeln!(out, "  {} {} {} in {}", r.agent, r.resume_id, r.session_name, r.workspace);
+        let codename = r.codename.as_ref().map(|n| format!(" (codename {n})")).unwrap_or_default();
+        let _ = writeln!(out, "  {} {} {}{codename} in {}", r.agent, r.resume_id, r.session_name, r.workspace);
     }
     crate::notifications::dump(out, cx);
 }

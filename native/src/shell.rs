@@ -75,6 +75,8 @@ pub struct Chrome {
     pub ws_switcher: Option<WsSwitcher>,
     /// The select's left edge, for the popover.
     pub ws_switcher_x: Rc<Cell<f32>>,
+    /// A session whose name is being edited.
+    pub session_rename: Option<crate::sessions::rename::Rename>,
 }
 
 const HOME_SCOPE: &str = "dir:~";
@@ -896,10 +898,11 @@ impl OrbitApp {
             // A divider where the files start, after the sessions and views.
             let group_start = tab.is_file() && pos > 0 && !self.tabs[strip[pos - 1]].is_file();
             let (icon, label) = self.tab_face(tab, cx);
-            let status = match &tab.kind {
-                TabKind::Terminal(t) => Some(t.read(cx).status),
-                _ => None,
+            let (status, session) = match &tab.kind {
+                TabKind::Terminal(t) => (Some(t.read(cx).status), Some(t.read(cx).meta.id.clone())),
+                _ => (None, None),
             };
+            let rename_field = session.as_deref().and_then(|k| self.session_rename_field(k, crate::sessions::rename::Place::Tab, cx));
             let agent = tab.is_agent(cx);
             let close_tip: SharedString = if agent {
                 "Minimize (the session keeps running) — End session from the tab's menu".into()
@@ -931,7 +934,10 @@ impl OrbitApp {
                 .hover(|s| s.bg(c(theme::PANEL_RAISED)).text_color(c(theme::TEXT)))
                 .when(active, |d| d.bg(c(theme::BG)).text_color(c(theme::TEXT)).border_color(c(theme::ACCENT)).hover(|s| s.bg(c(theme::BG))))
                 .child(orbit_icon(icon, 13., c(theme::TEXT_DIM)))
-                .child(div().when(tab.preview, |d| d.italic()).child(label))
+                .child(match rename_field {
+                    Some(field) => field,
+                    None => div().when(tab.preview, |d| d.italic()).child(label).into_any_element(),
+                })
                 .children(status.map(|s| crate::sidebar::status_indicator(format!("tab-st-{pos}"), s)))
                 .child(
                     div()
@@ -974,11 +980,14 @@ impl OrbitApp {
                 )
                 .child(probe(format!("tab:{pos}")))
                 .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
-                    // Double click keeps a preview tab open.
+                    // Double click keeps a preview tab open, or renames a session.
                     if ev.click_count() >= 2 {
                         this.keep_open(ix, cx);
                     }
-                    this.activate(ix, window, cx)
+                    this.activate(ix, window, cx);
+                    if let Some(key) = session.as_ref().filter(|_| ev.click_count() >= 2) {
+                        this.start_session_rename(key, crate::sessions::rename::Place::Tab, window, cx);
+                    }
                 }))
                 .on_mouse_down(
                     MouseButton::Right,

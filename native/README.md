@@ -507,6 +507,13 @@ the program ended) and `pty-error` events for a failed start, as before.
   agent), `NewClaudeSession`, `NewOpencodeSession`, `NewOmpSession`, `NewShellSession`,
   `ResumeLastSession`, `NextSessionNeedingInput`, `MarkInboxRead`, `ClearInbox`. They are global
   handlers, so they work from any focus; none is bound to a key yet.
+- Rename (`src/sessions/rename.rs`, App.tsx `renameTab`): *Rename Session* in the tab menu, a
+  double click on a session tab, or *Rename session* in the sidebar row's menu edits the name in
+  place (`.tab-rename`). Enter or leaving the field saves, Esc cancels, an empty name restores the
+  codename; a name another session of the scope has is refused with a toast. The name replaces
+  `sessionName` (tab, sidebar, inbox, notifications) and the codename is kept as `codename`, both
+  saved in `native-sessions.json` and carried into Recent and resume; files without the field
+  read as unnamed. Probe: `session-rename` (the field).
 
 Verified by self-test runs with `ORBIT_CONFIG_DIR` in a scratch folder, `SHELL=/bin/bash` and the
 stub agent on `PATH` (no real agent was started):
@@ -1369,7 +1376,7 @@ Status of everything the React app did: **done**, **partial** (with what's missi
 - [ ] partial: repo briefs on the dashboard and the sidebar, re-read every 30 s (`src/lib/useRepoBriefs.ts`); no background fetch timer
 
 ### Sessions / agents
-- [ ] partial: new session (shell, Claude Code, Open Code, OMP in the current scope) and codenames (`NewSessionMenu.tsx`, `src/lib/names.ts`). No "Open in" folder/repo picker, no rename.
+- [ ] partial: new session (shell, Claude Code, Open Code, OMP in the current scope) and codenames (`NewSessionMenu.tsx`, `src/lib/names.ts`), rename. No "Open in" folder/repo picker.
 - [x] done: agent status from spinner lines and Claude hooks, in tab titles and the sidebar (`src/lib/agentStatus.ts`, backend `agent_hooks.rs`)
 - [ ] partial: resume claude/opencode sessions (Recent per scope, restart with `--resume`). No initial prompt injection (`TerminalPane.tsx`), minimized agent tabs as `App.tsx`.
 - [ ] — Live agent feed (`AgentFeed.tsx`)
@@ -1392,7 +1399,7 @@ Status of everything the React app did: **done**, **partial** (with what's missi
 - [x] done: sessions and files groups with a divider, dirty dot, `Ctrl+W` closes the active file tab (refused when unsaved; `Ctrl+Shift+W` discards)
 - [x] done: definitions in other files open as editor tabs
 - [x] done: tab context menu as the React app (Close, Keep Open, Close Other Files, Close Files to the Right, Close Saved Files, Close All Files, Close Other Tabs, Close All Tabs; unsaved files stay open with a toast), middle click closes, unsaved-changes dialog (Save / Don't Save / Cancel)
-- [ ] — rename session tabs
+- [x] done: rename session tabs (double click or the tab menu; also the sidebar row's menu)
 
 ### Editor
 - [x] done: code editor with tree-sitter highlighting (C, C++, Rust, TS/TSX, JS, JSON), line numbers, undo/redo

@@ -8,7 +8,7 @@ use crate::commands;
 use crate::icons::orbit_icon;
 use crate::overlay::MenuItem;
 use crate::probe::probe;
-use crate::sessions::{self, status::Status, InboxKind, RecentSession};
+use crate::sessions::{self, rename::Place, status::Status, InboxKind, RecentSession};
 use crate::theme::{self, c, size};
 use crate::toast::ToastKind;
 use crate::workspace_ui::{self, PageId};
@@ -27,6 +27,8 @@ const RECENT_SHOWN: usize = 5;
 #[derive(Clone)]
 struct SessionRow {
     tab_key: String,
+    /// The session's key; none for an editor.
+    session: Option<String>,
     label: SharedString,
     /// None: an editor tab (doc icon).
     status: Option<Status>,
@@ -176,6 +178,7 @@ impl OrbitApp {
                             let name: SharedString = v.meta.session_name.clone().into();
                             SessionRow {
                                 tab_key: key,
+                                session: Some(v.meta.id.clone()),
                                 label: name.clone(),
                                 status: Some(v.status),
                                 agent: v.is_agent(),
@@ -194,6 +197,7 @@ impl OrbitApp {
                         let file = path.file_name()?.to_string_lossy().to_string();
                         Some(SessionRow {
                             tab_key: key,
+                            session: None,
                             label: format!("{repo}/{file}").into(),
                             status: None,
                             agent: false,
@@ -218,6 +222,11 @@ impl OrbitApp {
             None => div().w(px(18.)).flex_none().flex().justify_center().child(orbit_icon("doc", 13., c(theme::TEXT_DIM))).into_any_element(),
         };
         let tip = row.tooltip.clone();
+        let session = row.session.clone();
+        let label = match session.as_deref().and_then(|k| self.session_rename_field(k, Place::Sidebar, cx)) {
+            Some(field) => field,
+            None => div().min_w_0().truncate().when(minimized, |d| d.italic().opacity(0.75)).child(row.label.clone()).into_any_element(),
+        };
         div()
             .id(SharedString::from(format!("session:{}", row.label)))
             .relative()
@@ -236,7 +245,7 @@ impl OrbitApp {
             .text_color(c(if row.active { theme::NAV_ACTIVE } else { theme::TEXT_DIM }))
             .hover(|s| s.text_color(c(theme::TEXT)))
             .child(icon)
-            .child(div().min_w_0().truncate().when(minimized, |d| d.italic().opacity(0.75)).child(row.label.clone()))
+            .child(label)
             .children(row.unread.map(|k| div().ml_auto().child(unread_dot(format!("unread-{key}"), k))))
             .child(probe(format!("session:{}", row.label)))
             .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
@@ -250,6 +259,9 @@ impl OrbitApp {
                         MenuItem::new("Open", move |a, w, cx| a.activate_key(&k, w, cx))
                     };
                     let mut items = vec![open];
+                    if let Some(id) = session.clone() {
+                        items.push(MenuItem::new("Rename session", move |a, w, cx| a.start_session_rename(&id, Place::Sidebar, w, cx)));
+                    }
                     if agent {
                         if !minimized {
                             let k2 = k.clone();

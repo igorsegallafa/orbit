@@ -923,6 +923,14 @@ impl OrbitApp {
             }
         };
         let mut items = vec![MenuItem::new("Close", with(|a, ix, w, cx| a.close_tab(ix, false, w, cx)))];
+        if let TabKind::Terminal(v) = &tab.kind {
+            let id = v.read(cx).meta.id.clone();
+            if crate::sessions::store(cx).read(cx).view(&id).is_some() {
+                items.push(MenuItem::new("Rename Session", move |a, w, cx| {
+                    a.start_session_rename(&id, crate::sessions::rename::Place::Tab, w, cx)
+                }));
+            }
+        }
         if !files.is_empty() {
             if tab.preview {
                 items.push(MenuItem::new("Keep Open", with(|a, ix, _, cx| a.keep_open(ix, cx))));
