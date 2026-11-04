@@ -1072,7 +1072,7 @@ impl OrbitApp {
                 .justify_center()
                 .rounded(px(6.))
                 .cursor_pointer()
-                .hover(move |s| s.bg(if on { theme::accent_soft() } else { c(theme::PANEL_RAISED).into() }))
+                .hover(move |s| s.bg(if on { theme::accent_soft() } else { c(theme::PANEL_RAISED) }))
                 .when(on, |d| d.bg(c(theme::ACCENT_SOFT)))
                 .child(if on {
                     orbit_icon(icon, 17., c(theme::NAV_ACTIVE))
