@@ -25,7 +25,8 @@ interface TreeTarget {
 
 interface Props {
   workspace: Workspace;
-  onOpenFile: (repo: string, path: string) => void;
+  /** `preview`: a single click, which reuses the preview tab. */
+  onOpenFile: (repo: string, path: string, opts?: { preview?: boolean }) => void;
   /** Opens the diff review for a changed file (Git tab). */
   onReviewFile: (repo: string, path: string) => void;
   /** Opens the Review tab with every change of the workspace. */
@@ -45,6 +46,7 @@ interface Props {
 
 type RowHandlers = {
   click: (n: FileNode) => void;
+  doubleClick: (n: FileNode) => void;
   contextMenu: (e: React.MouseEvent, n: FileNode) => void;
   mouseDown: (e: React.MouseEvent, n: FileNode) => void;
   pointerDown: (e: React.PointerEvent, n: FileNode) => void;
@@ -68,6 +70,7 @@ const TreeRow = memo(function TreeRow({ node, depth, open, active, dropTarget, r
       data-path={node.path}
       data-drop-dir={node.is_dir ? node.path : undefined}
       onClick={() => h.click(node)}
+      onDoubleClick={() => h.doubleClick(node)}
       onContextMenu={(e) => h.contextMenu(e, node)}
       onMouseDown={(e) => h.mouseDown(e, node)}
       onPointerDown={(e) => h.pointerDown(e, node)}
@@ -445,7 +448,10 @@ export const FileTreePanel = memo(function FileTreePanel({
     click: (n) => {
       if (justDraggedRef.current) return;
       if (n.is_dir) toggleDir(n.path);
-      else onOpenFile(repo, n.path);
+      else onOpenFile(repo, n.path, { preview: true });
+    },
+    doubleClick: (n) => {
+      if (!n.is_dir) onOpenFile(repo, n.path);
     },
     contextMenu: (e, n) => {
       e.preventDefault();
@@ -475,6 +481,81 @@ export const FileTreePanel = memo(function FileTreePanel({
     const row = hostRef.current?.querySelector<HTMLElement>(`[data-path="${CSS.escape(shownPath)}"]`);
     row?.scrollIntoView({ block: "nearest" });
   }, [shownPath, shownLoaded]);
+
+  /** Arrow keys move between rows, ←/→ fold and unfold folders, Enter
+   *  opens a file in a tab of its own. */
+  const onTreeKey = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (renameTarget || e.altKey || e.ctrlKey || e.metaKey) return;
+    const rows = Array.from(e.currentTarget.querySelectorAll<HTMLElement>("button.tree-item"));
+    const row = (document.activeElement as HTMLElement | null)?.closest<HTMLElement>("button.tree-item");
+    const at = row ? rows.indexOf(row) : -1;
+    const path = row?.dataset.path ?? "";
+    const isDir = !!row?.classList.contains("tree-dir");
+    const focus = (el: HTMLElement | undefined | null) => {
+      if (!el) return;
+      e.preventDefault();
+      el.focus();
+      el.scrollIntoView({ block: "nearest" });
+    };
+    switch (e.key) {
+      case "ArrowDown":
+        return focus(rows[at + 1] ?? rows[at]);
+      case "ArrowUp":
+        return focus(rows[Math.max(at - 1, 0)]);
+      case "ArrowRight":
+        if (!row || !isDir) return;
+        e.preventDefault();
+        if (!expanded[path]) toggleDir(path);
+        else focus(rows[at + 1]);
+        return;
+      case "ArrowLeft": {
+        if (!row) return;
+        e.preventDefault();
+        if (isDir && expanded[path]) return toggleDir(path);
+        const parent = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : null;
+        if (parent) focus(rows.find((r) => r.dataset.path === parent));
+        return;
+      }
+      case "Enter":
+        if (!row || isDir) return;
+        e.preventDefault();
+        onOpenFile(repo, path);
+        return;
+    }
+  };
+
+  // The editor's breadcrumb: show a folder (open it and its parents, select it).
+  const [revealDir, setRevealDir] = useState<string | null>(null);
+  useEffect(() => {
+    const on = (e: Event) => {
+      const d = (e as CustomEvent<{ repo: string; path: string }>).detail;
+      if (!workspace.repos.includes(d.repo)) return;
+      setRepo(d.repo);
+      setView("files");
+      setRevealDir(d.path);
+    };
+    window.addEventListener("orbit-reveal-in-tree", on);
+    return () => window.removeEventListener("orbit-reveal-in-tree", on);
+  }, [workspace.repos]);
+  useEffect(() => {
+    if (revealDir === null) return;
+    const parts = revealDir ? revealDir.split("/") : [];
+    const dirs = ["", ...parts.map((_, i) => parts.slice(0, i + 1).join("/"))];
+    // Here rather than in the event: switching repos resets the tree first.
+    setExpanded((x) => (dirs.every((d) => x[d]) ? x : { ...x, ...Object.fromEntries(dirs.map((d) => [d, true])) }));
+    const missing = dirs.filter((d) => !tree[d]);
+    if (missing.length) {
+      missing.forEach((d) => loadDir(d));
+      return;
+    }
+    const row = revealDir
+      ? hostRef.current?.querySelector<HTMLElement>(`[data-path="${CSS.escape(revealDir)}"]`)
+      : hostRef.current?.querySelector<HTMLElement>("button.tree-item");
+    row?.scrollIntoView({ block: "nearest" });
+    row?.focus();
+    setRevealDir(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [revealDir, tree]);
 
   const renderDir = (dir: string, depth: number): React.ReactNode => {
     const children = tree[dir] ?? [];
@@ -542,6 +623,7 @@ export const FileTreePanel = memo(function FileTreePanel({
           <div
             className={`dock-panel-body ${dragHover === "" ? "tree-drop-target-body" : ""}`}
             data-drop-dir=""
+            onKeyDown={onTreeKey}
           >
             {renderDir("", 0)}
           </div>

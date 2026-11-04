@@ -48,11 +48,23 @@ export interface RevealTarget {
 const pendingReveal = new Map<string, RevealTarget>();
 const revealKey = (t: { workspace: string; repo: string; path: string }) => `${t.workspace}/${t.repo}/${t.path}`;
 
+// Save functions of the open editors, by file: closing a tab with unsaved
+// changes offers to save it from outside the pane.
+const savers = new Map<string, () => Promise<boolean>>();
+
+/** Saves an open editor's file; false when it failed or isn't open. */
+export function saveEditor(t: { workspace: string; repo: string; path: string }): Promise<boolean> {
+  return savers.get(revealKey(t))?.() ?? Promise.resolve(false);
+}
+
 /** Scrolls the file's editor to the target and selects it; call right after opening its tab. */
 export function revealInEditor(t: RevealTarget) {
   pendingReveal.set(revealKey(t), t);
   window.dispatchEvent(new CustomEvent("orbit-reveal", { detail: t }));
 }
+
+// The monaco namespace once loaded (marker counts in the status bar).
+let monacoApi: typeof Monaco | null = null;
 
 // Define the themes as soon as the monaco loader resolves (module scope, runs
 // once for the whole app) — the component prop "theme" then always finds
@@ -61,6 +73,7 @@ export function revealInEditor(t: RevealTarget) {
 loader
   .init()
   .then((monaco) => {
+    monacoApi = monaco as unknown as typeof Monaco;
     defineMonacoThemes(monaco as unknown as typeof Monaco);
     onThemeChange((t) => monaco.editor.setTheme(monacoThemeName(t)));
   })
@@ -79,6 +92,8 @@ interface Props {
   onCursor?: (line: number, column: number) => void;
   /** The cursor jumped far (go to definition, a click elsewhere): a place to come back to. */
   onJump?: (from: { line: number; column: number }, to: { line: number; column: number }) => void;
+  /** Unsaved changes appeared or went away (the tab shows a dot). */
+  onDirtyChange?: (dirty: boolean) => void;
 }
 
 /** Cursor moves at least this far apart count as navigation (as in VS Code). */
@@ -91,7 +106,7 @@ const JUMP_LINES = 10;
  * + model and launch a terminal session that executes the plan.
  * The file tree lives in the fixed right dock (FileTreePanel).
  */
-export function EditorPane({ workspace, repo, path, onError, onApplyPlan, onRunInTerminal, onCursor, onJump }: Props) {
+export function EditorPane({ workspace, repo, path, onError, onApplyPlan, onRunInTerminal, onCursor, onJump, onDirtyChange }: Props) {
   const monacoTheme = useMonacoTheme();
   // Latest callbacks for the editor's listeners (registered once on mount).
   const navRef = useRef({ onCursor, onJump });
@@ -103,7 +118,7 @@ export function EditorPane({ workspace, repo, path, onError, onApplyPlan, onRunI
   const [mode, setMode] = useState<"editor" | "preview">("editor");
   const [ai, setAi] = useState<{ agent: string; model: string } | null>(null);
   const [models, setModels] = useState<string[]>([]);
-  const saveRef = useRef<(() => void) | null>(null);
+  const saveRef = useRef<(() => Promise<boolean>) | null>(null);
   const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null);
   const paneRef = useRef<HTMLDivElement>(null);
   // Edits made elsewhere (another IDE, an agent): what's on disk as of the
@@ -118,6 +133,9 @@ export function EditorPane({ workspace, repo, path, onError, onApplyPlan, onRunI
   const [absPath, setAbsPath] = useState<string | null>(null);
   const [lspStatus, setLspStatus] = useState<lsp.LspStatus>({ state: "off", language: null, server: null, progress: null, error: null });
   const [symbolsOpen, setSymbolsOpen] = useState(false);
+  // The mounted editor, for the status bar (it follows the cursor and
+  // markers itself, so cursor moves don't re-render the pane).
+  const [editorInst, setEditorInst] = useState<Monaco.editor.IStandaloneCodeEditor | null>(null);
   const [cppSetup, setCppSetup] = useState<CppSetup | null>(null);
   const [cppPreset, setCppPreset] = useState<string>("");
   const setupKey = `${workspace}|${repo}`;
@@ -248,8 +266,8 @@ export function EditorPane({ workspace, repo, path, onError, onApplyPlan, onRunI
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cppGenerating, workspace, repo]);
 
-  const save = async () => {
-    if (content === null || !dirty) return;
+  const save = async (): Promise<boolean> => {
+    if (content === null || !dirty) return true;
     try {
       await invoke("write_file", { workspace, repo, path, content });
       diskRef.current = content;
@@ -257,11 +275,25 @@ export function EditorPane({ workspace, repo, path, onError, onApplyPlan, onRunI
       setDirty(false);
       const model = editorRef.current?.getModel();
       if (model) lsp.saved(model);
+      return true;
     } catch (e) {
       onError(String(e));
+      return false;
     }
   };
   saveRef.current = save;
+
+  const onDirtyRef = useRef(onDirtyChange);
+  onDirtyRef.current = onDirtyChange;
+  useEffect(() => onDirtyRef.current?.(dirty), [dirty]);
+  useEffect(() => {
+    const key = revealKey({ workspace, repo, path });
+    const fn = () => saveRef.current?.() ?? Promise.resolve(false);
+    savers.set(key, fn);
+    return () => {
+      if (savers.get(key) === fn) savers.delete(key);
+    };
+  }, [workspace, repo, path]);
 
   /** Puts the disk's version in the editor as an edit (undoable), keeping
    *  the cursor and scroll; not counted as an unsaved change. */
@@ -352,6 +384,7 @@ export function EditorPane({ workspace, repo, path, onError, onApplyPlan, onRunI
     defineMonacoThemes(monaco);
     monaco.editor.setTheme(monacoThemeName(currentTheme()));
     editorRef.current = editor;
+    setEditorInst(editor);
     applyReveal();
     editor.onDidChangeModelContent(() => {
       setContent(editor.getValue());
@@ -380,7 +413,9 @@ export function EditorPane({ workspace, repo, path, onError, onApplyPlan, onRunI
       id: "orbit.save",
       label: "Save",
       keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS],
-      run: () => saveRef.current?.(),
+      run: () => {
+        void saveRef.current?.();
+      },
     });
     editor.addAction({
       id: "orbit.workspaceSymbols",
@@ -406,10 +441,17 @@ export function EditorPane({ workspace, repo, path, onError, onApplyPlan, onRunI
   return (
     <div className="editor-pane" ref={paneRef}>
       <div className="editor-filebar">
-        <span className="mono">
-          {path ? `${repo}/${path}` : repo}
-          {dirty ? " •" : ""}
-        </span>
+        <Breadcrumb
+          repo={repo}
+          path={path}
+          onFolder={(dir) => window.dispatchEvent(new CustomEvent("orbit-reveal-in-tree", { detail: { repo, path: dir } }))}
+          onFile={() => {
+            const ed = editorRef.current;
+            if (!ed) return;
+            ed.focus();
+            ed.trigger("breadcrumb", "editor.action.quickOutline", null);
+          }}
+        />
         <span className="editor-filebar-actions">
           {isPlan && ai && onApplyPlan && (
             <span className="plan-apply-bar">
@@ -460,10 +502,6 @@ export function EditorPane({ workspace, repo, path, onError, onApplyPlan, onRunI
               </button>
             </span>
           )}
-          <LspChip status={lspStatus} onRestart={restartServer} hint={hint} />
-          <button className="btn-mini" onClick={save} disabled={!dirty}>
-            Save
-          </button>
         </span>
       </div>
       {diskChanged && (
@@ -574,9 +612,121 @@ export function EditorPane({ workspace, repo, path, onError, onApplyPlan, onRunI
             : `Browsing ${repo} — pick a file in the Files panel to open it`}
         </div>
       )}
+      {path && content !== null && (
+        <StatusBar editor={mode === "editor" || !isMarkdown ? editorInst : null} dirty={dirty}>
+          <LspChip status={lspStatus} onRestart={restartServer} hint={hint} />
+        </StatusBar>
+      )}
     </div>
   );
 }
+
+/** `repo › src › game › Game.cpp`: folders reveal in the Files panel, the
+ *  file opens its outline (symbols). */
+function Breadcrumb({ repo, path, onFolder, onFile }: { repo: string; path: string; onFolder: (dir: string) => void; onFile: () => void }) {
+  const parts = path ? path.split("/") : [];
+  return (
+    <nav className="breadcrumb" aria-label="File path">
+      {repo && (
+        <button className="btn-plain crumb" onClick={() => onFolder("")}>
+          {repo}
+        </button>
+      )}
+      {parts.map((part, i) => {
+        const last = i === parts.length - 1;
+        return (
+          <span key={i} className="crumb-wrap">
+            {(repo || i > 0) && <span className="crumb-sep">›</span>}
+            <button
+              className={`btn-plain crumb${last ? " crumb-file" : ""}`}
+              title={last ? "Go to symbol in file (Ctrl+Shift+O)" : "Reveal in Files"}
+              onClick={() => (last ? onFile() : onFolder(parts.slice(0, i + 1).join("/")))}
+            >
+              {part}
+            </button>
+          </span>
+        );
+      })}
+    </nav>
+  );
+}
+
+/** Bottom bar of the editor (JetBrains/VS Code style): problems, cursor,
+ *  line endings, indentation, language and the language server. */
+function StatusBar({ editor, dirty, children }: { editor: Monaco.editor.IStandaloneCodeEditor | null; dirty: boolean; children: React.ReactNode }) {
+  const [, redraw] = useState(0);
+  useEffect(() => {
+    if (!editor) return;
+    const bump = () => redraw((n) => n + 1);
+    const subs = [
+      editor.onDidChangeCursorPosition(bump),
+      editor.onDidChangeModel(bump),
+      editor.onDidChangeModelLanguage(bump),
+      editor.onDidChangeModelOptions(bump),
+    ];
+    const markers = monacoApi?.editor.onDidChangeMarkers((uris) => {
+      const uri = editor.getModel()?.uri.toString();
+      if (uris.some((u) => u.toString() === uri)) bump();
+    });
+    bump();
+    return () => {
+      subs.forEach((d) => d.dispose());
+      markers?.dispose();
+    };
+  }, [editor]);
+
+  const model = editor?.getModel();
+  const pos = editor?.getPosition();
+  const sel = editor?.getSelection();
+  const selected = sel && model && !sel.isEmpty() ? model.getValueInRange(sel).length : 0;
+  let errors = 0;
+  let warnings = 0;
+  if (model && monacoApi) {
+    for (const m of monacoApi.editor.getModelMarkers({ resource: model.uri })) {
+      if (m.severity === monacoApi.MarkerSeverity.Error) errors++;
+      else if (m.severity === monacoApi.MarkerSeverity.Warning) warnings++;
+    }
+  }
+  const opts = model?.getOptions();
+  const run = (id: string) => {
+    editor?.focus();
+    editor?.trigger("statusbar", id, null);
+  };
+
+  return (
+    <div className="editor-statusbar">
+      {model && (
+        <button
+          className={`btn-plain status-item${errors ? " status-errors" : warnings ? " status-warnings" : ""}`}
+          title="Go to next problem (F8)"
+          onClick={() => run("editor.action.marker.nextInFiles")}
+        >
+          <span className="status-error-icon">⨯</span> {errors}
+          <span className="status-warning-icon">⚠</span> {warnings}
+        </button>
+      )}
+      {dirty && <span className="status-item status-unsaved">Unsaved</span>}
+      <span className="status-spacer" />
+      {pos && (
+        <button className="btn-plain status-item" title="Go to line (Ctrl+G)" onClick={() => run("editor.action.gotoLine")}>
+          Ln {pos.lineNumber}, Col {pos.column}
+          {selected ? ` (${selected} selected)` : ""}
+        </button>
+      )}
+      {model && (
+        <span className="status-item" title="Line endings">
+          {model.getEOL() === "\r\n" ? "CRLF" : "LF"}
+        </span>
+      )}
+      {opts && <span className="status-item">{opts.insertSpaces ? `Spaces: ${opts.tabSize}` : `Tab: ${opts.tabSize}`}</span>}
+      {model && <span className="status-item">{languageName(model.getLanguageId())}</span>}
+      {children}
+    </div>
+  );
+}
+
+const LANGUAGE_NAMES: Record<string, string> = { cpp: "C++", c: "C", csharp: "C#", typescript: "TypeScript", javascript: "JavaScript", plaintext: "Plain Text" };
+const languageName = (id: string) => LANGUAGE_NAMES[id] ?? id.charAt(0).toUpperCase() + id.slice(1);
 
 /** Language server state for the open file, in the file bar. */
 function LspChip({

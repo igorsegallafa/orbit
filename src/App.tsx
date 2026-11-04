@@ -9,12 +9,13 @@ import { WorkspaceDetailPage } from "./pages/WorkspaceDetailPage";
 import { FeaturePage } from "./pages/FeaturePage";
 import { SidebarResizer } from "./components/SidebarResizer";
 import { ContextMenu, MenuItem, useContextMenu } from "./components/ContextMenu";
-import { EditorPane, revealInEditor } from "./components/EditorPane";
+import { EditorPane, revealInEditor, saveEditor } from "./components/EditorPane";
 import { FindPopup, OpenMatch } from "./components/FindInFiles";
 import { AgentSignal, TerminalPane, TerminalTab, claudeSessionArgs, dropFilesIntoTerminal, sendToTerminal } from "./components/TerminalPane";
 import { InboxButton, InboxItem, InboxKind, notifyOs } from "./components/Inbox";
 import { FileTreePanel } from "./components/FileTreePanel";
 import { useStableHandlers } from "./lib/useStableHandlers";
+import { placeFileTab } from "./lib/previewTabs";
 import { ReviewPane } from "./components/ReviewPane";
 import { CommitReviewPane } from "./components/CommitReviewPane";
 import { PrReviewPane } from "./components/PrReviewPane";
@@ -62,7 +63,9 @@ const pageKey = (p: NavPage) => (p.kind === "repo" ? `repo:${p.repo}` : p.kind);
 
 type Tab =
   | { kind: "workspace"; workspace: Workspace }
-  | { kind: "editor"; workspace: string; repo: string; path: string }
+  /** `preview`: opened with a single click in the file tree; the next such
+   *  file replaces it, until it's edited or kept open (VS Code's preview tab). */
+  | { kind: "editor"; workspace: string; repo: string; path: string; preview?: boolean }
   | { kind: "review"; workspace: string; repo: string; path: string }
   /** All local changes of a workspace, with review notes; `focus` scrolls to a file. */
   | { kind: "changes"; workspace: string; focus?: { repo: string; path: string; at: number } }
@@ -89,6 +92,8 @@ function repoScope(name: string): Workspace {
 const isScope = (workspace: string) => workspace.startsWith("@");
 
 type TerminalTabOf = Extract<Tab, { kind: "terminal" }>;
+type EditorTabOf = Extract<Tab, { kind: "editor" }>;
+const isEditorTab = (t: Tab): t is EditorTabOf => t.kind === "editor";
 /** Terminal commands that are AI agents: their tabs minimize instead of closing. */
 const AGENT_CMDS = ["claude", "opencode", "omp"];
 
@@ -164,6 +169,10 @@ function App() {
   const [initialSession] = useState(loadSession);
   const [tabs, setTabs] = useState<Tab[]>(initialSession.tabs);
   const [activeTab, setActiveTab] = useState<string | null>(initialSession.active);
+  /** Editor tabs with unsaved changes. */
+  const [dirtyTabs, setDirtyTabs] = useState<Record<string, true>>({});
+  /** Editor tab waiting for Save / Don't save before it closes. */
+  const [closeAsk, setCloseAsk] = useState<EditorTabOf | null>(null);
   const [sessionStatuses, setSessionStatuses] = useState<Record<string, AgentStatus>>({});
   const [inbox, setInbox] = useState<InboxItem[]>([]);
   const activeTabRef = useRef<string | null>(null);
@@ -431,10 +440,16 @@ function App() {
   const isAgentTab = (t: Tab | undefined): t is TerminalTabOf =>
     t?.kind === "terminal" && AGENT_CMDS.includes(t.terminal.cmd ?? "");
   const isShown = (t: Tab) => !(t.kind === "terminal" && t.terminal.minimized);
+  /** Tabs as the strip shows them: sessions and other views first, then
+   *  files, so opening files doesn't bury the agents. */
+  const stripOrder = (ts: Tab[]) => {
+    const shown = ts.filter(isShown);
+    return [...shown.filter((t) => !isEditorTab(t)), ...shown.filter(isEditorTab)];
+  };
 
   const minimizeTab = (id: string) => {
     setTabs((ts) => {
-      const shown = ts.filter(isShown);
+      const shown = stripOrder(ts);
       const next = ts.map((t) => (tabId(t) === id && t.kind === "terminal" ? { ...t, terminal: { ...t.terminal, minimized: true } } : t));
       if (activeTab === id) {
         const idx = shown.findIndex((t) => tabId(t) === id);
@@ -447,7 +462,12 @@ function App() {
   };
 
   /** The tab's X / middle-click: minimize agent sessions, close the rest. */
-  const dismissTab = (id: string) => (isAgentTab(tabs.find((t) => tabId(t) === id)) ? minimizeTab(id) : closeTab(id));
+  const dismissTab = (id: string) => {
+    const t = tabs.find((x) => tabId(x) === id);
+    if (isAgentTab(t)) minimizeTab(id);
+    else if (t && isEditorTab(t) && dirtyTabs[id]) setCloseAsk(t);
+    else closeTab(id);
+  };
 
   // Showing a minimized session (sidebar click, nav history) brings its tab back.
   useEffect(() => {
@@ -520,7 +540,7 @@ function App() {
       if (activeTab === id) {
         // The neighbour on the strip: minimized sessions aren't on it, and
         // activating one would bring it back.
-        const shown = ts.filter(isShown);
+        const shown = stripOrder(ts);
         const idx = shown.findIndex((t) => tabId(t) === id);
         const rest = shown.filter((t) => tabId(t) !== id);
         const nextTab = rest[Math.min(idx, rest.length - 1)];
@@ -534,6 +554,11 @@ function App() {
       const { [id]: _drop, ...rest } = s;
       return rest;
     });
+    setDirtyTabs((d) => {
+      if (!d[id]) return d;
+      const { [id]: _drop, ...rest } = d;
+      return rest;
+    });
   };
 
   // Batch closes for the tab context menu. All remount their panes, so PTY
@@ -545,7 +570,7 @@ function App() {
     setTabs((ts) => {
       const next: Tab[] = [];
       for (const t of ts) {
-        if (tabId(t) === keepId) next.push(t);
+        if (tabId(t) === keepId || dirtyTabs[tabId(t)]) next.push(t);
         else if (isAgentTab(t)) next.push({ ...t, terminal: { ...t.terminal, minimized: true } });
         else {
           forgetTerminal(t);
@@ -562,9 +587,10 @@ function App() {
 
   const closeAllTabs = () => {
     const agents = tabs.filter(isAgentTab);
+    const unsaved = tabs.filter((t) => isEditorTab(t) && dirtyTabs[tabId(t)]);
     tabs.filter((t) => !isAgentTab(t)).forEach(forgetTerminal);
-    setTabs(agents.map((t) => ({ ...t, terminal: { ...t.terminal, minimized: true } })));
-    setActiveTab(null);
+    setTabs([...agents.map((t) => ({ ...t, terminal: { ...t.terminal, minimized: true } })), ...unsaved]);
+    setActiveTab(unsaved.length ? tabId(unsaved[unsaved.length - 1]) : null);
     setSessionStatuses((s) => Object.fromEntries(Object.entries(s).filter(([id]) => agents.some((t) => tabId(t) === id))));
   };
 
@@ -579,6 +605,45 @@ function App() {
       : [{ label: "Close", danger: true, onSelect: () => closeTab(tabId(t)) }]),
   ];
 
+  const pinTab = (id: string) =>
+    setTabs((ts) => (ts.some((t) => tabId(t) === id && isEditorTab(t) && t.preview) ? ts.map((t) => (tabId(t) === id && isEditorTab(t) ? { ...t, preview: undefined } : t)) : ts));
+
+  const setTabDirty = (id: string, dirty: boolean) => {
+    setDirtyTabs((d) => (!!d[id] === dirty ? d : dirty ? { ...d, [id]: true } : Object.fromEntries(Object.entries(d).filter(([k]) => k !== id))));
+    // An edited preview tab stays open.
+    if (dirty) pinTab(id);
+  };
+
+  /** Closes the file tabs `which` picks; ones with unsaved changes stay. */
+  const closeFileTabs = (which: (t: EditorTabOf, index: number) => boolean) => {
+    const files = stripOrder(tabs).filter(isEditorTab);
+    const picked = files.filter(which);
+    const kept = picked.filter((t) => dirtyTabs[tabId(t)]);
+    const ids = new Set(picked.filter((t) => !dirtyTabs[tabId(t)]).map(tabId));
+    if (ids.size) {
+      const next = tabs.filter((t) => !ids.has(tabId(t)));
+      setTabs(next);
+      if (activeTab && ids.has(activeTab)) {
+        const order = stripOrder(next);
+        setActiveTab(order.length ? tabId(order[order.length - 1]) : null);
+      }
+    }
+    if (kept.length) toast.info(`${kept.length} file${kept.length > 1 ? "s" : ""} with unsaved changes kept open`);
+  };
+
+  const fileMenuItems = (t: Tab): MenuItem[] => {
+    const files = stripOrder(tabs).filter(isEditorTab);
+    if (!files.length) return [];
+    const at = isEditorTab(t) ? files.findIndex((f) => tabId(f) === tabId(t)) : -1;
+    return [
+      ...(isEditorTab(t) && t.preview ? [{ label: "Keep Open", onSelect: () => pinTab(tabId(t)) }] : []),
+      ...(at !== -1 && files.length > 1 ? [{ label: "Close Other Files", onSelect: () => closeFileTabs((_, i) => i !== at) }] : []),
+      ...(at !== -1 && at < files.length - 1 ? [{ label: "Close Files to the Right", onSelect: () => closeFileTabs((_, i) => i > at) }] : []),
+      { label: "Close Saved Files", onSelect: () => closeFileTabs((f) => !dirtyTabs[tabId(f)]) },
+      { label: "Close All Files", onSelect: () => closeFileTabs(() => true) },
+    ];
+  };
+
   const tabMenuItems = (t: Tab): MenuItem[] => [
     ...(isAgentTab(t)
       ? [
@@ -588,9 +653,10 @@ function App() {
       : [
           {
             label: "Close",
-            onSelect: () => closeTab(tabId(t)),
+            onSelect: () => dismissTab(tabId(t)),
           },
         ]),
+    ...fileMenuItems(t),
     {
       label: "Close Other Tabs",
       onSelect: () => closeOtherTabs(tabId(t)),
@@ -622,9 +688,21 @@ function App() {
     setActiveTab(id);
   };
 
-  const openFileTab = (wsName: string, repo: string, path: string) => {
+  /** Opens a file's tab. `preview` (a single click in the tree) reuses the
+   *  current preview tab instead of adding one; opening it again without
+   *  `preview` keeps it. */
+  const openFileTab = (wsName: string, repo: string, path: string, { preview = false } = {}) => {
     setNavPage({ kind: "dashboard" });
-    openTab({ kind: "editor", workspace: wsName, repo, path });
+    const tab: EditorTabOf = { kind: "editor", workspace: wsName, repo, path, ...(preview ? { preview: true } : {}) };
+    const id = tabId(tab);
+    setTabs((ts) =>
+      placeFileTab<Tab>(ts, tab, preview, {
+        id: tabId,
+        isPreview: (t) => isEditorTab(t) && !!t.preview,
+        pin: (t) => (isEditorTab(t) ? { ...t, preview: undefined } : t),
+      }),
+    );
+    setActiveTab(id);
   };
 
   const newTerminal = (wsName: string, label: string, cmd: string | null) => {
@@ -956,7 +1034,7 @@ function App() {
   // Stable callbacks: the file tree is memoized and would otherwise re-render
   // on every App state change (agent status, usage, tab switches).
   const treeHandlers = useStableHandlers({
-    onOpenFile: (repo: string, path: string) => focusWorkspace && openFileTab(focusWorkspace.name, repo, path),
+    onOpenFile: (repo: string, path: string, opts?: { preview?: boolean }) => focusWorkspace && openFileTab(focusWorkspace.name, repo, path, opts),
     onReviewFile: (repo: string, path: string) => focusWorkspace && openChanges(focusWorkspace.name, repo, path),
     onReviewAll: () => focusWorkspace && openChanges(focusWorkspace.name),
     onOpenFind: () => setFindOpen(true),
@@ -986,8 +1064,19 @@ function App() {
   // Ctrl/Cmd+Shift+F: Find in Files for the workspace in focus.
   const focusWsRef = useRef<Workspace | null>(null);
   focusWsRef.current = focusWorkspace;
+  // Ctrl/Cmd+W closes the active file tab (not terminals: shells use Ctrl+W).
+  const closeActiveFileRef = useRef<() => boolean>(() => false);
+  closeActiveFileRef.current = () => {
+    if (!active || !isEditorTab(active)) return false;
+    dismissTab(tabId(active));
+    return true;
+  };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.code === "KeyW" && closeActiveFileRef.current()) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
       if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.code === "KeyF" && focusWsRef.current) {
         e.preventDefault();
         setFindOpen(true);
@@ -1144,6 +1233,7 @@ function App() {
           onRunInTerminal={(label, cmd, args, repo) => runInTerminal(tab.workspace, label, cmd, args, repo)}
           onCursor={(line, column) => navHistory.setPosition(tabId(tab), line, column)}
           onJump={(from, to) => navHistory.jump(tabId(tab), { tab }, from, to)}
+          onDirtyChange={(d) => setTabDirty(tabId(tab), d)}
           onApplyPlan={(agent, model) => {
             const prompt = `Read PLAN.md in this directory and implement it: work through the "- [ ]" tasks in order, marking each done (change to "- [x]") as you finish it. Commit nothing unless asked.`;
             openPromptedSession(tab.workspace, agent, model, prompt);
@@ -1559,8 +1649,11 @@ function App() {
                 }
               }}
             >
-              {tabs.filter(isShown).map((t) => {
+              {stripOrder(tabs).map((t, i, strip) => {
                 const id = tabId(t);
+                const dirty = !!dirtyTabs[id];
+                // A divider where the files start, after sessions and views.
+                const groupStart = isEditorTab(t) && i > 0 && !isEditorTab(strip[i - 1]);
                 const label =
                   t.kind === "workspace"
                     ? t.workspace.name
@@ -1603,10 +1696,12 @@ function App() {
                 return (
                   <div
                     key={id}
-                    className={`tab ${activeTab === id ? "tab-active" : ""}`}
+                    className={`tab ${activeTab === id ? "tab-active" : ""}${isEditorTab(t) && t.preview ? " tab-preview" : ""}${dirty ? " tab-dirty" : ""}${groupStart ? " tab-group-start" : ""}`}
+                    title={isEditorTab(t) ? `${t.repo}/${t.path}` : undefined}
                     onClick={() => setActiveTab(id)}
                     onDoubleClick={() => {
                       if (t.kind === "terminal") setRenamingTab(id);
+                      if (isEditorTab(t)) pinTab(id);
                     }}
                     onContextMenu={(e) => {
                       e.preventDefault();
@@ -1651,13 +1746,14 @@ function App() {
                     {status && <StatusIndicator status={status} />}
                     <button
                       className="tab-close"
-                      title={isAgentTab(t) ? "Minimize (the session keeps running) — End session from the tab's menu" : "Close"}
+                      title={isAgentTab(t) ? "Minimize (the session keeps running) — End session from the tab's menu" : dirty ? "Unsaved changes — close" : "Close"}
                       onClick={(e) => {
                         e.stopPropagation();
                         dismissTab(id);
                       }}
                     >
-                      ×
+                      {dirty && <span className="tab-dirty-dot" />}
+                      <span className="tab-close-x">×</span>
                     </button>
                   </div>
                 );
@@ -1722,6 +1818,21 @@ function App() {
             openWorkspaceTab(ws);
           }}
           onClose={() => setCheckoutPrs(null)}
+        />
+      )}
+      {closeAsk && (
+        <UnsavedDialog
+          name={closeAsk.path.split("/").pop() ?? closeAsk.path}
+          onSave={async () => {
+            const t = closeAsk;
+            setCloseAsk(null);
+            if (await saveEditor(t)) closeTab(tabId(t));
+          }}
+          onDiscard={() => {
+            closeTab(tabId(closeAsk));
+            setCloseAsk(null);
+          }}
+          onCancel={() => setCloseAsk(null)}
         />
       )}
       {tabMenu.menu && (
@@ -1815,3 +1926,35 @@ function App() {
 }
 
 export default App;
+
+/** Closing a file with unsaved changes: Save, Don't Save, or Cancel. */
+function UnsavedDialog({ name, onSave, onDiscard, onCancel }: { name: string; onSave: () => void; onDiscard: () => void; onCancel: () => void }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onCancel();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onCancel]);
+  return (
+    <div className="modal-overlay" onMouseDown={onCancel}>
+      <div className="modal modal-sm" onMouseDown={(e) => e.stopPropagation()}>
+        <div className="modal-body">
+          <h3>Save changes to {name}?</h3>
+          <p>Your changes will be lost if you don't save them.</p>
+        </div>
+        <div className="modal-footer">
+          <button type="button" className="secondary" onClick={onCancel}>
+            Cancel
+          </button>
+          <button type="button" className="secondary" onClick={onDiscard}>
+            Don't Save
+          </button>
+          <button type="button" onClick={onSave} autoFocus>
+            Save
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}

@@ -24,6 +24,7 @@
   --radius: 10px;
   --control-height: 34px;
   --transition: 0.15s cubic-bezier(0.25, 0.25, 0, 1);
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
 }
 
 * {
@@ -557,38 +558,6 @@ body {
   gap: 10px;
   color: var(--text-faint);
   padding: 40px;
-}
-
-/* ---------- Tabs ---------- */
-
-.tabs {
-  display: flex;
-  gap: 4px;
-  border-bottom: 1px solid var(--border);
-  margin-bottom: 18px;
-}
-
-.tab {
-  background: transparent;
-  border: none;
-  border-bottom: 2px solid transparent;
-  border-radius: 6px 6px 0 0;
-  color: var(--text-dim);
-  padding: 0 14px;
-  height: 36px;
-  font-size: 13px;
-  font-weight: 500;
-  margin-bottom: -1px;
-  transition: color var(--transition), border-color var(--transition);
-}
-
-.tab:hover {
-  color: var(--text);
-}
-
-.tab-active {
-  color: var(--text) !important;
-  border-bottom-color: var(--accent);
 }
 
 /* ---------- Sections & cards ---------- */
@@ -1818,6 +1787,37 @@ button .spinner {
   color: var(--text);
 }
 
+/* Files start after the sessions: a thin divider between the groups. */
+.tab-group-start {
+  margin-left: 6px;
+  position: relative;
+}
+.tab-group-start::before {
+  content: "";
+  position: absolute;
+  left: -5px;
+  top: 9px;
+  bottom: 9px;
+  width: 1px;
+  background: var(--border-strong);
+}
+
+/* Preview tab (single click in the tree): replaced by the next one. */
+.tab-preview .tab-label { font-style: italic; }
+
+/* Unsaved: a dot in place of the ×, which comes back on hover. */
+.tab-close { display: inline-flex; align-items: center; justify-content: center; min-width: 18px; }
+.tab-dirty-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-dim);
+}
+.tab-dirty .tab-close-x { display: none; }
+.tab-dirty:hover .tab-dirty-dot,
+.tab-dirty .tab-close:focus-visible .tab-dirty-dot { display: none; }
+.tab-dirty:hover .tab-close-x { display: inline; }
+
 .tab-body {
   display: none;
   min-height: 0;
@@ -2154,7 +2154,8 @@ button.tree-item:active:not(:disabled) { transform: none; }
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 8px 14px;
+  min-height: 30px;
+  padding: 3px 10px;
   border-bottom: 1px solid var(--border);
   background: var(--panel);
   gap: 10px;
@@ -6737,3 +6738,55 @@ button.lsp-chip-restart:hover:not(:disabled) { color: var(--text); }
 .stp-body { font-size: 12.5px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .stp-why { font-size: 11.5px; color: var(--warn); }
 .stp-remove { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text-dim); cursor: pointer; }
+
+/* ---------- Editor breadcrumb & status bar ---------- */
+
+.breadcrumb {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.crumb-wrap { display: inline-flex; align-items: center; min-width: 0; }
+.crumb-sep { color: var(--text-faint); padding: 0 3px; }
+button.btn-plain.crumb {
+  padding: 1px 4px;
+  border-radius: 4px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+button.btn-plain.crumb:hover:not(:disabled) { background: var(--panel-raised); color: var(--text); }
+button.btn-plain.crumb-file { color: var(--text); }
+
+.editor-statusbar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 24px;
+  padding: 0 6px;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+  font-size: 11.5px;
+  color: var(--text-dim);
+  flex-shrink: 0;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.status-spacer { flex: 1; }
+.status-item { display: inline-flex; align-items: center; gap: 4px; padding: 0 6px; height: 20px; border-radius: 4px; }
+button.btn-plain.status-item { cursor: pointer; color: var(--text-dim); }
+button.btn-plain.status-item:hover:not(:disabled) { background: var(--panel-raised); color: var(--text); }
+.status-warning-icon { margin-left: 6px; }
+.status-errors .status-error-icon { color: var(--danger); }
+.status-warnings .status-warning-icon,
+.status-errors .status-warning-icon { color: var(--warn); }
+.status-unsaved { color: var(--warn); }
+/* The language server chip sits in the status bar now: no pill border. */
+.editor-statusbar .lsp-chip { border: none; background: transparent; height: 20px; padding: 0 6px; font-size: 11.5px; }
+
+/* Keyboard focus in the file tree (arrow keys). */
+.tree-item:focus { outline: none; }
+.tree-item:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
