@@ -63,6 +63,7 @@ impl PageTab {
             return self.toast(ToastKind::Info, "Still reading the workspace", None, window, cx);
         };
         let prompt = cx.new(|cx| TextareaState::new(window, cx).auto_grow(5, 10).placeholder("e.g. Add retry with exponential backoff to the HTTP client, with tests."));
+        super::watch(&prompt, window, cx);
         let handle = prompt.read(cx).focus_handle(cx);
         window.focus(&handle, cx);
         let ai = orbit_core::config::Config::load().map(|c| c.ai).ok();

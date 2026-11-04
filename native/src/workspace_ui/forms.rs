@@ -404,7 +404,7 @@ impl PageTab {
         let source = |s: Source, label: &'static str, cx: &mut Context<Self>| {
             let off = s.tracker().is_some_and(|k| !f.connected.contains(&k));
             let tone = if f.source == s { Tone::Primary } else { Tone::Plain };
-            ui::button(format!("create-source-{}", s.key()), if off { format!("{label} (not connected)") } else { label.to_string() }, tone)
+            crate::git::btn(format!("create-source-{}", s.key()), if off { format!("{label} (not connected)") } else { label.to_string() }, tone)
                 .on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.create_source(s, w, cx)))
         };
         let branch_hint = if from_branch {
@@ -437,14 +437,14 @@ impl PageTab {
             body = body
                 .child(field("Base branch"))
                 .child(div().flex().child(
-                    ui::button("create-base", format!("{} ▾", f.base), Tone::Plain).on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.create_pick_base(w, cx))),
+                    crate::git::btn("create-base", format!("{} ▾", f.base), Tone::Plain).on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.create_pick_base(w, cx))),
                 ))
                 .child(field("Repositories").child(format!(" · {} selected", f.selected.len())))
                 .when(!f.groups.is_empty(), |d| {
                     d.child(div().flex().flex_wrap().gap_1().children(f.groups.iter().map(|(g, members)| {
                         let all_in = !members.is_empty() && members.iter().all(|m| f.selected.contains(m));
                         let g2 = g.clone();
-                        ui::button(format!("create-group:{g}"), g.clone(), if all_in { Tone::Primary } else { Tone::Plain })
+                        crate::git::btn(format!("create-group:{g}"), g.clone(), if all_in { Tone::Primary } else { Tone::Plain })
                             .on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.create_toggle_group(&g2, w, cx)))
                     })))
                 })
@@ -461,7 +461,7 @@ impl PageTab {
             .child(
                 crate::git::footer()
                     .child(crate::git::cancel_button("Cancel", cx))
-                    .child(ui::button("create-submit", "Create workspace", Tone::Primary).on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.create_submit(w, cx)))),
+                    .child(crate::git::btn("create-submit", "Create workspace", Tone::Primary).on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.create_submit(w, cx)))),
             )
             .into_any_element()
     }
@@ -552,7 +552,7 @@ impl PageTab {
             .child(
                 crate::git::footer()
                     .child(crate::git::cancel_button("Cancel", cx))
-                    .child(ui::button("add-repos-submit", "Add to workspace", Tone::Primary).on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.add_repos_submit(w, cx)))),
+                    .child(crate::git::btn("add-repos-submit", "Add to workspace", Tone::Primary).on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.add_repos_submit(w, cx)))),
             )
             .into_any_element()
     }

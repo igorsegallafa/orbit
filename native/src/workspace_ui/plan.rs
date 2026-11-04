@@ -65,6 +65,8 @@ impl PageTab {
         let goal = cx.new(|cx| TextareaState::new(window, cx).auto_grow(4, 8).placeholder(placeholder));
         let answer = cx.new(|cx| TextareaState::new(window, cx).auto_grow(4, 8).placeholder("Your answer: pick an option above or write your own"));
         let summary = cx.new(|cx| TextareaState::new(window, cx).auto_grow(12, 16));
+        super::watch(&goal, window, cx);
+        super::watch(&answer, window, cx);
         let handle = goal.read(cx).focus_handle(cx);
         window.focus(&handle, cx);
         self.modal = Some(Modal::Plan(Box::new(PlanForm {

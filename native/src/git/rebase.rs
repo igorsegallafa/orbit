@@ -3,7 +3,7 @@
 //! (then `rebase --continue` runs here, so a half resolution never lands);
 //! Abort rolls that repo back to its pre-rebase state.
 use super::{card, cancel_button, footer, status_row, Flow, Mark};
-use crate::review::ui::{self, Tone};
+use crate::review::ui::Tone;
 use crate::toast::ToastKind;
 use crate::workspace_ui::{plural, spawn, PageTab};
 use gpui::{div, prelude::*, ClickEvent, Context, Window};
@@ -172,15 +172,15 @@ impl PageTab {
             let (r1, r2) = (repo.clone(), repo.clone());
             list = list.child(status_row(mark, repo.clone(), detail).when(conflicts, |d| {
                 d.child(
-                    ui::button(format!("rebase-ai:{repo}"), "Resolve with AI", Tone::Plain)
+                    crate::git::btn(format!("rebase-ai:{repo}"), "Resolve with AI", Tone::Plain)
                         .on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.rebase_resolve(r1.clone(), w, cx))),
                 )
-                .child(ui::button(format!("rebase-abort:{repo}"), "Abort", Tone::Danger).on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.rebase_abort(r2.clone(), w, cx))))
+                .child(crate::git::btn(format!("rebase-abort:{repo}"), "Abort", Tone::Danger).on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.rebase_abort(r2.clone(), w, cx))))
             }));
         }
         let foot = if !f.started {
             footer().child(cancel_button("Cancel", cx)).child(
-                ui::button("rebase-submit", format!("Rebase {}", plural(f.rows.len(), "repo")), Tone::Primary)
+                crate::git::btn("rebase-submit", format!("Rebase {}", plural(f.rows.len(), "repo")), Tone::Primary)
                     .on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.rebase_start(w, cx))),
             )
         } else {

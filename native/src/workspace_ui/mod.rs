@@ -82,6 +82,12 @@ impl PageTab {
             _poll: poll,
             _plan_poll: plan_poll,
         };
+        if let Page::Repo(r) = &tab.page {
+            let (a, b, c) = (r.new_branch.clone(), r.filter.clone(), r.summary.clone());
+            watch(&a, window, cx);
+            watch(&b, window, cx);
+            watch(&c, window, cx);
+        }
         tab.reload(false, window, cx);
         tab
     }
@@ -236,6 +242,16 @@ pub fn open(app: &mut OrbitApp, id: PageId, window: &mut Window, cx: &mut Contex
     app.activate(ix, window, cx);
     window.on_next_frame(move |window, cx| window.focus(&handle, cx));
     view
+}
+
+/// Re-renders the tab as `input` changes (the page reads its value).
+pub fn watch<T: gpui::EventEmitter<gpui_component::input::InputEvent>>(input: &gpui::Entity<T>, window: &mut Window, cx: &mut Context<PageTab>) {
+    cx.subscribe_in(input, window, |_, _, ev: &gpui_component::input::InputEvent, _, cx| {
+        if matches!(ev, gpui_component::input::InputEvent::Change) {
+            cx.notify();
+        }
+    })
+    .detach();
 }
 
 /// Records the width of the element it is placed in (absolutely, full size).
