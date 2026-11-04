@@ -57,8 +57,10 @@ pub struct Script {
     pub state: Option<PathBuf>,
     /// Shell steps run last (`steps.rs`): `--do "rclick:tab:0;click:menu:Close"`.
     pub shell_steps: Vec<String>,
-    /// `--window-size 1920x977`: the window's logical size.
+    /// `--window-size 1920x977`: the window's size (else maximized).
     pub window_size: Option<(f32, f32)>,
+    /// `--theme nord`: a theme for this run (not saved without `--state`).
+    pub theme: Option<String>,
 }
 
 fn cell(spec: &str) -> Option<(usize, usize)> {
@@ -108,13 +110,14 @@ impl Script {
                 "--exit-after" => s.exit_after = args.next().and_then(|v| v.parse().ok()),
                 "--dump" => s.dump = args.next().map(PathBuf::from),
                 "--state" => s.state = args.next().map(PathBuf::from),
+                "--do" => s.shell_steps.extend(args.next().unwrap_or_default().split(';').map(|x| x.trim().to_string()).filter(|x| !x.is_empty())),
                 "--window-size" => {
                     s.window_size = args.next().and_then(|v| {
                         let (w, h) = v.split_once('x')?;
                         Some((w.parse().ok()?, h.parse().ok()?))
                     })
                 }
-                "--do" => s.shell_steps.extend(args.next().unwrap_or_default().split(';').map(|x| x.trim().to_string()).filter(|x| !x.is_empty())),
+                "--theme" => s.theme = args.next(),
                 _ => eprintln!("unknown argument {a}"),
             }
         }
@@ -194,6 +197,18 @@ pub fn dump(app: &OrbitApp, log: &str, cx: &gpui::App) -> String {
     let tree = app.tree.read(cx);
     let _ = writeln!(out, "--- tree: {} rows, settled {}", tree.row_count(), tree.is_settled());
     out.push_str(&tree.rows_text(12));
+    let _ = writeln!(
+        out,
+        "--- shell: theme {} ({}), focus {}, dock {:?}, sidebar {}px{}, minimized {}, collapsed {:?}",
+        crate::theme::current().id,
+        crate::theme::pref(),
+        app.focus_workspace(cx).map_or("-", |w| w.meta.name.as_str()),
+        app.chrome.dock_tab,
+        app.layout.sidebar_width,
+        if app.layout.sidebar_hidden { " hidden" } else { "" },
+        app.minimized.len(),
+        app.ws_collapsed,
+    );
     let _ = writeln!(out, "--- tabs ({}):", app.tabs.len());
     for (ix, tab) in app.tabs.iter().enumerate() {
         let kind = match tab.kind {
@@ -206,8 +221,10 @@ pub fn dump(app: &OrbitApp, log: &str, cx: &gpui::App) -> String {
         };
         let _ = writeln!(
             out,
-            "  [{ix}] {kind:8} {}{}{}{}",
+            "  [{ix}] {kind:8} {}{}{}{}{}{}",
             tab.title(cx),
+            if tab.is_nav(cx) { "  (nav)" } else { "" },
+            if app.minimized.contains(&tab.key(cx)) { "  (minimized)" } else { "" },
             if app.active == Some(ix) { "  (active)" } else { "" },
             if tab.preview { "  (preview)" } else { "" },
             if tab.dirty(cx) { "  (dirty)" } else { "" },

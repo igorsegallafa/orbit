@@ -19,6 +19,7 @@ use gpui::{
     px, App, AnyView, AppContext, Context, Entity, FocusHandle, Focusable, Pixels, Point, SharedString, Subscription,
     Task, Window,
 };
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -50,8 +51,26 @@ pub enum NavTarget {
 }
 
 impl Tab {
+    /// An editor: the strip's second group, after a divider (`isEditorTab`).
     pub fn is_file(&self) -> bool {
-        !matches!(self.kind, TabKind::Terminal(_))
+        matches!(self.kind, TabKind::Editor(_))
+    }
+
+    /// A page the React app shows with no tab active (its `navPage`):
+    /// Dashboard, Code Review, a repo, Settings, Integrations. Off the strip;
+    /// the sidebar opens them, and one at a time is kept.
+    pub fn is_nav(&self, cx: &App) -> bool {
+        let key = self.key(cx);
+        key == "page:dashboard"
+            || key == "page:settings"
+            || key == "page:integrations"
+            || key.starts_with("page:repo:")
+            || key.starts_with("review:prs:")
+    }
+
+    /// An agent session: its × minimizes instead of ending it.
+    pub fn is_agent(&self, cx: &App) -> bool {
+        matches!(&self.kind, TabKind::Terminal(t) if t.read(cx).is_agent())
     }
 
     pub fn title(&self, cx: &App) -> SharedString {
@@ -147,7 +166,19 @@ pub struct OrbitApp {
     /// Views shown at the right of the titlebar, before the files-panel
     /// toggle: where the run widget and the inbox go.
     pub titlebar_items: Vec<AnyView>,
-    pub sessions: Entity<crate::sessions::SessionsPanel>,
+    /// Sidebar: workspaces whose session list is folded (`orbit.ws-expanded`).
+    pub ws_collapsed: BTreeSet<String>,
+    /// Agent sessions closed from the strip but still running, by tab key.
+    pub minimized: HashSet<String>,
+    /// The configured repos (`config.services`) and group count, for the sidebar.
+    pub services: Vec<String>,
+    pub group_count: usize,
+    /// Branch, changes and ahead/behind per repo (`useRepoBriefs.ts`).
+    pub briefs: HashMap<String, orbit_core::repo::RepoBrief>,
+    /// The status bar's AI usage and Claude limits, for `usage.0`'s workspace.
+    pub usage: Option<(String, Option<orbit_core::usage::AiUsage>, orbit_core::agent_hooks::RateLimits)>,
+    /// Shell chrome state (dock tab, open popovers), see `shell.rs`.
+    pub chrome: crate::shell::Chrome,
     persist: Persist,
     _subscriptions: Vec<Subscription>,
 }
@@ -164,7 +195,7 @@ pub fn init(cx: &mut App) {
             .keys(["ctrl-w"])
             .when(|a, _| a.active.is_some())
             // Shells use Ctrl+W: the key closes file tabs only.
-            .key_when(active_is_file)
+            .key_when(not_in_terminal)
             .run(|a, w, cx| a.close_active(false, w, cx)),
         Command::new("app.closeTabDiscard", "Close Tab Without Saving")
             .keys(["ctrl-shift-w"])
@@ -204,6 +235,18 @@ pub fn init(cx: &mut App) {
         Command::new("app.toggleSidebar", "Toggle Sidebar").run(|a, _, cx| a.toggle_sidebar(cx)),
         Command::new("app.toggleDock", "Toggle Files Panel").run(|a, _, cx| a.toggle_dock(cx)),
         Command::new("app.togglePanel", "Toggle Build/Run Panel").run(|a, _, cx| a.toggle_panel(cx)),
+        Command::new("app.selectTheme", "Select Theme…").run(|a, w, cx| {
+            let items = crate::theme::list()
+                .iter()
+                .map(|t| {
+                    let mark = if crate::theme::current().id == t.id { "✓  " } else { "    " };
+                    MenuItem::new(format!("{mark}{}", t.label), move |_: &mut OrbitApp, _: &mut Window, cx: &mut Context<OrbitApp>| {
+                        crate::theme::set(t.id, cx);
+                    })
+                })
+                .collect();
+            a.open_menu(Point::new(px(420.), px(90.)), items, w, cx)
+        }),
         Command::new("app.findAction", "Find Action…").keys(["ctrl-shift-a"]).run(|a, w, cx| a.open_palette(w, cx)),
         Command::new("app.switchWorkspace", "Switch Workspace…").when(|a, _| !a.workspaces.is_empty()).run(|a, w, cx| {
             a.open_workspace_menu(Point::new(px(160.), px(34.)), w, cx)
@@ -263,9 +306,13 @@ impl OrbitApp {
             }
         })
         .detach();
-        let sessions = crate::sessions::init(window, cx);
+        crate::sessions::init(window, cx);
+        let store = crate::sessions::store(cx);
+        let store_sub = cx.observe(&store, |_, _, cx| cx.notify());
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
+        let config = orbit_core::config::Config::load().ok();
+        crate::shell::start_polls(window, cx);
         Self {
             workspaces: workspace::list_workspaces(),
             selected: None,
@@ -284,9 +331,15 @@ impl OrbitApp {
             palette: None,
             overlay_focus: cx.focus_handle(),
             titlebar_items: vec![],
-            sessions,
+            ws_collapsed: BTreeSet::new(),
+            minimized: HashSet::new(),
+            services: config.as_ref().map(|c| c.services.iter().map(|s| s.name.clone()).collect()).unwrap_or_default(),
+            group_count: config.as_ref().map_or(0, |c| c.groups.len()),
+            briefs: HashMap::new(),
+            usage: None,
+            chrome: Default::default(),
             persist: Persist { path: state_path, ..Default::default() },
-            _subscriptions: vec![sub],
+            _subscriptions: vec![sub, store_sub],
         }
     }
 
@@ -344,14 +397,94 @@ impl OrbitApp {
     pub fn activate(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.remember_cursor(cx);
         self.active = Some(ix);
-        if let Some(tab) = self.tabs.get(ix) {
+        let Some(tab) = self.tabs.get(ix) else { return cx.notify() };
+        let key = tab.key(cx);
+        // Showing a minimized session brings its tab back.
+        self.minimized.remove(&key);
+        // One nav page at a time, as the React app's single `navPage`.
+        if tab.is_nav(cx) {
+            let others: Vec<String> = self.tabs.iter().filter(|t| t.is_nav(cx)).map(|t| t.key(cx)).filter(|k| *k != key).collect();
+            if !others.is_empty() {
+                self.tabs.retain(|t| !others.contains(&t.key(cx)));
+                self.active = self.tab_index(&key, cx);
+            }
+        }
+        // The dock, run widget and status bar follow the tab's workspace (`focusWorkspace`).
+        if let Some(ws) = self.tab_workspace(&key, cx) {
+            if self.selected != Some(ws) {
+                self.select_workspace(ws, cx);
+            }
+        }
+        if let Some(tab) = self.active.and_then(|a| self.tabs.get(a)) {
             window.focus(&tab.focus_handle(cx), cx);
             if !self.applying_nav {
-                let (key, target) = (tab.key(cx), tab.nav_target(cx));
+                let target = tab.nav_target(cx);
                 self.nav.visit(key, target);
             }
         }
         cx.notify();
+    }
+
+    /// The workspace (index) a tab works in: its page, its sessions' scope, its files.
+    pub fn tab_workspace(&self, key: &str, cx: &App) -> Option<usize> {
+        let by_name = |n: &str| self.workspaces.iter().position(|w| w.meta.name == n);
+        let tab = self.tabs.iter().find(|t| t.key(cx) == key)?;
+        match &tab.kind {
+            TabKind::Terminal(t) => by_name(&t.read(cx).meta.workspace),
+            TabKind::Editor(e) => self.workspaces.iter().position(|w| e.read(cx).path.starts_with(&w.dir)),
+            TabKind::Diff(d) => self.workspaces.iter().position(|w| d.read(cx).path.starts_with(&w.dir)),
+            _ if tab.is_nav(cx) => None,
+            _ => {
+                let rest = key.strip_prefix("page:ws:").or_else(|| key.strip_prefix("review:changes:"));
+                let rest = rest.or_else(|| ["page:ralph:", "page:usage:", "page:artifacts:"].iter().find_map(|p| key.strip_prefix(p)));
+                rest.and_then(by_name)
+            }
+        }
+    }
+
+    /// The workspace in focus (`focusWorkspace`): the active tab's. Nav pages have none.
+    pub fn focus_workspace(&self, cx: &App) -> Option<&Workspace> {
+        let key = self.active_tab()?.key(cx);
+        self.tab_workspace(&key, cx).map(|ix| &self.workspaces[ix])
+    }
+
+    /// Indices of the tabs on the strip, in its order: sessions and views, then files.
+    pub fn strip_tabs(&self, cx: &App) -> Vec<usize> {
+        let shown: Vec<usize> =
+            (0..self.tabs.len()).filter(|&i| !self.tabs[i].is_nav(cx) && !self.minimized.contains(&self.tabs[i].key(cx))).collect();
+        let (files, rest): (Vec<usize>, Vec<usize>) = shown.into_iter().partition(|&i| self.tabs[i].is_file());
+        rest.into_iter().chain(files).collect()
+    }
+
+    /// The tab's × and middle click: agent sessions minimize (they keep
+    /// running, the sidebar still lists them); the rest close.
+    pub fn dismiss_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        match self.tabs.get(ix) {
+            Some(t) if t.is_agent(cx) => self.minimize_tab(ix, window, cx),
+            Some(_) => self.close_tab(ix, false, window, cx),
+            None => {}
+        }
+    }
+
+    /// Takes a session off the strip; the strip's neighbour becomes active.
+    pub fn minimize_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(key) = self.tabs.get(ix).map(|t| t.key(cx)) else { return };
+        let strip = self.strip_tabs(cx);
+        let pos = strip.iter().position(|&i| i == ix);
+        self.minimized.insert(key);
+        if self.active == Some(ix) {
+            let rest: Vec<usize> = strip.into_iter().filter(|&i| i != ix).collect();
+            match pos.and_then(|p| rest.get(p.min(rest.len().saturating_sub(1))).copied()) {
+                Some(next) => self.activate(next, window, cx),
+                None => self.show_dashboard(window, cx),
+            }
+        }
+        cx.notify();
+    }
+
+    /// The Dashboard nav page (the React app's default `navPage`).
+    pub fn show_dashboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        crate::workspace_ui::open(self, crate::workspace_ui::PageId::Dashboard, window, cx);
     }
 
     /// The shown editor's cursor goes into its history entry.
@@ -372,11 +505,14 @@ impl OrbitApp {
         }
     }
 
+    /// Next / previous tab on the strip.
     pub fn cycle_tab(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
-        let n = self.tabs.len() as isize;
+        let strip = self.strip_tabs(cx);
+        let n = strip.len() as isize;
         if n > 0 {
-            let next = self.active.map_or(0, |a| (a as isize + delta).rem_euclid(n));
-            self.activate(next as usize, window, cx);
+            let at = self.active.and_then(|a| strip.iter().position(|&i| i == a));
+            let next = at.map_or(0, |p| (p as isize + delta).rem_euclid(n));
+            self.activate(strip[next as usize], window, cx);
         }
     }
 
@@ -511,16 +647,28 @@ impl OrbitApp {
         if let TabKind::Terminal(t) = &tab.kind {
             crate::sessions::closed(t, cx);
         }
+        let key = tab.key(cx);
+        self.minimized.remove(&key);
+        let strip_pos = self.strip_tabs(cx).iter().position(|&i| i == ix);
+        let was_active = self.active == Some(ix);
         self.tabs.remove(ix);
-        self.active = match self.active {
-            _ if self.tabs.is_empty() => None,
-            Some(a) if a > ix => Some(a - 1),
-            Some(a) => Some(a.min(self.tabs.len() - 1)),
-            None => None,
-        };
-        match self.active {
+        if !was_active {
+            self.active = self.active.map(|a| if a > ix { a - 1 } else { a });
+            return cx.notify();
+        }
+        // The strip's neighbour, else the open nav page, else the Dashboard.
+        let strip = self.strip_tabs(cx);
+        let next = strip_pos
+            .and_then(|p| strip.get(p.min(strip.len().saturating_sub(1))).copied())
+            .or_else(|| strip.last().copied())
+            .or_else(|| self.tabs.iter().position(|t| t.is_nav(cx)));
+        self.active = None;
+        match next {
             Some(a) => self.activate(a, window, cx),
-            None => window.focus(&self.focus, cx),
+            None => {
+                window.focus(&self.focus, cx);
+                self.show_dashboard(window, cx);
+            }
         }
         cx.notify();
     }
@@ -577,17 +725,25 @@ impl OrbitApp {
     fn remove_tabs(&mut self, which: impl Fn(usize, &Tab) -> bool, window: &mut Window, cx: &mut Context<Self>) -> usize {
         let active_key = self.active_tab().map(|t| t.key(cx));
         let mut kept_dirty = 0;
+        // Agent sessions survive batch closes: they're minimized, not ended.
+        let mut minimize = vec![];
         let remove: Vec<bool> = self
             .tabs
             .iter()
             .enumerate()
             .map(|(ix, t)| {
                 let picked = which(ix, t);
+                if picked && t.is_agent(cx) {
+                    minimize.push(t.key(cx));
+                    return false;
+                }
                 let dirty = picked && t.dirty(cx);
                 kept_dirty += dirty as usize;
                 picked && !dirty
             })
             .collect();
+        let active_minimized = active_key.as_ref().is_some_and(|k| minimize.contains(k));
+        self.minimized.extend(minimize);
         for (t, _) in self.tabs.iter().zip(&remove).filter(|(_, r)| **r) {
             if let TabKind::Terminal(v) = &t.kind {
                 crate::sessions::closed(v, cx);
@@ -595,8 +751,8 @@ impl OrbitApp {
         }
         let mut flags = remove.into_iter();
         self.tabs.retain(|_| !flags.next().unwrap_or(false));
-        let still = active_key.and_then(|k| self.tab_index(&k, cx));
-        self.active = still.or(self.tabs.len().checked_sub(1));
+        let still = active_key.and_then(|k| self.tab_index(&k, cx)).filter(|_| !active_minimized);
+        self.active = still.or_else(|| self.strip_tabs(cx).last().copied());
         match self.active {
             Some(a) if still.is_none() => self.activate(a, window, cx),
             Some(_) => {}
@@ -802,15 +958,18 @@ impl OrbitApp {
                 TabKind::Terminal(_) | TabKind::Review(_) | TabKind::Page(_) | TabKind::Tool(_) => None,
             })
             .collect();
+        let saved = |t: &Tab| matches!(t.kind, TabKind::Editor(_) | TabKind::Diff(_));
         let active = self.active.and_then(|a| {
-            let ix = self.tabs[..a].iter().filter(|t| t.is_file()).count();
-            self.tabs[a].is_file().then_some(ix)
+            let ix = self.tabs[..a].iter().filter(|t| saved(t)).count();
+            saved(&self.tabs[a]).then_some(ix)
         });
         SavedState {
             workspace: self.workspace().map(|w| w.meta.name.clone()),
             tabs,
             active,
             layout: self.layout.clone(),
+            theme: Some(crate::theme::pref()),
+            ws_collapsed: self.ws_collapsed.iter().cloned().collect(),
         }
     }
 
@@ -848,6 +1007,13 @@ impl OrbitApp {
     /// Reopens what was open last time. Files that are gone are skipped.
     pub fn restore(&mut self, saved: SavedState, window: &mut Window, cx: &mut Context<Self>) {
         self.layout = saved.layout;
+        self.ws_collapsed = saved.ws_collapsed.into_iter().collect();
+        // Nothing open (after the sessions come back too): the Dashboard, as the React app starts.
+        cx.defer_in(window, |a, w, cx| {
+            if a.active.is_none() {
+                a.show_dashboard(w, cx);
+            }
+        });
         if let Some(ix) = saved.workspace.and_then(|name| self.workspaces.iter().position(|w| w.meta.name == name)) {
             self.select_workspace(ix, cx);
         }

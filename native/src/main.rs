@@ -1,3 +1,4 @@
+#![recursion_limit = "512"]
 //! Orbit's native UI (GPUI + gpui-component): the shell, terminals, file
 //! tree, and the editor with language servers; see README.md.
 mod app;
@@ -21,6 +22,7 @@ mod script;
 mod search;
 mod sessions;
 mod shell;
+mod sidebar;
 mod state;
 mod steps;
 mod terminal;
@@ -50,7 +52,7 @@ fn main() {
     let saved = app::load_state(state_path.as_deref());
     gpui_platform::application().with_assets(icons::Assets::new()).run(move |cx: &mut App| {
         gpui_component::init(cx);
-        theme::init(cx);
+        theme::init(cx, script.theme.as_deref().or(saved.theme.as_deref()));
         // Commands and keys, per stage.
         app::init(cx);
         file_tree::bind_keys(cx);
@@ -64,10 +66,11 @@ fn main() {
         workspace_ui::init(cx);
         pages::init(cx);
 
-        let (w, h) = script.window_size.unwrap_or((1400., 900.));
+        // Maximized, as the Tauri app opens (`tauri.conf.json`); self-tests pick a size.
+        let (w, h) = script.window_size.unwrap_or((1280., 800.));
         let bounds = Bounds::centered(None, size(px(w), px(h)), cx);
         let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_bounds: Some(if script.window_size.is_some() { WindowBounds::Windowed(bounds) } else { WindowBounds::Maximized(bounds) }),
             app_id: Some("orbit-native".into()),
             // Our own titlebar (TitleBar draws the window controls and moves the window).
             window_decorations: Some(WindowDecorations::Client),

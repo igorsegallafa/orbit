@@ -7,10 +7,7 @@
 //! turn or need the user land in the inbox.
 //!
 //! The actions below are the ids a command palette or keymap can bind.
-mod panel;
 pub mod status;
-
-pub use panel::SessionsPanel;
 
 use crate::app::{OrbitApp, Tab, TabKind};
 use crate::terminal::{self, Signal, TerminalEvent, TerminalView};
@@ -138,7 +135,7 @@ pub fn store(cx: &App) -> Entity<SessionStore> {
     cx.global::<Store>().store.clone()
 }
 
-fn now_ms() -> u64 {
+pub fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
@@ -271,8 +268,8 @@ impl SessionStore {
 }
 
 /// Sets up the session store, Claude Code's hook listener and the session
-/// actions; returns the sidebar panel. Called once from `OrbitApp::new`.
-pub fn init(window: &mut Window, cx: &mut Context<OrbitApp>) -> Entity<SessionsPanel> {
+/// actions (the sidebar draws the sessions, `sidebar.rs`). Called once from `OrbitApp::new`.
+pub fn init(window: &mut Window, cx: &mut Context<OrbitApp>) {
     // Self-test runs (which disable the clipboard) keep away from the user's
     // saved sessions unless they point ORBIT_CONFIG_DIR elsewhere.
     let persist = !terminal::CLIPBOARD_DISABLED.load(Ordering::Relaxed) || std::env::var_os("ORBIT_CONFIG_DIR").is_some();
@@ -321,8 +318,6 @@ pub fn init(window: &mut Window, cx: &mut Context<OrbitApp>) -> Entity<SessionsP
     .detach();
     let to_restore = saved.sessions;
     cx.defer_in(window, move |a, w, cx| restore(a, to_restore, w, cx));
-    let app = cx.weak_entity();
-    cx.new(|cx| SessionsPanel::new(store, app, cx))
 }
 
 fn on_agent_event(ev: &serde_json::Value, cx: &mut App) {
@@ -375,12 +370,18 @@ pub fn scope(app: &OrbitApp) -> String {
 /// A new session of `cmd` (none: the shell) in the current scope. `input` is
 /// typed into it once it runs.
 pub fn new_session(app: &mut OrbitApp, cmd: Option<&str>, input: Option<String>, window: &mut Window, cx: &mut Context<OrbitApp>) {
+    let scope = scope(app);
+    new_session_in(app, scope, cmd, input, window, cx);
+}
+
+/// A new session in `scope` (a workspace name, `@repo` or `dir:<path>`): the New Session menu's pick.
+pub fn new_session_in(app: &mut OrbitApp, scope: String, cmd: Option<&str>, input: Option<String>, window: &mut Window, cx: &mut Context<OrbitApp>) {
     let label = AGENTS.iter().find(|a| a.2 == cmd).map_or_else(|| cmd.unwrap_or("shell").to_string(), |a| a.1.to_string());
     let taken: Vec<String> = store(cx).read(cx).open.iter().map(|(m, _)| m.session_name.clone()).collect();
     let agent_session_id = (cmd == Some("claude")).then(new_uuid);
     let meta = SessionMeta {
         id: new_key(),
-        workspace: scope(app),
+        workspace: scope,
         label,
         session_name: codename(taken.iter().map(String::as_str)),
         cmd: cmd.map(str::to_string),

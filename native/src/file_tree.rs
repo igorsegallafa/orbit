@@ -15,7 +15,6 @@ use gpui::{
     UniformListScrollHandle, Window,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
-use ignore::WalkBuilder;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -103,6 +102,8 @@ pub struct FileTree {
     prompt: Option<Prompt>,
     /// Copies, reveals and refreshes, for the self-test dump.
     pub log: Vec<String>,
+    /// The repo the dock shows (its select): only its rows are drawn, without the root row.
+    focus_root: Option<PathBuf>,
 }
 
 impl EventEmitter<FileTreeEvent> for FileTree {}
@@ -114,28 +115,19 @@ impl Focusable for FileTree {
     }
 }
 
-/// Directory children, dirs first, ignoring what git ignores and `.git` itself.
+/// Directory children as `list_files` (orbit-core) gives them to the React
+/// tree: everything, dirs first, then by name (byte order).
 fn read_children(dir: &Path) -> Vec<(PathBuf, bool)> {
-    let mut out: Vec<(PathBuf, bool)> = WalkBuilder::new(dir)
-        .max_depth(Some(1))
-        .hidden(false)
-        .follow_links(true)
-        .filter_entry(|e| e.file_name() != ".git")
-        .build()
+    let Ok(entries) = std::fs::read_dir(dir) else { return vec![] };
+    let mut out: Vec<(PathBuf, bool)> = entries
         .flatten()
-        .filter(|e| e.depth() == 1)
         .map(|e| {
-            let is_dir = e.file_type().is_some_and(|t| t.is_dir());
-            (e.into_path(), is_dir)
+            let p = e.path();
+            let is_dir = p.is_dir();
+            (p, is_dir)
         })
         .collect();
-    out.sort_by(|(a, ad), (b, bd)| {
-        bd.cmp(ad).then_with(|| {
-            let an = a.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
-            let bn = b.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
-            an.cmp(&bn)
-        })
-    });
+    out.sort_by(|(a, ad), (b, bd)| bd.cmp(ad).then_with(|| a.file_name().cmp(&b.file_name())));
     out
 }
 
@@ -223,6 +215,37 @@ impl FileTree {
             pending_reveal: None,
             prompt: None,
             log: vec![],
+            focus_root: None,
+        }
+    }
+
+    /// The repos (root rows): name and folder.
+    pub fn roots(&self) -> Vec<(SharedString, PathBuf)> {
+        self.entries.iter().filter(|e| e.depth == 0).map(|e| (e.name.clone(), e.path.clone())).collect()
+    }
+
+    pub fn focus_root(&self) -> Option<&Path> {
+        self.focus_root.as_deref()
+    }
+
+    /// Shows one repo (the dock's repo select), loading its top folder.
+    pub fn set_focus_root(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        let Some(ix) = self.entries.iter().position(|e| e.depth == 0 && e.path == root) else { return };
+        self.focus_root = Some(root);
+        if !self.entries[ix].expanded {
+            self.expand(ix, cx);
+        }
+        if !self.selected.is_some_and(|s| self.visible().contains(&s)) {
+            self.selected = None;
+        }
+        cx.notify();
+    }
+
+    /// The rows drawn: the focused repo's subtree (all rows without one).
+    fn visible(&self) -> std::ops::Range<usize> {
+        match self.focus_root.as_ref().and_then(|r| self.entries.iter().position(|e| e.depth == 0 && &e.path == r)) {
+            Some(ix) => ix + 1..self.subtree_end(ix),
+            None => 0..self.entries.len(),
         }
     }
 
@@ -237,7 +260,12 @@ impl FileTree {
             .into_iter()
             .map(|(name, path)| Entry { path, name: name.into(), depth: 0, is_dir: true, expanded: false, loading: false })
             .collect();
-        self.selected = (!self.entries.is_empty()).then_some(0);
+        self.selected = None;
+        // The first repo, as the dock's select starts.
+        match self.entries.first().map(|e| e.path.clone()) {
+            Some(first) => self.set_focus_root(first, cx),
+            None => self.focus_root = None,
+        }
         cx.notify();
     }
 
@@ -389,6 +417,12 @@ impl FileTree {
             self.pending_reveal = None;
             return;
         };
+        // A file of another repo: the dock switches to it.
+        if let Some(root) = self.entries[..=ix].iter().rev().find(|e| e.depth == 0).map(|e| e.path.clone()) {
+            if self.focus_root.as_ref().is_some_and(|f| *f != root) {
+                self.focus_root = Some(root);
+            }
+        }
         let e = &self.entries[ix];
         if e.path == target || !e.is_dir || (e.expanded && !e.loading) {
             // Found, or as deep as the tree goes (an ignored folder).
@@ -452,32 +486,38 @@ impl FileTree {
 
     fn select(&mut self, ix: usize, cx: &mut Context<Self>) {
         self.selected = Some(ix);
-        self.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
+        let first = self.visible().start;
+        self.scroll.scroll_to_item(ix.saturating_sub(first), ScrollStrategy::Nearest);
         cx.notify();
     }
 
     fn select_prev(&mut self, _: &SelectPrev, _: &mut Window, cx: &mut Context<Self>) {
-        let ix = self.selected.map_or(0, |s| s.saturating_sub(1));
-        self.select(ix, cx);
+        let rows = self.visible();
+        if !rows.is_empty() {
+            let ix = self.selected.filter(|s| rows.contains(s)).map_or(rows.start, |s| s.saturating_sub(1).max(rows.start));
+            self.select(ix, cx);
+        }
     }
 
     fn select_next(&mut self, _: &SelectNext, _: &mut Window, cx: &mut Context<Self>) {
-        if self.entries.is_empty() {
-            return;
+        let rows = self.visible();
+        if !rows.is_empty() {
+            let ix = self.selected.filter(|s| rows.contains(s)).map_or(rows.start, |s| (s + 1).min(rows.end - 1));
+            self.select(ix, cx);
         }
-        let ix = self.selected.map_or(0, |s| (s + 1).min(self.entries.len() - 1));
-        self.select(ix, cx);
     }
 
     fn select_first(&mut self, _: &SelectFirst, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.entries.is_empty() {
-            self.select(0, cx);
+        let rows = self.visible();
+        if !rows.is_empty() {
+            self.select(rows.start, cx);
         }
     }
 
     fn select_last(&mut self, _: &SelectLast, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(last) = self.entries.len().checked_sub(1) {
-            self.select(last, cx);
+        let rows = self.visible();
+        if !rows.is_empty() {
+            self.select(rows.end - 1, cx);
         }
     }
 
@@ -499,7 +539,8 @@ impl FileTree {
             cx.notify();
         } else if e.depth > 0 {
             let depth = e.depth;
-            if let Some(parent) = self.entries[..ix].iter().rposition(|p| p.depth < depth) {
+            let start = self.visible().start;
+            if let Some(parent) = self.entries[..ix].iter().rposition(|p| p.depth < depth).filter(|p| *p >= start) {
                 self.select(parent, cx);
             }
         }
@@ -699,6 +740,9 @@ impl FileTree {
 impl Render for FileTree {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let focused = self.focus.contains_focused(window, cx);
+        let rows = self.visible();
+        // Depths below the focused repo's root row start at 0.
+        let base = if self.focus_root.is_some() { 1 } else { 0 };
         div()
             .key_context("FileTree")
             .track_focus(&self.focus)
@@ -718,38 +762,46 @@ impl Render for FileTree {
             .child(
                 uniform_list(
                     "file-tree",
-                    self.entries.len(),
+                    rows.len(),
                     cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
                         range
+                            .map(|i| i + rows.start)
+                            .filter(|&ix| ix < this.entries.len())
                             .map(|ix| {
                                 let e = &this.entries[ix];
                                 let selected = this.selected == Some(ix);
-                                let chevron = match (e.is_dir, e.expanded, e.loading) {
-                                    (true, _, true) => "…",
-                                    (true, true, _) => "▾",
-                                    (true, false, _) => "▸",
-                                    _ => " ",
-                                };
+                                // `.tree-chevron-small` "▸", turned down when open.
+                                let chevron = e.is_dir.then(|| {
+                                    let icon = icons::orbit_icon("chevron-right", 7., c(theme::TEXT_FAINT));
+                                    if e.expanded {
+                                        icon.with_transformation(gpui::Transformation::rotate(gpui::percentage(0.25)))
+                                    } else {
+                                        icon
+                                    }
+                                });
+                                // `.tree-item`: 19px rows, 8px per level, 14px/500 text-dim; `.tree-active` when selected.
                                 div()
                                     .id(ix)
                                     .relative()
-                                    .h(px(22.))
-                                    .pl(px(8. + e.depth as f32 * 12.))
-                                    .pr_2()
+                                    .h(px(19.))
+                                    .mx(px(4.))
+                                    .pl(px(5. + e.depth.saturating_sub(base) as f32 * 8.))
                                     .flex()
                                     .items_center()
-                                    .gap_1()
-                                    .text_sm()
+                                    .gap(px(5.))
+                                    .rounded(px(3.))
+                                    .text_size(px(14.))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
                                     .whitespace_nowrap()
                                     .overflow_hidden()
                                     .cursor_pointer()
-                                    .text_color(c(if e.is_dir { theme::TEXT } else { theme::TEXT_DIM }))
-                                    .when(selected && focused, |d| d.bg(theme::accent_soft()))
+                                    .text_color(c(theme::TEXT_DIM))
+                                    .hover(|s| s.bg(c(theme::PANEL_RAISED)).text_color(c(theme::TEXT)))
+                                    .when(selected, |d| d.bg(c(theme::ACCENT_SOFT)).text_color(c(theme::NAV_ACTIVE)))
                                     .when(selected && !focused, |d| d.bg(c(theme::PANEL_RAISED)))
-                                    .hover(|s| s.bg(c(theme::PANEL_HOVER)))
-                                    .child(div().w(px(10.)).text_color(c(theme::TEXT_FAINT)).child(chevron))
+                                    .child(div().w(px(10.)).flex_none().flex().justify_center().children(chevron))
                                     .child(if e.is_dir { icons::folder_icon(e.expanded, 14.) } else { icons::file_icon(&e.name, 14.) })
-                                    .child(e.name.clone())
+                                    .child(div().overflow_hidden().text_ellipsis().child(e.name.clone()))
                                     .child(crate::probe::probe(format!("tree:{}", e.name)))
                                     .on_mouse_down(
                                         MouseButton::Left,
@@ -778,6 +830,8 @@ impl Render for FileTree {
                     }),
                 )
                 .track_scroll(&self.scroll)
+                .pt(px(4.))
+                .pb(px(8.))
                 .flex_1()
                 .min_h_0(),
             )
