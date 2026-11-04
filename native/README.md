@@ -15,15 +15,16 @@ root remains the product.
 cd native
 cargo build --release      # 824 crates; incremental release builds take 40 s–1.5 min (thin LTO)
 ./target/release/orbit-native
+scripts/package-linux.sh   # dist/: a tarball with install.sh, and an AppImage when appimagetool is found
 ```
 
 The app lists workspaces and starts language servers through `orbit-core`, the same code as the
 Tauri app, so it shows the same workspaces and honours Settings → Languages (server overrides,
-disabled languages). `target/` is ~3.3 GB after a
+disabled languages, the diagnostics filter). `target/` is ~3.3 GB after a
 release build plus clippy and tests.
 
 The first start after a build takes several seconds while the GPU driver compiles and caches
-pipelines. Warm starts reach the first frame in 180–190 ms.
+pipelines. Warm starts reach the first frame in 200–250 ms.
 
 Keys (JetBrains-style, as the Tauri app; `Ctrl+Shift+A` lists every command with its keys):
 `Ctrl+Shift+T` new terminal (a shell session) · `Ctrl+W` close the file tab (in a terminal the shell gets it; unsaved
@@ -163,11 +164,13 @@ machine (CachyOS, GNOME Wayland, Intel + NVIDIA, Vulkan) on the first try and ne
 One thing was not obvious: `gpui-pre` ships without a platform, so `gpui-pre-platform` (with the
 `wayland` and `x11` features) is a separate dependency.
 
-**The cost: memory.** `gpui-pre` renders through wgpu, where gpui 0.2.2 used blade. The wgpu
-instance asks for the Vulkan *and* GL backends and enumerates every adapter. That maps both
+**The cost: memory.** `gpui-pre` renders through wgpu, where gpui 0.2.2 used blade. Upstream, the
+wgpu instance asks for the Vulkan *and* GL backends and enumerates every adapter. That maps both
 vendors' Vulkan drivers, NVIDIA's EGL stack and Mesa's (`libgallium` + `libLLVM`), and opens
-`/dev/nvidia0` even though the window renders on the Intel GPU. See the table below. Anonymous
-(heap) memory is only ~37 MB; the rest is shared driver libraries and the 53 MB binary.
+`/dev/nvidia0` even though the window renders on the Intel GPU. Since the packaging stage the app
+asks for Vulkan only (GL when there is no Vulkan GPU), through a vendored, two-hunk patch of
+`gpui-pre-wgpu`: see *GPU backend*. Anonymous (heap) memory is only ~37 MB; the rest is shared
+driver libraries and the ~60 MB binary.
 
 Licences: gpui-pre, gpui-component, alacritty_terminal: Apache-2.0; portable-pty: MIT. No code was
 taken from Zed's GPL crates (`editor`, `terminal`, `terminal_view`).
@@ -193,18 +196,14 @@ EGL only), which a launcher can set.
 MB. clangd's figure depends on how far `--background-index` has got (1.3–4.4 GB in the first 30 s
 while indexing aether-engine). It is the same in any editor, so it is kept out of the app columns.
 
-Vulkan-only experiment (not committed): with `gpui-pre-wgpu` patched to request
-`Backends::VULKAN` alone, idle was 110 MB by default and 54 MB with the Intel ICD only. Shipping
-that means a `[patch.crates-io]` with a vendored copy of `gpui-pre-wgpu` (two lines changed in
-`wgpu_context.rs`), or getting the backend set made configurable upstream. Worth doing before
-release; the decision is the owner's.
+The table above predates the Vulkan-only renderer; *Stage: packaging* has the current numbers.
 
 Other numbers:
 
 | Metric | Value |
 |---|---|
-| Start to first frame | 180–190 ms warm; ~9 s on the very first run after a build (driver pipeline cache) |
-| Binary (release, stripped, thin LTO) | 53 MB |
+| Start to first frame | 190–260 ms warm (180–190 ms in stage 1, before the Vulkan probe and later stages); ~9 s on the very first run after a build (driver pipeline cache) |
+| Binary (release, stripped, thin LTO) | 61 MB (53 MB in stage 1); the tarball is 21 MB |
 | clangd start → `initialize` done | ~110 ms; the editor attaches 150 ms after opening |
 | Tree, background loads | 3 levels 44 ms, 4 levels 81 ms, 5 levels (37,347 rows) 5.6 s without blocking the UI |
 | Editor open (`Game.cpp`) | < 1 ms to read; highlighting is incremental tree-sitter |
@@ -344,6 +343,8 @@ Caveats found:
 | `src/pages/` | tool tabs (`TabKind::Tool`; `mod.rs`: `PageTab`, `PageView`, `Host`, commands, sidebar entries, dump) · `settings.rs` (sections, AI, Languages, Appearance, Health, Updates) · `repos.rs` (Repositories, Folders, Groups) · `integrations.rs` · `ralph.rs` · `usage.rs` · `artifacts.rs` · `updates.rs` (update check) · `crash.rs` (panic hook) · `ui.rs` |
 | `src/script.rs` | self-test mode and dumps |
 | `src/theme.rs`, `src/orbit-dark.json` | Orbit Dark colours and shell metrics (`src/App.css`) |
+| `vendor/gpui-pre-wgpu`, `vendor/PATCHES.md` | the wgpu renderer with the Vulkan-only patch, and how to re-apply it |
+| `packaging/linux/`, `scripts/package-linux.sh` | `.desktop` entry, `install.sh`, and the tarball / AppImage build |
 
 ## Sharing the backend: `orbit-core`
 
@@ -829,6 +830,162 @@ output|shared|worktree|branch-only|auto-switch|clone-now|save|cancel`, `local-pa
 `ralph-iterations:<n|until-done>`, `ralph-push`, `ralph-start|pause|stop`, `usage:<model>`,
 `artifact:<repo>:<name>`. Inputs inside the pages fill through `click:<probe>` then `type:`.
 
+## Stage: packaging
+
+### GPU backend
+
+gpui's wgpu renderer (`gpui-pre-wgpu`, Linux and FreeBSD only) asked wgpu for Vulkan *and* GL,
+which loads every vendor's Vulkan driver and every EGL stack. It now asks for **Vulkan only**, and
+for **GL only when no hardware Vulkan adapter exists** (probed once at start). `WGPU_BACKEND`
+(wgpu's own variable, e.g. `WGPU_BACKEND=gl`) forces a backend. gpui has no supported switch for
+this, so `native/vendor/gpui-pre-wgpu` is the crates.io package with one function added to
+`wgpu_context.rs`, wired in by `[patch.crates-io]`; `vendor/PATCHES.md` says what changed and how
+to re-apply it on an upgrade. Windows (DirectX) and macOS (Metal) don't use the crate.
+
+Idle (`--workspace add-items-skills`), PSS + SwapPss, max of 3 runs, MB:
+
+| Renderer | Idle |
+|---|---:|
+| Before: Vulkan + GL | 159 |
+| **Vulkan only (default now)** | **122** |
+| Vulkan only, Intel ICD only (`VK_DRIVER_FILES=…/intel_icd.json`) | 62 |
+| GL forced (`WGPU_BACKEND=gl`) | 140 |
+
+The rest of the gap to the PoC is NVIDIA's Vulkan driver: the loader opens every ICD, so
+`libnvidia-gpucomp`, `-rtcore` and `-glcore` (~46 MB) are mapped although the window renders on
+the Intel GPU. A launcher can drop them with `VK_DRIVER_FILES` or `VK_LOADER_DRIVERS_DISABLE`;
+doing it automatically means knowing the compositor's GPU before the loader runs, which was left
+out (it would break NVIDIA-only and PRIME-offload setups if guessed wrong).
+
+Checked: the GL path renders (forced, and naturally with `VK_DRIVER_FILES=/nonexistent.json`:
+Mesa EGL and `libgallium` mapped, no Vulkan driver, first frame after 110 ms); the stage-1 gate
+still passes on Vulkan (F12 on `Initialize`, 39:12 of `Game.h`, lands on `Game.cpp` 44:10).
+
+### Tauri vs native
+
+Same machine as *Measurements* (31 GB RAM, with 15 GB in swap during the runs). Both apps on a
+scratch copy of the config (`ORBIT_CONFIG_DIR`), workspace `add-items-skills`, measured 15 s after
+start. PSS + SwapPss per process tree, max of 3 runs, MB. "App" is the UI process plus, for Tauri,
+`WebKitWebProcess` and `WebKitNetworkProcess`; terminal programs and clangd are apart.
+
+| Scenario | Tauri | Native | Native / Tauri |
+|---|---:|---:|---:|
+| Idle, workspace selected | 457 | 124 | 27% |
+| + tree expanded, `Game.h` and `Game.cpp` open | 581 | 138 | 24% |
+| + 3 terminals running `top` | 582 (+6 `top`) | 140 (+9 shells) | 24% |
+| clangd (same flags in both) | ~1,510 | 1,440–2,660 | |
+| Start → first paint | 615–965 ms | 190–260 ms | |
+
+- Tauri: a release build of this branch (`pnpm tauri build --no-bundle`) on the system WebKitGTK
+  2.54.2. Its tabs (the workspace, the two editors, three `top` terminals) were seeded in a
+  scratch copy of its localStorage (`XDG_DATA_HOME`), and its file tree was expanded through
+  WebKit's remote inspector (`WEBKIT_INSPECTOR_HTTP_SERVER`, JS clicks on the rows: no OS input).
+  First paint is the page's `first-contentful-paint` measured from the launch.
+- Tree: the React dock shows one repo, so aether-engine was opened two levels below its root
+  (1,261 rows); the native tree shows the four repos three levels from the workspace (1,452 rows),
+  the same depth in aether-engine. Native's first frame is its own `first frame after` line; under
+  this memory pressure the first run of a series sometimes took 2–3 s.
+- clangd varies with how far `--background-index` has got; it costs the same in either app.
+
+### Packaging (Linux)
+
+- `packaging/linux/orbit-native.desktop` (app id `orbit-native`, so Wayland matches the window to
+  it) and the Tauri app's icons from `src-tauri/icons` (32–512 px, nothing duplicated).
+- `scripts/package-linux.sh [--no-build]` writes `dist/orbit-native-<version>-linux-<arch>.tar.gz`
+  (`bin/`, `share/`, `install.sh`) and, when `appimagetool` is found (`$APPIMAGETOOL` or `PATH`),
+  `dist/orbit-native-<version>-<arch>.AppImage`. The version is `package.json`'s.
+  `install.sh` installs into `~/.local` (or `PREFIX`), points the entry's `Exec` at the binary and
+  refreshes the desktop and icon caches; `--uninstall` removes it. Checked: the tarball, the
+  `.desktop` (`desktop-file-validate`), install and uninstall into a scratch prefix. The AppImage
+  path was not run here (running a downloaded `appimagetool` was not allowed); CI builds it.
+- The binary links only glibc, libgcc, `libxcb`/`libxkbcommon` (Vulkan, Wayland and fonts are
+  loaded at run time), so the AppImage needs no bundled libraries. As with the Tauri release, build
+  it on the oldest Ubuntu to support (glibc).
+
+**CI** (`.github/workflows/native.yml`, on PRs, pushes to main and by hand; `continue-on-error`,
+so it never blocks a PR; `release.yml` is untouched): Linux on `ubuntu-latest` runs `cargo
+build`, `clippy -D warnings`, `test` and the packaging, and uploads the tarball and AppImage for a
+week; Windows and macOS run `cargo check --all-targets` (macOS with
+`gpui_platform/runtime_shaders`, so the runner needs no Metal toolchain). Caches use
+`swatinem/rust-cache` with `native/target`, one key per OS.
+
+**Windows and macOS.** Checked here by cross-compiling (`x86_64-pc-windows-msvc`,
+`aarch64-apple-darwin`; C dependencies stubbed, Metal shaders skipped, so type-checking only):
+both pass `clippy --all-targets -D warnings`. One fix was needed: the terminal's primary
+selection (`write_to_primary` / `read_from_primary`) exists on Linux only, so copy-on-select and
+middle-click paste are Linux-only now. Nothing has been *run* on Windows or macOS yet.
+
+**Updater (plan, not built).** `orbit_core::updates::check` already compares `latest.json` with
+the running version and Settings → Updates offers the release page. Installing:
+
+1. The release workflow adds native artifacts (Linux tarball and AppImage; later a Windows zip and
+   a macOS `.app`) and a `latest-native.json` with per-platform URLs, signed with the existing
+   minisign key (`TAURI_SIGNING_PRIVATE_KEY`), so the public key in `tauri.conf.json` verifies it.
+2. The app downloads to a cache folder, verifies the signature (`minisign-verify`), then swaps
+   itself: the AppImage replaces `$APPIMAGE` by rename, a tarball install replaces
+   `bin/orbit-native` the same way (Linux keeps the running inode), Windows renames the running
+   exe aside first (the `self-replace` crate does both); then it offers *Restart*.
+3. Until then, updating is installing the new tarball or AppImage.
+
+### Fixes in this stage
+
+Self-tests on a scratch workspace (`ORBIT_CONFIG_DIR`, `ORBIT_WORKSPACE_ROOT`, a repo with a local
+bare origin) unless noted:
+
+- **Rename follows open editors.** Renaming `main.rs` → `app.rs` from the tree's menu turned the
+  dirty tab into `api/app.rs` with the edit and the cursor (2:1) kept; renaming the folder `src` →
+  `lib` moved both open editors, and `Ctrl+S` then wrote `lib/util.rs`. The tree emits
+  `TreeRequest::Renamed`, and `OrbitApp::file_renamed` reopens each affected editor in its slot.
+  Language servers now get `didClose` when an editor goes (closed tab or renamed file).
+- **Diagnostics filter.** The editor applies Settings → Languages' *Errors only* and hidden codes
+  to the server's diagnostics (build problems are never filtered), as the React editor does. On a
+  file with clangd's `unused-includes` warning and an error: `⨯ 1 ⚠ 1` unfiltered, `⨯ 1 ⚠ 0` with
+  the code hidden or *Errors only* in config, and toggling *Errors only* in Settings while the
+  file is open changed the open editor from `⚠ 1` to `⚠ 0`. Unit test for the rule.
+- **Tracker cards in New workspace.** Shortcut and Linear sources (marked "not connected", and
+  refused with a hint, without a token), a search field (300 ms debounce, stale answers dropped)
+  and the card list; picking a card fills the name (slug of the title) and branch (Linear's
+  suggested branch, else `feat/<id>`), and the workspace is created with the card saved in
+  `.workspace.yaml`. With a stub `curl` first on `PATH` and a scratch Shortcut token: Linear refused,
+  Shortcut listed `sc-101`, `sc-102`; typing `login` made one request and listed `sc-102`;
+  picking it and `api` created `fix-login-timeout` on `feat/sc-102` with `card: {kind: shortcut,
+  id: sc-102, …}`. Probes: `create-source-shortcut|linear`, `create-card-search`,
+  `create-card:<id>`.
+
+## Gap list: before the native app can replace the Tauri app
+
+Prioritized. "Must-have" means the owner's daily flow would miss it.
+
+**Must-have**
+
+1. **Run it on Windows and macOS.** It compiles for both, but GPUI's DirectX and Metal renderers,
+   ConPTY terminals, paths and the agent hooks have never run. The team builds on Windows.
+2. **Release and update.** Native artifacts in `release.yml` (with the glibc floor), the signed
+   manifest and self-replace (plan above). Today an update is a manual reinstall.
+3. **Agent workflow gaps.** OS notifications for sessions that need input; the Plan modal and
+   PLAN.md progress (the owner's sessions start from a plan prompt), initial prompt injection;
+   minimized agent tabs and session rename; the live agent feed.
+4. **GitHub PR review.** Review threads and submitting a review, the Code Review / feature pages,
+   PR checkout and *address review*; commit review. The local REVIEW.md flow is done.
+5. **Themes.** Only Orbit Dark; the owner uses Nord. The six other themes are token tables
+   (`src/lib/theme.ts`) and gpui-component takes a theme JSON, so this is mostly data.
+6. **Find in the current file** (`Ctrl+F`): gpui-component's editor has search; it is unbound and
+   untested here.
+7. **Markdown preview** (PLAN.md, REVIEW.md, READMEs): gpui-component has a Markdown view.
+
+**Nice-to-have**
+
+- Workspace page: investigate/fix failing checks with AI, Race, review feedback; repo page compare
+  and cherry-pick; the commit modal's inline diff; the multi-repo build modal.
+- Ralph PRD writing and editing, run overrides, the custom prompt; per-OS build commands in the
+  repo form.
+- Editor: semantic tokens, document highlights, snippets, the "hide this diagnostic" quick fix,
+  jumps inside a file in back/forward history; breakpoint conditions.
+- Files: drag-and-drop move, "Add Files…", dropping a path into a terminal; the dock's Git panel;
+  refresh on window focus; history entries of a renamed file still point at the old path.
+- Folder scopes (`dir:<path>`) and the Folders card; kitty graphics; activity bar and brand icons.
+- Choosing the compositor's GPU automatically (−60 MB on hybrid laptops, see *GPU backend*).
+
 ## Next stages
 
 Ordered by dependency, with rough sizes (one focused agent-day ≈ 1 unit).
@@ -852,15 +1009,16 @@ Ordered by dependency, with rough sizes (one focused agent-day ≈ 1 unit).
 6. **Review** (4–5): mostly done (stage above: changes review, REVIEW.md notes, send-to-PR, F7,
    PRs, checks and logs); left: commit review, GitHub PR review with threads, address review.
 7. ~~**Git and workspace flows**~~: mostly done (see *Stage: git and workspace flows*); left:
-   tracker cards in New workspace, compare and cherry-pick on the repo page, the commit modal's
-   inline diff, the workspace page's Plan and Race.
+   compare and cherry-pick on the repo page, the commit modal's inline diff, the workspace page's
+   Plan and Race. (Tracker cards: packaging stage.)
 8. ~~**Run/Build/Debug**~~: done (see *Build / Run / Debug*); left: the multi-repo build modal,
    breakpoint conditions, a round breakpoint glyph (needs an editor gutter hook upstream).
 9. ~~**Settings, Ralph, integrations, usage, artifacts, updates**~~: mostly done (see *Stage:
-   settings, …*); left: writing/editing a Ralph PRD and its prompt, the themes, tracker cards in
-   New workspace, per-OS build commands in the repo form, installing updates (packaging).
-10. **Packaging** (1): the Vulkan-only wgpu patch (or a launcher with the restricted env),
-    `.desktop` and icon, an updater.
+   settings, …*); left: writing/editing a Ralph PRD and its prompt, the themes, per-OS build
+   commands in the repo form, installing updates.
+10. ~~**Packaging**~~: done (see *Stage: packaging*): the Vulkan-only renderer, `.desktop`, icons,
+    tarball and AppImage, native CI; the updater is a plan. What is left before the native app can
+    replace the Tauri app is in *Gap list*.
 
 ## Feature parity checklist
 
@@ -885,7 +1043,7 @@ Status of everything the React app does: **done**, **partial** (with what's miss
 
 ### Workspaces & sidebar
 - [ ] partial: workspace list from `config.yaml` / `.workspace.yaml`, click to select. No session entries or status indicators (`src/App.tsx`, `StatusIndicator.tsx`).
-- [ ] partial: Create workspace: blank (manual) and from an existing branch, groups, base branch menu, linked repos noted (`WorkspaceCreateModal.tsx`). No tracker cards (Shortcut/Linear).
+- [x] done: Create workspace: blank (manual), from an existing branch, or from a Shortcut/Linear card (searched, pre-fills name and branch, saved as the workspace's card), groups, base branch menu, linked repos noted (`WorkspaceCreateModal.tsx`)
 - [ ] partial: Workspace detail page: delivery flow, repos with badges and pull, PRs with check aggregates, remove (`WorkspaceDetailPage.tsx`). No plan, race, artifacts, usage, investigate/fix checks with AI, review feedback.
 - [x] done: Add repositories (`AddReposModal.tsx`)
 - [x] done: Branch drift banner: switch back, stash and switch, auto-switch (`BranchDriftBanner.tsx`)
@@ -917,7 +1075,7 @@ Status of everything the React app does: **done**, **partial** (with what's miss
 - [x] done: theme-driven ANSI colours (Orbit Dark only)
 
 ### File tree / right dock
-- [x] done: file tree with lazy background loads, `.gitignore`, symlinked repos, keyboard navigation (arrows, Home/End, Enter, F2, Delete), single click previews, double click or Enter keeps the tab; follows the active file; context menu: new file/folder, open, rename, copy path / relative path, reveal in file manager, open in terminal, delete to the Trash (`FileTreePanel.tsx`). Not ported: drag-and-drop move, "Add Files…" (import), dropping a path into a terminal; an open editor keeps the old path after its file is renamed.
+- [x] done: file tree with lazy background loads, `.gitignore`, symlinked repos, keyboard navigation (arrows, Home/End, Enter, F2, Delete), single click previews, double click or Enter keeps the tab; follows the active file; context menu: new file/folder, open, rename, copy path / relative path, reveal in file manager, open in terminal, delete to the Trash (`FileTreePanel.tsx`). Not ported: drag-and-drop move, "Add Files…" (import), dropping a path into a terminal. A rename moves open editors (unsaved text and cursor kept).
 - [x] done: auto-refresh on disk changes: open folders re-read (expanded ones stay expanded), unmodified editors reload; `build*/` and `.cache/` changes ignored (`src/lib/useFsChanges.ts`). No refresh on window focus yet.
 - [ ] — Files / Git / Search dock toolbar, Git panel (`GitPanel.tsx`)
 
@@ -945,7 +1103,7 @@ Status of everything the React app does: **done**, **partial** (with what's miss
 - [x] done: references, implementation, type definition, document and workspace symbols, completion, signature help, code actions (with `workspace/applyEdit`), formatting, rename across files, `$/progress`, restart
 - [ ] — declaration, document highlights, semantic tokens, snippets, completion resolve
 - [ ] partial: servers for Python, Go, C#, Lua are mapped like C++/Rust/TS (orbit-core's table), untested (only clangd here)
-- [ ] partial: Languages settings (server per language, custom command, enabled, errors only, hidden codes, running servers with log and stop) (`LanguagesSection.tsx`). The editor doesn't apply the diagnostics filter yet.
+- [ ] partial: Languages settings (server per language, custom command, enabled, errors only, hidden codes, running servers with log and stop) (`LanguagesSection.tsx`). The editor applies the diagnostics filter (errors only, hidden codes), live; no "hide this diagnostic" quick fix yet.
 
 ### Search
 - [x] done: Search Everywhere (double Shift toggles, `Ctrl+Shift+A` on Actions): tabs All/Files/Symbols/Actions/Text with Tab/Shift+Tab, fuzzy-ranked files, `workspace/symbol` over the workspace's running servers, registry actions, text through orbit-core's search (debounced), "more ›" section headers (`SearchEverywhereModal.tsx`, `src/lib/fuzzy.ts`, `src/lib/commands.ts`)
