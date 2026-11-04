@@ -72,24 +72,6 @@ pub fn list_files(workspace: &str, repo: &str, path: &str) -> Result<Vec<FileNod
     Ok(nodes)
 }
 
-pub fn read_file(workspace: &str, repo: &str, path: &str) -> Result<String, String> {
-    let file = resolve(workspace, repo, path)?;
-    let meta = std::fs::metadata(&file).map_err(|e| e.to_string())?;
-    // ponytail: 1MB cap keeps accidental binaries from freezing the webview
-    if meta.len() > 1_048_576 {
-        return Err("file is too large to open (1MB cap)".into());
-    }
-    std::fs::read_to_string(&file).map_err(|e| format!("failed to read: {e}"))
-}
-
-pub fn write_file(workspace: &str, repo: &str, path: &str, content: &str) -> Result<(), String> {
-    let file = resolve(workspace, repo, path)?;
-    if let Some(parent) = file.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    std::fs::write(&file, content).map_err(|e| format!("failed to write: {e}"))
-}
-
 // ---------- Tree file operations (context menu / drag & drop) ----------
 
 fn valid_name(name: &str) -> Result<(), String> {

@@ -25,6 +25,7 @@ pub enum Section {
     Ai,
     Languages,
     Appearance,
+    Notifications,
     Health,
     Updates,
 }
@@ -93,6 +94,14 @@ const NAV: &[(&str, &[SectionDef])] = &[
                 title: "Appearance",
                 description: "The app's theme: interface, editor, diffs and terminals.",
                 keywords: "theme dark light color dracula nord tokyo catppuccin solarized",
+            },
+            SectionDef {
+                id: Section::Notifications,
+                icon: "bell",
+                slug: "notifications",
+                title: "Notifications",
+                description: "Desktop notifications when an agent or a Ralph run needs you.",
+                keywords: "notify alert desktop os toast inbox",
             },
             SectionDef {
                 id: Section::Health,
@@ -825,6 +834,27 @@ impl SettingsPage {
             .into_any_element()
     }
 
+    fn render_notifications(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let on = crate::notifications::enabled();
+        kit::section()
+            .child(kit::rows([
+                kit::setting(
+                    "Desktop notifications",
+                    kit::hint("When an agent finishes or needs your attention, or a Ralph run ends, while Orbit is in the background or another tab is open. The inbox gets them either way."),
+                    kit::check("notify-enabled", if on { "On" } else { "Off" }, on).on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
+                        crate::notifications::set_enabled(!crate::notifications::enabled(), cx);
+                        cx.notify();
+                    })),
+                ),
+                kit::setting(
+                    "Test",
+                    kit::hint("Shows one now, so the system can ask for permission."),
+                    kit::button("notify-test", "Send test", Kind::Secondary).on_click(cx.listener(|_, _: &ClickEvent, _, cx| crate::notifications::test(cx))),
+                ),
+            ]))
+            .into_any_element()
+    }
+
     fn render_health(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let checks = self.health.ready();
         let failing = checks.map(|l| l.iter().filter(|c| c.required && !c.ok).count());
@@ -1011,6 +1041,7 @@ impl Render for SettingsPage {
             Section::Ai => self.render_ai(cx),
             Section::Languages => self.render_languages(window, cx),
             Section::Appearance => self.render_appearance(cx),
+            Section::Notifications => self.render_notifications(cx),
             Section::Health => self.render_health(cx),
             Section::Updates => self.render_updates(cx),
         };
@@ -1038,7 +1069,7 @@ impl PageView for SettingsPage {
     fn dump(&self, out: &mut String, cx: &App) {
         let d = def(self.section);
         let shown: Vec<&str> = self.matching(cx).iter().map(|s| s.slug).collect();
-        let _ = writeln!(out, "  section {} · nav {:?} · theme {}", d.slug, shown, theme::pref());
+        let _ = writeln!(out, "  section {} · nav {:?} · theme {} · notifications {}", d.slug, shown, theme::pref(), crate::notifications::enabled());
         match &self.config {
             Load::Ready(cfg) => {
                 let _ = writeln!(

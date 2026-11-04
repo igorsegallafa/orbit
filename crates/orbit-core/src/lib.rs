@@ -1,9 +1,8 @@
 //! Orbit's backend: config, workspaces and worktrees, git and GitHub, language
-//! servers, file watching and the rest of the logic both UIs share. Nothing
-//! here depends on Tauri; events go through [`events::EventSink`].
+//! servers, file watching and the rest of the logic under the UI. Nothing
+//! here depends on GPUI; events go through [`events::EventSink`].
 pub mod agent;
 pub mod agent_hooks;
-pub mod clipboard;
 pub mod artifacts;
 pub mod build;
 pub mod config;

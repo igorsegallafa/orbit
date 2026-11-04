@@ -3,12 +3,12 @@
 #   Orbit-<version>-windows-<arch>-setup.exe   per-user NSIS installer (needs makensis)
 #   Orbit-<version>-windows-<arch>.zip         Orbit.exe alone: the in-app updater's download
 # The version is ORBIT_VERSION, else native/Cargo.toml's.
-#   scripts/package-windows.sh   (after cargo build --release)
+#   scripts/package-windows.sh   (after `cargo build --release -p orbit-native` at the root)
 set -euo pipefail
 native=$(cd "$(dirname "$0")/.." && pwd)
 version=${ORBIT_VERSION:-$(sed -n 's/^version = "\([^"]*\)".*/\1/p' "$native/Cargo.toml" | head -n1)}
 arch=x86_64
-bin=$native/target/release/orbit-native.exe
+bin=$(dirname "$native")/target/release/orbit-native.exe
 [[ -f $bin ]] || { echo "missing $bin" >&2; exit 1; }
 
 dist=$native/dist

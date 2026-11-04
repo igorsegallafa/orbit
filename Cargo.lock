@@ -4496,7 +4496,7 @@ dependencies = [
 
 [[package]]
 name = "orbit-native"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -4513,6 +4513,7 @@ dependencies = [
  "image",
  "lsp-types",
  "memchr",
+ "notify-rust",
  "orbit-core",
  "regex",
  "serde",

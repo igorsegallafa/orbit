@@ -1,5 +1,6 @@
-; Orbit's Windows installer: per user, into %LOCALAPPDATA%\Orbit (where the
-; Tauri app's NSIS installer put Orbit.exe, so an update from it lands in place).
+; Orbit's Windows installer, per user. It takes over the Tauri Orbit's install:
+; same folder ($LOCALAPPDATA\Orbit, or where that one was put), Orbit.exe,
+; Start menu entry and uninstall key, so its updater can run this one in place.
 ; makensis -DVERSION=1.2.3 -DEXE=Orbit.exe -DICON=icon.ico -DOUTFILE=setup.exe installer.nsi
 ; Flags (the Tauri updater's): /S or /P silent, /R start Orbit when done.
 Unicode true
@@ -11,6 +12,9 @@ RequestExecutionLevel user
 !include "FileFunc.nsh"
 !include "LogicLib.nsh"
 
+; The Tauri installer's keys (publisher: the identifier's second part).
+!define MANUFACTURER "nsx001220"
+!define MANUPRODUCTKEY "Software\${MANUFACTURER}\Orbit"
 !define UNINSTKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\Orbit"
 
 Name "Orbit"
@@ -41,9 +45,35 @@ Function .onInit
   ${IfNot} ${Errors}
     StrCpy $Relaunch 1
   ${EndIf}
+  ReadRegStr $R2 HKCU "${MANUPRODUCTKEY}" ""
+  ${If} $R2 != ""
+    StrCpy $INSTDIR $R2
+  ${EndIf}
+FunctionEnd
+
+; A Tauri Orbit installed from its .msi (per machine): uninstall it first.
+Function RemoveMsiInstall
+  StrCpy $R0 0
+  ${Do}
+    EnumRegKey $R1 HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall" $R0
+    ${If} $R1 == ""
+      ${Break}
+    ${EndIf}
+    IntOp $R0 $R0 + 1
+    ReadRegStr $R2 HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\$R1" "DisplayName"
+    ReadRegStr $R3 HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\$R1" "Publisher"
+    ReadRegDWORD $R4 HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\$R1" "WindowsInstaller"
+    ${If} $R2 == "Orbit"
+    ${AndIf} $R3 == "${MANUFACTURER}"
+    ${AndIf} $R4 == 1
+      ExecWait 'msiexec.exe /x $R1 /passive /norestart'
+      ${Break}
+    ${EndIf}
+  ${Loop}
 FunctionEnd
 
 Section "Orbit"
+  Call RemoveMsiInstall
   SetOutPath "$INSTDIR"
   ; The app that started this installer may still be exiting.
   ${For} $R2 1 20
@@ -57,12 +87,17 @@ Section "Orbit"
   File "/oname=Orbit.exe" "${EXE}"
   File "/oname=Orbit.ico" "${ICON}"
   WriteUninstaller "$INSTDIR\uninstall.exe"
-  CreateShortCut "$SMPROGRAMS\Orbit.lnk" "$INSTDIR\Orbit.exe" "" "$INSTDIR\Orbit.ico"
+  ; Kept when there (the Tauri app's points at the same exe).
+  ${IfNot} ${FileExists} "$SMPROGRAMS\Orbit.lnk"
+    CreateShortCut "$SMPROGRAMS\Orbit.lnk" "$INSTDIR\Orbit.exe" "" "$INSTDIR\Orbit.ico"
+  ${EndIf}
+  WriteRegStr HKCU "${MANUPRODUCTKEY}" "" "$INSTDIR"
+  WriteRegStr HKCU "${UNINSTKEY}" "MainBinaryName" "Orbit.exe"
   WriteRegStr HKCU "${UNINSTKEY}" "DisplayName" "Orbit"
   WriteRegStr HKCU "${UNINSTKEY}" "DisplayVersion" "${VERSION}"
-  WriteRegStr HKCU "${UNINSTKEY}" "Publisher" "Igor Segalla"
-  WriteRegStr HKCU "${UNINSTKEY}" "DisplayIcon" "$INSTDIR\Orbit.ico"
-  WriteRegStr HKCU "${UNINSTKEY}" "InstallLocation" "$INSTDIR"
+  WriteRegStr HKCU "${UNINSTKEY}" "Publisher" "${MANUFACTURER}"
+  WriteRegStr HKCU "${UNINSTKEY}" "DisplayIcon" '"$INSTDIR\Orbit.exe"'
+  WriteRegStr HKCU "${UNINSTKEY}" "InstallLocation" '"$INSTDIR"'
   WriteRegStr HKCU "${UNINSTKEY}" "UninstallString" '"$INSTDIR\uninstall.exe"'
   WriteRegStr HKCU "${UNINSTKEY}" "QuietUninstallString" '"$INSTDIR\uninstall.exe" /S'
   WriteRegDWORD HKCU "${UNINSTKEY}" "NoModify" 1
@@ -80,5 +115,7 @@ Section "Uninstall"
   Delete "$INSTDIR\uninstall.exe"
   RMDir "$INSTDIR"
   Delete "$SMPROGRAMS\Orbit.lnk"
+  Delete "$DESKTOP\Orbit.lnk"
   DeleteRegKey HKCU "${UNINSTKEY}"
+  DeleteRegKey HKCU "${MANUPRODUCTKEY}"
 SectionEnd

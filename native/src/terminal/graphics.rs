@@ -274,7 +274,7 @@ fn decode(keys: &Keys, payload: &[u8]) -> Result<Decoded, Error> {
     Ok(Decoded { image, width, height })
 }
 
-/// A file named by `t=f` / `t=t` (as `src-tauri/src/term_image.rs`).
+/// A file named by `t=f` / `t=t`.
 fn read_image(path: &Path, offset: u64, size: u64, temp: bool) -> Result<Vec<u8>, String> {
     if !path.is_absolute() {
         return Err("path must be absolute".into());

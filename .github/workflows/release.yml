@@ -3,6 +3,8 @@ name: Release
 # Publishing a release on GitHub (tag v1.2.3) builds Orbit (native/) for each
 # OS, signs the downloads and attaches them with the updater's latest.json.
 # The tag is the version: build.rs bakes ORBIT_VERSION into the binary.
+# latest.json is at the URL and in the format the legacy Tauri Orbit checks,
+# with the same platform keys, so its installs update themselves to this.
 on:
   release:
     types: [published]
@@ -16,8 +18,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # AppImage + tarball. Built on the oldest supported Ubuntu so the
-          # glibc it links runs on more distros.
+          # AppImage, .deb, .rpm and a tarball. Built on the oldest supported
+          # Ubuntu so the glibc it links runs on more distros.
           - os: linux
             runner: ubuntu-22.04
             features: ""
@@ -35,7 +37,6 @@ jobs:
     defaults:
       run:
         shell: bash
-        working-directory: native
 
     steps:
       - uses: actions/checkout@v5
@@ -48,7 +49,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
-            libfontconfig-dev libfreetype-dev libx11-xcb-dev libxcb1-dev libvulkan-dev
+            libfontconfig-dev libfreetype-dev libx11-xcb-dev libxcb1-dev libvulkan-dev rpm
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -56,12 +57,12 @@ jobs:
       # one there under this key, and releases only read it.
       - uses: swatinem/rust-cache@v2
         with:
-          workspaces: "./native -> target"
+          workspaces: ". -> target"
           shared-key: native-release-${{ matrix.os }}
           save-if: false
 
       - name: Build
-        run: cargo build --release --locked ${{ matrix.features }}
+        run: cargo build --release --locked -p orbit-native ${{ matrix.features }}
 
       - name: Package (Linux)
         if: runner.os == 'Linux'
@@ -71,17 +72,17 @@ jobs:
           curl -fsSL -o "$RUNNER_TEMP/appimagetool" \
             https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x "$RUNNER_TEMP/appimagetool"
-          APPIMAGETOOL="$RUNNER_TEMP/appimagetool" scripts/package-linux.sh --no-build
+          APPIMAGETOOL="$RUNNER_TEMP/appimagetool" native/scripts/package-linux.sh --no-build
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
         run: |
           command -v makensis >/dev/null || [[ -x "/c/Program Files (x86)/NSIS/makensis.exe" ]] || choco install nsis -y --no-progress
-          scripts/package-windows.sh
+          native/scripts/package-windows.sh
 
       - name: Package (macOS)
         if: runner.os == 'macOS'
-        run: scripts/package-macos.sh
+        run: native/scripts/package-macos.sh
 
       - uses: actions/upload-artifact@v4
         with:
@@ -103,7 +104,7 @@ jobs:
 
       - uses: swatinem/rust-cache@v2
         with:
-          workspaces: "./native/tools/sign -> target"
+          workspaces: "native/tools/sign -> target"
           shared-key: orbit-sign
 
       - uses: actions/download-artifact@v4

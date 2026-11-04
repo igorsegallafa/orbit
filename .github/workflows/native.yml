@@ -14,9 +14,6 @@ concurrency:
 jobs:
   linux:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: native
     steps:
       - uses: actions/checkout@v5
 
@@ -33,15 +30,15 @@ jobs:
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: |
-            ./native -> target
-            ./native/tools/sign -> target
+            . -> target
+            native/tools/sign -> target
           shared-key: native-linux
 
-      - run: cargo build --locked
-      - run: cargo clippy --locked --all-targets -p orbit-native -p orbit-core -- -D warnings
-      - run: cargo test --locked -p orbit-native -p orbit-core
+      - run: cargo build --locked --workspace
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked --workspace
       - name: Release signer
-        run: cargo clippy --locked --manifest-path tools/sign/Cargo.toml -- -D warnings
+        run: cargo clippy --locked --manifest-path native/tools/sign/Cargo.toml -- -D warnings
 
       # The tarball and AppImage, kept for a week to try a PR's build. Built on
       # ubuntu-latest here; the release builds on ubuntu-22.04 (glibc).
@@ -49,11 +46,11 @@ jobs:
         env:
           APPIMAGE_EXTRACT_AND_RUN: 1
         run: |
-          cargo build --release --locked
+          cargo build --release --locked -p orbit-native
           curl -fsSL -o "$RUNNER_TEMP/appimagetool" \
             https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x "$RUNNER_TEMP/appimagetool"
-          APPIMAGETOOL="$RUNNER_TEMP/appimagetool" scripts/package-linux.sh --no-build
+          APPIMAGETOOL="$RUNNER_TEMP/appimagetool" native/scripts/package-linux.sh --no-build
       - uses: actions/upload-artifact@v4
         with:
           name: orbit-linux
@@ -75,9 +72,6 @@ jobs:
           - platform: macos-latest
             features: "--features gpui_platform/runtime_shaders"
     runs-on: ${{ matrix.platform }}
-    defaults:
-      run:
-        working-directory: native
     steps:
       - uses: actions/checkout@v5
 
@@ -85,7 +79,7 @@ jobs:
 
       - uses: swatinem/rust-cache@v2
         with:
-          workspaces: "./native -> target"
+          workspaces: ". -> target"
           shared-key: native-${{ matrix.platform }}
 
-      - run: cargo check --locked --all-targets ${{ matrix.features }}
+      - run: cargo check --locked -p orbit-native --all-targets ${{ matrix.features }}

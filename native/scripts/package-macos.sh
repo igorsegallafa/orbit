@@ -5,13 +5,13 @@
 # The bundle is ad-hoc signed (no Developer ID yet): the first launch needs
 # right-click → Open (or "Open Anyway"); updates don't.
 # The version is ORBIT_VERSION, else native/Cargo.toml's.
-#   scripts/package-macos.sh   (after cargo build --release)
+#   scripts/package-macos.sh   (after `cargo build --release -p orbit-native` at the root)
 set -euo pipefail
 native=$(cd "$(dirname "$0")/.." && pwd)
 version=${ORBIT_VERSION:-$(sed -n 's/^version = "\([^"]*\)".*/\1/p' "$native/Cargo.toml" | head -n1)}
 arch=$(uname -m)
 [[ $arch == arm64 ]] && arch=aarch64
-bin=$native/target/release/orbit-native
+bin=$(dirname "$native")/target/release/orbit-native
 [[ -x $bin ]] || { echo "missing $bin" >&2; exit 1; }
 
 dist=$native/dist

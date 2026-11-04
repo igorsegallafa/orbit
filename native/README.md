@@ -1,32 +1,36 @@
 # Orbit native (GPUI)
 
-Orbit's UI rewritten as a native Rust app on [GPUI](https://www.gpui.rs/) (Zed's UI framework) and
-[gpui-component](https://github.com/longbridge/gpui-kit), to replace the Tauri + WebKitGTK + React
-frontend, which costs 340–595 MB idle (mostly `WebKitWebProcess`).
+Orbit's desktop app: a native Rust app on [GPUI](https://www.gpui.rs/) (Zed's UI framework) and
+[gpui-component](https://github.com/longbridge/gpui-kit), over the backend crate `crates/orbit-core`.
 
-Stage 1 built the shell and proved the riskiest part first: a code editor with a language server,
-which every later stage depends on. Stage 2 moved Orbit's backend into the shared crate
-`crates/orbit-core` (see *Sharing the backend*), which both apps now link. The Tauri app in the repo
-root remains the product.
+It replaced the Tauri + WebKitGTK + React app, which cost 340–595 MB idle (mostly
+`WebKitWebProcess`) and was removed from the repository once this one was the product (its last
+version is in the history before the commit "Remove the Tauri app and make the repository root a Cargo workspace"). Stage 1 built the shell and
+proved the riskiest part first: a code editor with a language server, which every later stage
+depends on. Stage 2 moved the backend into `crates/orbit-core` (see *Sharing the backend*). The
+stage notes below are the port's history: they compare with "the Tauri app" or "the React app",
+and name its sources (`src/…`, `src-tauri/…`) as they were then.
 
 ## Build and run
 
+From the repository root (one Cargo workspace: `crates/orbit-core` and `native`, one `Cargo.lock`
+and one `target/`):
+
 ```sh
-cd native
-cargo build --release      # 824 crates; incremental release builds take 40 s–1.5 min (thin LTO)
+cargo build --release -p orbit-native   # ~830 crates; incremental release builds take 40 s–1.5 min (thin LTO)
 ./target/release/orbit-native
-scripts/package-linux.sh   # dist/: a tarball with install.sh, and an AppImage when appimagetool is found
+native/scripts/package-linux.sh         # native/dist/: a tarball with install.sh, and an AppImage when appimagetool is found
+cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace   # the checks
 ```
 
-The app lists workspaces and starts language servers through `orbit-core`, the same code as the
-Tauri app, so it shows the same workspaces and honours Settings → Languages (server overrides,
-disabled languages, the diagnostics filter). `target/` is ~3.3 GB after a
-release build plus clippy and tests.
+The app lists workspaces and starts language servers through `orbit-core`, and honours Settings →
+Languages (server overrides, disabled languages, the diagnostics filter). `target/` is ~3.3 GB
+after a release build plus clippy and tests.
 
 The first start after a build takes several seconds while the GPU driver compiles and caches
 pipelines. Warm starts reach the first frame in 200–250 ms.
 
-Keys (JetBrains-style, as the Tauri app; `Ctrl+Shift+A` lists every command with its keys):
+Keys (JetBrains-style; `Ctrl+Shift+A` lists every command with its keys):
 `Ctrl+Shift+T` new terminal (a shell session) · `Ctrl+W` close the file tab (in a terminal the shell gets it; unsaved
 changes ask Save / Don't Save / Cancel) · `Ctrl+Shift+W` close any tab without saving ·
 `Ctrl+Tab` / `Ctrl+Shift+Tab` next / previous tab · `Alt+←` / `Alt+→` and the mouse side buttons
@@ -66,7 +70,7 @@ dispatch (`Window::dispatch_keystroke` / `dispatch_event`), and the result is a 
     --exit-after 40 --dump out.txt      # quit after 40 s and write the dump (tabs, editor, LSP, diagnostics, terminal grid, layout, history, overlays…)
     --window-size 1920x977              # the window's size (the Tauri reference screenshots' viewport)
 ORBIT_CAPTURE=shot.png ./target/release/orbit-native …   # built with --features capture: saves each frame as PNG
-scripts/measure.sh 8 [args…]            # PSS (+SwapPss) of the process tree after 8 s; language servers apart
+native/scripts/measure.sh 8 [args…]     # PSS (+SwapPss) of the process tree after 8 s; language servers apart
 ```
 
 In self-test mode, copies are recorded in the dump and never written to the system clipboard.
@@ -170,7 +174,7 @@ the shown scope. Background sessions keep running. The dump's `--- scope:` line 
 | Components | `gpui-component =0.9.0` (Apache-2.0): code editor, diff view, theme and widgets |
 | Editor | gpui-component's `EditorState`: rope buffer, tree-sitter highlighting (C, C++, Rust, TS/TSX, JS here), undo, search, folding, and LSP hooks (`DefinitionProvider`, `HoverProvider`, completion, code actions, semantic tokens, document colors, `show_document`) |
 | Diff | gpui-component's `Diff`: virtualized unified/split patch view with app-supplied syntax colors |
-| Terminal | `alacritty_terminal 0.26` (VT parsing, grid, selection) on `orbit_core::pty` (`portable-pty 0.9`, shared with the Tauri app), painted on a GPUI canvas (own code, ported from the PoC) |
+| Terminal | `alacritty_terminal 0.26` (VT parsing, grid, selection) on `orbit_core::pty` (`portable-pty 0.9`), painted on a GPUI canvas (own code, ported from the PoC) |
 | LSP | our own small JSON-RPC client (`src/lsp`), with types from `lsp-types =0.97` (the version gpui-component's traits use) |
 
 **Why gpui-component and not crates.io `gpui 0.2.2` (the PoC's).** The editor is the gate, and
@@ -353,6 +357,7 @@ Caveats found:
 | `src/review/` | the review tabs (`mod.rs`: tab, commands, sidebar entries, dump) · `changes.rs` changed files and notes · `prs.rs` PRs, status, checks, logs, creation · `send.rs` notes to a PR review · `notes.rs` REVIEW.md and note anchoring · `ui.rs` small widgets |
 | `src/terminal/` | terminal view over `orbit_core::pty`: VT parse, status tracking, scrollback replay (`mod.rs`), grid layout and paint (`grid.rs`), keys and mouse reports (`input.rs`), kitty graphics (`graphics.rs`, `diacritics.rs`) |
 | `src/sessions/` | sessions (`mod.rs`: keys, codenames, save/restore, inbox, recent, resume, actions), agent status heuristics and hooks (`status.rs`) |
+| `src/notifications.rs` | desktop notifications: suppression, coalescing, delivery, clicks |
 | `src/file_tree.rs` | virtualized tree with background folder loads, reveal, refresh after disk changes, name prompt and file operations (`orbit_core::files`) |
 | `src/file_ops.rs` | the tree's ties to the app: context menu, the workspace watcher (`orbit_core::watch`; tree refresh, editor reload), following the active file, breadcrumb reveal |
 | `src/workspace.rs` | workspace list from `orbit_core::workspace` |
@@ -392,18 +397,16 @@ tooltips (`tooltip-in` 80ms) are gpui-component's and appear at once. React has 
 
 ## Sharing the backend: `orbit-core`
 
-`crates/orbit-core` holds Orbit's backend logic with no Tauri dependency. `src-tauri` keeps the
-`#[tauri::command]` wrappers (thin: argument plumbing, `spawn_blocking`, events to the webview) and
-calls into it; the native app calls it directly.
+`crates/orbit-core` holds Orbit's backend logic with no UI dependency; the app calls it directly.
+Until the Tauri app was removed, `src-tauri` held thin `#[tauri::command]` wrappers over the same
+functions.
 
-**Layout.** `orbit-core` is a member of `src-tauri`'s Cargo workspace (`[workspace]` in
-`src-tauri/Cargo.toml`, `package.workspace` in the core crate), so the Tauri app keeps its
-`Cargo.lock`, its `src-tauri/target` and the CI cache path unchanged. `pnpm run check` runs clippy
-and tests with `--workspace`, which covers the core crate. `native/` stays a separate workspace with
-its own lock file and target dir and takes `orbit-core` as a path dependency: GPUI's dependency tree
-never meets Tauri's, so neither can force upgrades on the other. Adding the core crate to `native/`
-only added `trash`, `urlencoding` and `winreg` to its lock; no existing version moved. The cost is
-that `orbit-core` compiles twice, once per target dir (a few seconds).
+**Layout.** The repository root is a Cargo workspace with two members, `crates/orbit-core` and
+`native`, one `Cargo.lock` (native's, so GPUI's exact pins never moved) and one `target/`. The
+release and dev profiles and the `[patch.crates-io]` for `native/vendor/gpui-pre-wgpu` live in the
+root `Cargo.toml`, since Cargo only reads them there. (Before the Tauri app was removed, the core
+crate was a member of `src-tauri`'s workspace and `native/` was a workspace of its own, so the core
+compiled once per target dir.)
 
 **Events.** Long-running work reports through `orbit_core::events`:
 
@@ -412,12 +415,9 @@ pub trait EventSink: Send + Sync + 'static { fn emit(&self, event: &str, payload
 #[derive(Clone)] pub struct Events(Arc<dyn EventSink>);   // events.emit("fs-changed", change)
 ```
 
-Any `Fn(&str, Value)` closure is a sink. `src-tauri` builds one per command from its `AppHandle`
-(`crate::events(app)`, which calls `AppHandle::emit`); the native app would pass a closure that sends
-into a GPUI channel. Event names and payload shapes are unchanged (`fs-changed`, `build-output`,
+Any `Fn(&str, Value)` closure is a sink; the app passes closures that send into GPUI channels. Event names and payload shapes are unchanged (`fs-changed`, `build-output`,
 `run-output`, `agent-feed`, `agent-event`, `ralph-event`, `ralph-prd-progress`). Process managers
-(`lsp`, `dap`) don't emit: `start` takes `on_message(id, raw)` and `on_exit(id, …)` callbacks, and the
-Tauri wrapper turns those into `lsp-message`/`lsp-exit` and `dap-message`/`dap-exit`.
+(`lsp`, `dap`) don't emit: `start` takes `on_message(id, raw)` and `on_exit(id, …)` callbacks.
 
 **What moved** (with their tests, 124 Rust tests in total, as before plus one for `events`):
 `config`, `proc`, `git`, `github`, `links`, `workspace`, `health`, `integrations`, `usage`, `repo`,
@@ -426,15 +426,12 @@ Tauri wrapper turns those into `lsp-message`/`lsp-exit` and `dap-message`/`dap-e
 held logic became core functions (`notes::add`, `lsp::cpp_setup`, `ralph::start`, `repo::briefs`,
 `files::*`…); the wrappers only call them.
 
-**What stays in `src-tauri`, and why:**
-
-- `term_image.rs`: reads files named by kitty graphics commands for the webview.
-  (`pty.rs` moved to core in stage 3 and is now a thin adapter, see *Stage 3*.)
-- `commands.rs` (93 commands): one-line wrappers over core. (The PR commands moved to
-  `orbit_core::prs` in the review stage, the git and workspace ones in the git flows stage, the
-  config edits, `open_in_editor`, usage and integrations in the settings stage.)
-- `lib.rs`: the Tauri builder, plugins, the handler list, `events()` and `blocking()`.
-- Plugin calls (`tauri_plugin_opener` for reveal/open after an artifact download) stay in the wrappers.
+**What stayed in `src-tauri`** until its removal: one-line `#[tauri::command]` wrappers over core,
+the Tauri builder and plugins, and two webview-only pieces whose native counterparts live in
+`native/`: `term_image.rs` (kitty graphics files, now `src/terminal/graphics.rs`) and the
+`--orbit-statusline` entry (now `src/main.rs`). Core code that only the webview used went with it:
+the PTY's pause/resume flow control (`pty::set_paused`), `clipboard::text`,
+`files::read_file`/`write_file` and the render crash log.
 
 **The native app now uses** `orbit_core::workspace::list` for the sidebar and `orbit_core::lsp::start`
 / `send` / `stop` / `log` for language servers, so server choice (config override, disabled
@@ -455,7 +452,7 @@ markdown, the tree loads 3 levels (1,436 rows) in the background, terminals spaw
 pub fn reserve_id() -> u32;                                   // id first, so the handler can know it
 pub fn spawn(id: u32, spec: Spawn, on_output: impl FnMut(Output) + Send + 'static) -> Result<(), String>;
 pub enum Output { Data(Vec<u8>), Exit }                       // bursts (8 ms / 256 KB), then Exit once
-pub fn write(id, &[u8]) / resize(id, Size) / set_paused(id, bool) / kill(id);
+pub fn write(id, &[u8]) / resize(id, Size) / kill(id);
 pub fn session_dir(workspace, repo, cwd) -> Result<PathBuf>;  // cwd > repo folder > scope folder
 pub fn scrollback(key) -> Vec<u8>; pub fn forget(key);       // saved tail per tab key
 pub fn claude_session_exists(workspace, id) -> bool; pub fn opencode_session_id(workspace, repo, since_ms);
@@ -466,7 +463,7 @@ pub fn claude_session_exists(workspace, id) -> bool; pub fn opencode_session_id(
 dropped, `TERM`, `TERM_PROGRAM=Orbit`, claude session variables removed, AppImage host env), claude's
 hooks `--settings` and `--remote-control`, spawning at the real size, 8 ms output bursts, the
 256 KB scrollback tail flushed every 2 s, and pause/resume (`set_paused`) for the webview's flow
-control. One change: the queue between the PTY reader and the burst thread is bounded (64 reads), so
+control (removed with the Tauri app). One change: the queue between the PTY reader and the burst thread is bounded (64 reads), so
 a consumer slower than the program holds the program back instead of buffering without limit.
 
 `src-tauri/src/pty.rs` is now a ~100-line adapter: the same commands (`pty_spawn`, `pty_write`,
@@ -484,7 +481,17 @@ the program ended) and `pty-error` events for a failed start, as before.
   GPUI channel (waiting for permission, working, done). Shown in the tab title and the sidebar dot.
   Agents without hooks get "done" after 10 s of activity ending in silence.
 - Inbox: "finished" and "needs your attention" items, unread unless the session's tab is active in
-  a focused window; seeing the tab settles them. No OS notifications yet.
+  a focused window; seeing the tab settles them.
+- Desktop notifications (`src/notifications.rs`) for the same items and a Ralph run ending, as the
+  React app's `notifyOs`: none while the window is focused on that item's tab; Settings →
+  Notifications turns them off (saved as `notifications` in the state file). Items within 0.8 s go
+  out as one ("2 updates in Orbit"), and a newer one for the same item replaces the old. A click
+  raises the window on the item's tab. Linux: `notify-rust` over `org.freedesktop.Notifications`
+  (app name Orbit, the app icon, `desktop-entry` `orbit-native`, the `default` action); macOS and
+  Windows: GPUI's `show_system_notification` (`UNUserNotificationCenter`, needs an app bundle;
+  toasts under the AUMID `com.nsx001220.orbit.native`). Self-tests record them in the dump
+  (`--- notifications`) without showing them unless `ORBIT_SELFTEST_NOTIFY=1`; the step
+  `notify-click` clicks the newest through the real click handler.
 - Closing an agent tab ends it: claude (its `--session-id`) and opencode (looked up with
   `opencode session list`) go to *Recent* for the scope; clicking one (or `ResumeLastSession`)
   reopens it with `--resume <id>` / `--session <id>`. Tabs don't minimize as in React (that needs a
@@ -946,9 +953,13 @@ sidebar (*WORKSPACE*: Ralph, AI usage, CI artifacts; *ORBIT*: Integrations, Sett
   each story's title, description, criteria, notes and done flag, reorder, delete, add. *Start*
   (`run_form.rs`): fixed iterations or until done, stop after a story, agent and model for this run,
   extra instructions, the workspace's iteration prompt (save / restore default), time budget, stall
-  limit, per-iteration timeout, wait on usage limits, push; the last config per scope is kept in
+  limit, per-iteration timeout, idle timeout and exit grace (the watchdog that kills a hung
+  iteration's process group and still counts a story it committed cleanly), wait on usage limits,
+  push; the last config per scope is kept in
   `<config dir>/native-ralph.json`. Then Pause after iteration / Stop, the stories with the current
-  one, the counters, the live feed (`feed.rs`: per iteration, tool chips, `**bold**`/`` `code` ``,
+  one, the counters, *N commits not pushed* with Push after a run, the live feed (`feed.rs`: per
+  iteration, the time since the agent's last output (yellow from half the idle timeout) with its
+  running and background commands, tool chips, `**bold**`/`` `code` ``,
   follows the end, *↓ Latest*) and past runs. A run ending toasts and adds an inbox item even with
   no Ralph tab open. An empty plan offers *Plan this feature* (`workspace.plan`, the Plan modal).
 - **AI usage** (`workspace.usage`): per model tokens and cost, sessions on click, the Claude 5h/7d
@@ -1005,10 +1016,10 @@ output|shared|worktree|branch-only|auto-switch|clone-now|save|cancel`, `local-pa
 `group-member:<repo>`, `group-save`, `ai-agent:<label>`, `ai-model`, `ai-fast-model`, `ai-remote:on|off`,
 `ai-test`, `lang:<id>:command|enabled|errors-only`, `lsp:<id>:log|stop`, `health-recheck`,
 `updates-check`, `integration:<kind>:token|show|connect|disconnect`, Ralph's
-`ralph-start|pause|stop|edit-plan|new-prd|create-prd|plan-feature|edit|edit-save|edit-discard|add-story|jump`,
+`ralph-start|pause|stop|push|edit-plan|new-prd|create-prd|plan-feature|edit|edit-save|edit-discard|add-story|jump`,
 `ralph-story:<id>`, `ralph-run:<id>`, `ralph-edit:<id>:title|desc|criteria|notes|done|up|down|delete`,
 `ralph-edit-rules`, the run form's `ralph-run-fixed|until|iterations|stop-after|agent|model|extra|
-prompt-toggle|prompt|hours|stall|timeout|wait|wait-min|push|cancel|start`, `ralph-prompt-save|restore`,
+prompt-toggle|prompt|hours|stall|timeout|idle|grace|wait|wait-min|push|cancel|start`, `ralph-prompt-save|restore`,
 the PRD form's `prd-brief|write-now|interview|opt:<i>|answer|ready|next|summary|write|gen-cancel|cancel|close`,
 `usage:<model>`,
 `artifact:<repo>:<name>`. Inputs inside the pages fill through `click:<probe>` then `type:`.
@@ -1094,7 +1105,7 @@ Checked: the GL path renders (forced, and naturally with `VK_DRIVER_FILES=/nonex
 Mesa EGL and `libgallium` mapped, no Vulkan driver, first frame after 110 ms); the stage-1 gate
 still passes on Vulkan (F12 on `Initialize`, 39:12 of `Game.h`, lands on `Game.cpp` 44:10).
 
-### Tauri vs native
+### Tauri vs native (before the Tauri app was removed)
 
 Same machine as *Measurements* (31 GB RAM, with 15 GB in swap during the runs). Both apps on a
 scratch copy of the config (`ORBIT_CONFIG_DIR`), workspace `add-items-skills`, measured 15 s after
@@ -1109,16 +1120,10 @@ start. PSS + SwapPss per process tree, max of 3 runs, MB. "App" is the UI proces
 | clangd (same flags in both) | ~1,510 | 1,440–2,660 | |
 | Start → first paint | 615–965 ms | 190–260 ms | |
 
-- Tauri: a release build of this branch (`pnpm tauri build --no-bundle`) on the system WebKitGTK
-  2.54.2. Its tabs (the workspace, the two editors, three `top` terminals) were seeded in a
-  scratch copy of its localStorage (`XDG_DATA_HOME`), and its file tree was expanded through
-  WebKit's remote inspector (`WEBKIT_INSPECTOR_HTTP_SERVER`, JS clicks on the rows: no OS input).
-  First paint is the page's `first-contentful-paint` measured from the launch.
-- Tree: the React dock shows one repo, so aether-engine was opened two levels below its root
-  (1,261 rows); the native tree shows the four repos three levels from the workspace (1,452 rows),
-  the same depth in aether-engine. Native's first frame is its own `first frame after` line; under
-  this memory pressure the first run of a series sometimes took 2–3 s.
-- clangd varies with how far `--background-index` has got; it costs the same in either app.
+Tauri was a release build on the system WebKitGTK 2.54.2, with the same tabs seeded and its tree
+expanded through WebKit's remote inspector (no OS input); its first paint is the page's
+`first-contentful-paint`. Its tree showed one repo (1,261 rows) against the native tree's four
+(1,452 rows). clangd varies with how far `--background-index` has got.
 
 ### Packaging (Linux)
 
@@ -1126,7 +1131,8 @@ start. PSS + SwapPss per process tree, max of 3 runs, MB. "App" is the UI proces
   icons in `packaging/icons` (32–512 px, `.ico`, `.icns`).
 - `scripts/package-linux.sh [--no-build]` writes `dist/Orbit-<version>-linux-<arch>.tar.gz`
   (`bin/orbit`, `share/`, `install.sh`) and, when `appimagetool` is found (`$APPIMAGETOOL` or `PATH`),
-  `dist/Orbit-<version>-<arch>.AppImage`. The version is `ORBIT_VERSION`, else `Cargo.toml`'s.
+  `dist/Orbit-<version>-<arch>.AppImage`. The version is `ORBIT_VERSION`, else `native/Cargo.toml`'s;
+  the binary is the workspace's `target/release/orbit-native`.
   `install.sh` installs into `~/.local` (or `PREFIX`), points the entry's `Exec` at the binary and
   refreshes the desktop and icon caches; `--uninstall` removes it. Checked: the tarball, the
   `.desktop` (`desktop-file-validate`), install and uninstall into a scratch prefix. The AppImage
@@ -1222,7 +1228,7 @@ bare origin) unless noted:
   id: sc-102, …}`. Probes: `create-source-shortcut|linear`, `create-card-search`,
   `create-card:<id>`.
 
-## Gap list: before the native app can replace the Tauri app
+## Gap list: what the Tauri app had that is not ported yet
 
 Prioritized. "Must-have" means the owner's daily flow would miss it.
 
@@ -1286,13 +1292,13 @@ Ordered by dependency, with rough sizes (one focused agent-day ≈ 1 unit).
    settings, …*); left: writing/editing a Ralph PRD and its prompt, the themes, per-OS build
    commands in the repo form, installing updates.
 10. ~~**Packaging**~~: done (see *Stage: packaging*): the Vulkan-only renderer, `.desktop`, icons,
-    tarball and AppImage, native CI; the updater is done (*Release and in-app update*). What is left before the native app can
-    replace the Tauri app is in *Gap list*.
+    tarball and AppImage, native CI; the updater is done (*Release and in-app update*). What the Tauri app had and this one
+    does not yet is in *Gap list*.
 
 ## Feature parity checklist
 
-Status of everything the React app does: **done**, **partial** (with what's missing) or **—**
-(not started). Files are the React sources.
+Status of everything the React app did: **done**, **partial** (with what's missing) or **—**
+(not started). Files are the React sources, in the history before the Tauri app's removal.
 
 ### App shell & layout
 - [ ] partial: main area with tabs, sidebar and focused workspace (`src/App.tsx`). Tab kinds: terminal, editor, diff, review (changes, pull requests).
@@ -1411,4 +1417,4 @@ Status of everything the React app does: **done**, **partial** (with what's miss
 - [ ] partial: native UI writes state through core: workspaces (create, add repos, remove), commits, pushes, rebases, merges, branches, stashes, REVIEW.md notes, PRs; config editing not yet
 - [x] done: FS/git watcher events in the native UI (`orbit_core::watch::watch` with a channel sink; the tree and editors)
 - [x] done: run configs (`.orbit/run.json`, with `run.local.json` and CMake presets) through `orbit_core::run`
-- [x] done: PTY registry, scrollback and flow control in core (`orbit_core::pty`); `src-tauri/src/pty.rs` is an adapter
+- [x] done: PTY registry, scrollback and flow control in core (`orbit_core::pty`)

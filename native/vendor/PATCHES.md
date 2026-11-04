@@ -2,7 +2,7 @@
 
 ## `gpui-pre-wgpu` 0.3.11 (Zed's `gpui_wgpu`, zed@f816e1f)
 
-Wired in by `[patch.crates-io]` in `native/Cargo.toml`. The crate is only a dependency on Linux
+Wired in by `[patch.crates-io]` in the repository root's `Cargo.toml`. The crate is only a dependency on Linux
 and FreeBSD (macOS uses Metal, Windows DirectX), so the patch changes nothing on other OSes.
 
 **What changed.** Only `src/wgpu_context.rs`: `WgpuContext::instance` asked for

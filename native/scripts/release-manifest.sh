@@ -2,8 +2,9 @@
 # Writes the updater's latest.json (the Tauri updater's format) for the signed
 # files in <dir>; each file needs its <file>.sig (tools/sign).
 #   scripts/release-manifest.sh <version> <dir> <download base url> [notes] > latest.json
-# Keys: <os>-<arch>-<kind> is what Orbit reads (appimage, tar, zip, app); the
-# bare <os>-<arch> and -nsis keys are what an installed Tauri Orbit reads.
+# Keys: the legacy Tauri release's (an installed Tauri Orbit reads <os>-<arch>-<bundle>,
+# then <os>-<arch>, and installs that file), plus Orbit's own -tar and -zip.
+# A Tauri .msi install gets the NSIS installer, which removes the MSI install.
 set -euo pipefail
 version=${1#v}
 dir=$2
@@ -23,7 +24,9 @@ add() { # <file> <key>...
 }
 add "Orbit-$version-x86_64.AppImage" linux-x86_64 linux-x86_64-appimage
 add "Orbit-$version-linux-x86_64.tar.gz" linux-x86_64-tar
-add "Orbit-$version-windows-x86_64-setup.exe" windows-x86_64 windows-x86_64-nsis
+add "Orbit-$version-amd64.deb" linux-x86_64-deb
+add "Orbit-$version-1.x86_64.rpm" linux-x86_64-rpm
+add "Orbit-$version-windows-x86_64-setup.exe" windows-x86_64 windows-x86_64-nsis windows-x86_64-msi
 add "Orbit-$version-windows-x86_64.zip" windows-x86_64-zip
 add "Orbit-$version-macos-aarch64.app.tar.gz" darwin-aarch64 darwin-aarch64-app
 

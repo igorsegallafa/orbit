@@ -134,6 +134,9 @@ pub struct SavedState {
     pub layout: Layout,
     /// Theme id from `theme::list()`, or "system" (`orbit.theme`).
     pub theme: Option<String>,
+    /// Desktop notifications (Settings → Notifications); None is on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notifications: Option<bool>,
     /// Workspaces whose sessions are collapsed in the sidebar (`orbit.ws-expanded` false).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub ws_collapsed: Vec<String>,
@@ -217,6 +220,7 @@ mod tests {
             active: None,
             layout: Layout { sidebar_width: 300., ..Default::default() },
             theme: Some("nord".into()),
+            notifications: Some(false),
             ws_collapsed: vec!["ws".into()],
         };
         let json = serde_json::to_string(&s).unwrap();

@@ -94,6 +94,10 @@ pub enum Kind {
     Binary,
     /// macOS: the `.app` bundle.
     Bundle,
+    /// Linux: installed by the `orbit` .deb or .rpm; updated through the
+    /// package manager (`pkexec`), as the Tauri updater does.
+    Deb,
+    Rpm,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -114,7 +118,8 @@ impl Target {
     /// The running app's install, or why it can't update itself.
     pub fn detect() -> Result<Target, String> {
         let exe = std::env::current_exe().map_err(|e| format!("can't find the running executable: {e}"))?;
-        detect_from(OS, std::env::var_os("APPIMAGE"), &exe)
+        let managed = if OS == "linux" && exe.starts_with("/usr") { package_manager() } else { None };
+        detect_from(OS, std::env::var_os("APPIMAGE"), &exe, managed)
     }
 
     /// The manifest's key for this install.
@@ -129,14 +134,28 @@ fn platform_key(os: &str, arch: &str, kind: Kind) -> String {
         Kind::Binary if os == "windows" => "zip",
         Kind::Binary => "tar",
         Kind::Bundle => "app",
+        Kind::Deb => "deb",
+        Kind::Rpm => "rpm",
     };
     format!("{os}-{arch}-{suffix}")
 }
 
-fn detect_from(os: &str, appimage: Option<OsString>, exe: &Path) -> Result<Target, String> {
+/// Which package manager owns the `orbit` package, if any.
+fn package_manager() -> Option<Kind> {
+    if Path::new("/var/lib/dpkg/info/orbit.list").exists() {
+        return Some(Kind::Deb);
+    }
+    let rpm = Command::new("rpm").args(["-q", "orbit"]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+    rpm.is_ok_and(|s| s.success()).then_some(Kind::Rpm)
+}
+
+fn detect_from(os: &str, appimage: Option<OsString>, exe: &Path, managed: Option<Kind>) -> Result<Target, String> {
     if os == "linux" {
         if let Some(p) = appimage.filter(|p| !p.is_empty()) {
             return Ok(Target { kind: Kind::AppImage, path: PathBuf::from(p) });
+        }
+        if let Some(kind) = managed {
+            return Ok(Target { kind, path: exe.to_path_buf() });
         }
     }
     let parents: Vec<String> = exe.ancestors().skip(1).take(3).map(|p| p.file_name().unwrap_or_default().to_string_lossy().into_owned()).collect();
@@ -166,7 +185,10 @@ pub fn install(release: &Release, target: &Target, pubkey: &str, progress: impl 
     let key = target.platform_key();
     let asset = release.platforms.get(&key).ok_or_else(|| format!("Release {} has no {key} build.", release.version))?;
     // Next to the install, so the final rename stays on one filesystem.
-    let dir = target.path.parent().ok_or("the install has no parent folder")?;
+    let dir = match target.kind {
+        Kind::Deb | Kind::Rpm => std::env::temp_dir(),
+        _ => target.path.parent().ok_or("the install has no parent folder")?.to_path_buf(),
+    };
     let work = dir.join(format!(".orbit-update-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&work);
     std::fs::create_dir_all(&work).map_err(|e| format!("can't write to {}: {e}", dir.display()))?;
@@ -174,6 +196,11 @@ pub fn install(release: &Release, target: &Target, pubkey: &str, progress: impl 
         let payload = work.join("download");
         download(&asset.url, &payload, progress)?;
         verify(&payload, &asset.signature, pubkey, &release.version)?;
+        match target.kind {
+            Kind::Deb => return package_install(&payload, "deb", &["dpkg", "-i"]),
+            Kind::Rpm => return package_install(&payload, "rpm", &["rpm", "-U"]),
+            _ => {}
+        }
         let new = unpack(target.kind, &payload, &work)?;
         match target.kind {
             Kind::Bundle => replace_dir(&target.path, &new),
@@ -182,6 +209,17 @@ pub fn install(release: &Release, target: &Target, pubkey: &str, progress: impl 
     })();
     let _ = std::fs::remove_dir_all(&work);
     r
+}
+
+/// Installs a verified package as root (pkexec asks for the password).
+fn package_install(payload: &Path, ext: &str, cmd: &[&str]) -> Result<(), String> {
+    let pkg = payload.with_extension(ext);
+    std::fs::rename(payload, &pkg).map_err(|e| e.to_string())?;
+    let o = Command::new("pkexec").args(cmd).arg(&pkg).output().map_err(|e| format!("failed to run pkexec: {e}"))?;
+    if !o.status.success() {
+        return Err(format!("{} failed: {}", cmd.join(" "), String::from_utf8_lossy(&o.stderr).trim()));
+    }
+    Ok(())
 }
 
 /// Fetches `url` into `dest` with curl, reporting the bytes written so far.
@@ -220,8 +258,8 @@ fn content_length(url: &str) -> Option<u64> {
     // Redirects print one header block each; the last length is the file's.
     String::from_utf8_lossy(&out.stdout)
         .lines()
-        .filter_map(|l| l.split_once(':').filter(|(k, _)| k.trim().eq_ignore_ascii_case("content-length")).and_then(|(_, v)| v.trim().parse().ok()))
-        .last()
+        .rev()
+        .find_map(|l| l.split_once(':').filter(|(k, _)| k.trim().eq_ignore_ascii_case("content-length")).and_then(|(_, v)| v.trim().parse().ok()))
         .filter(|n| *n > 0)
 }
 
@@ -440,7 +478,7 @@ mod tests {
 
     #[test]
     fn detects_the_install() {
-        let t = |os, img: Option<&str>, exe: &str| detect_from(os, img.map(OsString::from), Path::new(exe));
+        let t = |os, img: Option<&str>, exe: &str| detect_from(os, img.map(OsString::from), Path::new(exe), None);
         assert_eq!(t("linux", Some("/home/u/Orbit.AppImage"), "/tmp/.mount_x/usr/bin/orbit").unwrap(), Target { kind: Kind::AppImage, path: "/home/u/Orbit.AppImage".into() });
         assert_eq!(t("linux", None, "/home/u/.local/bin/orbit").unwrap().kind, Kind::Binary);
         assert!(t("linux", None, "/src/orbit/native/target/release/orbit-native").is_err());
@@ -448,6 +486,8 @@ mod tests {
         assert_eq!(t("darwin", None, "/Applications/Orbit.app/Contents/MacOS/Orbit").unwrap(), Target { kind: Kind::Bundle, path: "/Applications/Orbit.app".into() });
         assert!(t("darwin", None, "/usr/local/bin/orbit").is_err());
         assert_eq!(t("windows", None, r"C:\Users\u\AppData\Local\Orbit\Orbit.exe").unwrap().kind, Kind::Binary);
+        assert_eq!(detect_from("linux", None, Path::new("/usr/bin/orbit"), Some(Kind::Deb)).unwrap(), Target { kind: Kind::Deb, path: "/usr/bin/orbit".into() });
+        assert_eq!(platform_key("linux", "x86_64", Kind::Rpm), "linux-x86_64-rpm");
         assert_eq!(platform_key("linux", "x86_64", Kind::AppImage), "linux-x86_64-appimage");
         assert_eq!(platform_key("linux", "x86_64", Kind::Binary), "linux-x86_64-tar");
         assert_eq!(platform_key("windows", "x86_64", Kind::Binary), "windows-x86_64-zip");

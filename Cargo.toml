@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = ["crates/orbit-core", "native"]
+
+# Profiles and patches only take effect at the workspace root.
+[profile.release]
+debug = false
+strip = true
+lto = "thin"
+codegen-units = 16
+
+[profile.dev]
+debug = 0
+
+# Vulkan-only renderer on Linux (GL fallback); see native/vendor/PATCHES.md.
+[patch.crates-io]
+gpui-pre-wgpu = { path = "native/vendor/gpui-pre-wgpu" }

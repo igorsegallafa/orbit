@@ -1,14 +1,14 @@
 //! Terminal sessions on a PTY (`portable-pty`): shells, agents (claude,
 //! opencode) and run configurations. Output reaches the UI through a callback,
-//! in bursts; a paused session stops reading so a flooding program waits for
-//! the UI instead of filling memory. Sessions with a key keep the tail of
+//! in bursts; a consumer slower than the program holds the program back
+//! instead of filling memory. Sessions with a key keep the tail of
 //! their output on disk so a restarted app can show it again.
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Terminal size in cells, plus pixels for programs that draw images.
@@ -55,28 +55,6 @@ struct Session {
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     child: Box<dyn Child + Send + Sync>,
     master: Box<dyn MasterPty + Send>,
-    flow: Arc<Flow>,
-}
-
-/// Paused while the UI has more output queued than it can draw.
-#[derive(Default)]
-struct Flow {
-    paused: Mutex<bool>,
-    resumed: Condvar,
-}
-
-impl Flow {
-    fn set(&self, paused: bool) {
-        *self.paused.lock().unwrap() = paused;
-        self.resumed.notify_all();
-    }
-
-    fn wait(&self) {
-        let mut paused = self.paused.lock().unwrap();
-        while *paused {
-            paused = self.resumed.wait(paused).unwrap();
-        }
-    }
 }
 
 static SESSIONS: Mutex<Option<HashMap<u32, Session>>> = Mutex::new(None);
@@ -150,20 +128,17 @@ pub fn spawn(id: u32, spec: Spawn, mut on_output: impl FnMut(Output) + Send + 's
     drop(pair.slave);
     let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
     let writer = Arc::new(Mutex::new(pair.master.take_writer().map_err(|e| e.to_string())?));
-    let flow = Arc::new(Flow::default());
     SESSIONS
         .lock()
         .unwrap()
         .get_or_insert_with(HashMap::new)
-        .insert(id, Session { writer, child, master: pair.master, flow: flow.clone() });
+        .insert(id, Session { writer, child, master: pair.master });
 
     let scrollback = spec.key.as_deref().filter(|_| spec.scrollback).map(Scrollback::start);
     let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(READ_QUEUE);
     std::thread::spawn(move || {
         let mut buf = vec![0u8; 64 * 1024];
-        loop {
-            flow.wait();
-            let Ok(n) = reader.read(&mut buf) else { break };
+        while let Ok(n) = reader.read(&mut buf) {
             if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
                 break;
             }
@@ -272,20 +247,10 @@ pub fn resize(id: u32, size: Size) -> Result<(), String> {
     with_session(id, |s| s.master.resize(size.into()).map_err(|e| e.to_string()))?
 }
 
-/// The UI's draw queue is full (`true`) or has drained (`false`).
-pub fn set_paused(id: u32, paused: bool) {
-    let flow = with_session(id, |s| s.flow.clone());
-    if let Ok(flow) = flow {
-        flow.set(paused);
-    }
-}
-
 pub fn kill(id: u32) -> Result<(), String> {
     let removed = SESSIONS.lock().unwrap().as_mut().and_then(|m| m.remove(&id));
     let mut s = removed.ok_or_else(|| format!("pty session {id} not found"))?;
     let _ = s.child.kill();
-    // A paused reader would never see the end of the PTY.
-    s.flow.set(false);
     Ok(())
 }
 
@@ -475,46 +440,5 @@ mod tests {
         assert!(text.contains("got:hi"), "{text}");
         assert!(text.ends_with("Orbit"), "{text}");
         assert!(write(id, b"x").is_err(), "the session is gone after exit");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_paused_session_stops_reading_until_resumed() {
-        let (tx, rx) = mpsc::channel::<usize>();
-        let id = reserve_id();
-        let spec = Spawn {
-            cwd: std::env::temp_dir(),
-            cmd: Some("/bin/sh".into()),
-            args: vec!["-c".into(), "yes | head -c 20000000".into()],
-            size: Size { cols: 80, rows: 24, ..Default::default() },
-            ..Default::default()
-        };
-        spawn(id, spec, move |o| {
-            let _ = tx.send(match o {
-                Output::Data(d) => d.len(),
-                Output::Exit => 0,
-            });
-        })
-        .unwrap();
-        set_paused(id, true);
-        // Whatever was read before the pause drains, then nothing more comes.
-        std::thread::sleep(Duration::from_millis(300));
-        while rx.try_recv().is_ok() {}
-        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "output while paused");
-        set_paused(id, false);
-        let mut total = 0;
-        loop {
-            match rx.recv_timeout(Duration::from_secs(20)) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => total += n,
-            }
-        }
-        assert!(total > 0);
-        // Exit is reported just before the session leaves the table.
-        let removed = (0..100).any(|_| {
-            std::thread::sleep(Duration::from_millis(50));
-            with_session(id, |_| ()).is_err()
-        });
-        assert!(removed, "removed when it ended");
     }
 }

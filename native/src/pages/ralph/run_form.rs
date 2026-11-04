@@ -56,6 +56,8 @@ pub struct RunForm {
     max_hours: Entity<InputState>,
     stall_after: Entity<InputState>,
     timeout: Entity<InputState>,
+    idle: Entity<InputState>,
+    grace: Entity<InputState>,
     wait_on_limit: bool,
     limit_wait: Entity<InputState>,
     push: bool,
@@ -105,11 +107,13 @@ impl RunForm {
             max_hours: num_input(l.max_hours, window, cx),
             stall_after: num_input(l.stall_after, window, cx),
             timeout: num_input(config.iteration_timeout_min, window, cx),
+            idle: num_input(config.idle_timeout_min, window, cx),
+            grace: num_input(config.exit_grace_sec, window, cx),
             wait_on_limit: l.wait_on_limit,
             limit_wait: num_input(l.limit_wait_min, window, cx),
             push: config.push,
         };
-        for input in [&form.iterations, &form.model, &form.max_hours, &form.stall_after, &form.timeout, &form.limit_wait] {
+        for input in [&form.iterations, &form.model, &form.max_hours, &form.stall_after, &form.timeout, &form.idle, &form.grace, &form.limit_wait] {
             watch(input, window, cx);
         }
         form
@@ -126,6 +130,8 @@ impl RunForm {
         l.wait_on_limit = self.wait_on_limit;
         l.limit_wait_min = parse(&self.limit_wait, 1, l.limit_wait_min, cx);
         config.iteration_timeout_min = parse(&self.timeout, 5, config.iteration_timeout_min, cx);
+        config.idle_timeout_min = parse(&self.idle, 0., config.idle_timeout_min, cx);
+        config.exit_grace_sec = parse(&self.grace, 0, config.exit_grace_sec, cx);
         config.agent = self.agent.clone();
         config.model = Some(self.model.read(cx).value().trim().to_string()).filter(|m| !m.is_empty());
         config.extra_instructions = self.extra.read(cx).value().to_string();
@@ -148,7 +154,7 @@ impl RunForm {
         let l = &config.limits;
         let _ = writeln!(
             out,
-            "  run form: until done {} · iterations {} · stop after {:?} · agent {:?} · model {:?} · extra {:?} · hours {} · stall {} · timeout {} · wait {} {}min · push {} · prompt open {} custom {}",
+            "  run form: until done {} · iterations {} · stop after {:?} · agent {:?} · model {:?} · extra {:?} · hours {} · stall {} · timeout {} · idle {} · grace {} · wait {} {}min · push {} · prompt open {} custom {}",
             l.until_complete,
             l.max_iterations,
             l.stop_after_story,
@@ -158,6 +164,8 @@ impl RunForm {
             l.max_hours,
             l.stall_after,
             config.iteration_timeout_min,
+            config.idle_timeout_min,
+            config.exit_grace_sec,
             l.wait_on_limit,
             l.limit_wait_min,
             config.push,
@@ -447,6 +455,14 @@ impl RalphPage {
                     .child(field("Time budget (hours)", pkit::field("ralph-run-hours", &f.max_hours, window, cx), Some("0 = no limit")))
                     .child(field("Stop when stuck after", pkit::field("ralph-run-stall", &f.stall_after, window, cx), Some("iterations without a commit")))
                     .child(field("Max per iteration (min)", pkit::field("ralph-run-timeout", &f.timeout, window, cx), Some("kills a hung agent"))),
+            )
+            .child(
+                div()
+                    .grid()
+                    .grid_cols(2)
+                    .gap(px(12.))
+                    .child(field("Idle timeout (min)", pkit::field("ralph-run-idle", &f.idle, window, cx), Some("no agent output this long kills its processes · 0 = off")))
+                    .child(field("Exit grace (s)", pkit::field("ralph-run-grace", &f.grace, window, cx), Some("a finished agent still running after this is killed · 0 = off"))),
             )
             .child(
                 div()
