@@ -74,8 +74,8 @@ fn nav_item(id: impl Into<SharedString>, icon: &'static str, label: Option<Share
         .text_size(px(13.))
         .font_weight(FontWeight::MEDIUM)
         .text_color(c(theme::TEXT_DIM))
-        .hover(|s| s.bg(c(theme::PANEL_RAISED)).text_color(c(theme::TEXT)))
-        .when(active, |d| d.bg(c(theme::ACCENT_SOFT)).text_color(c(theme::NAV_ACTIVE)).hover(|s| s.bg(c(theme::ACCENT_SOFT)).text_color(c(theme::NAV_ACTIVE))))
+        .hover(move |s| if active { s.bg(c(theme::ACCENT_SOFT)).text_color(c(theme::NAV_ACTIVE)) } else { s.bg(c(theme::PANEL_RAISED)).text_color(c(theme::TEXT)) })
+        .when(active, |d| d.bg(c(theme::ACCENT_SOFT)).text_color(c(theme::NAV_ACTIVE)))
         .child(
             div().w(px(18.)).flex_none().flex().justify_center().child(
                 orbit_icon(icon, 15., c(icon_color)).when(!active, |s| s.group_hover(group, |s| s.text_color(c(theme::TEXT)))),
@@ -105,11 +105,10 @@ fn nav_ws(id: impl Into<SharedString>, icon: &'static str, label: SharedString, 
         .text_size(px(13.))
         .font_weight(FontWeight::MEDIUM)
         .text_color(c(theme::TEXT_DIM))
-        .hover(|s| s.bg(c(theme::PANEL_HOVER)).text_color(c(theme::TEXT)))
+        .hover(move |s| if active { s.bg(c(theme::ACCENT_SOFT)) } else { s.bg(c(theme::PANEL_HOVER)).text_color(c(theme::TEXT)) })
         .when(active, |d| {
             d.bg(c(theme::ACCENT_SOFT))
                 .text_color(c(theme::TEXT))
-                .hover(|s| s.bg(c(theme::ACCENT_SOFT)))
                 // `box-shadow: inset 2px 0 0 var(--accent)`.
                 .child(div().absolute().left_0().top_0().bottom_0().w(px(2.)).rounded_l(px(6.)).bg(c(theme::ACCENT)))
         })

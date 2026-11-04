@@ -931,8 +931,8 @@ impl OrbitApp {
                 .border_b_2()
                 .border_color(gpui::transparent_black())
                 .text_color(c(theme::TEXT_DIM))
-                .hover(|s| s.bg(c(theme::PANEL_RAISED)).text_color(c(theme::TEXT)))
-                .when(active, |d| d.bg(c(theme::BG)).text_color(c(theme::TEXT)).border_color(c(theme::ACCENT)).hover(|s| s.bg(c(theme::BG))))
+                .hover(move |s| if active { s.bg(c(theme::BG)) } else { s.bg(c(theme::PANEL_RAISED)).text_color(c(theme::TEXT)) })
+                .when(active, |d| d.bg(c(theme::BG)).text_color(c(theme::TEXT)).border_color(c(theme::ACCENT)))
                 .child(orbit_icon(icon, 13., c(theme::TEXT_DIM)))
                 .child(match rename_field {
                     Some(field) => field,
@@ -1072,8 +1072,8 @@ impl OrbitApp {
                 .justify_center()
                 .rounded(px(6.))
                 .cursor_pointer()
-                .hover(|s| s.bg(c(theme::PANEL_RAISED)))
-                .when(on, |d| d.bg(c(theme::ACCENT_SOFT)).hover(|s| s.bg(c(theme::ACCENT_SOFT))))
+                .hover(move |s| s.bg(if on { theme::accent_soft() } else { c(theme::PANEL_RAISED).into() }))
+                .when(on, |d| d.bg(c(theme::ACCENT_SOFT)))
                 .child(if on {
                     orbit_icon(icon, 17., c(theme::NAV_ACTIVE))
                 } else {
