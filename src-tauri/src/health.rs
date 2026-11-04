@@ -58,6 +58,13 @@ pub fn programs_in(cmdline: &str) -> Vec<String> {
     out
 }
 
+fn git_identity(name: Option<String>, email: Option<String>) -> Result<String, String> {
+    match (name.as_deref().map(str::trim), email.as_deref().map(str::trim)) {
+        (Some(n), Some(e)) if !n.is_empty() && !e.is_empty() => Ok(format!("{n} <{e}>")),
+        _ => Err("missing".into()),
+    }
+}
+
 pub fn run() -> Vec<Check> {
     let cfg = Config::load().unwrap_or_default();
     let gh_auth = crate::proc::run("gh", &["auth", "status"], None).map(|_| "logged in".to_string());
@@ -66,11 +73,22 @@ pub fn run() -> Vec<Check> {
         .filter(|o| o.contains("gh auth git-credential"))
         .map(|_| "git push uses your gh login".to_string())
         .ok_or_else(|| "missing".to_string());
+    let identity = git_identity(
+        crate::proc::run("git", &["config", "--get", "user.name"], None).ok(),
+        crate::proc::run("git", &["config", "--get", "user.email"], None).ok(),
+    );
 
     let mut checks = vec![
         check("git", "orbit", true, version("git"), "Install Git: https://git-scm.com"),
         check("gh", "orbit", true, version("gh"), "Install the GitHub CLI: https://cli.github.com"),
         check("gh auth", "orbit", true, gh_auth, "Run `gh auth login`"),
+        check(
+            "git identity",
+            "orbit",
+            true,
+            identity,
+            "Commits fail without it: run `git config --global user.name \"Your Name\"` and `git config --global user.email you@example.com`",
+        ),
         check("git credential helper", "orbit", false, helper, "Optional: run `gh auth setup-git` so git uses your gh login"),
         check("curl", "orbit", false, version("curl"), "Needed for the Linear, Shortcut and Figma integrations"),
     ];
@@ -129,7 +147,15 @@ pub fn run() -> Vec<Check> {
 
 #[cfg(test)]
 mod tests {
-    use super::programs_in;
+    use super::{git_identity, programs_in};
+
+    #[test]
+    fn git_identity_needs_name_and_email() {
+        assert_eq!(git_identity(Some("Ana\n".into()), Some("a@b.c\n".into())).unwrap(), "Ana <a@b.c>");
+        assert!(git_identity(Some("Ana".into()), None).is_err());
+        assert!(git_identity(None, Some("a@b.c".into())).is_err());
+        assert!(git_identity(Some(" ".into()), Some("a@b.c".into())).is_err());
+    }
 
     #[test]
     fn finds_the_tools_a_build_command_runs() {

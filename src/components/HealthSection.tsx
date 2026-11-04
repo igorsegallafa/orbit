@@ -54,7 +54,7 @@ export function HealthSection({ onError }: { onError: (msg: string) => void }) {
             <p className={`health-summary ${missingRequired ? "health-summary-bad" : ""}`}>
               {missingRequired === 0
                 ? "Everything Orbit needs is installed."
-                : `${missingRequired} required tool${missingRequired > 1 ? "s" : ""} missing.`}
+                : `${missingRequired} required check${missingRequired > 1 ? "s" : ""} failing.`}
             </p>
           )}
         </div>
