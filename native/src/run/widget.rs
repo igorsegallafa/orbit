@@ -325,7 +325,10 @@ impl RunWidget {
             .items_center()
             .justify_center()
             .when(enabled, |d| d.cursor_pointer().hover(|s| s.bg(c(theme::PANEL_HOVER))))
-            .child(crate::icons::ui_icon(if building { "spinner" } else { "hammer" }, 14., c(theme::TEXT_DIM)))
+            .map(|d| match building {
+                true => d.child(crate::workspace_ui::kit::spinner("run-build-spin", 14., c(theme::TEXT_DIM))),
+                false => d.child(crate::icons::ui_icon("hammer", 14., c(theme::TEXT_DIM))),
+            })
             .child(probe("run-build"))
             .tooltip(move |window, cx| Tooltip::new(hint.clone()).build(window, cx))
             .on_mouse_down(

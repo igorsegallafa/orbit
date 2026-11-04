@@ -255,7 +255,7 @@ impl RalphPage {
                                     t.prd_generate(false, w, cx)
                                 }
                             })))
-                            .child(pkit::disabled(pkit::button("prd-interview", if f.loading { "Thinking…" } else { "Interview me first" }, Kind::Primary), off).on_click(cx.listener(
+                            .child(pkit::disabled(pkit::button_busy("prd-interview", if f.loading { "Thinking…" } else { "Interview me first" }, Kind::Primary, f.loading), off).on_click(cx.listener(
                                 move |t, _: &ClickEvent, w, cx| {
                                     if !off {
                                         t.prd_ask(false, w, cx)

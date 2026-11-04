@@ -271,7 +271,7 @@ impl Render for IntegrationsPage {
                                 ))
                                 .child(
                                     kit::disabled(
-                                        kit::button(format!("integration:{}:connect", d.slug), if row.testing { "Testing…" } else { "Connect" }, Kind::Primary),
+                                        kit::button_busy(format!("integration:{}:connect", d.slug), if row.testing { "Testing…" } else { "Connect" }, Kind::Primary, row.testing),
                                         row.testing || empty,
                                     )
                                     .on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.connect(ix, w, cx))),

@@ -539,7 +539,7 @@ impl SettingsPage {
         if let Some(Load::Failed(e)) = &self.test {
             connection = connection.child(kit::error_box(e.clone()));
         }
-        let test_btn = kit::disabled(kit::button("ai-test", if testing { "Testing…" } else { "Test agent" }, Kind::Secondary), testing)
+        let test_btn = kit::disabled(kit::button_busy("ai-test", if testing { "Testing…" } else { "Test agent" }, Kind::Secondary, testing), testing)
             .on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.test_agent(w, cx)));
         let mut rows = vec![
             kit::setting("Agent", kit::hint("The CLI Orbit runs for plans, commit messages, PR drafts, CI investigation and Ralph."), agent_seg),
@@ -957,9 +957,9 @@ impl SettingsPage {
         let action = match &st.status {
             updates::Status::Available(_) if installable => kit::button("updates-install", "Install update", Kind::Primary).on_click(|_, _, cx| updates::install(cx)),
             updates::Status::Available(_) => kit::button("updates-open", "Open release page", Kind::Primary).on_click(|_, _, cx| cx.open_url(updates::RELEASES_URL)),
-            updates::Status::Downloading { .. } => kit::disabled(kit::button("updates-install", "Installing…", Kind::Primary), true),
+            updates::Status::Downloading { .. } => kit::disabled(kit::button_busy("updates-install", "Installing…", Kind::Primary, true), true),
             updates::Status::Ready(_) => kit::button("updates-restart", "Restart to update", Kind::Primary).on_click(|_, _, cx| updates::restart(cx)),
-            _ => kit::disabled(kit::button("updates-check", if busy { "Checking…" } else { "Check for updates" }, Kind::Secondary), busy)
+            _ => kit::disabled(kit::button_busy("updates-check", if busy { "Checking…" } else { "Check for updates" }, Kind::Secondary, busy), busy)
                 .on_click(|_, _, cx| updates::check(true, cx)),
         };
         let mut text = div().flex().flex_col().gap(px(4.)).child(kit::hint(st.describe()));

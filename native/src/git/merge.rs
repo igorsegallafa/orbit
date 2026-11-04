@@ -109,7 +109,7 @@ impl PageTab {
             footer().child(cancel_button("Close", cx))
         } else {
             footer().child(cancel_button("Cancel", cx)).child(
-                crate::git::btn("merge-submit", if f.running { "Merging…".to_string() } else { format!("Merge {}", plural(f.prs.len(), "PR")) }, Tone::Primary)
+                crate::git::btn_busy("merge-submit", if f.running { "Merging…".to_string() } else { format!("Merge {}", plural(f.prs.len(), "PR")) }, Tone::Primary, f.running)
                     .on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.merge_start(w, cx))),
             )
         };

@@ -477,7 +477,7 @@ impl RalphPage {
                 .text_size(px(12.))
                 .text_color(c(theme::WARN))
                 .child(format!("{unpushed} commit{} not pushed", if unpushed == 1 { "" } else { "s" }))
-                .child(kit::disabled(kit::button("ralph-push", label, Kind::Secondary), self.pushing).on_click(cx.listener(|t, _: &ClickEvent, w, cx| {
+                .child(kit::disabled(kit::button_busy("ralph-push", label, Kind::Secondary, self.pushing), self.pushing).on_click(cx.listener(|t, _: &ClickEvent, w, cx| {
                     if !t.pushing {
                         t.push(w, cx);
                     }

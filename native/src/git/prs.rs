@@ -572,9 +572,9 @@ impl PageTab {
 
         let n = picked.len();
         let primary = if f.rows.is_none() {
-            kit::disabled(kit::button("prs-submit", "Checking repositories…", Kind::Primary, kit::NORMAL), true)
+            kit::disabled(kit::button_busy("prs-submit", "Checking repositories…", Kind::Primary, kit::NORMAL, true), true)
         } else if f.creating {
-            kit::disabled(kit::button("prs-submit", "Creating…", Kind::Primary, kit::NORMAL), true)
+            kit::disabled(kit::button_busy("prs-submit", "Creating…", Kind::Primary, kit::NORMAL, true), true)
         } else if (created > 0 && n == 0) || (n == 0 && any_open) {
             kit::button("prs-submit", "Open in review", Kind::Primary, kit::NORMAL).on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.prs_open_review(w, cx)))
         } else {

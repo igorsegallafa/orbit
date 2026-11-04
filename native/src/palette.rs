@@ -647,6 +647,10 @@ impl OrbitApp {
                         .justify_center()
                         .text_size(px(13.))
                         .text_color(c(theme::TEXT_FAINT))
+                        .gap(px(8.))
+                        .when(matches!(p.status.as_deref(), Some("Indexing files…" | "Searching…")), |d| {
+                            d.child(crate::workspace_ui::kit::spinner("se-spin", 14., c(theme::ACCENT)))
+                        })
                         .child(p.status.clone().unwrap_or_else(|| "Nothing to show".into())),
                 )
             })
@@ -770,7 +774,8 @@ impl OrbitApp {
                     Some(s) => s.clone(),
                     None => "Searching…".into(),
                 };
-                d.flex_none().h(relative(0.4)).justify_center().child(empty(text))
+                let spin = p.searching.then(|| crate::workspace_ui::kit::spinner("find-empty-spin", 14., c(theme::ACCENT)));
+                d.flex_none().h(relative(0.4)).justify_center().child(div().flex().items_center().justify_center().children(spin).child(empty(text)))
             } else {
                 d.flex_none().h(relative(0.4)).child(list.size_full())
             }
@@ -792,7 +797,17 @@ impl OrbitApp {
                     .pt(px(10.))
                     .pb(px(6.))
                     .child(div().text_size(px(12.5)).font_weight(FontWeight::SEMIBOLD).text_color(c(theme::TEXT)).child("Find in Files"))
-                    .child(div().min_w_0().truncate().text_size(px(11.5)).text_color(c(theme::TEXT_FAINT)).children(summary)),
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .text_size(px(11.5))
+                            .text_color(c(theme::TEXT_FAINT))
+                            .when(p.searching && summary.is_some(), |d| d.child(crate::workspace_ui::kit::spinner("find-spin", 11., c(theme::ACCENT))))
+                            .children(summary.map(|s| div().min_w_0().truncate().child(s))),
+                    ),
             )
             .child(
                 // `.find-inputrow`.

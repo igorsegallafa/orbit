@@ -160,6 +160,11 @@ pub fn button(name: impl Into<SharedString>, label: impl Into<SharedString>, kin
     sized_button(name, None, label, kind, 34., 13., 14.)
 }
 
+/// `button` with a `.spinner` before the label while `busy`.
+pub fn button_busy(name: impl Into<SharedString>, label: impl Into<SharedString>, kind: Kind, busy: bool) -> Stateful<Div> {
+    sized_button(name, busy.then_some("spinner"), label, kind, 34., 13., 14.)
+}
+
 /// `.btn-mini`: 24px.
 pub fn mini(name: impl Into<SharedString>, label: impl Into<SharedString>, kind: Kind) -> Stateful<Div> {
     sized_button(name, None, label, kind, 24., 11.5, 10.).rounded(px(5.))
@@ -201,7 +206,11 @@ fn sized_button(name: impl Into<SharedString>, icon_name: Option<&'static str>, 
             .hover(|s| s.bg(theme::danger_soft())),
     };
     let fg = if kind == Kind::Primary { c(theme::ON_ACCENT) } else if kind == Kind::DangerOutline { c(theme::DANGER) } else { c(theme::TEXT) };
-    el.children(icon_name.map(|i| icon(i, 14., fg))).child(label.into()).child(probe(name.to_string()))
+    let lead = icon_name.map(|i| match i {
+        "spinner" => crate::workspace_ui::kit::spinner(gpui::ElementId::Name(format!("{name}-spin").into()), text, fg).into_any_element(),
+        _ => icon(i, 14., fg).into_any_element(),
+    });
+    el.children(lead).child(label.into()).child(probe(name.to_string()))
 }
 
 /// A button with a leading 14px icon.

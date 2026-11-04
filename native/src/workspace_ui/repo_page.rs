@@ -598,7 +598,7 @@ impl PageTab {
                         .child({
                             let cloning = r.busy.as_deref() == Some("Clone");
                             let name = r.name.clone();
-                            kit::disabled(kit::button("repo-clone", if cloning { "Cloning…" } else { "Clone repository" }, Kind::Primary, kit::NORMAL), r.busy.is_some()).when(r.busy.is_none(), |b| {
+                            kit::disabled(kit::button_busy("repo-clone", if cloning { "Cloning…" } else { "Clone repository" }, Kind::Primary, kit::NORMAL, cloning), r.busy.is_some()).when(r.busy.is_none(), |b| {
                                 b.on_click(cx.listener(move |t, _: &ClickEvent, w, cx| {
                                     t.repo_run("Clone", Some(format!("{name} cloned")), orbit_core::settings::clone_service, w, cx)
                                 }))
@@ -772,7 +772,10 @@ fn bar_cell(id: &'static str, icon_name: &'static str, label: String, value: Str
         .items_center()
         .gap(px(12.))
         .when(primary, |d| d.bg(gpui::linear_gradient(180., gpui::linear_color_stop(theme::accent_soft(), 0.), gpui::linear_color_stop(kit::alpha(c(theme::PANEL), 0.), 0.9))))
-        .child(icon(icon_name, 15., if primary { accent } else { c(theme::TEXT_DIM) }))
+        .map(|d| match icon_name {
+            "spinner" => d.child(kit::spinner(format!("{id}-spin"), 15., c(theme::TEXT_DIM))),
+            _ => d.child(icon(icon_name, 15., if primary { accent } else { c(theme::TEXT_DIM) })),
+        })
         .child(
             div()
                 .flex_1()
@@ -805,7 +808,7 @@ fn bar(r: &RepoView, ov: Option<&RepoOverview>, cx: &mut Context<PageTab>) -> im
     let branch = ov.map(|o| o.branch.clone().unwrap_or_else(|| format!("detached at {}", o.head))).unwrap_or_default();
     let fetched = ago(ov.and_then(|o| o.last_fetch));
     let (sync_icon, sync_label, sync_detail, primary, sync_hint) = match ov.map(sync_of) {
-        _ if r.fetching => ("refresh", "Fetch origin".to_string(), "Fetching…".to_string(), false, "Check origin for new commits".to_string()),
+        _ if r.fetching => ("spinner", "Fetch origin".to_string(), "Fetching…".to_string(), false, "Check origin for new commits".to_string()),
         None | Some(Sync::Fetch) => ("refresh", "Fetch origin".into(), fetched, false, "Check origin for new commits".into()),
         Some(Sync::Publish) => ("push", "Publish branch".into(), "Push it to origin".into(), true, format!("Push {branch} to origin and track it")),
         Some(Sync::Pull { rebase }) => {
