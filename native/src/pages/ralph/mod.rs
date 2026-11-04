@@ -63,7 +63,7 @@ fn events() -> Events {
 }
 
 fn default_run_config() -> RunConfig {
-    RunConfig { limits: ralph::Limits::default(), agent: None, model: None, push: false, iteration_timeout_min: 60, extra_instructions: String::new() }
+    RunConfig::default()
 }
 
 /// Repaints a page when one of its inputs changes.
@@ -134,6 +134,7 @@ pub struct RalphPage {
     feed: Vec<Value>,
     runs: Vec<Value>,
     starting: bool,
+    pushing: bool,
     /// The story whose details show.
     expanded: Option<String>,
     /// A past run's id and events, shown instead of the live feed.
@@ -181,6 +182,7 @@ impl RalphPage {
             feed: vec![],
             runs: vec![],
             starting: false,
+            pushing: false,
             expanded: None,
             viewing: None,
             modal: None,
@@ -291,6 +293,26 @@ impl RalphPage {
         cx.notify();
     }
 
+    /// The "N commits not pushed" button.
+    fn push(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.pushing = true;
+        let (scope, repo) = (self.scope.clone(), self.repo.clone());
+        ui::bg(
+            cx,
+            move || ralph::push(scope, repo),
+            |t: &mut Self, r, w, cx| {
+                t.pushing = false;
+                match r {
+                    Ok(_) => t.host.toast(ToastKind::Success, "Pushed", None, cx),
+                    Err(e) => t.host.error("Couldn't push", e, cx),
+                }
+                t.load(false, w, cx);
+            },
+            window,
+        );
+        cx.notify();
+    }
+
     fn stop(&mut self, pause: bool, cx: &mut Context<Self>) {
         let (scope, repo) = (self.scope.clone(), self.repo.clone());
         let r = if pause { ralph::pause(scope, repo) } else { ralph::stop(scope, repo) };
@@ -395,7 +417,7 @@ impl RalphPage {
         div().flex_none().flex().items_center().justify_between().gap(px(16.)).child(title).child(actions)
     }
 
-    fn render_status(&self, st: &RalphState) -> gpui::Div {
+    fn render_status(&self, st: &RalphState, cx: &mut Context<Self>) -> gpui::Div {
         let prd = st.prd.as_ref();
         let (passed, total) = prd.map(|p| (p.passed(), p.user_stories.len())).unwrap_or((0, 0));
         let noun = self.noun();
@@ -445,6 +467,22 @@ impl RalphPage {
             let start = r["startedAt"].as_u64().unwrap_or(now);
             stats = stats.child(stat(duration(r["finishedAt"].as_u64().unwrap_or(now).saturating_sub(start)), "time"));
         }
+        let unpushed = if running { 0 } else { last.as_ref().and_then(|r| r["unpushed"].as_u64()).unwrap_or(0) };
+        let push = (unpushed > 0).then(|| {
+            let label = if self.pushing { "Pushing…" } else { "Push" };
+            div()
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .text_size(px(12.))
+                .text_color(c(theme::WARN))
+                .child(format!("{unpushed} commit{} not pushed", if unpushed == 1 { "" } else { "s" }))
+                .child(kit::disabled(kit::button("ralph-push", label, Kind::Secondary), self.pushing).on_click(cx.listener(|t, _: &ClickEvent, w, cx| {
+                    if !t.pushing {
+                        t.push(w, cx);
+                    }
+                })))
+        });
         div()
             .flex_none()
             .px(px(16.))
@@ -475,6 +513,7 @@ impl RalphPage {
                     .child(text)
                     .children(story.map(|s| div().max_w(px(520.)).truncate().font_weight(FontWeight::NORMAL).text_color(c(theme::TEXT_DIM)).child(s))),
             )
+            .children(push)
             .child(stats)
     }
 
@@ -649,7 +688,9 @@ impl RalphPage {
             };
             div().size_full().flex().items_center().justify_center().child(div().max_w(px(420.)).text_center().line_height(px(20.)).text_color(c(theme::TEXT_FAINT)).child(text)).into_any_element()
         } else {
-            div().flex().flex_col().children(group_by_iteration(events).iter().map(|g| iteration_block(g, live))).into_any_element()
+            let run = self.state.ready().and_then(|s| s.run.as_ref());
+            let (activity, idle_min, now) = (run.map(|r| &r.activity), run.map_or(0., |r| r.config.idle_timeout_min), ui::now());
+            div().flex().flex_col().children(group_by_iteration(events).iter().map(|g| iteration_block(g, live, activity, idle_min, now))).into_any_element()
         };
         let jump = (!events.is_empty() && !self.at_bottom()).then(|| {
             div()
@@ -803,7 +844,7 @@ impl Render for RalphPage {
                 let current = st.run.as_ref().filter(|r| r.running).and_then(|r| r.current_story.clone());
                 let mut stories = prd.user_stories.clone();
                 stories.sort_by_key(|s| s.priority);
-                view = view.child(self.render_status(st)).child(div().flex_none().h(px(6.)).flex().gap(px(3.)).children(stories.iter().map(|s| {
+                view = view.child(self.render_status(st, cx)).child(div().flex_none().h(px(6.)).flex().gap(px(3.)).children(stories.iter().map(|s| {
                     let now = current.as_deref() == Some(s.id.as_str());
                     seg(&s.id, now, s.passes)
                 })));
@@ -864,6 +905,12 @@ impl PageView for RalphPage {
                 }
                 let _ = writeln!(out, "  prompt custom {}", s.prompt_custom);
                 if let Some(r) = &s.run {
+                    let (idle, warn) = feed::idleness(r.activity.last_event_at, ui::now(), r.config.idle_timeout_min);
+                    let _ = writeln!(
+                        out,
+                        "  activity last event {}s ago warn {warn} · tool {:?} · background {:?} · unpushed {} · idle {} min · grace {}s",
+                        idle, r.activity.tool, r.activity.background, r.unpushed, r.config.idle_timeout_min, r.config.exit_grace_sec
+                    );
                     let _ = writeln!(
                         out,
                         "  run {} running {} iteration {} story {:?} {}/{} commits {} reason {:?} · agent {:?} model {:?} · until done {} max {} · push {}",

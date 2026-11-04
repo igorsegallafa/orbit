@@ -953,9 +953,13 @@ sidebar (*WORKSPACE*: Ralph, AI usage, CI artifacts; *ORBIT*: Integrations, Sett
   each story's title, description, criteria, notes and done flag, reorder, delete, add. *Start*
   (`run_form.rs`): fixed iterations or until done, stop after a story, agent and model for this run,
   extra instructions, the workspace's iteration prompt (save / restore default), time budget, stall
-  limit, per-iteration timeout, wait on usage limits, push; the last config per scope is kept in
+  limit, per-iteration timeout, idle timeout and exit grace (the watchdog that kills a hung
+  iteration's process group and still counts a story it committed cleanly), wait on usage limits,
+  push; the last config per scope is kept in
   `<config dir>/native-ralph.json`. Then Pause after iteration / Stop, the stories with the current
-  one, the counters, the live feed (`feed.rs`: per iteration, tool chips, `**bold**`/`` `code` ``,
+  one, the counters, *N commits not pushed* with Push after a run, the live feed (`feed.rs`: per
+  iteration, the time since the agent's last output (yellow from half the idle timeout) with its
+  running and background commands, tool chips, `**bold**`/`` `code` ``,
   follows the end, *↓ Latest*) and past runs. A run ending toasts and adds an inbox item even with
   no Ralph tab open. An empty plan offers *Plan this feature* (`workspace.plan`, the Plan modal).
 - **AI usage** (`workspace.usage`): per model tokens and cost, sessions on click, the Claude 5h/7d
@@ -1012,10 +1016,10 @@ output|shared|worktree|branch-only|auto-switch|clone-now|save|cancel`, `local-pa
 `group-member:<repo>`, `group-save`, `ai-agent:<label>`, `ai-model`, `ai-fast-model`, `ai-remote:on|off`,
 `ai-test`, `lang:<id>:command|enabled|errors-only`, `lsp:<id>:log|stop`, `health-recheck`,
 `updates-check`, `integration:<kind>:token|show|connect|disconnect`, Ralph's
-`ralph-start|pause|stop|edit-plan|new-prd|create-prd|plan-feature|edit|edit-save|edit-discard|add-story|jump`,
+`ralph-start|pause|stop|push|edit-plan|new-prd|create-prd|plan-feature|edit|edit-save|edit-discard|add-story|jump`,
 `ralph-story:<id>`, `ralph-run:<id>`, `ralph-edit:<id>:title|desc|criteria|notes|done|up|down|delete`,
 `ralph-edit-rules`, the run form's `ralph-run-fixed|until|iterations|stop-after|agent|model|extra|
-prompt-toggle|prompt|hours|stall|timeout|wait|wait-min|push|cancel|start`, `ralph-prompt-save|restore`,
+prompt-toggle|prompt|hours|stall|timeout|idle|grace|wait|wait-min|push|cancel|start`, `ralph-prompt-save|restore`,
 the PRD form's `prd-brief|write-now|interview|opt:<i>|answer|ready|next|summary|write|gen-cancel|cancel|close`,
 `usage:<model>`,
 `artifact:<repo>:<name>`. Inputs inside the pages fill through `click:<probe>` then `type:`.

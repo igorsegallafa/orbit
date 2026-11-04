@@ -5,7 +5,10 @@
 // so AND the task's repo got a commit, so the agent never edits the plan.
 use super::prd::{Prd, Story};
 use super::supervisor::{self, Iteration, RalphEnv};
-use super::{human_time, now, prompts, record, relativize, runs, runs_dir, save_summary, snapshot, RalphState, RunConfig, RunState};
+use super::{
+    agent_command, cut_short, human_time, iteration_timeout, now, prompts, reconciled, record, record_ending, relativize, runs, runs_dir,
+    save_summary, snapshot, watchdog, Activity, Live, RalphState, RunConfig, RunState,
+};
 use crate::agent::plan::{parse_plan, PlanItem};
 use crate::agent::runner::{self, Line};
 use crate::agent::stream::{self, Event};
@@ -115,7 +118,6 @@ fn plan_title(ws_dir: &std::path::Path) -> String {
 struct PlanEnv {
     app: Events,
     key: String,
-    workspace: String,
     ws_dir: PathBuf,
     branch: String,
     repos: Vec<String>,
@@ -124,11 +126,19 @@ struct PlanEnv {
     started: Instant,
     progress: PathBuf,
     last_pushed: HashMap<String, Option<String>>,
+    /// Each repo's worktree.
+    dirs: HashMap<String, PathBuf>,
+    /// Tests: a script run instead of the agent.
+    stub: Option<PathBuf>,
 }
 
 impl PlanEnv {
     fn dir_of(&self, repo: &str) -> PathBuf {
-        crate::workspace::repo_path(&self.workspace, repo).unwrap_or_else(|_| self.ws_dir.join(repo))
+        self.dirs.get(repo).cloned().unwrap_or_else(|| self.ws_dir.join(repo))
+    }
+
+    fn unpushed(&self) -> u32 {
+        self.repos.iter().map(|r| watchdog::unpushed(&self.dir_of(r))).sum()
     }
 
     fn head_of(&self, repo: &str) -> Option<String> {
@@ -190,6 +200,7 @@ impl RalphEnv for PlanEnv {
                 st.iteration = n;
                 st.current_story = Some(task.id.clone());
                 st.limit_until = None;
+                st.activity = Activity { last_event_at: Some(now()), ..Default::default() };
             },
         );
 
@@ -226,12 +237,14 @@ impl RalphEnv for PlanEnv {
         let mut tail: VecDeque<String> = VecDeque::new();
         let (app, key) = (self.app.clone(), self.key.clone());
         let root = dir.to_string_lossy().to_string();
+        let mut live = Live::new(&app, &key, &root);
 
-        let outcome = runner::run_streaming(
-            live_cmd(&self.ai, &prompt, Access::Full, None),
+        let outcome = runner::run_watched(
+            agent_command(&self.stub, || live_cmd(&self.ai, &prompt, Access::Full, None)),
             &dir,
-            Duration::from_secs(self.cfg.iteration_timeout_min.max(1) * 60),
+            iteration_timeout(&self.cfg),
             Some(&format!("ralph:{}", self.key)),
+            watchdog::watch(&self.cfg),
             |line| {
                 let (text, is_err) = match &line {
                     Line::Out(l) => (l.as_str(), false),
@@ -244,6 +257,9 @@ impl RalphEnv for PlanEnv {
                 if tail.len() > 10 {
                     tail.pop_front();
                 }
+                if !is_err {
+                    live.line(text);
+                }
                 let events = if is_err { vec![] } else { stream::parse_line(text) };
                 if events.is_empty() && !text.trim_start().starts_with('{') && !text.trim().is_empty() {
                     if !is_err {
@@ -251,9 +267,11 @@ impl RalphEnv for PlanEnv {
                     }
                     record(&app, &key, json!({"kind": "log", "text": text, "stderr": is_err}), |_| {});
                 }
+                let mut finished = false;
                 for e in events {
                     match e {
                         Event::Result { text, is_error, cost_usd, duration_ms, turns } => {
+                            finished = true;
                             result = Some((text, is_error, cost_usd, duration_ms, turns))
                         }
                         Event::Text { text } => {
@@ -270,6 +288,7 @@ impl RalphEnv for PlanEnv {
                         Event::Session { .. } => {}
                     }
                 }
+                finished
             },
         );
 
@@ -279,7 +298,19 @@ impl RalphEnv for PlanEnv {
         let tail_text = tail.iter().cloned().collect::<Vec<_>>().join("\n");
         let mut iteration = match &outcome {
             Err(e) => Iteration::Failed(e.clone()),
-            Ok(o) if o.cancelled => Iteration::Cancelled,
+            Ok(o) if cut_short(o) => {
+                record_ending(&self.app, &self.key, n, o, &self.cfg);
+                let message = if res_text.trim().is_empty() { texts.last().cloned().unwrap_or_default() } else { res_text.clone() };
+                let c = watchdog::check(&dir, &head_before, &task.id, &[".orbit/"], &message, res_error);
+                let it = reconciled(&self.app, &self.key, &task.id, &c, o.cancelled);
+                if it == Iteration::Recovered {
+                    match self.mark_done(task.index) {
+                        Ok(()) => record(&self.app, &self.key, json!({"kind": "story_passed", "id": task.id}), |_| {}),
+                        Err(e) => record(&self.app, &self.key, json!({"kind": "log", "text": format!("couldn't mark {} done in PLAN.md: {e}", task.id), "stderr": true}), |_| {}),
+                    }
+                }
+                it
+            }
             Ok(o) => {
                 let limited = if result.is_some() {
                     res_error && supervisor::looks_like_limit(&res_text)
@@ -335,6 +366,7 @@ impl RalphEnv for PlanEnv {
                 st.cost_usd += cost.unwrap_or(0.0);
                 st.passed = passed;
                 st.total = total;
+                st.activity = Activity::default();
             },
         );
         if iteration != Iteration::Limit && iteration != Iteration::Cancelled {
@@ -467,6 +499,8 @@ pub fn start(app: Events, workspace: String, config: RunConfig) -> Result<(), St
                 limit_until: None,
                 model: None,
                 config: config.clone(),
+                activity: Activity::default(),
+                unpushed: 0,
                 events: VecDeque::new(),
                 stop: false,
                 pause: false,
@@ -476,11 +510,13 @@ pub fn start(app: Events, workspace: String, config: RunConfig) -> Result<(), St
     }
     record(&app, &key, json!({"kind": "run_start", "agent": ai.agent, "model": ai.model}), |_| {});
 
+    let dirs = repo_dirs(&workspace)?.into_iter().collect();
     let mut env = PlanEnv {
         app: app.clone(),
         key: key.clone(),
         last_pushed: HashMap::new(),
-        workspace: workspace.clone(),
+        dirs,
+        stub: None,
         branch: meta.branch.clone(),
         repos: meta.repos.clone(),
         ws_dir,
@@ -495,20 +531,19 @@ pub fn start(app: Events, workspace: String, config: RunConfig) -> Result<(), St
     }
     std::thread::spawn(move || {
         let summary = supervisor::supervise(&config.limits, &mut env);
-        record(
-            &app,
-            &key,
-            json!({"kind": "stopped", "reason": summary.reason, "iterations": summary.iterations, "limitWaits": summary.limit_waits}),
-            |st| {
-                st.running = false;
-                st.finished_at = Some(now());
-                st.reason = Some(summary.reason.clone());
-                st.limit_until = None;
-            },
-        );
-        save_summary(&key);
+        super::finish(&app, &key, &summary, env.unpushed());
     });
     Ok(())
+}
+
+/// Each workspace repo's worktree.
+pub fn repo_dirs(workspace: &str) -> Result<Vec<(String, PathBuf)>, String> {
+    let (ws_dir, meta) = workspace_dir(workspace)?;
+    Ok(meta
+        .repos
+        .iter()
+        .map(|r| (r.clone(), crate::workspace::repo_path(workspace, r).unwrap_or_else(|_| ws_dir.join(r))))
+        .collect())
 }
 
 #[cfg(test)]
@@ -535,5 +570,125 @@ mod tests {
         assert_eq!(blocked_reason("notes\n<task-blocked>\ncriterion 2 can't pass: (a) relax it (b) drop it\n</task-blocked>").as_deref(), Some("criterion 2 can't pass: (a) relax it (b) drop it"));
         assert_eq!(blocked_reason("<task-blocked>cut off").as_deref(), Some("cut off"));
         assert_eq!(blocked_reason("all good\n<task-done/>"), None);
+    }
+
+
+    /// Stub agents are shell scripts, and the checks use process groups.
+    #[cfg(unix)]
+    mod guard {
+        use super::*;
+
+        use crate::events::NoEvents;
+        use crate::ralph::watchdog::fixture::{self, git, group_empty, pgid, quick, RESULT_DONE};
+        use crate::ralph::Limits;
+
+        struct Case {
+            root: PathBuf,
+            repo: PathBuf,
+            run_dir: PathBuf,
+            env: PlanEnv,
+        }
+
+        /// A one-task plan over a scratch repo, with `agent` as the stub agent.
+        fn case(name: &str, cfg: RunConfig, agent: &str) -> Case {
+            let root = fixture::scratch(name);
+            let ws = root.join("ws");
+            let repo = ws.join("app");
+            fixture::repo(&repo, &root.join("remote.git"));
+            std::fs::write(ws.join(PLAN_FILE), "# Feature\n\n## Tasks\n\n- [ ] 1. First task — app\n").unwrap();
+            let run_dir = root.join("run");
+            std::fs::create_dir_all(&run_dir).unwrap();
+            let key = format!("guard-test/{name}");
+            fixture::start_run(&key, &run_dir, &cfg);
+            let head = git(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+            let env = PlanEnv {
+                app: Events::new(NoEvents),
+                key,
+                ws_dir: ws,
+                branch: "feat/x".into(),
+                repos: vec!["app".into()],
+                ai: AiSettings::default(),
+                cfg,
+                started: Instant::now(),
+                progress: root.join("progress.md"),
+                last_pushed: HashMap::from([("app".to_string(), Some(head))]),
+                dirs: HashMap::from([("app".to_string(), repo.clone())]),
+                stub: Some(fixture::stub(&root, agent)),
+            };
+            Case { root, repo, run_dir, env }
+        }
+
+        impl Case {
+            fn kinds(&self) -> Vec<String> {
+                fixture::events(&self.run_dir).iter().map(|e| e["kind"].as_str().unwrap_or("").to_string()).collect()
+            }
+            fn event(&self, kind: &str) -> serde_json::Value {
+                fixture::events(&self.run_dir).into_iter().find(|e| e["kind"] == kind).unwrap_or_default()
+            }
+            fn ticked(&self) -> bool {
+                read_items(&self.env.ws_dir).1[0].done
+            }
+            fn pushed(&self) -> bool {
+                let remote = git(&self.root.join("remote.git"), &["rev-parse", "feat/x"]);
+                remote.trim() == git(&self.repo, &["rev-parse", "HEAD"]).trim()
+            }
+        }
+
+        const COMMIT_T1: &str = "git commit --allow-empty -qm 'feat: [T1] - First task'";
+
+        #[test]
+        fn an_idle_iteration_is_killed_with_its_whole_tree() {
+            let agent = "printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}'\nsleep 1200 &\nsleep 1200";
+            let mut c = case("idle", quick(), agent);
+            let start = Instant::now();
+            assert_eq!(c.env.run_iteration(1), Iteration::Stalled);
+            assert!(start.elapsed() < Duration::from_secs(15), "{:?}", start.elapsed());
+            assert_eq!(c.event("iteration_idle")["idleMin"], 0.05);
+            assert_eq!(c.event("iteration_end")["outcome"], "Stalled");
+            assert!(group_empty(&pgid(&c.root)));
+            assert!(!c.ticked());
+        }
+
+        #[test]
+        fn a_finished_agent_that_stays_alive_is_recovered() {
+            let cfg = RunConfig { idle_timeout_min: 10.0, ..quick() };
+            let mut c = case("grace", cfg, &format!("{COMMIT_T1}\n{RESULT_DONE}\nsleep infinity &\nwait"));
+            let start = Instant::now();
+            assert_eq!(c.env.run_iteration(1), Iteration::Recovered);
+            // Exit grace (1 s) plus the SIGTERM round trip, not the 10 min idle.
+            assert!(start.elapsed() < Duration::from_secs(8), "{:?}", start.elapsed());
+            assert_eq!(c.event("iteration_exit_grace")["graceSec"], 1);
+            assert_eq!(c.event("reconcile")["passed"], true);
+            assert_eq!(c.event("iteration_end")["outcome"], "Recovered");
+            assert!(c.kinds().contains(&"story_passed".to_string()));
+            assert!(c.ticked());
+            assert!(c.pushed());
+            assert!(group_empty(&pgid(&c.root)));
+        }
+
+        #[test]
+        fn a_task_stuck_without_its_commit_stalls_and_counts_toward_stall_after() {
+            let agent = "echo wip > wip.txt\nprintf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"Still building\"}'\nsleep infinity &\nwait";
+            let mut c = case("stuck", quick(), agent);
+            let limits = Limits { max_iterations: 5, stall_after: 2, ..Default::default() };
+            let s = supervisor::supervise(&limits, &mut c.env);
+            assert_eq!((s.reason, s.iterations), (supervisor::StopReason::Stalled, 2));
+            let ends: Vec<_> = fixture::events(&c.run_dir).into_iter().filter(|e| e["kind"] == "iteration_end").map(|e| e["outcome"].clone()).collect();
+            assert_eq!(ends, ["Stalled", "Stalled"]);
+            assert_eq!(c.event("reconcile")["committed"], false);
+            assert!(!c.ticked());
+        }
+
+        #[test]
+        fn a_normal_iteration_is_unchanged() {
+            let mut c = case("normal", quick(), &format!("{COMMIT_T1}\n{RESULT_DONE}"));
+            assert_eq!(c.env.run_iteration(1), Iteration::Complete);
+            let kinds = c.kinds();
+            for k in ["iteration_idle", "iteration_exit_grace", "reconcile"] {
+                assert!(!kinds.contains(&k.to_string()), "{k} in {kinds:?}");
+            }
+            assert!(c.ticked());
+            assert!(c.pushed());
+        }
     }
 }
