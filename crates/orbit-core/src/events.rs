@@ -1,6 +1,5 @@
 //! Events from long-running work (file watching, builds, agent runs) to the UI.
-//! The Tauri app forwards them to the webview with `AppHandle::emit`; the
-//! native app sends them down a channel.
+//! The app sends them down a channel.
 use serde::Serialize;
 use serde_json::Value;
 use std::sync::Arc;

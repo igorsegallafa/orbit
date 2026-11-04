@@ -1,12 +1,6 @@
-//! Crash logs: the webview's render crashes (`ErrorBoundary`) and the native
-//! app's panics are appended to a log file with a timestamp.
+//! Crash logs: the app's panics are appended to a log file with a timestamp.
 use std::io::Write;
-use std::path::{Path, PathBuf};
-
-/// Where the Tauri app's render crashes go.
-pub fn render_crash_log() -> PathBuf {
-    std::env::temp_dir().join("orbit-render-crash.log")
-}
+use std::path::Path;
 
 /// Appends one entry to `file`.
 pub fn append(file: &Path, message: &str) -> Result<(), String> {
