@@ -14,6 +14,7 @@ use super::kit::{self, Kind};
 use super::ui;
 use super::{Host, PageView};
 use crate::app::OrbitApp;
+use crate::motion;
 use crate::probe::probe;
 use crate::review::Load;
 use crate::theme::{self, c};
@@ -465,15 +466,12 @@ impl RalphPage {
                     .text_size(px(14.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(c(color))
-                    .child(div().size(px(9.)).flex_none().rounded_full().bg(c(dot)).when(running, |d| {
-                        d.shadow(vec![gpui::BoxShadow {
-                            color: theme::accent_soft().into(),
-                            offset: gpui::point(px(0.), px(0.)),
-                            blur_radius: px(0.),
-                            spread_radius: px(4.),
-                            inset: false,
-                        }])
-                    }))
+                    // `.rv-state-run .rv-dot` pulses; the others are still.
+                    .child(if running && dot == theme::ACCENT {
+                        motion::rv_pulse("ralph-run-dot", 9., 4., c(theme::ACCENT), theme::accent_soft())
+                    } else {
+                        div().size(px(9.)).flex_none().rounded_full().bg(c(dot)).into_any_element()
+                    })
                     .child(text)
                     .children(story.map(|s| div().max_w(px(520.)).truncate().font_weight(FontWeight::NORMAL).text_color(c(theme::TEXT_DIM)).child(s))),
             )
@@ -807,13 +805,7 @@ impl Render for RalphPage {
                 stories.sort_by_key(|s| s.priority);
                 view = view.child(self.render_status(st)).child(div().flex_none().h(px(6.)).flex().gap(px(3.)).children(stories.iter().map(|s| {
                     let now = current.as_deref() == Some(s.id.as_str());
-                    div().flex_1().h_full().rounded(px(3.)).bg(c(if now {
-                        theme::ACCENT
-                    } else if s.passes {
-                        theme::OK
-                    } else {
-                        theme::PANEL_RAISED
-                    }))
+                    seg(&s.id, now, s.passes)
                 })));
                 if self.is_plan() && !st.warnings.is_empty() {
                     view = view.child(
@@ -913,5 +905,24 @@ impl PageView for RalphPage {
         for r in self.runs.iter().take(5) {
             let _ = writeln!(out, "  past run {} {}", r["id"].as_str().unwrap_or(""), reason(&r["reason"]));
         }
+    }
+}
+
+/// `.rv-seg`: `background 300ms ease` between pending (0), current (1) and
+/// done (2); the current one also blinks (`rv-blink`).
+fn seg(id: &str, current: bool, done: bool) -> gpui::AnyElement {
+    use motion::TweenExt;
+    let target = if current { 1. } else if done { 2. } else { 0. };
+    let bar = div().size_full().rounded(px(3.)).tween(SharedString::from(format!("rv-seg:{id}")), target, motion::SEG, motion::ease(), |d, v| {
+        let (raised, accent, ok) = (c(theme::PANEL_RAISED), c(theme::ACCENT), c(theme::OK));
+        d.bg(if v <= 1. { motion::mix(raised, accent, v) } else { motion::mix(accent, ok, v - 1.) })
+    });
+    // The holder keeps one id either way, so the tween's state survives the blink toggling.
+    let holder = div().flex_1().h_full().child(bar);
+    let key = SharedString::from(format!("rv-seg-blink:{id}"));
+    if current {
+        motion::blink(holder, key, motion::RV_BLINK, 0.45)
+    } else {
+        holder.id(key).into_any_element()
     }
 }

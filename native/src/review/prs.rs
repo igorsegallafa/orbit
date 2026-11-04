@@ -353,7 +353,7 @@ fn dim_inline(text: impl Into<gpui::SharedString>) -> gpui::Div {
 fn load_line<T>(l: &Load<T>) -> gpui::Div {
     match l {
         Load::Failed(e) => div().px_3().py_1().text_xs().text_color(c(theme::DANGER)).child(e.clone()),
-        _ => dim("Loading…"),
+        _ => crate::motion::skeleton_table(3, 3),
     }
 }
 

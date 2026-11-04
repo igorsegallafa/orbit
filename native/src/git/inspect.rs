@@ -114,7 +114,8 @@ impl PageTab {
                 }
             }
             Load::Failed(e) => list = list.child(div().p(px(6.)).text_size(px(12.)).text_color(c(theme::DANGER)).child(e.clone())),
-            _ => list = list.child(div().p(px(6.)).text_size(px(12.)).text_color(c(theme::TEXT_FAINT)).child("Loading…")),
+            // `CommitReviewPane`'s two skeleton rows.
+            _ => list = list.child(crate::motion::skeleton_line(30., 0.7, 11.)).child(crate::motion::skeleton_line(30., 0.55, 11.)),
         }
         let count = f.files.ready().map(|l| plural(l.len(), "file"));
         let head = div()

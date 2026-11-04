@@ -3,6 +3,7 @@
 //! description on the right. The AI drafts one repo or every checked one at
 //! once; PRs are created side by side with per-repo results and retries.
 use super::Flow;
+use crate::motion::skeleton;
 use crate::overlay::{ButtonStyle, Dialog, DialogButton};
 use crate::theme::{self, c};
 use crate::toast::ToastKind;
@@ -437,7 +438,9 @@ impl PageTab {
 
         let mut list = div().id("prs-list").flex_none().w(px(330.)).h_full().overflow_y_scroll().p(px(8.)).bg(c(theme::BG)).border_r_1().border_color(c(theme::BORDER)).flex().flex_col().gap(px(2.));
         if f.rows.is_none() && f.error.is_none() {
-            for (ix, name) in f.placeholder.iter().enumerate() {
+            // No repos known yet: three unnamed rows, as React.
+            let names: Vec<String> = if f.placeholder.is_empty() { vec![String::new(); 3] } else { f.placeholder.clone() };
+            for (ix, name) in names.iter().enumerate() {
                 list = list.child(
                     div()
                         .flex()
@@ -452,8 +455,12 @@ impl PageTab {
                                 .flex()
                                 .flex_col()
                                 .gap(px(3.))
-                                .child(div().font_family(theme::MONO_FONT).text_size(px(12.5)).font_weight(FontWeight::SEMIBOLD).child(name.clone()))
-                                .child(div().w(px(160.)).h(px(9.)).rounded(px(4.)).bg(c(theme::PANEL_RAISED))),
+                                .child(if name.is_empty() {
+                                    skeleton(gpui::relative(0.6), 12.).into_any_element()
+                                } else {
+                                    div().font_family(theme::MONO_FONT).text_size(px(12.5)).font_weight(FontWeight::SEMIBOLD).child(name.clone()).into_any_element()
+                                })
+                                .child(skeleton(gpui::relative(0.8), 9.)),
                         ),
                 );
             }
@@ -550,10 +557,16 @@ impl PageTab {
         let editor = div().id("prs-editor").flex_1().min_w_0().h_full().overflow_y_scroll().px(px(18.)).py(px(16.)).flex().flex_col().gap(px(8.));
         let editor = match rows.get(f.selected) {
             Some(r) => editor.child(self.render_prs_editor(r, f.creating, cx)),
-            None if f.rows.is_none() && f.error.is_none() => editor
-                .child(div().w(px(220.)).h(px(14.)).rounded(px(6.)).bg(c(theme::PANEL_RAISED)))
-                .child(div().w_full().h(px(34.)).rounded(px(6.)).bg(c(theme::PANEL_RAISED)))
-                .child(div().w_full().h(px(220.)).rounded(px(6.)).bg(c(theme::PANEL_RAISED))),
+            // `.prs-editor-skeleton`.
+            None if f.rows.is_none() && f.error.is_none() => editor.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(12.))
+                    .child(skeleton(gpui::relative(0.4), 14.))
+                    .child(skeleton(gpui::relative(1.), 34.))
+                    .child(skeleton(gpui::relative(1.), 220.)),
+            ),
             None => editor,
         };
 

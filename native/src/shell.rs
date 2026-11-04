@@ -119,6 +119,17 @@ fn titlebar_btn(
 }
 
 /// A drag handle on a pane's edge (`.sidebar-resizer`, `.dock-resizer`, the panel's).
+/// A side pane clipped to a width that slides to 0 and back over 0.22s
+/// (`.sidebar-anim` / `.dock-anim`); drags follow the cursor at once.
+fn pane_slide(id: &'static str, width: f32, hidden: bool, animating: bool, pane: impl IntoElement) -> impl IntoElement {
+    use crate::motion::{self, TweenExt};
+    let target = if hidden { 0. } else { width };
+    let tween = div().flex_none().h_full().overflow_hidden().child(pane).tween(id, target, motion::PANE, motion::standard(), |d, w| d.w(px(w)));
+    // Shown: grows from 0 on mount.
+    let tween = if animating && !hidden { tween.from(0.) } else { tween };
+    tween.jump(!animating)
+}
+
 fn resizer(pane: Pane, lit: bool, cx: &mut Context<OrbitApp>) -> impl IntoElement {
     let vertical = pane != Pane::Panel;
     let id = match pane {
@@ -521,7 +532,6 @@ impl OrbitApp {
                         .id("ws-switcher")
                         .occlude()
                         .absolute()
-                        .top(px(size::TITLEBAR + 2.))
                         .left(px(self.chrome.ws_switcher_x.get().max(8.)))
                         .w(px(320.))
                         .p(px(size::MENU_PAD))
@@ -532,7 +542,9 @@ impl OrbitApp {
                         .shadow(theme::shadow(12., 32., 0.5))
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .child(filter)
-                        .child(div().id("wsw-list").max_h(px(380.)).overflow_y_scroll().children(rows)),
+                        .child(div().id("wsw-list").max_h(px(380.)).overflow_y_scroll().children(rows))
+                        // `.select-list`: modal-in 0.1s.
+                        .map(|m| crate::motion::drop_in(m, "ws-switcher-in", px(size::TITLEBAR + 2.), crate::motion::MENU_IN)),
                 ),
         )
     }
@@ -825,7 +837,6 @@ impl OrbitApp {
                         .occlude()
                         .absolute()
                         .left(x)
-                        .top(y)
                         .w(px(width))
                         .p(px(size::MENU_PAD))
                         .bg(c(theme::PANEL_RAISED))
@@ -838,7 +849,9 @@ impl OrbitApp {
                         .child(div().id("nsm-locations").max_h(px(240.)).overflow_y_scroll().children(rows))
                         .child(choose)
                         .child(div().h(px(1.)).my(px(4.)).bg(c(theme::BORDER)))
-                        .children(agents),
+                        .children(agents)
+                        // `.context-menu`: modal-in 0.1s.
+                        .map(|m| crate::motion::drop_in(m, "new-session-menu-in", y, crate::motion::MENU_IN)),
                 ),
         )
     }
@@ -1396,7 +1409,10 @@ impl Render for OrbitApp {
         // Settings is its own screen: no tabs over it, and its nav replaces the
         // sidebar (the page draws it). No tabs at all: no strip.
         let on_settings = self.active_tab().is_some_and(|t| t.key(cx) == crate::pages::SETTINGS_KEY);
-        let show_dock = focus && !self.layout.dock_hidden && !on_settings;
+        let dock_anim = self.pane_animating(1);
+        let show_dock = focus && (!self.layout.dock_hidden || dock_anim) && !on_settings;
+        let sidebar_anim = self.pane_animating(0);
+        let show_sidebar = (!self.layout.sidebar_hidden || sidebar_anim) && !on_settings;
         let show_strip = !on_settings && !self.strip_tabs(cx).is_empty();
         let main = div()
             .flex_1()
@@ -1444,9 +1460,15 @@ impl Render for OrbitApp {
                     .flex_1()
                     .min_h_0()
                     .flex()
-                    .when(!self.layout.sidebar_hidden && !on_settings, |d| d.child(self.render_sidebar(cx)).child(resizer(Pane::Sidebar, sidebar_lit, cx)))
+                    .when(show_sidebar, |d| {
+                        let pane = pane_slide("sidebar-pane", self.layout.sidebar_width, self.layout.sidebar_hidden, sidebar_anim, self.render_sidebar(cx));
+                        d.child(pane).when(!self.layout.sidebar_hidden, |d| d.child(resizer(Pane::Sidebar, sidebar_lit, cx)))
+                    })
                     .child(main)
-                    .when(show_dock, |d| d.child(resizer(Pane::Dock, false, cx)).child(self.render_dock(cx))),
+                    .when(show_dock, |d| {
+                        let pane = pane_slide("dock-pane", self.layout.dock_width, self.layout.dock_hidden, dock_anim, self.render_dock(cx));
+                        d.when(!self.layout.dock_hidden, |d| d.child(resizer(Pane::Dock, false, cx))).child(pane)
+                    }),
             )
             .when(focus && !on_settings, |d| d.child(self.render_status(cx)))
             .children(self.render_drag_layer(cx))

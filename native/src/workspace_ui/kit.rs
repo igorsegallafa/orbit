@@ -217,7 +217,7 @@ pub fn count(n: usize) -> Div {
 /// `.spinner` / `SpinnerIcon`: a ring with a turning arc.
 pub fn spinner(id: impl Into<ElementId>, size: f32, color: Rgba) -> impl IntoElement {
     use gpui::{percentage, Animation, AnimationExt, Transformation};
-    icon("spinner", size, color).with_animation(id, Animation::new(std::time::Duration::from_millis(700)).repeat(), |s, t| {
+    icon("spinner", size, color).with_animation(id, Animation::new(crate::motion::SPIN).repeat_synced(), |s, t| {
         s.with_transformation(Transformation::rotate(percentage(t)))
     })
 }

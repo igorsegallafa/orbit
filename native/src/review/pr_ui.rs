@@ -89,6 +89,40 @@ pub fn icon_button(name: impl Into<SharedString>, icon: &str, size: f32, icon_si
         .child(probe(name.to_string()))
 }
 
+/// `icon_button` while busy: `spin` turns the icon (`.spin`, 0.8s), otherwise
+/// a `.spinner` replaces it.
+pub fn icon_button_busy(name: impl Into<SharedString>, icon: &str, size: f32, icon_size: f32, busy: bool, spin: bool) -> Stateful<Div> {
+    use gpui::{percentage, Animation, AnimationExt, Transformation};
+    let name: SharedString = name.into();
+    if !busy {
+        return icon_button(name, icon, size, icon_size);
+    }
+    let glyph = if spin {
+        lucide(icon, icon_size, c(theme::TEXT_DIM))
+            .with_animation(ElementId::Name(format!("{name}-spin").into()), Animation::new(crate::motion::STATUS_SPIN).repeat(), |s, t| {
+                s.with_transformation(Transformation::rotate(percentage(t)))
+            })
+            .into_any_element()
+    } else {
+        crate::workspace_ui::kit::spinner(ElementId::Name(format!("{name}-spin").into()), icon_size, c(theme::ACCENT)).into_any_element()
+    };
+    div()
+        .id(ElementId::Name(name.clone()))
+        .relative()
+        .flex_none()
+        .size(px(size))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(6.))
+        .border_1()
+        .border_color(c(theme::BORDER_STRONG))
+        .cursor_pointer()
+        .hover(|s| s.bg(c(theme::PANEL_RAISED)))
+        .child(glyph)
+        .child(probe(name.to_string()))
+}
+
 pub fn tip<E: StatefulInteractiveElement>(el: E, text: impl Into<SharedString>) -> E {
     let text: SharedString = text.into();
     el.tooltip(move |window, cx| Tooltip::new(text.clone()).build(window, cx))

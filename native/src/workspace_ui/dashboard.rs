@@ -4,6 +4,7 @@
 use super::icons::icon;
 use super::kit::{self, Kind};
 use super::{spawn, Page, PageTab};
+use crate::motion::{self, TweenExt};
 use crate::probe::probe;
 use crate::review::Load;
 use crate::theme::{self, c};
@@ -139,6 +140,29 @@ impl PageTab {
                     ))),
             )
             .when(repo_count > 0, |dd| dd.child(new_ws("dash-new-head", cx)));
+        if matches!(d.workspaces, Load::Idle | Load::Loading) {
+            // App.tsx while loading: `SkeletonCards n={4}` and `SkeletonTable rows={4} cols={3}`.
+            let cols = ((self.width.get() + 14.) / (240. + 14.)).floor().max(1.) as u16;
+            let skeleton = div()
+                .child(div().grid().grid_cols(cols).gap(px(14.)).mb(px(20.)).children((0..4).map(|_| motion::skeleton_card())))
+                .child(
+                    div()
+                        .border_1()
+                        .border_color(c(theme::BORDER))
+                        .rounded(px(theme::size::RADIUS))
+                        .overflow_hidden()
+                        .bg(c(theme::PANEL))
+                        .child(motion::skeleton_table(4, 3)),
+                );
+            return div()
+                .id("dashboard")
+                .size_full()
+                .overflow_y_scroll()
+                .px(px(44.))
+                .py(px(28.))
+                .child(div().relative().child(super::measure(self.width.clone())).child(skeleton))
+                .into_any_element();
+        }
         let body = if d.repo_count == Some(0) {
             onboard(
                 "Welcome to Orbit",
@@ -165,7 +189,11 @@ impl PageTab {
                 .grid()
                 .grid_cols(cols)
                 .gap(px(14.))
-                .children(workspaces.iter().map(|ws| self.card(d, ws, cx).into_any_element()))
+                .children(workspaces.iter().map(|ws| {
+                    // `card-in` (no stagger on `.dash-card`).
+                    let wrap = div().flex().flex_col().child(self.card(d, ws, cx));
+                    motion::card_in(wrap, gpui::ElementId::Name(format!("dash-in:{}", ws.name).into()), std::time::Duration::ZERO)
+                }))
                 .child(
                     div()
                         .id("dash-new")
@@ -193,15 +221,15 @@ impl PageTab {
                 )
                 .into_any_element()
         };
-        div()
+        let page = div()
             .id("dashboard")
             .size_full()
             .overflow_y_scroll()
             .px(px(44.))
             .py(px(28.))
             .child(head)
-            .child(div().relative().child(super::measure(self.width.clone())).child(body))
-            .into_any_element()
+            .child(div().relative().child(super::measure(self.width.clone())).child(body));
+        motion::page_in(page, "dashboard-in")
     }
 
     fn card(&self, d: &Dashboard, ws: &Workspace, cx: &mut Context<Self>) -> impl IntoElement {
@@ -297,10 +325,9 @@ impl PageTab {
             .p(px(16.))
             .rounded(px(12.))
             .border_1()
-            .border_color(if running { kit::alpha(c(theme::ACCENT), 0.45) } else { c(theme::BORDER) })
+            .flex_1()
             .bg(c(theme::PANEL))
             .cursor_pointer()
-            .hover(|s| s.border_color(c(theme::BORDER_STRONG)).shadow(theme::shadow(8., 24., 0.25)))
             .child(
                 div()
                     .flex()
@@ -346,7 +373,7 @@ impl PageTab {
                                     .text_size(px(11.5))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(kit::mix(c(theme::INFO), c(theme::TEXT), 0.4))
-                                    .child(div().size(px(7.)).rounded_full().bg(c(theme::ACCENT)))
+                                    .child(motion::rv_pulse(gpui::ElementId::Name(format!("dash-ralph-dot:{}", ws.name).into()), 7., 3., c(theme::ACCENT), theme::accent_soft()))
                                     .child("Ralph"),
                                 "Ralph is running · open",
                             )
@@ -389,6 +416,11 @@ impl PageTab {
                     t.card_menu(menu_name.clone(), e.position, w, cx)
                 }),
             )
+            // `.dash-card:hover`: border, shadow and a 1px lift, eased in and out.
+            .hover_tween(gpui::ElementId::Name(format!("dash-hover:{}", ws.name).into()), motion::TRANSITION, motion::standard(), move |d, t| {
+                let border = if running { kit::alpha(c(theme::ACCENT), 0.45) } else { c(theme::BORDER) };
+                d.border_color(motion::mix(border, c(theme::BORDER_STRONG), t)).top(px(-t)).when(t > 0., |d| d.shadow(theme::shadow(8., 24., 0.25 * t)))
+            })
     }
 }
 

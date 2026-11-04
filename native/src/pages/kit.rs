@@ -419,10 +419,7 @@ pub fn empty(text: impl Into<SharedString>) -> Div {
         .child(div().max_w(px(440.)).text_center().text_size(px(13.5)).line_height(px(21.)).text_color(c(theme::TEXT_FAINT)).child(text.into()))
 }
 
-/// `.skeleton`: a placeholder bar.
-pub fn skeleton(w: impl Into<gpui::DefiniteLength>, h: f32) -> Div {
-    div().w(w.into()).h(px(h)).rounded(px(4.)).bg(c(theme::PANEL_RAISED))
-}
+pub use crate::motion::skeleton;
 
 
 // ---------- nav ----------

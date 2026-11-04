@@ -6,6 +6,7 @@ use super::pr_ui::{self, lucide, tint, Tone};
 use super::Load;
 use crate::app::OrbitApp;
 use crate::pages::{Host, PageView};
+use crate::motion::skeleton;
 use crate::probe::probe;
 use crate::theme::{self, c};
 use crate::toast::ToastKind;
@@ -526,7 +527,8 @@ impl PrReviewPage {
             );
         }
         let Some(detail) = self.detail.ready() else {
-            let bar = |w: f32, h: f32| div().w(gpui::relative(w)).h(px(h)).rounded(px(4.)).bg(c(theme::PANEL_RAISED));
+            // `.pr-side-loading`.
+            let bar = |w: f32, h: f32| skeleton(gpui::relative(w), h);
             return side.child(div().flex().flex_col().gap(px(8.)).p(px(14.)).child(bar(0.8, 14.)).child(bar(0.6, 10.)).child(bar(0.7, 11.)));
         };
         let pr = self.pr().clone();
@@ -669,7 +671,14 @@ impl PrReviewPage {
                     .mb(px(6.))
                     .rounded(px(2.))
                     .bg(c(theme::BORDER))
-                    .child(div().h_full().bg(c(theme::OK)).w(gpui::relative(if total > 0 { viewed_count as f32 / total as f32 } else { 0. }))),
+                    // `.rv-progress > div`: `transition: width 0.25s ease`.
+                    .child(crate::motion::fill(
+                        "pr-viewed-fill",
+                        if total > 0 { viewed_count as f32 / total as f32 } else { 0. },
+                        crate::motion::RV_FILL,
+                        crate::motion::ease(),
+                        div().h_full().bg(c(theme::OK)),
+                    )),
             );
         if hide && total > 0 && viewed_count == total {
             files = files.child(
@@ -1013,7 +1022,7 @@ impl PrReviewPage {
 
     fn render_overview(&self) -> AnyElement {
         let Some(detail) = self.detail.ready() else {
-            return div().p(px(20.)).text_size(px(12.5)).text_color(c(theme::TEXT_FAINT)).child("Loading…").into_any_element();
+            return table_loading("pr-overview-spin", "Loading…");
         };
         let head = div()
             .flex()
@@ -1041,7 +1050,7 @@ impl PrReviewPage {
         };
         let now = pr_ui::now();
         let reviews: AnyElement = match &self.review {
-            None => div().w(px(200.)).h(px(12.)).rounded(px(4.)).bg(c(theme::PANEL_RAISED)).into_any_element(),
+            None => skeleton(gpui::relative(0.5), 12.).into_any_element(),
             Some(r) if r.reviews.is_empty() => div()
                 .text_size(px(13.))
                 .text_color(c(theme::TEXT_FAINT))
@@ -1141,18 +1150,7 @@ impl PrReviewPage {
         let state = match &self.diff {
             Load::Ready(s) => s.clone(),
             Load::Failed(e) => return div().p(px(20.)).text_size(px(12.5)).text_color(c(theme::DANGER)).child(e.clone()).into_any_element(),
-            _ => {
-                return div()
-                    .p(px(20.))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .text_size(px(12.5))
-                    .text_color(c(theme::TEXT_FAINT))
-                    .child(lucide("loader-circle", 13., c(theme::TEXT_FAINT)))
-                    .child("Loading diff…")
-                    .into_any_element()
-            }
+            _ => return table_loading("pr-diff-spin", "Loading diff…"),
         };
         let diff_path: SharedString = state.read(cx).files().first().map(|f| f.path().clone()).unwrap_or_else(|| path.clone().into());
         let threads = self.threads_of(path);
@@ -1573,6 +1571,21 @@ pub fn open(app: &mut OrbitApp, _host: Host, prs: Vec<PullRequest>, window: &mut
     crate::pages::open(app, key, move |h, w, cx| PrReviewPage::new(h, prs, w, cx), window, cx);
 }
 
+/// `.table-loading`: a spinner and a faint label, centered.
+pub(crate) fn table_loading(id: &'static str, label: &'static str) -> AnyElement {
+    div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap(px(10.))
+        .px(px(12.))
+        .py(px(28.))
+        .text_color(c(theme::TEXT_FAINT))
+        .child(crate::workspace_ui::kit::spinner(id, 22., c(theme::ACCENT)))
+        .child(label)
+        .into_any_element()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1587,3 +1600,4 @@ mod tests {
         assert_eq!((files[0].additions(), files[0].deletions()), (2, 1));
     }
 }
+
