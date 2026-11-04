@@ -38,6 +38,22 @@ use script::Script;
 use std::time::Instant;
 
 fn main() {
+    // Claude Code runs `<this exe> --orbit-statusline <file>` as its status line
+    // (orbit_core::agent_hooks). It must never open a window: each window would
+    // restore the agent sessions, whose status line would start another window.
+    let mut args = std::env::args().skip(1);
+    match args.next().as_deref() {
+        Some("--orbit-statusline") => return orbit_core::agent_hooks::statusline_helper(args.next()),
+        Some(flag) if flag.starts_with("--orbit-") => {
+            eprintln!("orbit-native: unknown helper flag {flag}");
+            std::process::exit(2);
+        }
+        _ => {}
+    }
+    run();
+}
+
+fn run() {
     let started = Instant::now();
     pages::crash::install();
     let script = Script::from_args();
