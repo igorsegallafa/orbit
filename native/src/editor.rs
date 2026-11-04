@@ -22,8 +22,9 @@ use gpui_component::input::{
 use orbit_core::lsp::CppSetup;
 use picker::{PickItem, Picker, PickerKey, PickerKind};
 pub use provider::hover_text;
-use provider::{sort_for_apply, targets, workspace_edits, DocProvider, LspDoc, Target};
+use provider::{sort_for_apply, targets, workspace_edits, DefinitionHit, DocProvider, LspDoc, ProblemHover, Target};
 use serde_json::{json, Value};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -235,6 +236,10 @@ pub struct EditorTab {
     tab_size: TabSize,
     doc: Option<Rc<LspDoc>>,
     provider: Option<Rc<DocProvider>>,
+    /// Hover (problems, then the server's answer); `problems` is what `show_diagnostics` shows.
+    hover: Rc<ProblemHover>,
+    /// The last definition the server gave (a Ctrl-hover asks for it), for `on_ctrl_click`.
+    definition: Rc<RefCell<Option<DefinitionHit>>>,
     lsp_state: LspState,
     /// Last progress text shown, to repaint only when it changes.
     shown_progress: Option<String>,
@@ -355,9 +360,10 @@ impl EditorTab {
 
         let mut doc = None;
         let mut provider = None;
+        let definition: Rc<RefCell<Option<DefinitionHit>>> = Default::default();
         if let (Some((_, language_id)), Some(_), Some(uri)) = (language.lsp, &repo, path_to_uri(&path)) {
             let d = Rc::new(LspDoc::new(uri, language_id));
-            let p = Rc::new(DocProvider(d.clone()));
+            let p = Rc::new(DocProvider(d.clone(), definition.clone()));
             let this = cx.weak_entity();
             *d.apply_edit.borrow_mut() = Some(Rc::new({
                 let this = this.clone();
@@ -369,7 +375,6 @@ impl EditorTab {
             state.update(cx, |s, _| {
                 let lsp = s.lsp_mut();
                 lsp.definition_provider = Some(p.clone());
-                lsp.hover_provider = Some(p.clone());
                 lsp.completion_provider = Some(p.clone());
                 lsp.code_action_providers = vec![p.clone()];
                 lsp.completion_menu.max_width = px(520.);
@@ -386,12 +391,25 @@ impl EditorTab {
             doc = Some(d);
             provider = Some(p);
         }
+        let hover = Rc::new(ProblemHover { doc: doc.clone(), problems: Default::default() });
+        state.update(cx, |s, _| s.lsp_mut().hover_provider = Some(hover.clone()));
 
-        let subscriptions = vec![cx.subscribe(&state, |this, _, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::Change) {
-                this.on_change(cx);
-            }
-        })];
+        let subscriptions = vec![
+            cx.subscribe(&state, |this, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.on_change(cx);
+                }
+            }),
+            // The component shows a problem under the pointer as a popover over
+            // the line above, and the hover popover lands on top of it. Monaco
+            // puts the message in the hover instead (`ProblemHover`), so its
+            // popover is closed as soon as it opens, before it is drawn.
+            cx.observe(&state, |_, state, cx| {
+                if state.read(cx).diagnostic_popover().is_some() {
+                    state.update(cx, |s, cx| s.clear_diagnostic_popover(cx));
+                }
+            }),
+        ];
         let mut this = Self {
             path,
             title: title.into(),
@@ -406,6 +424,8 @@ impl EditorTab {
             tab_size,
             doc,
             provider,
+            hover,
+            definition,
             lsp_state: LspState::Off,
             shown_progress: None,
             diagnostics: vec![],
@@ -597,6 +617,7 @@ impl EditorTab {
         let diagnostics: Vec<_> = lsp.chain(&self.build_diagnostics).cloned().collect();
         self.diagnostics = diagnostics.clone();
         self.diagnostics.sort_by_key(|d| (d.range.start.line, d.range.start.character));
+        *self.hover.problems.borrow_mut() = self.diagnostics.clone();
         self.state.update(cx, |s, cx| {
             let text = s.text().clone();
             if let Some(set) = s.diagnostics_mut() {
@@ -624,7 +645,7 @@ impl EditorTab {
 
     /// Hover text at the cursor, asked of the server directly (self-test).
     pub fn hover_at_cursor(&self, window: &mut Window, cx: &mut App) -> Task<Option<String>> {
-        let Some(provider) = self.provider.clone() else { return Task::ready(None) };
+        let provider = self.hover.clone();
         let state = self.state.read(cx);
         let (text, offset) = (state.text().clone(), state.cursor());
         let task = provider.hover(&text, offset, window, cx);
@@ -649,6 +670,31 @@ impl EditorTab {
         } else {
             cx.emit(EditorEvent::OpenLocation { path: target.path, range: Some(target.range) });
         }
+    }
+
+    /// Ctrl/Cmd+click on a symbol whose definition the Ctrl-hover found. The
+    /// component follows it too, but only after any open popover (hover,
+    /// problem) has taken the press as a click outside and cleared the found
+    /// definition, so a click on a hovered symbol or a line with a problem did
+    /// nothing. This runs first, in the capture phase.
+    fn on_ctrl_click(&mut self, event: &gpui::MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if event.button != MouseButton::Left || !event.modifiers.secondary(cx) || event.modifiers.alt || event.modifiers.shift {
+            return;
+        }
+        let link = {
+            let hit = self.definition.borrow();
+            let state = self.state.read(cx);
+            hit.as_ref()
+                .filter(|h| h.text == *state.text())
+                .filter(|h| state.range_to_bounds(&h.symbol).is_some_and(|b| b.contains(&event.position)))
+                .and_then(|h| h.links.first().cloned())
+        };
+        let Some(link) = link else { return };
+        window.prevent_default();
+        cx.stop_propagation();
+        self.state.update(cx, |s, cx| s.clear_hover_state(cx));
+        let Some(path) = uri_to_path(&link.target_uri) else { return };
+        self.open_target(Target { path, range: link.target_selection_range }, window, cx);
     }
 
     // ---------- edits ----------
@@ -1045,6 +1091,15 @@ impl EditorTab {
         let icon = if d.severity == Some(lsp_types::DiagnosticSeverity::ERROR) { "⨯" } else { "⚠" };
         self.message = Some(format!("{icon} {ix}/{} {}", self.diagnostics.len(), d.message.lines().next().unwrap_or_default()).into());
         self.reveal(d.range, window, cx);
+        // The message in the hover popover, as hovering the squiggle shows it.
+        let here: Vec<_> = self.diagnostics.iter().filter(|x| x.range == d.range).cloned().collect();
+        if let Some(hover) = provider::with_problems(&here, None) {
+            self.state.update(cx, |s, cx| {
+                let text = s.text();
+                let range = text.position_to_offset(&d.range.start)..text.position_to_offset(&d.range.end);
+                s.present_hover(range, hover, cx);
+            });
+        }
         cx.notify();
     }
 
@@ -1100,6 +1155,7 @@ impl EditorTab {
     }
 
     fn on_escape(&mut self, _: &Escape, _: &mut Window, cx: &mut Context<Self>) {
+        self.state.update(cx, |s, cx| s.clear_hover_state(cx));
         if self.signature.take().is_some() || self.message.take().is_some() {
             cx.notify();
         }
@@ -1706,6 +1762,7 @@ impl Render for EditorTab {
                     .when(previewing, |d| d.hidden())
                     // Breakpoint strip clicks (after the editor moved the caret).
                     .on_mouse_down(MouseButton::Left, cx.listener(crate::debug::gutter::on_mouse_down))
+                    .capture_any_mouse_down(cx.listener(Self::on_ctrl_click))
                     .child(Editor::new(&self.state).size_full().bordered(false))
                     .children(picker),
             )

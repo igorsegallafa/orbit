@@ -96,21 +96,55 @@ impl LspDoc {
     }
 }
 
-pub struct DocProvider(pub Rc<LspDoc>);
+/// The last definition answer: for which text and symbol, and where it goes.
+pub struct DefinitionHit {
+    pub text: Rope,
+    pub symbol: ByteRange<usize>,
+    pub links: Vec<lsp_types::LocationLink>,
+}
+
+pub struct DocProvider(pub Rc<LspDoc>, pub Rc<RefCell<Option<DefinitionHit>>>);
 
 impl DefinitionProvider for DocProvider {
     fn definitions(&self, text: &Rope, offset: usize, _: &mut Window, cx: &mut App) -> Task<Result<Vec<lsp_types::LocationLink>>> {
         let Some(server) = self.0.server() else { return Task::ready(Ok(vec![])) };
         let request = server.request("textDocument/definition", self.0.position_params(text, offset));
-        cx.background_spawn(async move { Ok(location_links(request.await?)) })
+        // Kept for `EditorTab::on_ctrl_click`, which follows it itself.
+        let (last, text) = (self.1.clone(), text.clone());
+        cx.spawn(async move |_| {
+            let links = location_links(request.await?);
+            let symbol = match links.first().and_then(|l| l.origin_selection_range) {
+                Some(r) => text.position_to_offset(&r.start)..text.position_to_offset(&r.end),
+                None => text.word_range(offset).unwrap_or(offset..offset),
+            };
+            *last.borrow_mut() = (!links.is_empty()).then(|| DefinitionHit { text, symbol, links: links.clone() });
+            Ok(links)
+        })
     }
 }
 
-impl HoverProvider for DocProvider {
+/// Hover as Monaco shows it: the problems under the pointer first, then the
+/// server's hover. The component's own diagnostic popover is turned off
+/// (`EditorTab::new`), so this is where a problem's message shows.
+pub struct ProblemHover {
+    pub doc: Option<Rc<LspDoc>>,
+    /// The diagnostics the editor shows (filtered, build problems included).
+    pub problems: Rc<RefCell<Vec<Diagnostic>>>,
+}
+
+impl HoverProvider for ProblemHover {
     fn hover(&self, text: &Rope, offset: usize, _: &mut Window, cx: &mut App) -> Task<Result<Option<lsp_types::Hover>>> {
-        let Some(server) = self.0.server() else { return Task::ready(Ok(None)) };
-        let request = server.request("textDocument/hover", self.0.position_params(text, offset));
-        cx.background_spawn(async move { Ok(serde_json::from_value(request.await?).ok()) })
+        let pos = text.offset_to_position(offset);
+        let problems: Vec<Diagnostic> = self.problems.borrow().iter().filter(|d| covers(&d.range, pos)).cloned().collect();
+        let request = self
+            .doc
+            .as_ref()
+            .and_then(|doc| Some(doc.server()?.request("textDocument/hover", doc.position_params(text, offset))));
+        let Some(request) = request else { return Task::ready(Ok(with_problems(&problems, None))) };
+        cx.background_spawn(async move {
+            let hover = request.await.ok().and_then(|v| serde_json::from_value::<lsp_types::Hover>(v).ok());
+            Ok(with_problems(&problems, hover))
+        })
     }
 }
 
@@ -289,6 +323,81 @@ pub fn code_actions(value: Value) -> Vec<CodeAction> {
         .collect()
 }
 
+/// Whether `range` holds `pos`, ends included (so a zero-width problem shows too).
+fn covers(range: &Range, pos: lsp_types::Position) -> bool {
+    let at = |p: lsp_types::Position| (p.line, p.character);
+    at(range.start) <= at(pos) && at(pos) <= at(range.end)
+}
+
+/// One problem as Markdown: severity, message, then `source(code)` as Monaco has it.
+pub fn problem_markdown(d: &Diagnostic) -> String {
+    use lsp_types::DiagnosticSeverity as S;
+    let icon = match d.severity {
+        Some(S::ERROR) | None => "⨯",
+        Some(S::WARNING) => "⚠",
+        _ => "ⓘ",
+    };
+    let code = match &d.code {
+        Some(lsp_types::NumberOrString::String(c)) => Some(c.clone()),
+        Some(lsp_types::NumberOrString::Number(n)) => Some(n.to_string()),
+        None => None,
+    };
+    let origin = match (&d.source, code) {
+        (Some(s), Some(c)) => format!("{s}({c})"),
+        (Some(s), None) => s.clone(),
+        (None, Some(c)) => c,
+        (None, None) => String::new(),
+    };
+    let message = d.message.lines().map(escape_markdown).collect::<Vec<_>>().join("  \n");
+    if origin.is_empty() {
+        format!("{icon} {message}")
+    } else {
+        format!("{icon} {message} *{}*", escape_markdown(&origin))
+    }
+}
+
+fn escape_markdown(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if matches!(c, '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>' | '#' | '|') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// The server's hover with the problems in front of it, a rule between.
+pub fn with_problems(problems: &[Diagnostic], hover: Option<lsp_types::Hover>) -> Option<lsp_types::Hover> {
+    if problems.is_empty() {
+        return hover;
+    }
+    let mut parts: Vec<String> = problems.iter().map(problem_markdown).collect();
+    let range = hover.as_ref().and_then(|h| h.range);
+    if let Some(text) = hover.as_ref().map(hover_markdown).filter(|t| !t.trim().is_empty()) {
+        parts.push("---".into());
+        parts.push(text);
+    }
+    Some(lsp_types::Hover {
+        contents: lsp_types::HoverContents::Markup(lsp_types::MarkupContent { kind: lsp_types::MarkupKind::Markdown, value: parts.join("\n\n") }),
+        range,
+    })
+}
+
+/// A hover as Markdown (language strings fenced).
+fn hover_markdown(hover: &lsp_types::Hover) -> String {
+    use lsp_types::{HoverContents, MarkedString};
+    let marked = |m: &MarkedString| match m {
+        MarkedString::String(s) => s.clone(),
+        MarkedString::LanguageString(l) => format!("```{}\n{}\n```", l.language, l.value),
+    };
+    match &hover.contents {
+        HoverContents::Scalar(m) => marked(m),
+        HoverContents::Array(ms) => ms.iter().map(marked).collect::<Vec<_>>().join("\n\n"),
+        HoverContents::Markup(m) => m.value.clone(),
+    }
+}
+
 pub fn hover_text(hover: &lsp_types::Hover) -> String {
     use lsp_types::{HoverContents, MarkedString};
     let marked = |m: &MarkedString| match m {
@@ -402,6 +511,59 @@ mod tests {
         let text = "int foo = 1;\nfoo += foo;\n";
         let out = apply_to_text(text, vec![edit(0, 4, 7, "count"), edit(1, 0, 3, "count"), edit(1, 7, 10, "count")]);
         assert_eq!(out, "int count = 1;\ncount += count;\n");
+    }
+
+    fn warning(line: u32, from: u32, to: u32, message: &str) -> Diagnostic {
+        Diagnostic {
+            range: Range::new(Position::new(line, from), Position::new(line, to)),
+            severity: Some(lsp_types::DiagnosticSeverity::WARNING),
+            code: Some(lsp_types::NumberOrString::String("unused-includes".into())),
+            source: Some("clangd".into()),
+            message: message.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn hover_puts_problems_before_the_server_hover() {
+        let d = warning(3, 0, 42, "Included header TextureHandle.h is not used directly (fixes available)");
+        let server = lsp_types::Hover {
+            contents: lsp_types::HoverContents::Scalar(lsp_types::MarkedString::LanguageString(lsp_types::LanguageString {
+                language: "cpp".into(),
+                value: "int x".into(),
+            })),
+            range: Some(Range::new(Position::new(3, 26), Position::new(3, 39))),
+        };
+        let hover = with_problems(&[d], Some(server.clone())).unwrap();
+        let text = hover_text(&hover);
+        assert_eq!(
+            text,
+            "⚠ Included header TextureHandle.h is not used directly (fixes available) *clangd(unused-includes)*\n\n---\n\n```cpp\nint x\n```"
+        );
+        assert_eq!(hover.range, server.range);
+        // No problems: the server's hover as it was; no hover: the problems alone.
+        assert_eq!(with_problems(&[], Some(server.clone())), Some(server));
+        assert!(hover_text(&with_problems(&[warning(0, 0, 1, "a_b")], None).unwrap()).starts_with("⚠ a\\_b"));
+        assert_eq!(with_problems(&[], None), None);
+    }
+
+    #[test]
+    fn problems_cover_their_range_ends_included() {
+        let d = warning(3, 9, 42, "");
+        assert!(covers(&d.range, Position::new(3, 9)));
+        assert!(covers(&d.range, Position::new(3, 42)));
+        assert!(!covers(&d.range, Position::new(3, 43)));
+        assert!(!covers(&d.range, Position::new(2, 20)));
+        assert!(covers(&warning(5, 4, 4, "").range, Position::new(5, 4)));
+    }
+
+    #[test]
+    fn an_include_definition_is_a_location_at_the_top_of_the_header() {
+        let v = json!([{ "uri": "file:///ws/engine/src/shared/Graphics/Device/TextureHandle.h", "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 0 } } }]);
+        let t = targets(v);
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].path, PathBuf::from("/ws/engine/src/shared/Graphics/Device/TextureHandle.h"));
+        assert_eq!(t[0].range, Range::default());
     }
 
     #[test]

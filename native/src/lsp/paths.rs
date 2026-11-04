@@ -61,6 +61,16 @@ mod tests {
     }
 
     #[test]
+    fn maps_a_header_outside_the_opened_file_folder_back_to_the_workspace() {
+        // clangd answers with the real path; the tab opens it under the workspace link.
+        let real = Path::new("/home/u/Desktop/ex-machina/aether-engine");
+        let open = Path::new("/home/u/Documents/orbit-workspace/workspaces/feat/aether-engine");
+        let reply = json!([{ "uri": "file:///home/u/Desktop/ex-machina/aether-engine/src/shared/Graphics/Device/TextureHandle.h" }]);
+        let out = map_uris(reply, real, open);
+        assert_eq!(out[0]["uri"], "file:///home/u/Documents/orbit-workspace/workspaces/feat/aether-engine/src/shared/Graphics/Device/TextureHandle.h");
+    }
+
+    #[test]
     fn uris_round_trip_with_spaces() {
         let p = Path::new("/tmp/with space/a.cpp");
         let uri = path_to_uri(p).unwrap();

@@ -109,7 +109,7 @@ Search Everywhere tabs `search-tab:<Label>`, Find's `find-toggle:case|word|regex
 `click:` `rclick:` `mclick:` `dblclick:` `sclick:` (Shift) `drag:<probe>:<dx>,<dy>`, and `<probe>@x,y` for a point
 from the probe's top-left; plus `key:<spec>`,
 `type:<text>`, `shift:<n>` (bare Shift taps as modifier events; `shift:2` is a double Shift), `mods:<alt|shift|ctrl…>` (hold those modifiers; `mods:` releases them), `mouse:back|forward`, `cmd:<command id>`, `open:<path>`, `preview:<path>`,
-`toast:<text>`, `wait:<ms>` and `dump:<label>` (the full dump, into the log, at that point).
+`toast:<text>`, `wait:<ms>`, `hover:cursor` / `ctrl-click:cursor` (the mouse over, or a Ctrl+click on, the word at the editor's cursor) and `dump:<label>` (the full dump, into the log, at that point; it lists the open hover popover).
 Build/Run/Debug adds (`src/run/script.rs`) `until:<text>[@secs]` (wait until the dump contains
 `text`, e.g. `until:build Ok@300`, `until:debug: Stopped@60`) and `gutter:<line>` (click the active
 editor's breakpoint strip at that line); its probes are `run-config`, `run-preset`, `run-build`,
@@ -288,7 +288,13 @@ status bar, breadcrumb, picker, completion menu, signature help and banner.
 - **Rename** (`F2` on `addNumbers` → `sumOf`): the open file in its buffer, `util.h` and `util.cpp`
   on disk (other open editors in their buffers); **format** (`Ctrl+Shift+I`) reindents with clangd;
   checked with `git diff` in the scratch repo after `Ctrl+S`.
-- **Go to line** (`Ctrl+G`, `6:7`), **next problem** (`F8`, wraps, message in the status bar).
+- **Go to line** (`Ctrl+G`, `6:7`), **next problem** (`F8`, wraps, message in the status bar and in the hover popover).
+- **Problems on hover**, as Monaco shows them: squiggles in the text, the message in the hover popover
+  before the server's hover (`ProblemHover`). gpui-component's own problem popover, which sat over the
+  line above and under the hover popover, is closed as it opens. Ctrl+click follows the definition the
+  Ctrl-hover found in the capture phase (`on_ctrl_click`): the component's popovers took the press as
+  a click outside and dropped it first, so a hovered symbol or one on a line with a problem (an unused
+  `#include`) did not open. Includes need no `documentLink`: clangd answers `definition` there.
 - **clangd banner**: the scratch repo without `compile_commands.json` shows it; "Generate with CMake"
   (or `@orbit_editor::GenerateCompileCommands`) runs `cmake -S . -B build -G Ninja
   -DCMAKE_EXPORT_COMPILE_COMMANDS=ON` (a preset when the repo has them), and on success the banner
