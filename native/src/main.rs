@@ -6,6 +6,7 @@ mod editor;
 mod file_tree;
 mod lsp;
 mod script;
+mod sessions;
 mod terminal;
 mod theme;
 mod workspace;

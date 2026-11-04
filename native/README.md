@@ -25,7 +25,7 @@ release build plus clippy and tests.
 The first start after a build takes several seconds while the GPU driver compiles and caches
 pipelines. Warm starts reach the first frame in 180–190 ms.
 
-Keys: `Ctrl+Shift+T` new terminal · `Ctrl+W` close file tab (refused when unsaved) ·
+Keys: `Ctrl+Shift+T` new terminal (a shell session) · `Ctrl+W` close file tab (refused when unsaved) ·
 `Ctrl+Shift+W` close any tab (discards) · `Ctrl+Tab` next tab · `Ctrl+Q` quit · in the editor
 `Ctrl+S` save, `F12` or `Ctrl+click` go to definition, hover for docs · in a terminal
 `Ctrl+Shift+C`/`Ctrl+Shift+V` copy/paste, drag to select (double click: word, triple: line;
@@ -51,6 +51,26 @@ scripts/measure.sh 8 [args…]            # PSS (+SwapPss) of the process tree a
 
 In self-test mode, copies are recorded in the dump and never written to the system clipboard.
 
+Sessions and free-form steps run after the fixed ones (`;`-separated):
+
+```sh
+./target/release/orbit-native --session shell --session claude   # open sessions (shell, claude, opencode, omp, any command)
+    --steps "status:waiting@15; dump; action:sessions::NextSessionNeedingInput; wait:Allow Bash@5; \
+             type:y\n; keys:ctrl-c; sleep:800; action:orbit::CloseTab; action:sessions::ResumeLastSession"
+```
+
+`wait:<text>[@secs]` waits for text in the active terminal, `status:<status>` for a session in that
+status, `action:<name>` dispatches any registered GPUI action by name, `type:`/`keys:` go through
+GPUI's keystroke dispatch, `dump` writes the sessions, inbox and recent list into the log. Waits
+also record how late the UI thread ran its timers ("ui timer lag"), which is how a blocked UI shows.
+The dump always ends with the sessions, inbox and recent list.
+
+Self-test runs neither save nor restore sessions in the user's config. Point `ORBIT_CONFIG_DIR` at a
+scratch folder to test that (and to keep scrollback and agent settings files out of the real one).
+Agent sessions are tested without a real agent: `scripts/stub-agent/claude` stands in for Claude
+Code (prints its argv, posts the hooks from Orbit's `--settings` file, waits for an answer); put it
+first on `PATH`. Use `SHELL=/bin/bash` (zsh may start an interactive setup wizard).
+
 ## Stack and why
 
 | Piece | Choice |
@@ -59,7 +79,7 @@ In self-test mode, copies are recorded in the dump and never written to the syst
 | Components | `gpui-component =0.9.0` (Apache-2.0): code editor, diff view, theme and widgets |
 | Editor | gpui-component's `EditorState`: rope buffer, tree-sitter highlighting (C, C++, Rust, TS/TSX, JS here), undo, search, folding, and LSP hooks (`DefinitionProvider`, `HoverProvider`, completion, code actions, semantic tokens, document colors, `show_document`) |
 | Diff | gpui-component's `Diff`: virtualized unified/split patch view with app-supplied syntax colors |
-| Terminal | `alacritty_terminal 0.26` (VT parsing, grid, selection) + `portable-pty`, painted on a GPUI canvas (own code, ported from the PoC) |
+| Terminal | `alacritty_terminal 0.26` (VT parsing, grid, selection) on `orbit_core::pty` (`portable-pty 0.9`, shared with the Tauri app), painted on a GPUI canvas (own code, ported from the PoC) |
 | LSP | our own small JSON-RPC client (`src/lsp`), with types from `lsp-types =0.97` (the version gpui-component's traits use) |
 
 **Why gpui-component and not crates.io `gpui 0.2.2` (the PoC's).** The editor is the gate, and
@@ -179,7 +199,8 @@ Caveats found:
 | `src/editor.rs` | editor tab: `EditorState`, save, dirty, LSP document sync and providers, cross-file definition |
 | `src/lsp/` | `mod.rs` file → language and the server registry · `server.rs` JSON-RPC client and URI mapping over `orbit_core::lsp` (which picks, starts and feeds the process) · `paths.rs` URIs and root rebase |
 | `src/diff_view.rs` | diff tab over `git diff HEAD` |
-| `src/terminal/` | PTY + VT (`mod.rs`), grid layout and paint (`grid.rs`), keys and mouse reports (`input.rs`) |
+| `src/terminal/` | terminal view over `orbit_core::pty`: VT parse, status tracking, scrollback replay (`mod.rs`), grid layout and paint (`grid.rs`), keys and mouse reports (`input.rs`) |
+| `src/sessions/` | sessions (`mod.rs`: keys, codenames, save/restore, inbox, recent, resume, actions), agent status heuristics and hooks (`status.rs`), the sidebar block (`panel.rs`) |
 | `src/file_tree.rs` | virtualized tree with background folder loads |
 | `src/workspace.rs` | workspace list from `orbit_core::workspace` |
 | `src/theme.rs`, `src/orbit-dark.json` | Orbit Dark tokens (`src/App.css`, `src/lib/theme.ts`) for our views and for gpui-component |
@@ -223,10 +244,8 @@ held logic became core functions (`notes::add`, `lsp::cpp_setup`, `ralph::start`
 
 **What stays in `src-tauri`, and why:**
 
-- `pty.rs` + `term_image.rs`: the PTY streams output to the webview through a Tauri `ipc::Channel`
-  with flow control and scrollback files, and uses `portable-pty 0.8` where the native terminal uses
-  0.9 with its own VT. Unifying the two is the *Sessions* stage's job (move the PTY registry,
-  scrollback and flow control to core behind an output callback, on one `portable-pty` version).
+- `term_image.rs`: reads files named by kitty graphics commands for the webview.
+  (`pty.rs` moved to core in stage 3 and is now a thin adapter, see *Stage 3*.)
 - `commands.rs` (93 commands): most are one-line wrappers over core, but some still hold logic
   inline: service/folder/group editing in the config, `ws_create_pr(s)`, `ws_checks` aggregation,
   `check_logs`, `open_in_editor`. Not moved here to keep this stage reviewable; the *Git and
@@ -243,6 +262,81 @@ Its own `paths::real_path`, `find_compile_commands` and server table are gone. I
 Ctrl+click on `Initialize` (39:12 of `Game.h`) open `Game.cpp` at 44:10, hover returns clangd's
 markdown, the tree loads 3 levels (1,436 rows) in the background, terminals spawn.
 
+## Stage 3: sessions and the terminal
+
+**The PTY is in core** (`crates/orbit-core/src/pty.rs`), on `portable-pty 0.9` for both apps. In
+`src-tauri/Cargo.lock` only portable-pty's own subtree moved (0.8.1 → 0.9.0, `nix` 0.25 → 0.28,
+`serial` → `serial2`); no other Tauri dependency changed.
+
+```rust
+pub fn reserve_id() -> u32;                                   // id first, so the handler can know it
+pub fn spawn(id: u32, spec: Spawn, on_output: impl FnMut(Output) + Send + 'static) -> Result<(), String>;
+pub enum Output { Data(Vec<u8>), Exit }                       // bursts (8 ms / 256 KB), then Exit once
+pub fn write(id, &[u8]) / resize(id, Size) / set_paused(id, bool) / kill(id);
+pub fn session_dir(workspace, repo, cwd) -> Result<PathBuf>;  // cwd > repo folder > scope folder
+pub fn scrollback(key) -> Vec<u8>; pub fn forget(key);       // saved tail per tab key
+pub fn claude_session_exists(workspace, id) -> bool; pub fn opencode_session_id(workspace, repo, since_ms);
+// Spawn { cwd, cmd (None: $SHELL), args, env, size, key, scrollback: bool, program_version }
+```
+
+`spawn` keeps everything the Tauri command did: the child environment (outer-terminal variables
+dropped, `TERM`, `TERM_PROGRAM=Orbit`, claude session variables removed, AppImage host env), claude's
+hooks `--settings` and `--remote-control`, spawning at the real size, 8 ms output bursts, the
+256 KB scrollback tail flushed every 2 s, and pause/resume (`set_paused`) for the webview's flow
+control. One change: the queue between the PTY reader and the burst thread is bounded (64 reads), so
+a consumer slower than the program holds the program back instead of buffering without limit.
+
+`src-tauri/src/pty.rs` is now a ~100-line adapter: the same commands (`pty_spawn`, `pty_write`,
+`pty_resize`, `pty_flow`, `pty_kill`, `pty_scrollback`, `pty_forget`, `claude_session_exists`,
+`opencode_session_id`) with the same arguments, the webview `ipc::Channel` (an empty message once
+the program ended) and `pty-error` events for a failed start, as before.
+
+**Native sessions.** Every terminal tab is a session, as in the React app: a key
+(`tm:<ms>-<rand>`), a codename, a scope (the selected workspace, else `dir:~`) and what it runs.
+
+- New: the sidebar's *Sessions* block (`+ shell`, `+ claude`, `+ opencode`, `+ omp`), `Ctrl+Shift+T`
+  (a shell), or the actions. Claude starts with `--session-id <uuid>` so it can be resumed.
+- Status: the spinner-verb heuristics of `agentStatus.ts` (thinking/running/editing/busy/idle/
+  exited) plus Claude Code's hooks through `orbit_core::agent_hooks` with an `Events` sink into a
+  GPUI channel (waiting for permission, working, done). Shown in the tab title and the sidebar dot.
+  Agents without hooks get "done" after 10 s of activity ending in silence.
+- Inbox: "finished" and "needs your attention" items, unread unless the session's tab is active in
+  a focused window; seeing the tab settles them. No OS notifications yet.
+- Closing an agent tab ends it: claude (its `--session-id`) and opencode (looked up with
+  `opencode session list`) go to *Recent* for the scope; clicking one (or `ResumeLastSession`)
+  reopens it with `--resume <id>` / `--session <id>`. Tabs don't minimize as in React (that needs a
+  hidden-tab notion in the shell).
+- Restart: open sessions and Recent are saved to `<config>/native-sessions.json` (the React app
+  keeps its own in localStorage). On start, claude sessions come back with `--resume` (or
+  `--session-id` when Claude has no transcript yet); the others replay their saved output with the
+  screen clears turned into scrollback, under a "restored after restart" line, then start fresh.
+- Flow control: the output thread parses into the terminal in 16 KB slices under the grid lock, and
+  since the core's read queue is bounded, a flooding program runs at the parser's pace. The UI
+  thread only learns "something changed" (one pending wake-up) and repaints once per frame.
+- Actions for the command registry and keymap (`sessions::…`): `NewAgentSession` (Settings → AI
+  agent), `NewClaudeSession`, `NewOpencodeSession`, `NewOmpSession`, `NewShellSession`,
+  `ResumeLastSession`, `NextSessionNeedingInput`, `MarkInboxRead`, `ClearInbox`. They are global
+  handlers, so they work from any focus; none is bound to a key yet.
+
+Verified by self-test runs with `ORBIT_CONFIG_DIR` in a scratch folder, `SHELL=/bin/bash` and the
+stub agent on `PATH` (no real agent was started):
+
+- Hooks: the stub's `UserPromptSubmit` → `Notification(permission_prompt)` turned the session
+  *waiting* 0.4 s after start, with an inbox item "… needs your attention · Home · Claude needs
+  your permission to use Bash" (unread while another tab was active).
+- `NextSessionNeedingInput` from the shell tab activated the waiting claude tab and settled its
+  item; typing `y` reached the stub, whose `Stop` hook added a "finished" item.
+- Closing the claude tab put its session id in Recent; `ResumeLastSession` reopened it and the
+  stub's argv was `--settings …/agent-settings/<key>.json --resume <the same id>`.
+- Restart: a second run on the same config dir restored both tabs: the shell replayed
+  `echo RESTORE-$((40+2))` / `RESTORE-42` above "── restored after restart ──" and a new prompt;
+  claude came back with `--session-id <id>` (no transcript, as expected for the stub).
+- Flooding: `yes | head -n 2000000` finished in 0.66 s with the UI thread's timers at most 1 ms
+  late (339 frames, 0.5 ms average layout+paint, 8 ms max); `Ctrl+C` after 3 s of an endless `yes`
+  gave the prompt back within 50 ms.
+- `pnpm run check` passes with the adapter (Tauri app unchanged for the frontend); core has two new
+  PTY tests (round trip with exit; pause stops reading until resumed).
+
 ## Next stages
 
 Ordered by dependency, with rough sizes (one focused agent-day ≈ 1 unit).
@@ -251,7 +345,9 @@ Ordered by dependency, with rough sizes (one focused agent-day ≈ 1 unit).
 2. **Shell parity** (2): resizable panes, the activity bar and icons (Lucide is bundled), the
    status bar, toasts and notifications, the custom titlebar, back/forward history, persisted tab
    and session state.
-3. **Sessions** (3): agent terminals (claude/opencode) with codenames, status from hooks and the
+3. ~~**Sessions**~~: mostly done (stage 3, above); left: minimized agent tabs, OS notifications,
+   session rename, the "Open in" folder choice of the new-session menu, kitty graphics, the live
+   agent feed. Originally: agent terminals (claude/opencode) with codenames, status from hooks and the
    spinner parser, resume, the new-session menu, the inbox. Plus terminal flow control and
    scrollback restore through `orbit-core::pty`.
 4. **Editor completeness** (3): completion, signature help, code actions, references, document
@@ -308,14 +404,14 @@ Status of everything the React app does: **done**, **partial** (with what's miss
 - [ ] — Repo briefs refresh and background fetch (`src/lib/useRepoBriefs.ts`)
 
 ### Sessions / agents
-- [ ] — New session menu (`NewSessionMenu.tsx`), codenames (`src/lib/names.ts`)
-- [ ] — Agent status from spinner lines and Claude hooks (`src/lib/agentStatus.ts`, backend `agent_hooks.rs`)
-- [ ] — Resume claude/opencode sessions, initial prompt injection (`TerminalPane.tsx`)
+- [ ] partial: new session (shell, Claude Code, Open Code, OMP in the current scope) and codenames (`NewSessionMenu.tsx`, `src/lib/names.ts`). No "Open in" folder/repo picker, no rename.
+- [x] done: agent status from spinner lines and Claude hooks, in tab titles and the sidebar (`src/lib/agentStatus.ts`, backend `agent_hooks.rs`)
+- [ ] partial: resume claude/opencode sessions (Recent per scope, restart with `--resume`). No initial prompt injection (`TerminalPane.tsx`), no minimized agent tabs (`App.tsx`).
 - [ ] — Live agent feed (`AgentFeed.tsx`)
 - [ ] — Ralph view, PRD and run modals (`RalphView.tsx`, `RalphPrdModal.tsx`, `RalphRunModal.tsx`)
 
 ### Terminal
-- [ ] partial: PTY terminal with spawn, write, resize, 10k scrollback, 256/true colour, cursor shapes, OSC title, bracketed paste, alternate-screen wheel. No flow control, scrollback restore or forget (`TerminalPane.tsx`).
+- [x] done: PTY terminal on `orbit_core::pty` with spawn at the real size, write, resize, 10k scrollback, 256/true colour, cursor shapes, OSC title, bracketed paste, alternate-screen wheel, flow control, scrollback restore after restart and forget on close (`TerminalPane.tsx`)
 - [x] done: selection (drag, word, line), copy (`Ctrl+Shift+C`, primary on select), paste (`Ctrl+Shift+V`, `Shift+Insert`, middle click)
 - [x] done: mouse reporting to TUIs (X10/normal and SGR; click, drag, motion, wheel)
 - [ ] — Kitty graphics (`src/lib/kittyGraphics.ts`)
@@ -373,10 +469,10 @@ Status of everything the React app does: **done**, **partial** (with what's miss
 - [ ] partial: themes. Orbit Dark only (tokens from `src/App.css` / `src/lib/theme.ts`, gpui-component theme JSON); the other six themes and the picker are not ported.
 
 ### Notifications
-- [ ] — Toasts, inbox, OS notifications (`Toast.tsx`, `Inbox.tsx`); there is only a status-bar notice
+- [ ] partial: the inbox of agent sessions (finished / needs attention, unread until seen) in the sidebar (`Inbox.tsx`). No toasts, OS notifications or Ralph items; otherwise a status-bar notice.
 
 ### Backend services
 - [x] done: the backend is shared through `crates/orbit-core` (config, workspaces, git, GitHub, LSP/DAP processes, watcher, builds, run configs, agents, Ralph, review, search, notes, files); the native app uses its workspace list and LSP manager
 - [ ] partial: no native UI writes state yet; the core functions for it exist (`workspace::create`, `repo::commit`, `notes::add`, …)
 - [ ] — FS/git watcher events in the native UI (`orbit_core::watch::watch` with a channel sink), run configs (`.orbit/run.json`)
-- [ ] — PTY registry, scrollback and flow control in core (still `src-tauri/src/pty.rs`)
+- [x] done: PTY registry, scrollback and flow control in core (`orbit_core::pty`); `src-tauri/src/pty.rs` is an adapter

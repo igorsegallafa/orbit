@@ -1,0 +1,25 @@
+#!/bin/bash
+# Stand-in for Claude Code in the self-tests (no login, no cost): prints its
+# argv, posts the hooks Orbit's --settings file routes (prompt submitted, a
+# permission prompt, turn finished) and waits for an answer like the real one.
+# Use: PATH="$PWD/scripts/stub-agent:$PATH" ./target/release/orbit-native …
+args="$*"
+settings=""
+while [ $# -gt 0 ]; do
+  [ "$1" = "--settings" ] && settings="$2" && shift
+  shift
+done
+url=$(grep -o 'http://127.0.0.1:[0-9]*/hook/[^"]*' "$settings" 2>/dev/null | head -1)
+post() { [ -n "$url" ] && curl -s -m 5 -X POST -H 'Content-Type: application/json' -d "$1" "$url" >/dev/null; }
+echo "stub-claude args: $args"
+echo "hook url: ${url:+set}"
+post '{"hook_event_name":"UserPromptSubmit"}'
+for i in 1 2 3; do printf '\r✽ Thinking… (%ss)' "$i"; sleep 0.3; done
+echo
+post '{"hook_event_name":"Notification","notification_type":"permission_prompt","message":"Claude needs your permission to use Bash"}'
+printf 'Allow Bash? [y/n] '
+read -r answer
+echo "answer: $answer"
+post '{"hook_event_name":"Stop"}'
+echo "stub-claude done"
+while read -r more; do echo "got: $more"; done
