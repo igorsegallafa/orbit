@@ -1,0 +1,90 @@
+name: Native app
+
+# The GPUI app in native/. Informational while the Tauri app is the product:
+# failures show on the PR but don't block it, and nothing is released from here.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: native-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: native
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libfontconfig-dev libfreetype-dev libx11-xcb-dev libxcb1-dev libvulkan-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./native -> target"
+          shared-key: native-linux
+
+      - run: cargo build --locked
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+
+      # The tarball and AppImage, kept for a week to try a PR's build. Built on
+      # ubuntu-latest here; a release should build on the oldest supported Ubuntu (glibc).
+      - name: Package
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: 1
+        run: |
+          cargo build --release --locked
+          curl -fsSL -o "$RUNNER_TEMP/appimagetool" \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x "$RUNNER_TEMP/appimagetool"
+          APPIMAGETOOL="$RUNNER_TEMP/appimagetool" scripts/package-linux.sh --no-build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: orbit-native-linux
+          path: |
+            native/dist/*.tar.gz
+            native/dist/*.AppImage
+          retention-days: 7
+
+  # Does it compile where the team builds? (Windows uses GPUI's DirectX renderer,
+  # macOS Metal; neither is run or tested yet.)
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            features: ""
+          # Shaders compiled at run time: no Metal toolchain needed on the runner.
+          - platform: macos-latest
+            features: "--features gpui_platform/runtime_shaders"
+    runs-on: ${{ matrix.platform }}
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: native
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./native -> target"
+          shared-key: native-${{ matrix.platform }}
+
+      - run: cargo check --locked --all-targets ${{ matrix.features }}

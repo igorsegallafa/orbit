@@ -30,3 +30,4 @@ native/target/
 
 # Agent worktrees
 .claude/worktrees/
+native/dist/
