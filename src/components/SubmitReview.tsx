@@ -111,7 +111,7 @@ export function SubmitReview({
           {pending} pending comment{pending === 1 ? "" : "s"}
         </span>
         <button disabled={busy || needsText} onClick={() => onSubmit(event, body)}>
-          {busy ? "Submitting…" : "Submit review"}
+          {busy ? "Submitting…" : "Submit to GitHub"}
         </button>
       </div>
     </div>
