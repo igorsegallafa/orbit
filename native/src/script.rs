@@ -209,6 +209,27 @@ pub fn dump(app: &OrbitApp, log: &str, cx: &gpui::App) -> String {
         app.minimized.len(),
         app.ws_collapsed,
     );
+    let scope_name = |s: &crate::scope::Scope| s.clone().unwrap_or_else(|| "global".into());
+    let strip = app.strip_tabs(cx);
+    let _ = writeln!(
+        out,
+        "--- scope: {} (last tab {}), strip {:?}, switcher {}",
+        scope_name(&app.scope()),
+        app.scopes.last(&app.scope()).unwrap_or("-"),
+        strip,
+        app.chrome.ws_switcher.as_ref().map_or("closed".to_string(), |s| format!(
+            "open, query {:?}, rows {:?}, highlighted {}",
+            s.query,
+            app.switch_items()
+                .iter()
+                .map(|i| match i {
+                    crate::shell::SwitchItem::Scope(s) => scope_name(s),
+                    crate::shell::SwitchItem::NewWorkspace => "New workspace…".into(),
+                })
+                .collect::<Vec<_>>(),
+            s.highlighted
+        )),
+    );
     let _ = writeln!(out, "--- tabs ({}):", app.tabs.len());
     for (ix, tab) in app.tabs.iter().enumerate() {
         let kind = match tab.kind {
@@ -221,13 +242,14 @@ pub fn dump(app: &OrbitApp, log: &str, cx: &gpui::App) -> String {
         };
         let _ = writeln!(
             out,
-            "  [{ix}] {kind:8} {}{}{}{}{}{}",
+            "  [{ix}] {kind:8} {}{}{}{}{}{}  @{}",
             tab.title(cx),
             if tab.is_nav(cx) { "  (nav)" } else { "" },
             if app.minimized.contains(&tab.key(cx)) { "  (minimized)" } else { "" },
             if app.active == Some(ix) { "  (active)" } else { "" },
             if tab.preview { "  (preview)" } else { "" },
             if tab.dirty(cx) { "  (dirty)" } else { "" },
+            app.tab_scope(tab, cx).map_or("nav".to_string(), |s| scope_name(&s)),
         );
     }
     for server in app.lsp.running() {

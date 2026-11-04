@@ -33,7 +33,7 @@ changes ask Save / Don't Save / Cancel) · `Ctrl+Shift+W` close any tab without 
 back / forward (in a terminal `Alt+←/→` go to the shell) · double `Shift` Search Everywhere
 (`Tab` switches its tabs) · `Ctrl+Shift+A` Find Action (its Actions tab) · `Ctrl+Shift+F` Find in Files
 (`Alt+C`/`Alt+W`/`Alt+X` case, words, regex; `Tab` to the file mask) ·
-`Ctrl+Alt+A` new agent session · `Ctrl+Alt+R` resume the last session · `Ctrl+Alt+I` next session
+`Ctrl+Alt+W` switch workspace (type to filter, Enter) · `Ctrl+Alt+A` new agent session · `Ctrl+Alt+R` resume the last session · `Ctrl+Alt+I` next session
 needing input ·
 `Ctrl+Q` quit · in the editor `Ctrl+S` save, `F12` or `Ctrl+click` go to definition, hover for
 docs, `Shift+F12` references, `Ctrl+F12` implementation, `Ctrl+Shift+O` file outline, `Ctrl+T`
@@ -97,7 +97,7 @@ render a `probe("name")` (tabs `tab:<ix>`, menu items `menu:<label>`, dialog but
 `dialog:<label>`, palette rows `palette:<title>` (files by name, Find matches `palette:<path>:<line>`),
 Search Everywhere tabs `search-tab:<Label>`, Find's `find-toggle:case|word|regex` and
 `find-repo:<repo>|All repos`, tree rows `tree:<name>`, breadcrumb folders `crumb:<ix>`, `tb-sidebar`, `tb-back`, `tb-forward`,
-`tb-inbox`, `tb-dock`, `new-tab`, `resize-sidebar`, `resize-dock`, `resize-panel`,
+`tb-inbox`, `tb-dock`, `tb-workspace` and its rows `wsw:<workspace>|No workspace|New workspace…`, `new-tab`, `resize-sidebar`, `resize-dock`, `resize-panel`,
 `panel-close`, `toast-close:<id>`, `ws:<name>`) and are dispatched with `Window::dispatch_event`:
 `click:` `rclick:` `mclick:` `dblclick:` `drag:<probe>:<dx>,<dy>`; plus `key:<spec>`,
 `type:<text>`, `shift:<n>` (bare Shift taps as modifier events; `shift:2` is a double Shift), `mouse:back|forward`, `cmd:<command id>`, `open:<path>`, `preview:<path>`,
@@ -146,6 +146,17 @@ Other shell extension points on `OrbitApp`: `toast(kind, title, description, cx)
 `toast_error`; `open_menu(position, Vec<MenuItem>, …)`; `open_dialog(Dialog { title, message,
 buttons, on_cancel }, …)`; `titlebar_items: Vec<AnyView>` (the run widget and the inbox go there);
 `state.rs` for what is restored on start.
+
+### Workspace scopes
+
+Every tab belongs to a scope: a workspace (its sessions, files under its folder, its pages) or the
+global scope (`dir:`/`@repo` sessions, files outside any workspace). Nav pages belong to none. The
+strip shows the active scope's tabs; the active scope is `OrbitApp::selected` (`scope()`), and each
+scope remembers its last tab (`scopes`). Activating a tab of another scope switches to it, so the
+sidebar, Search Everywhere, the inbox and back/forward cross scopes on their own; the titlebar
+select (`tb-workspace`, `Ctrl+Alt+W`) calls `switch_scope`. Batch closes and the tab menu act on
+the shown scope. Background sessions keep running. The dump's `--- scope:` line and each tab's
+`@scope` show it.
 
 ## Stack and why
 
@@ -323,7 +334,8 @@ Caveats found:
 | `src/orbit_icons.rs` | the icons of `Icons.tsx` (generated), drawn with `icons::orbit_icon` |
 | `src/commands.rs` | command registry and keymap |
 | `src/nav.rs` | back/forward history (`src/lib/navHistory.ts`) |
-| `src/state.rs` | saved state (`<config dir>/native-state.json`): workspace, tabs, active tab, cursors, pane sizes |
+| `src/state.rs` | saved state (`<config dir>/native-state.json`): the active scope, each scope's tabs and last tab, cursors, pane sizes; migrates the old global tab list |
+| `src/scope.rs` | tab scopes: a workspace or the global scope; the strip shows the active scope's tabs |
 | `src/overlay.rs`, `src/toast.rs` | context menus and dialogs, toasts |
 | `src/palette.rs` | the search overlay: Search Everywhere (Find Action is its Actions tab) and Find in Files, rows in a virtual list |
 | `src/search/` | their commands and keys, symbol and text sources, Find's hit ranges (`mod.rs`); fuzzy ranking (`fuzzy.rs`, `src/lib/fuzzy.ts`) |

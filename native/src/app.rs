@@ -10,7 +10,8 @@ use crate::lsp::{uri_to_path, LspRegistry, Notification, RepoKey};
 use crate::nav::NavHistory;
 use crate::overlay::{ButtonStyle, ContextMenu, Dialog, DialogButton, MenuItem};
 use crate::palette::Palette;
-use crate::state::{self, Layout, SavedState, SavedTab};
+use crate::scope::{self, Scope};
+use crate::state::{self, Layout, SavedScope, SavedState, SavedTab};
 use crate::terminal::TerminalView;
 use crate::toast::{ToastKind, Toasts};
 use crate::workspace::{self, Workspace};
@@ -100,6 +101,14 @@ impl Tab {
         }
     }
 
+    /// The key across restarts: sessions by their id, the rest as `key`.
+    pub fn saved_key(&self, cx: &App) -> String {
+        match &self.kind {
+            TabKind::Terminal(t) => format!("session:{}", t.read(cx).meta.id),
+            _ => self.key(cx),
+        }
+    }
+
     /// Stable identity: history entries, menus and dialogs refer to tabs by key.
     pub fn key(&self, cx: &App) -> String {
         match &self.kind {
@@ -171,6 +180,11 @@ pub struct OrbitApp {
     pub ws_collapsed: BTreeSet<String>,
     /// Agent sessions closed from the strip but still running, by tab key.
     pub minimized: HashSet<String>,
+    /// Each scope's last active tab. The active scope is `selected`'s workspace.
+    pub scopes: scope::Memory,
+    /// From the saved state, applied once the sessions are back: the active
+    /// scope and each scope's last tab (by `saved_key`).
+    restoring: Option<(Scope, Vec<(Scope, String)>)>,
     /// The configured repos (`config.services`) and group count, for the sidebar.
     pub services: Vec<String>,
     pub group_count: usize,
@@ -187,7 +201,7 @@ pub struct OrbitApp {
 /// The app's commands and keys (JetBrains-style, as the React app).
 pub fn init(cx: &mut App) {
     crate::overlay::bind_keys(cx);
-    let has_files = |a: &OrbitApp, _: &App| a.tabs.iter().any(Tab::is_file);
+    let has_files = |a: &OrbitApp, cx: &App| a.tabs.iter().any(|t| t.is_file() && a.in_scope(t, cx));
     let active_is_file = |a: &OrbitApp, _: &App| a.active_tab().is_some_and(Tab::is_file);
     let not_in_terminal = |a: &OrbitApp, _: &App| a.active_terminal().is_none();
     for command in [
@@ -249,9 +263,7 @@ pub fn init(cx: &mut App) {
             a.open_menu(Point::new(px(420.), px(90.)), items, w, cx)
         }),
         Command::new("app.findAction", "Find Action…").keys(["ctrl-shift-a"]).run(|a, w, cx| a.open_palette(w, cx)),
-        Command::new("app.switchWorkspace", "Switch Workspace…").when(|a, _| !a.workspaces.is_empty()).run(|a, w, cx| {
-            a.open_workspace_menu(Point::new(px(160.), px(34.)), w, cx)
-        }),
+        Command::new("app.switchWorkspace", "Switch Workspace…").keys(["ctrl-alt-w"]).run(|a, w, cx| a.toggle_workspace_switcher(w, cx)),
         // Sessions (`sessions.rs`); Ctrl+Shift+T above opens a shell session.
         Command::new("sessions.newAgent", "New Agent Session").keys(["ctrl-alt-a"]).action(crate::sessions::NewAgentSession),
         Command::new("sessions.newClaude", "New Claude Session").action(crate::sessions::NewClaudeSession),
@@ -334,6 +346,8 @@ impl OrbitApp {
             titlebar_items: vec![],
             ws_collapsed: BTreeSet::new(),
             minimized: HashSet::new(),
+            scopes: Default::default(),
+            restoring: None,
             services: config.as_ref().map(|c| c.services.iter().map(|s| s.name.clone()).collect()).unwrap_or_default(),
             group_count: config.as_ref().map_or(0, |c| c.groups.len()),
             briefs: HashMap::new(),
@@ -352,8 +366,59 @@ impl OrbitApp {
         cx.notify();
     }
 
+    /// The global scope: no workspace, an empty tree.
+    pub fn clear_workspace(&mut self, cx: &mut Context<Self>) {
+        self.selected = None;
+        self.tree.update(cx, |tree, cx| tree.set_roots(vec![], cx));
+        cx.notify();
+    }
+
     pub fn workspace(&self) -> Option<&Workspace> {
         self.selected.map(|ix| &self.workspaces[ix])
+    }
+
+    /// The active scope.
+    pub fn scope(&self) -> Scope {
+        self.workspace().map(|w| w.meta.name.clone())
+    }
+
+    /// Makes `scope` the active one without touching the tabs.
+    fn set_scope(&mut self, scope: &Scope, cx: &mut Context<Self>) {
+        match scope.as_ref().and_then(|n| self.workspaces.iter().position(|w| &w.meta.name == n)) {
+            Some(ix) if self.selected != Some(ix) => self.select_workspace(ix, cx),
+            Some(_) => {}
+            None if self.selected.is_some() => self.clear_workspace(cx),
+            None => {}
+        }
+    }
+
+    /// Switches to `scope` (the titlebar select): shows its last active tab.
+    /// Already there with one of its tabs shown, nothing changes.
+    pub fn switch_scope(&mut self, scope: Scope, window: &mut Window, cx: &mut Context<Self>) {
+        let shown = self.active_tab().is_some_and(|t| self.tab_scope(t, cx).is_some());
+        if scope == self.scope() && shown {
+            return;
+        }
+        self.show_scope(scope, window, cx);
+    }
+
+    /// Activates `scope` and its last tab, else its first; with no tabs, the
+    /// workspace's page (or the Dashboard for the global scope).
+    pub fn show_scope(&mut self, scope: Scope, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_scope(&scope, cx);
+        let scope = self.scope();
+        let strip = self.strip_tabs(cx);
+        let keys: Vec<String> = strip.iter().map(|&i| self.tabs[i].key(cx)).collect();
+        match self.scopes.pick(&scope, &keys) {
+            Some(pos) => self.activate(strip[pos], window, cx),
+            None => match scope {
+                Some(name) => {
+                    crate::workspace_ui::open(self, crate::workspace_ui::PageId::Workspace(name), window, cx);
+                }
+                None => self.show_dashboard(window, cx),
+            },
+        }
+        cx.notify();
     }
 
     /// The selected workspace's repo holding `path`, and its folder in the workspace.
@@ -410,11 +475,10 @@ impl OrbitApp {
                 self.active = self.tab_index(&key, cx);
             }
         }
-        // The dock, run widget and status bar follow the tab's workspace (`focusWorkspace`).
-        if let Some(ws) = self.tab_workspace(&key, cx) {
-            if self.selected != Some(ws) {
-                self.select_workspace(ws, cx);
-            }
+        // A tab of another scope switches to it; nav pages keep the scope.
+        if let Some(scope) = self.active_tab().and_then(|t| self.tab_scope(t, cx)) {
+            self.set_scope(&scope, cx);
+            self.scopes.record(scope, key.clone());
         }
         if let Some(tab) = self.active.and_then(|a| self.tabs.get(a)) {
             window.focus(&tab.focus_handle(cx), cx);
@@ -428,19 +492,41 @@ impl OrbitApp {
 
     /// The workspace (index) a tab works in: its page, its sessions' scope, its files.
     pub fn tab_workspace(&self, key: &str, cx: &App) -> Option<usize> {
-        let by_name = |n: &str| self.workspaces.iter().position(|w| w.meta.name == n);
         let tab = self.tabs.iter().find(|t| t.key(cx) == key)?;
+        if tab.is_nav(cx) {
+            return None;
+        }
+        self.workspace_of(tab, cx)
+    }
+
+    fn workspace_of(&self, tab: &Tab, cx: &App) -> Option<usize> {
+        let by_name = |n: &str| self.workspaces.iter().position(|w| w.meta.name == n);
+        let by_path = |p: &Path| self.workspaces.iter().position(|w| p.starts_with(&w.dir));
         match &tab.kind {
             TabKind::Terminal(t) => by_name(&t.read(cx).meta.workspace),
-            TabKind::Editor(e) => self.workspaces.iter().position(|w| e.read(cx).path.starts_with(&w.dir)),
-            TabKind::Diff(d) => self.workspaces.iter().position(|w| d.read(cx).path.starts_with(&w.dir)),
-            _ if tab.is_nav(cx) => None,
-            _ => {
-                let rest = key.strip_prefix("page:ws:").or_else(|| key.strip_prefix("review:changes:"));
-                let rest = rest.or_else(|| ["page:ralph:", "page:usage:", "page:artifacts:"].iter().find_map(|p| key.strip_prefix(p)));
-                rest.and_then(by_name)
-            }
+            TabKind::Editor(e) => by_path(&e.read(cx).path),
+            TabKind::Diff(d) => by_path(&d.read(cx).path),
+            TabKind::Review(r) => by_name(&r.read(cx).workspace),
+            TabKind::Page(_) | TabKind::Tool(_) => scope::page_workspace(&tab.key(cx)).and_then(by_name),
         }
+    }
+
+    /// The tab's scope; None for nav pages, which belong to none.
+    pub fn tab_scope(&self, tab: &Tab, cx: &App) -> Option<Scope> {
+        if tab.is_nav(cx) {
+            return None;
+        }
+        Some(self.workspace_of(tab, cx).map(|ix| self.workspaces[ix].meta.name.clone()))
+    }
+
+    /// On the strip's scope (the active one), or a nav page.
+    pub fn in_scope(&self, tab: &Tab, cx: &App) -> bool {
+        self.tab_scope(tab, cx).is_none_or(|s| s == self.scope())
+    }
+
+    /// A file's scope: the workspace it is in.
+    pub fn path_scope(&self, path: &Path) -> Scope {
+        scope::of_path(self.workspaces.iter().map(|w| (w.meta.name.as_str(), w.dir.as_path())), path)
     }
 
     /// The workspace in focus (`focusWorkspace`): the active tab's. Nav pages have none.
@@ -449,10 +535,13 @@ impl OrbitApp {
         self.tab_workspace(&key, cx).map(|ix| &self.workspaces[ix])
     }
 
-    /// Indices of the tabs on the strip, in its order: sessions and views, then files.
+    /// Indices of the tabs on the strip, in its order: the active scope's
+    /// sessions and views, then its files.
     pub fn strip_tabs(&self, cx: &App) -> Vec<usize> {
-        let shown: Vec<usize> =
-            (0..self.tabs.len()).filter(|&i| !self.tabs[i].is_nav(cx) && !self.minimized.contains(&self.tabs[i].key(cx))).collect();
+        let scope = Some(self.scope());
+        let shown: Vec<usize> = (0..self.tabs.len())
+            .filter(|&i| self.tab_scope(&self.tabs[i], cx) == scope && !self.minimized.contains(&self.tabs[i].key(cx)))
+            .collect();
         let (files, rest): (Vec<usize>, Vec<usize>) = shown.into_iter().partition(|&i| self.tabs[i].is_file());
         rest.into_iter().chain(files).collect()
     }
@@ -541,7 +630,9 @@ impl OrbitApp {
         };
         let editor = self.new_editor(path.clone(), text, window, cx);
         let tab = Tab { kind: TabKind::Editor(editor.clone()), preview };
-        let reuse = preview.then(|| self.tabs.iter().position(|t| t.preview && !t.dirty(cx))).flatten();
+        // The preview slot of the file's own scope.
+        let scope = Some(self.path_scope(&path));
+        let reuse = preview.then(|| self.tabs.iter().position(|t| t.preview && !t.dirty(cx) && self.tab_scope(t, cx) == scope)).flatten();
         let ix = match reuse {
             Some(ix) => {
                 self.tabs[ix] = tab;
@@ -733,7 +824,8 @@ impl OrbitApp {
             .iter()
             .enumerate()
             .map(|(ix, t)| {
-                let picked = which(ix, t);
+                // Batch closes act on the shown scope only.
+                let picked = which(ix, t) && self.in_scope(t, cx);
                 if picked && t.is_agent(cx) {
                     minimize.push(t.key(cx));
                     return false;
@@ -771,8 +863,8 @@ impl OrbitApp {
     }
 
     pub fn close_files(&mut self, set: FileSet, window: &mut Window, cx: &mut Context<Self>) {
-        // Positions among the file tabs, as the React menu counts them.
-        let files: Vec<usize> = (0..self.tabs.len()).filter(|&i| self.tabs[i].is_file()).collect();
+        // Positions among the scope's file tabs, as the React menu counts them.
+        let files = self.scope_files(cx);
         let at = |ix: usize| files.iter().position(|&f| f == ix);
         let pick: Vec<bool> = (0..self.tabs.len())
             .map(|i| match (set, at(i)) {
@@ -801,6 +893,11 @@ impl OrbitApp {
         self.report_kept(kept, cx);
     }
 
+    /// The active scope's file tabs.
+    fn scope_files(&self, cx: &App) -> Vec<usize> {
+        (0..self.tabs.len()).filter(|&i| self.tabs[i].is_file() && self.in_scope(&self.tabs[i], cx)).collect()
+    }
+
     pub fn keep_open(&mut self, ix: usize, cx: &mut Context<Self>) {
         if let Some(t) = self.tabs.get_mut(ix) {
             t.preview = false;
@@ -812,7 +909,7 @@ impl OrbitApp {
     pub fn open_tab_menu(&mut self, ix: usize, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.tabs.get(ix) else { return };
         let key = tab.key(cx);
-        let files: Vec<usize> = (0..self.tabs.len()).filter(|&i| self.tabs[i].is_file()).collect();
+        let files = self.scope_files(cx);
         let at = files.iter().position(|&f| f == ix);
         let with = |f: fn(&mut OrbitApp, usize, &mut Window, &mut Context<OrbitApp>)| {
             let key = key.clone();
@@ -838,19 +935,6 @@ impl OrbitApp {
         }
         items.push(MenuItem::new("Close Other Tabs", with(|a, ix, w, cx| a.close_other_tabs(ix, w, cx))));
         items.push(MenuItem::new("Close All Tabs", |a, w, cx| a.close_all_tabs(w, cx)).danger());
-        self.open_menu(position, items, window, cx);
-    }
-
-    pub fn open_workspace_menu(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
-        let items = self
-            .workspaces
-            .iter()
-            .enumerate()
-            .map(|(ix, ws)| {
-                let label = if self.selected == Some(ix) { format!("✓  {}", ws.meta.name) } else { format!("    {}", ws.meta.name) };
-                MenuItem::new(label, move |a: &mut OrbitApp, _: &mut Window, cx: &mut Context<OrbitApp>| a.select_workspace(ix, cx))
-            })
-            .collect();
         self.open_menu(position, items, window, cx);
     }
 
@@ -946,28 +1030,38 @@ impl OrbitApp {
     }
 
     pub fn snapshot(&self, cx: &App) -> SavedState {
-        let tabs: Vec<SavedTab> = self
-            .tabs
-            .iter()
-            .filter_map(|t| match &t.kind {
+        // Sessions are saved by the sessions store; they only appear as a scope's last tab.
+        fn slot(scopes: &mut Vec<SavedScope>, ws: Scope) -> &mut SavedScope {
+            let i = scopes.iter().position(|s| s.workspace == ws).unwrap_or_else(|| {
+                scopes.push(SavedScope { workspace: ws, ..Default::default() });
+                scopes.len() - 1
+            });
+            &mut scopes[i]
+        }
+        let mut scopes: Vec<SavedScope> = vec![];
+        for t in &self.tabs {
+            let saved = match &t.kind {
                 TabKind::Editor(e) => {
                     let e = e.read(cx);
-                    Some(SavedTab::Editor { path: e.path.clone(), preview: t.preview, cursor: Some(e.cursor(cx)) })
+                    SavedTab::Editor { path: e.path.clone(), preview: t.preview, cursor: Some(e.cursor(cx)) }
                 }
-                TabKind::Diff(d) => Some(SavedTab::Diff { path: d.read(cx).path.clone() }),
-                // Sessions come back with the Sessions stage (scrollback restore).
-                TabKind::Terminal(_) | TabKind::Review(_) | TabKind::Page(_) | TabKind::Tool(_) => None,
-            })
-            .collect();
-        let saved = |t: &Tab| matches!(t.kind, TabKind::Editor(_) | TabKind::Diff(_));
-        let active = self.active.and_then(|a| {
-            let ix = self.tabs[..a].iter().filter(|t| saved(t)).count();
-            saved(&self.tabs[a]).then_some(ix)
-        });
+                TabKind::Diff(d) => SavedTab::Diff { path: d.read(cx).path.clone() },
+                TabKind::Terminal(_) | TabKind::Review(_) | TabKind::Page(_) | TabKind::Tool(_) => continue,
+            };
+            let Some(ws) = self.tab_scope(t, cx) else { continue };
+            slot(&mut scopes, ws).tabs.push(saved);
+        }
+        for t in &self.tabs {
+            let Some(ws) = self.tab_scope(t, cx) else { continue };
+            if self.scopes.last(&ws) == Some(t.key(cx).as_str()) {
+                slot(&mut scopes, ws).active = Some(t.saved_key(cx));
+            }
+        }
         SavedState {
-            workspace: self.workspace().map(|w| w.meta.name.clone()),
-            tabs,
-            active,
+            workspace: self.scope(),
+            scopes,
+            tabs: vec![],
+            active: None,
             layout: self.layout.clone(),
             theme: Some(crate::theme::pref()),
             ws_collapsed: self.ws_collapsed.iter().cloned().collect(),
@@ -1007,21 +1101,23 @@ impl OrbitApp {
 
     /// Reopens what was open last time. Files that are gone are skipped.
     pub fn restore(&mut self, saved: SavedState, window: &mut Window, cx: &mut Context<Self>) {
+        let saved = saved.migrate(|p| self.path_scope(p));
         self.layout = saved.layout;
         self.ws_collapsed = saved.ws_collapsed.into_iter().collect();
-        // Nothing open (after the sessions come back too): the Dashboard, as the React app starts.
-        cx.defer_in(window, |a, w, cx| {
-            if a.active.is_none() {
-                a.show_dashboard(w, cx);
-            }
-        });
+        // After the sessions come back (their restore was deferred first): each
+        // scope's last tab, and the active scope. Nothing open: the Dashboard.
+        cx.defer_in(window, |a, w, cx| a.finish_restore(w, cx));
+        let tabs: Vec<&SavedTab> = saved.scopes.iter().flat_map(|s| &s.tabs).collect();
+        if !saved.scopes.is_empty() {
+            let last = saved.scopes.iter().filter_map(|s| Some((s.workspace.clone(), s.active.clone()?))).collect();
+            self.restoring = Some((saved.workspace.clone(), last));
+        }
         if let Some(ix) = saved.workspace.and_then(|name| self.workspaces.iter().position(|w| w.meta.name == name)) {
             self.select_workspace(ix, cx);
         }
         self.applying_nav = true;
-        let mut opened = vec![];
         let mut missing = 0;
-        for tab in &saved.tabs {
+        for tab in tabs {
             let ok = match tab {
                 SavedTab::Editor { path, preview, cursor } if path.is_file() => {
                     let editor = self.open_file(path.clone(), *preview, window, cx);
@@ -1034,20 +1130,33 @@ impl OrbitApp {
                 SavedTab::Diff { path } if path.is_file() => self.open_diff(path.clone(), window, cx).is_some(),
                 _ => false,
             };
-            opened.push(ok.then(|| self.active.and_then(|a| self.tabs.get(a)).map(|t| t.key(cx))).flatten());
             missing += !ok as usize;
         }
         self.applying_nav = false;
-        let active = saved.active.and_then(|a| opened.get(a).cloned().flatten()).and_then(|k| self.tab_index(&k, cx));
-        if let Some(ix) = active.or(self.tabs.len().checked_sub(1)) {
-            self.activate(ix, window, cx);
-        }
         if missing > 0 {
             let s = if missing > 1 { "s" } else { "" };
             self.toast(ToastKind::Info, format!("{missing} tab{s} from last time could not be reopened"), None, cx);
         }
         // What was just restored is what's on disk.
         self.persist.last = serde_json::to_string_pretty(&self.snapshot(cx)).unwrap_or_default();
+    }
+
+    /// The saved scope state, once every tab is back.
+    fn finish_restore(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let restoring = self.restoring.take();
+        let Some((active, last)) = restoring.filter(|_| !self.tabs.is_empty()) else {
+            if self.active.is_none() {
+                self.show_dashboard(window, cx);
+            }
+            return;
+        };
+        self.scopes.clear();
+        for (scope, saved_key) in last {
+            if let Some(t) = self.tabs.iter().find(|t| t.saved_key(cx) == saved_key) {
+                self.scopes.record(scope, t.key(cx));
+            }
+        }
+        self.show_scope(active, window, cx);
     }
 
     fn on_lsp_notification(&mut self, n: Notification, cx: &mut Context<Self>) {
