@@ -1,31 +1,11 @@
 //! The Pull requests page: the workspace's open PRs and their live status,
-//! CI checks with failed-check logs and re-runs, and creating PRs for the
-//! repos that have none (`PrsModal.tsx`, the workspace page's tracker).
+//! CI checks with failed-check logs and re-runs. Repos without a PR open the
+//! create-PRs modal (`git::prs`).
 use super::ui::{self, Tone};
 use super::{toolbar, Load, ReviewTab};
 use crate::theme::{self, c};
-use gpui::{div, prelude::*, px, ClickEvent, Context, Entity, Window};
-use gpui_component::input::InputState;
-use orbit_core::prs::{self, PrSpec};
-
-/// A repo PRs can be created for, with its title and description.
-pub struct CreateRow {
-    pub repo: String,
-    pub include: bool,
-    pub title: Entity<InputState>,
-    pub body: Entity<InputState>,
-    pub drafting: bool,
-}
-
-/// A title from the branch: `feat/add-login` → "Add login".
-pub fn title_from_branch(branch: &str) -> String {
-    let last = branch.rsplit('/').next().unwrap_or(branch).replace(['-', '_'], " ");
-    let mut chars = last.trim().chars();
-    match chars.next() {
-        Some(f) => f.to_uppercase().chain(chars).collect(),
-        None => String::new(),
-    }
-}
+use gpui::{div, prelude::*, px, ClickEvent, Context, Window};
+use orbit_core::prs;
 
 impl ReviewTab {
     pub(super) fn refresh_prs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -50,88 +30,10 @@ impl ReviewTab {
                     })
                 })
                 .await;
-            let _ = this.update_in(cx, |t, window, cx| {
+            let _ = this.update_in(cx, |t, _, cx| {
                 t.prs = prs.map_or_else(Load::Failed, Load::Ready);
                 t.status = status.map_or_else(Load::Failed, Load::Ready);
                 t.checks = checks.map_or_else(Load::Failed, Load::Ready);
-                t.sync_create_rows(window, cx);
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    /// One row per repo without an open PR.
-    fn sync_create_rows(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let has_pr: Vec<String> = self.prs.ready().into_iter().flatten().map(|p| p.repo.clone()).collect();
-        self.create.retain(|r| !has_pr.contains(&r.repo));
-        let title = title_from_branch(&self.branch);
-        for repo in self.repos.clone() {
-            if has_pr.contains(&repo) || self.create.iter().any(|r| r.repo == repo) {
-                continue;
-            }
-            let t = title.clone();
-            let title = cx.new(|cx| InputState::new(window, cx).placeholder("Title").default_value(t));
-            let body = cx.new(|cx| InputState::new(window, cx).placeholder("Description (optional)"));
-            self.create.push(CreateRow { repo, include: true, title, body, drafting: false });
-        }
-    }
-
-    fn create_prs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let specs: Vec<PrSpec> = self
-            .create
-            .iter()
-            .filter(|r| r.include)
-            .map(|r| PrSpec { repo: r.repo.clone(), title: r.title.read(cx).value().to_string(), body: r.body.read(cx).value().to_string(), draft: false })
-            .collect();
-        if specs.is_empty() {
-            self.message = Some("Pick at least one repository".into());
-            return cx.notify();
-        }
-        if let Some(r) = specs.iter().find(|s| s.title.trim().is_empty()) {
-            self.message = Some(format!("{}: the PR needs a title", r.repo));
-            return cx.notify();
-        }
-        self.creating = true;
-        self.message = None;
-        let (ws, base) = (self.workspace.clone(), self.base.clone());
-        cx.spawn_in(window, async move |this, cx| {
-            let result = cx.background_executor().spawn(async move { prs::create_all(&ws, &base, &specs) }).await;
-            let _ = this.update_in(cx, |t, window, cx| {
-                t.creating = false;
-                match result {
-                    Ok(list) => {
-                        let n = list.len();
-                        t.with_app(window, cx, |a, _, cx| {
-                            a.toast(crate::toast::ToastKind::Success, format!("{n} pull request{} open", if n == 1 { "" } else { "s" }), None, cx)
-                        });
-                        t.refresh_prs(window, cx);
-                    }
-                    Err(e) => t.message = Some(e),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    /// AI title and description for one repo (`ws_pr_draft`).
-    fn draft(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(row) = self.create.get_mut(ix) else { return };
-        row.drafting = true;
-        let (ws, repo) = (self.workspace.clone(), row.repo.clone());
-        cx.spawn_in(window, async move |this, cx| {
-            let r = cx.background_executor().spawn(async move { orbit_core::agent::pr_draft(&ws, &repo) }).await;
-            let _ = this.update_in(cx, |t, window, cx| {
-                let Some(row) = t.create.get_mut(ix) else { return };
-                row.drafting = false;
-                match r {
-                    Ok(d) => {
-                        row.title.update(cx, |i, cx| i.set_value(d.title, window, cx));
-                        row.body.update(cx, |i, cx| i.set_value(d.body, window, cx));
-                    }
-                    Err(e) => t.message = Some(e),
-                }
                 cx.notify();
             });
         })
@@ -195,6 +97,41 @@ impl ReviewTab {
             })),
             other => body.child(load_line(other)),
         };
+        // Repos without a PR: the create modal does titles, AI drafts and readiness.
+        if let Load::Ready(list) = &self.prs {
+            let missing: Vec<&str> = self.repos.iter().filter(|r| !list.iter().any(|p| &p.repo == *r)).map(String::as_str).collect();
+            if !missing.is_empty() {
+                body = body.child(
+                    div()
+                        .mx_3()
+                        .my_1()
+                        .px_3()
+                        .py_2()
+                        .rounded(px(6.))
+                        .border_1()
+                        .border_dashed()
+                        .border_color(c(theme::BORDER))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .text_sm()
+                        .child(div().flex_1().min_w_0().truncate().text_color(c(theme::TEXT_DIM)).child(format!(
+                            "{} without a pull request: {}",
+                            if missing.len() == 1 { "1 repo".to_string() } else { format!("{} repos", missing.len()) },
+                            missing.join(", ")
+                        )))
+                        .child(ui::button("create-prs", "Create pull requests…", Tone::Primary).on_click(cx.listener(|t, _: &ClickEvent, w, cx| {
+                            // Deferred: the command switches tabs, which reads this one.
+                            let app = t.app.clone();
+                            w.defer(cx, move |w, cx| {
+                                if let Some(app) = app.upgrade() {
+                                    app.update(cx, |a, cx| crate::commands::run("git.createPrs", a, w, cx));
+                                }
+                            });
+                        }))),
+                );
+            }
+        }
         // Saved PRs no longer open (merged, closed).
         let closed: Vec<_> = self
             .status
@@ -286,58 +223,6 @@ impl ReviewTab {
             };
         }
 
-        // Create.
-        if !self.create.is_empty() {
-            body = body.child(ui::section(format!("CREATE PULL REQUESTS INTO {}", self.base)));
-            for (ix, row) in self.create.iter().enumerate() {
-                let include = row.include;
-                body = body.child(
-                    div()
-                        .mx_3()
-                        .my_1()
-                        .p_2()
-                        .rounded(px(6.))
-                        .border_1()
-                        .border_color(c(theme::BORDER))
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .text_sm()
-                                .child(
-                                    ui::button(format!("create:{}:include", row.repo), if include { "✓" } else { " " }, Tone::Plain)
-                                        .w(px(20.))
-                                        .on_click(cx.listener(move |t, _: &ClickEvent, _, cx| {
-                                            if let Some(r) = t.create.get_mut(ix) {
-                                                r.include = !r.include;
-                                            }
-                                            cx.notify();
-                                        })),
-                                )
-                                .child(div().flex_1().text_color(c(theme::TEXT)).child(row.repo.clone()))
-                                .child(
-                                    ui::button(format!("create:{}:draft", row.repo), if row.drafting { "Drafting…" } else { "Draft with AI" }, Tone::Plain)
-                                        .on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.draft(ix, w, cx))),
-                                ),
-                        )
-                        .when(include, |d| d.child(crate::workspace_ui::kit::input(&row.title)).child(crate::workspace_ui::kit::input(&row.body))),
-                );
-            }
-            body = body.child(
-                div().px_3().pt_2().flex().child(
-                    ui::button("create-prs", if self.creating { "Creating…" } else { "Create pull requests" }, Tone::Primary)
-                        .on_click(cx.listener(|t, _: &ClickEvent, w, cx| {
-                            if !t.creating {
-                                t.create_prs(w, cx)
-                            }
-                        })),
-                ),
-            );
-        }
         div().size_full().flex().flex_col().child(bar).child(body)
     }
 }
@@ -354,15 +239,5 @@ fn load_line<T>(l: &Load<T>) -> gpui::Div {
     match l {
         Load::Failed(e) => div().px_3().py_1().text_xs().text_color(c(theme::DANGER)).child(e.clone()),
         _ => crate::motion::skeleton_table(3, 3),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn titles_come_from_the_branch() {
-        assert_eq!(super::title_from_branch("feat/add-login_page"), "Add login page");
-        assert_eq!(super::title_from_branch("fix"), "Fix");
-        assert_eq!(super::title_from_branch(""), "");
     }
 }
