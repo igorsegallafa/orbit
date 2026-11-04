@@ -90,7 +90,10 @@ Self-test runs neither save nor restore sessions in the user's config. Point `OR
 scratch folder to test that (and to keep scrollback and agent settings files out of the real one).
 Agent sessions are tested without a real agent: `scripts/stub-agent/claude` stands in for Claude
 Code (prints its argv, posts the hooks from Orbit's `--settings` file, waits for an answer); put it
-first on `PATH`. Use `SHELL=/bin/bash` (zsh may start an interactive setup wizard).
+first on `PATH`. Use `SHELL=/bin/bash` (zsh may start an interactive setup wizard). Its print mode
+(`claude -p`, `scripts/stub-agent/claude-print`) answers Ralph's PRD interview (one round, then
+done), writes the PRD files when asked, and runs a Ralph iteration (ticks the next story and
+commits, or commits a plan task); `ORBIT_STUB_LOG=<file>` records each call.
 
 `--do` runs shell steps last, separated by `;` (`src/steps.rs`). Mouse steps target elements that
 render a `probe("name")` (tabs `tab:<ix>`, menu items `menu:<label>`, dialog buttons
@@ -809,11 +812,22 @@ sidebar (*WORKSPACE*: Ralph, AI usage, CI artifacts; *ORBIT*: Integrations, Sett
   share settings.
 - **Integrations**: Shortcut, Linear, Figma; masked token, Show/Hide, Connect (validated by the
   provider, then saved), Disconnect.
-- **Ralph** (`ralph.open`): target *Plan* (PLAN.md, one agent per task) or a repo's PRD
-  (`scripts/ralph/prd.json`); iterations 3/5/10/until done, push toggle, Start / Pause after
-  iteration / Stop; the stories with the current one highlighted, the run's counters, the live feed
-  (`ralph-event`s fanned out from one `Events` sink to every open Ralph tab) and past runs. Writing
-  and editing a PRD (interview, generation, editor) and the custom iteration prompt are not ported.
+- **Ralph** (`src/pages/ralph/`, `RalphView.tsx` and its modals): `pages::open_ralph(app, scope,
+  …)` opens the one tab per scope (`page:ralph:<scope>`). A workspace runs its plan (PLAN.md, one
+  agent per task); a repository (`@repo`, from the repo page) runs its clone's PRD
+  (`scripts/ralph/prd.json`, one agent per story). Entry points: `ralph.open` (selected workspace),
+  the dashboard card, the workspace page's Ralph tool and plan card, the repo page's Ralph button,
+  and a Ralph inbox item. *New PRD* (`prd_form.rs`): a brief, an optional interview in rounds
+  (options with the recommended one starred, *I'm ready*), the editable decisions, then the agent
+  writes `tasks/prd-<repo>.md` and the JSON (live log, Cancel). *Edit* (`editor.rs`): the rules,
+  each story's title, description, criteria, notes and done flag, reorder, delete, add. *Start*
+  (`run_form.rs`): fixed iterations or until done, stop after a story, agent and model for this run,
+  extra instructions, the workspace's iteration prompt (save / restore default), time budget, stall
+  limit, per-iteration timeout, wait on usage limits, push; the last config per scope is kept in
+  `<config dir>/native-ralph.json`. Then Pause after iteration / Stop, the stories with the current
+  one, the counters, the live feed (`feed.rs`: per iteration, tool chips, `**bold**`/`` `code` ``,
+  follows the end, *↓ Latest*) and past runs. A run ending toasts and adds an inbox item even with
+  no Ralph tab open. An empty plan offers *Plan this feature* (`workspace.plan`, the Plan modal).
 - **AI usage** (`workspace.usage`): per model tokens and cost, sessions on click, the Claude 5h/7d
   windows; every 30 s. **CI artifacts** (`workspace.artifacts`): latest run per workflow of each
   repo's branch; Download extracts into `~/Downloads/Orbit/<workspace>/` and opens the folder.
@@ -867,8 +881,13 @@ output|shared|worktree|branch-only|auto-switch|clone-now|save|cancel`, `local-pa
 `github-filter`, `github:<owner/repo>`, `group-new`, `group-create`, `group:<g>:edit|remove`,
 `group-member:<repo>`, `group-save`, `ai-agent:<label>`, `ai-model`, `ai-fast-model`, `ai-remote:on|off`,
 `ai-test`, `lang:<id>:command|enabled|errors-only`, `lsp:<id>:log|stop`, `health-recheck`,
-`updates-check`, `integration:<kind>:token|show|connect|disconnect`, `ralph-target:<plan|repo>`,
-`ralph-iterations:<n|until-done>`, `ralph-push`, `ralph-start|pause|stop`, `usage:<model>`,
+`updates-check`, `integration:<kind>:token|show|connect|disconnect`, Ralph's
+`ralph-start|pause|stop|edit-plan|new-prd|create-prd|plan-feature|edit|edit-save|edit-discard|add-story|jump`,
+`ralph-story:<id>`, `ralph-run:<id>`, `ralph-edit:<id>:title|desc|criteria|notes|done|up|down|delete`,
+`ralph-edit-rules`, the run form's `ralph-run-fixed|until|iterations|stop-after|agent|model|extra|
+prompt-toggle|prompt|hours|stall|timeout|wait|wait-min|push|cancel|start`, `ralph-prompt-save|restore`,
+the PRD form's `prd-brief|write-now|interview|opt:<i>|answer|ready|next|summary|write|gen-cancel|cancel|close`,
+`usage:<model>`,
 `artifact:<repo>:<name>`. Inputs inside the pages fill through `click:<probe>` then `type:`.
 
 ## Stage: shell parity (themes, sidebar, frame, dock)

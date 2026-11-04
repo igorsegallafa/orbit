@@ -332,6 +332,7 @@ pub fn init(cx: &mut App) {
         Command::new("workspace.remove", "Remove Workspace…")
             .when(has_ws)
             .run(|a, w, cx| open_ws_with(a, w, cx, |t, w, cx| t.confirm_remove(false, w, cx))),
+        Command::new("workspace.plan", "Plan the Feature…").when(has_ws).run(|a, w, cx| open_ws_with(a, w, cx, |t, w, cx| t.open_plan_modal(w, cx))),
         Command::new("git.commit", "Commit…").when(has_ws).run(|a, w, cx| open_ws_with(a, w, cx, |t, w, cx| t.start_commit(w, cx))),
         Command::new("git.push", "Push…").when(has_ws).run(|a, w, cx| open_ws_with(a, w, cx, |t, w, cx| t.start_push(w, cx))),
         Command::new("git.rebase", "Rebase onto Base Branch…").when(has_ws).run(|a, w, cx| open_ws_with(a, w, cx, |t, w, cx| t.start_rebase(w, cx))),
