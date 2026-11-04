@@ -25,6 +25,11 @@ pub fn probe(name: impl Into<String>) -> AnyElement {
         .into_any_element()
 }
 
+/// Records bounds an element computed itself (a scrollbar's thumb).
+pub fn record(name: String, bounds: Bounds<Pixels>) {
+    BOUNDS.with(|b| b.borrow_mut().insert(name, bounds));
+}
+
 pub fn bounds(name: &str) -> Option<Bounds<Pixels>> {
     BOUNDS.with(|b| b.borrow().get(name).copied())
 }

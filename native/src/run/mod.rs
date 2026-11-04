@@ -808,7 +808,7 @@ impl RunStore {
         }
         if let Some(r) = &self.run {
             let v = r.view.read(cx);
-            let _ = writeln!(out, "  run {}{}:", r.name, if r.exited { " (exited)" } else { "" });
+            let _ = writeln!(out, "  run {}{}: {}", r.name, if r.exited { " (exited)" } else { "" }, v.scroll_summary());
             for line in v.grid_text().trim_end().lines().filter(|l| !l.trim().is_empty()).take(12) {
                 let _ = writeln!(out, "    | {line}");
             }

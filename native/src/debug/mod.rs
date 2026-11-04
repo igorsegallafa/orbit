@@ -622,7 +622,7 @@ impl DebugStore {
             let _ = writeln!(out, "  console {kind:?}: {text}");
         }
         if let Some(p) = &self.program {
-            let _ = writeln!(out, "  program terminal{}:", if p.read(cx).exited() { " (closed)" } else { "" });
+            let _ = writeln!(out, "  program terminal{}: {}", if p.read(cx).exited() { " (closed)" } else { "" }, p.read(cx).scroll_summary());
             for line in p.read(cx).grid_text().trim_end().lines().filter(|l| !l.trim().is_empty()).take(24) {
                 let _ = writeln!(out, "    | {line}");
             }

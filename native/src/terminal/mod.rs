@@ -13,6 +13,7 @@ mod input;
 
 pub use grid::{FRAMES, FRAME_US_MAX, FRAME_US_TOTAL};
 
+use crate::scrollbar;
 use crate::sessions::status::{self, Hook, Status, Tracker};
 use crate::sessions::SessionMeta;
 use crate::theme::{self, c, hsla};
@@ -28,13 +29,16 @@ use alacritty_terminal::{
 use futures::{channel::mpsc, StreamExt};
 use gpui::{
     canvas, div, fill, outline, point, prelude::*, px, size, App, Bounds, ClipboardItem, Context, FocusHandle,
-    EventEmitter, Focusable, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollEvent,
-    SharedString, Subscription, Task, Window,
+    EventEmitter, Focusable, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
+    ScrollEvent, SharedString, Subscription, Task, Window,
 };
+use gpui_component::scroll::ScrollbarHandle;
 use grid::Geometry;
 use input::{key_to_bytes, mouse_report, MouseReport};
 use orbit_core::pty;
 use std::{
+    cell::Cell,
+    rc::Rc,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -155,6 +159,55 @@ pub enum Signal {
 /// Agents without hooks: a stretch of activity this long ending in silence counts as "done".
 const FALLBACK_DONE: Duration = Duration::from_secs(10);
 
+/// The scrollback as a `ScrollbarHandle`: a line is a viewport's height over
+/// its rows, so the thumb is rows / (scrollback + rows) of the track. The
+/// alternate screen has no scrollback, so it shows no bar.
+#[derive(Clone)]
+struct ScrollbackHandle {
+    shared: Arc<Shared>,
+    bounds: Rc<Cell<Bounds<Pixels>>>,
+}
+
+impl ScrollbackHandle {
+    /// Scrollback lines, rows, display offset; no scrollback in the alternate screen.
+    fn lines(&self) -> (usize, usize, usize) {
+        let term = self.shared.term.lock();
+        let grid = term.grid();
+        let history = if term.mode().contains(TermMode::ALT_SCREEN) { 0 } else { grid.history_size() };
+        (history, grid.screen_lines().max(1), grid.display_offset())
+    }
+
+    fn line_px(&self, rows: usize) -> Pixels {
+        self.bounds.get().size.height / rows as f32
+    }
+}
+
+impl ScrollbarHandle for ScrollbackHandle {
+    fn viewport_bounds(&self) -> Bounds<Pixels> {
+        self.bounds.get()
+    }
+
+    fn offset(&self) -> gpui::Point<Pixels> {
+        let (history, rows, offset) = self.lines();
+        point(px(0.), -self.line_px(rows) * history.saturating_sub(offset) as f32)
+    }
+
+    fn set_offset(&self, to: gpui::Point<Pixels>) {
+        let (history, rows, offset) = self.lines();
+        let from_top = ((-to.y / self.line_px(rows)).round().max(0.) as usize).min(history);
+        let delta = (history - from_top) as i32 - offset as i32;
+        if delta != 0 {
+            self.shared.term.lock().scroll_display(Scroll::Delta(delta));
+        }
+    }
+
+    fn content_size(&self) -> gpui::Size<Pixels> {
+        let (history, rows, _) = self.lines();
+        let b = self.bounds.get().size;
+        size(b.width, self.line_px(rows) * (history + rows) as f32)
+    }
+}
+
 pub struct TerminalView {
     shared: Arc<Shared>,
     pub meta: SessionMeta,
@@ -165,6 +218,7 @@ pub struct TerminalView {
     exited: Arc<AtomicBool>,
     focus: FocusHandle,
     scroll_remainder: f32,
+    scrollbar: ScrollbackHandle,
     /// A selection drag is in progress.
     selecting: bool,
     /// The cell of the last motion report, so moving within a cell sends nothing.
@@ -304,6 +358,7 @@ impl TerminalView {
         let focus = cx.focus_handle();
         inhibit::register(&focus);
         Self {
+            scrollbar: ScrollbackHandle { shared: shared.clone(), bounds: Rc::default() },
             shared,
             meta,
             tracker,
@@ -436,6 +491,13 @@ impl TerminalView {
     /// Window position of a viewport cell's center, once painted (self-test).
     pub fn cell_position(&self, col: usize, row: usize) -> Option<gpui::Point<gpui::Pixels>> {
         self.shared.geometry.lock().unwrap().map(|g| g.cell_center(col, row))
+    }
+
+    /// The scrollback position and whether the scrollbar has anything to show (self-test dumps).
+    pub fn scroll_summary(&self) -> String {
+        let (history, rows, offset) = self.scrollbar.lines();
+        let alt = self.shared.term.lock().mode().contains(TermMode::ALT_SCREEN);
+        format!("scroll: display offset {offset} of {history}, rows {rows}, alt screen {alt}, scrollbar {}", history > 0)
     }
 
     pub fn scroll_lines(&mut self, lines: i32, cx: &mut Context<Self>) {
@@ -658,15 +720,23 @@ impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let shared = self.shared.clone();
         let focused = self.focus.is_focused(window);
+        let viewport = self.scrollbar.bounds.clone();
         div()
             .id("terminal")
             .track_focus(&self.focus)
+            .relative()
             .size_full()
             .bg(c(theme::BG))
             .cursor_text()
             .on_key_down(cx.listener(Self::on_key_down))
             .on_modifiers_changed(|ev: &gpui::ModifiersChangedEvent, window, cx| inhibit::set_alt(ev.modifiers.alt, window, cx))
             .on_scroll(cx.listener(Self::on_scroll))
+            .capture_any_mouse_down(cx.listener(|this, ev: &MouseDownEvent, _, cx| {
+                if ev.button == MouseButton::Left && scrollbar::page(&this.scrollbar, ev.position) {
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_down(MouseButton::Middle, cx.listener(Self::on_mouse_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::on_mouse_down))
@@ -676,7 +746,10 @@ impl Render for TerminalView {
             .on_mouse_up(MouseButton::Right, cx.listener(Self::on_mouse_up))
             .child(
                 canvas(
-                    move |bounds, window, _cx| (std::time::Instant::now(), grid::layout(&shared, bounds, window)),
+                    move |bounds, window, _cx| {
+                        viewport.set(bounds);
+                        (std::time::Instant::now(), grid::layout(&shared, bounds, window))
+                    },
                     move |bounds, (started, frame), window, cx| {
                         window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
                             for (b, color) in &frame.rects {
@@ -707,5 +780,6 @@ impl Render for TerminalView {
                 )
                 .size_full(),
             )
+            .child(scrollbar::vertical("term", &self.scrollbar))
     }
 }

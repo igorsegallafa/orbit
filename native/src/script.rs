@@ -331,6 +331,7 @@ pub fn dump(app: &OrbitApp, log: &str, cx: &gpui::App) -> String {
             let _ = writeln!(out, "selection: {:?}", t.selection_text());
             let _ = writeln!(out, "copied: {:?}", t.last_copied);
             let _ = writeln!(out, "kitty graphics: {}", t.graphics_summary());
+            let _ = writeln!(out, "{}", t.scroll_summary());
             out.push_str(t.grid_text().trim_end());
             out.push('\n');
         }

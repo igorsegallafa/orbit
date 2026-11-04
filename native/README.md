@@ -367,7 +367,8 @@ Caveats found:
 | `src/lsp/` | `mod.rs` file → language and the server registry · `server.rs` JSON-RPC client and URI mapping over `orbit_core::lsp` (which picks, starts and feeds the process) · `paths.rs` URIs and root rebase |
 | `src/diff_view.rs` | diff tab over `git diff HEAD` (untracked files too), F7 navigation, and REVIEW.md notes inline in a workspace repo |
 | `src/review/` | the review tabs (`mod.rs`: tab, commands, sidebar entries, dump) · `changes.rs` changed files and notes · `prs.rs` PRs, status, checks, logs, creation · `send.rs` notes to a PR review · `notes.rs` REVIEW.md and note anchoring · `ui.rs` small widgets |
-| `src/terminal/` | terminal view over `orbit_core::pty`: VT parse, status tracking, scrollback replay (`mod.rs`), grid layout and paint (`grid.rs`), keys and mouse reports (`input.rs`), kitty graphics (`graphics.rs`, `diacritics.rs`), GNOME shortcut inhibition (`inhibit.rs`) |
+| `src/scrollbar.rs` | the overlay scrollbar of the terminal and the log views: gpui-component's `Scrollbar` over their own `ScrollbarHandle`, styled from theme tokens, with track clicks that page |
+| `src/terminal/` | terminal view over `orbit_core::pty`: VT parse, status tracking, scrollback replay and the scrollbar's handle (`mod.rs`), grid layout and paint (`grid.rs`), keys and mouse reports (`input.rs`), kitty graphics (`graphics.rs`, `diacritics.rs`), GNOME shortcut inhibition (`inhibit.rs`) |
 | `src/sessions/` | sessions (`mod.rs`: keys, codenames, save/restore, inbox, recent, resume, actions), agent status heuristics and hooks (`status.rs`) |
 | `src/notifications.rs` | desktop notifications: suppression, coalescing, delivery, clicks |
 | `src/file_tree.rs` | virtualized tree with background folder loads, reveal, refresh after disk changes, name prompt and file operations (`orbit_core::files`) |
@@ -871,6 +872,22 @@ not run (it needs GitHub).
   drops every other escape and control code), lines wrap at the panel's width, the view follows the
   end while output arrives unless scrolled up, drag selects (double click a line), `Ctrl+C` /
   `Ctrl+Shift+C` copy, `Ctrl+A` selects all; compiler lines are links to their problem.
+- **Scrollbars** (`src/scrollbar.rs`) on the terminals (sessions, Run, Program Output) and the log
+  views, as xterm.js's overlay scrollbar with App.css's `::-webkit-scrollbar` look: a 6 px rounded
+  thumb on a 10 px track over the content (the grid keeps its columns), `BORDER_STRONG`, 8 px and
+  brighter on hover, brightest while dragged. It is gpui-component's `Scrollbar` (the editor's) in
+  hover mode: it fades in on scroll or when the pointer is on the track and out 2 s later, and its
+  timers stop once hidden. Dragging the thumb scrolls; a click on the track pages towards it
+  (gpui-component's jumps there, so a capture-phase handler takes the click first). The terminal's
+  handle maps the display offset to pixels (thumb = rows / (scrollback + rows)) and reports no
+  scrollback in the alternate screen, so vim, less or Claude Code's full-screen UI show no bar. A log
+  view's handle is its `ListState`: lines it hasn't laid out get a line's height so the thumb fits
+  the whole log, dragging up stops following the end and reaching the end follows again (the list's
+  padding moved to its parent: inside it, the end a drag can reach was 8 px short of the end that
+  counts). Self-test probes: `term-thumb` / `term-track` (the last terminal painted) and
+  `<log id>-thumb` / `<log id>-track` (`build-output`, `dbg-console`), present while the bar has
+  something to show; the terminal dump has a `scroll:` line (display offset, scrollback, alternate
+  screen) and a log view's its top line and pixel offset.
 - **Problems**: `problems.rs` is `problems.ts` with its tests. Problems under the repo's real root
   are mapped to the workspace path and set on open editors as diagnostics with source `build`,
   next to clangd's (`EditorTab::set_build_diagnostics`), so they count in the status bar and `F8`.
@@ -1556,6 +1573,7 @@ Status of everything the React app did: **done**, **partial** (with what's missi
 - [x] done: PTY terminal on `orbit_core::pty` with spawn at the real size, write, resize, 10k scrollback, 256/true colour, cursor shapes, OSC title, bracketed paste, alternate-screen wheel, flow control, scrollback restore after restart and forget on close (`TerminalPane.tsx`)
 - [x] done: selection (drag, word, line), copy (`Ctrl+Shift+C`, primary on select), paste (`Ctrl+Shift+V`, `Shift+Insert`, middle click)
 - [x] done: mouse reporting to TUIs (X10/normal and SGR; click, drag, motion, wheel)
+- [x] done: overlay scrollbar over the scrollback (xterm's: fades in on scroll or hover, wider and brighter on hover; drag, track click pages; none in the alternate screen)
 - [x] done: kitty graphics: Unicode placeholders (Claude Code) and direct placements; `t=d` chunked, `t=f`/`t=t` files, PNG and raw RGB(A), `o=z`, `a=T`/`t`/`p`/`d`/`q` (`src/lib/kittyGraphics.ts`, `src-tauri/src/term_image.rs`)
 - [x] done: theme-driven ANSI colours (every theme)
 
