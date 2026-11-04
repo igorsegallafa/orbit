@@ -40,6 +40,8 @@ project symbols, `Ctrl+G` go to line, `F8`/`Shift+F8` next/previous problem, `Ct
 completion (also as you type), `Ctrl+Shift+Space` parameter hints, `Ctrl+.`/`Alt+Enter` quick
 fixes, `F2` rename, `Ctrl+Shift+I`/`Shift+Alt+F` format · in a terminal `Ctrl+Shift+C`/`Ctrl+Shift+V` copy/paste, drag to select (double click: word,
 triple: line; `Shift` overrides an app's mouse mode), middle click pastes the primary selection.
+Build/Run/Debug: `Ctrl+F9` build, `Shift+F10` run, `Shift+F9` debug, `Ctrl+F2` stop, `Ctrl+F8`
+toggle breakpoint, while paused `F9` resume, `F8` step over, `F7` step into, `Shift+F8` step out.
 Tabs: right click for the tab menu, middle click closes, double click keeps a preview tab.
 File tree: arrows, `Home`/`End`, `Enter` opens, `F2` rename, `Delete` to the Trash, right click for
 the menu; the editor's breadcrumb folders reveal in it.
@@ -586,6 +588,56 @@ element, which the self-test can't target (no probes inside it), so the composer
 command that shares its path; notes on folded lines show once the fold is expanded; the diff view is
 read-only, so there is no editing in the diff.
 
+## Build / Run / Debug
+
+`src/run/` and `src/debug/`, ported from `RunWidget.tsx`, `BottomPanel.tsx`, `DebugView.tsx`,
+`runStore.ts`, `problems.ts` and `src/lib/dap/*`, on `orbit_core::run` and `orbit_core::dap`.
+
+- **Run widget** (titlebar slot): the configurations of every repo of the workspace
+  (`.orbit/run.json` + `run.local.json`), the CMake preset, Build `Ctrl+F9`, Run `Shift+F10`, Debug
+  `Shift+F9`, Stop `Ctrl+F2` (cancels the build, Ctrl+C to the program, or ends the debug session).
+  The choice is remembered per workspace in `<config dir>/native-run.json`, with the breakpoints.
+- **Bottom panel** (`layout.panel_height`, resizable, saved): Build output (virtualized, follows the
+  end unless scrolled up; compiler lines are links), Run (the program on `orbit_core::pty` with the
+  configuration's cwd, args and env), Problems (grouped by file, errors first), Debug. A build opens
+  it; a failed build with problems switches to Problems.
+- **Problems**: `problems.rs` is `problems.ts` with its tests. Problems under the repo's real root
+  are mapped to the workspace path and set on open editors as diagnostics with source `build`,
+  next to clangd's (`EditorTab::set_build_diagnostics`), so they count in the status bar and `F8`.
+- **Debugger**: gdb `-i dap` (or lldb-dap, as `dap::adapter` picks). The launch is `session.ts`'s:
+  initialize → launch (not awaited) → initialized → setBreakpoints → configurationDone → launch's
+  answer. Paths are rebased between the workspace path and the real repo path both ways. Stops show
+  threads, the call stack (the innermost repo frame is opened and highlighted), lazy variables and a
+  console; Enter in its input evaluates (gdb gets `context: "watch"`: its `"repl"` runs CLI
+  commands). `F9`/`F8`/`F7`/`Shift+F8` resume/step while paused; in the editor `F8`/`Shift+F8` fall
+  back to next/previous problem otherwise, and `F7` to the review's next change.
+- **Breakpoints in the editor.** gpui-component's editor has no glyph margin and no gutter click
+  hook. The least invasive route: every editor gets an 8 px `GutterDecoration` strip (set up from
+  `observe_new::<EditorTab>`, no editor code), breakpoints are red bars there, the paused line is
+  an amber bar plus a filled `RangeDecoration`, and one mouse-down listener on the editor's wrapper
+  (`editor.rs`) toggles the caret's line when the click lands in the strip (the editor has moved the
+  caret by then). `Ctrl+F8` toggles at the caret.
+
+Verified with self-tests (`ORBIT_CONFIG_DIR` / `ORBIT_WORKSPACE_ROOT` in a scratch folder) on a
+tiny CMake project reached through a symlinked workspace repo:
+
+- Build + Run: configure with the `${auto}` preset, build, run; the terminal shows
+  `argc=3 greeting=hi-from-orbit sum=10 p=(3,4)` (args and env from run.json), then exits.
+- A broken target: `Build Failed, 1 errors, 1 warnings`, the panel on Problems, `problem:0` opens
+  `broken.cpp` at 3:12 and the editor has 3 diagnostics (clangd's error, the build's error and
+  warning).
+- Debug: breakpoints from gutter clicks and `Ctrl+F8` (persisted), `Shift+F9` stops at line 23 with
+  `gutter main.cpp: breakpoints [14, 23], paused mark [23], paused line [23]`; frames, `Locals`
+  (`numbers = std::vector of length 4`, `greeting = "hi-from-orbit"`), expanding `p` gives `x = 3`,
+  `y = 4`; `F7` into `sum`, `Shift+F8` out, `F8` over (stopping at the breakpoint in `sum` when one
+  is there); `p.x + numbers.size()` evaluates to `7`; `Ctrl+F2` ends the session; the frames
+  report real paths and come back as the workspace paths.
+- aether-engine: the widget resolves `game` with `${auto}` → `linux-gcc-relwithdebinfo` and lists
+  its 8 presets; Build through the app ran `cmake --build …/build/linux-gcc-relwithdebinfo --target
+  game` (`Build Ok`, 0.8 s, up to date); cancelling a running build gave `Build Cancelled`. Debugging
+  the game was not completed: another build of the same tree was running at the same time and the
+  link failed (`ld terminated with signal 7`), and the debug session correctly did not start.
+
 ## Next stages
 
 Ordered by dependency, with rough sizes (one focused agent-day ≈ 1 unit).
@@ -611,8 +663,8 @@ Ordered by dependency, with rough sizes (one focused agent-day ≈ 1 unit).
 7. **Git and workspace flows** (4): commit, push, PR, rebase and merge modals, checks, branch
    drift, the repo page, workspace create and add repos, the dashboard, ~~Search Everywhere and
    Find in Files~~ (done in the files and search stage).
-8. **Run/Build/Debug** (3–4): run widget, bottom panel, problems, the DAP debugger UI (breakpoints
-   in the gutter use `GutterDecoration`).
+8. ~~**Run/Build/Debug**~~: done (see *Build / Run / Debug*); left: the multi-repo build modal,
+   breakpoint conditions, a round breakpoint glyph (needs an editor gutter hook upstream).
 9. **Settings, Ralph, integrations, usage, artifacts, updates** (3–4).
 10. **Packaging** (1): the Vulkan-only wgpu patch (or a launcher with the restricted env),
     `.desktop` and icon, an updater.

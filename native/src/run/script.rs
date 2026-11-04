@@ -34,6 +34,9 @@ pub async fn step(verb: &str, arg: &str, window: AnyWindowHandle, app: &Entity<O
         }
         "gutter" => {
             let line: u32 = arg.parse().unwrap_or(1);
+            // A fresh layout first: the editor may not have painted its lines yet.
+            let _ = window.update(cx, |_, window, _| window.refresh());
+            cx.background_executor().timer(Duration::from_millis(300)).await;
             let at = app.read_with(cx, |a, cx| a.active_editor().and_then(|e| crate::debug::gutter::strip_point(e.read(cx), line, cx)));
             let Some(at) = at else {
                 let _ = writeln!(log, "  no editor laid out");
