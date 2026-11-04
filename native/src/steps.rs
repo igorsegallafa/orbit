@@ -4,8 +4,9 @@
 //!
 //! | Step | Does |
 //! |---|---|
-//! | `click:<probe>` `rclick:` `mclick:` `dblclick:` | left/right/middle/double click the probe's center |
+//! | `click:<probe>` `rclick:` `mclick:` `dblclick:` `sclick:` | left/right/middle/double/Shift click the probe's center |
 //! | `drag:<probe>:<dx>,<dy>` | drag from the probe's center by (dx, dy) px |
+//! | `<probe>@<x>,<y>` | in a mouse step: that point from the probe's top-left |
 //! | `key:<spec>` | one keystroke (`ctrl-shift-a`, `escape`) |
 //! | `type:<text>` | typed text |
 //! | `shift:<n>` | `n` bare Shift taps (modifier events; `shift:2` is a double Shift) |
@@ -40,11 +41,18 @@ async fn locate(window: AnyWindowHandle, name: &str, cx: &mut AsyncApp) -> Optio
     probe::clear();
     let _ = window.update(cx, |_, window, _| window.refresh());
     sleep(cx, 120).await;
-    probe::bounds(name).map(|b| b.center())
+    let offset = name.rsplit_once('@').and_then(|(n, at)| {
+        let (x, y) = at.split_once(',')?;
+        Some((n, gpui::point(px(x.parse().ok()?), px(y.parse().ok()?))))
+    });
+    match offset {
+        Some((name, at)) => probe::bounds(name).map(|b| b.origin + at),
+        None => probe::bounds(name).map(|b| b.center()),
+    }
 }
 
-async fn click(window: AnyWindowHandle, at: Point<Pixels>, button: MouseButton, count: usize, cx: &mut AsyncApp) {
-    let modifiers = Modifiers::default();
+async fn click(window: AnyWindowHandle, at: Point<Pixels>, button: MouseButton, count: usize, shift: bool, cx: &mut AsyncApp) {
+    let modifiers = Modifiers { shift, ..Default::default() };
     send(window, PlatformInput::MouseMove(MouseMoveEvent { position: at, pressed_button: None, modifiers }), cx);
     for n in 1..=count {
         send(
@@ -80,7 +88,7 @@ pub async fn run(steps: &[String], window: AnyWindowHandle, app: &Entity<OrbitAp
         let (verb, arg) = step.split_once(':').unwrap_or((step.as_str(), ""));
         let _ = writeln!(log, "step {step}");
         match verb {
-            "click" | "rclick" | "mclick" | "dblclick" => {
+            "click" | "rclick" | "mclick" | "dblclick" | "sclick" => {
                 let (button, count) = match verb {
                     "rclick" => (MouseButton::Right, 1),
                     "mclick" => (MouseButton::Middle, 1),
@@ -88,7 +96,7 @@ pub async fn run(steps: &[String], window: AnyWindowHandle, app: &Entity<OrbitAp
                     _ => (MouseButton::Left, 1),
                 };
                 match locate(window, arg, cx).await {
-                    Some(at) => click(window, at, button, count, cx).await,
+                    Some(at) => click(window, at, button, count, verb == "sclick", cx).await,
                     None => {
                         let _ = writeln!(log, "  no element {arg:?} on screen");
                     }
@@ -141,7 +149,7 @@ pub async fn run(steps: &[String], window: AnyWindowHandle, app: &Entity<OrbitAp
             "mouse" => {
                 let dir = if arg == "forward" { NavigationDirection::Forward } else { NavigationDirection::Back };
                 let at = gpui::point(px(700.), px(400.));
-                click(window, at, MouseButton::Navigate(dir), 1, cx).await;
+                click(window, at, MouseButton::Navigate(dir), 1, false, cx).await;
             }
             "cmd" => {
                 let ok = window

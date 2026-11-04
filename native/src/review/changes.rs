@@ -653,7 +653,13 @@ impl ReviewTab {
             .on_add_annotation(move |range, window, cx| {
                 let _ = w2.update(cx, |t, cx| t.comment_on(range, window, cx));
             });
-        div().id("chg-scroll").flex_1().min_h_0().pt(px(12.)).px(px(16.)).child(diff)
+        div()
+            .id("chg-scroll")
+            .flex_1()
+            .min_h_0()
+            .pt(px(12.))
+            .px(px(16.))
+            .child(div().size_full().relative().child(diff).child(crate::probe::probe("chg-diff")))
     }
 }
 

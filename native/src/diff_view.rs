@@ -84,6 +84,14 @@ pub fn git_patch_in(dir: &Path, rel: &str, prefix: Option<&str>) -> Result<Strin
     Ok(patch)
 }
 
+/// The dump line for a diff's selection, if any.
+pub fn selection_dump(state: &Entity<DiffState>, cx: &App) -> Option<String> {
+    let s = state.read(cx);
+    let lines = s.selected_lines().map(|r| format!("{} {:?} {}-{}", r.path(), r.side(), r.start(), r.end()));
+    let text = s.selected_text(cx);
+    (lines.is_some() || !text.is_empty()).then(|| format!("  selection lines {lines:?} text {text:?}"))
+}
+
 /// A diff state that colors code with the active theme.
 pub fn highlighted_state(files: Vec<DiffFile>, mode: DiffMode, cx: &mut App) -> Entity<DiffState> {
     let highlight_theme = cx.theme().highlight_theme.clone();
@@ -673,7 +681,7 @@ impl Render for DiffTab {
             .flex_col()
             .bg(c(theme::BG))
             .child(bar)
-            .child(div().flex_1().min_h_0().child(diff))
+            .child(div().flex_1().min_h_0().relative().child(diff).child(probe("diff-body")))
     }
 }
 
