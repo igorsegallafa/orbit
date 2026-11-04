@@ -27,7 +27,7 @@ pub enum Page {
 
 /// A form or git flow shown over the page.
 pub enum Modal {
-    Create(forms::CreateForm),
+    Create(Box<forms::CreateForm>),
     AddRepos(forms::AddReposForm),
     Flow(Flow),
 }
