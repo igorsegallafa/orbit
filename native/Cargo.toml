@@ -33,6 +33,7 @@ url = "2"
 dirs = "6"
 futures = "0.3"
 anyhow = "1"
+regex = "1"
 
 [profile.release]
 debug = false

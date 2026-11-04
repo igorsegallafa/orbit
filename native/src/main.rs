@@ -4,6 +4,7 @@ mod app;
 mod commands;
 mod diff_view;
 mod editor;
+mod file_ops;
 mod file_tree;
 mod icons;
 mod lsp;
@@ -12,6 +13,7 @@ mod overlay;
 mod palette;
 mod probe;
 mod script;
+mod search;
 mod sessions;
 mod shell;
 mod state;
@@ -46,6 +48,8 @@ fn main() {
         app::init(cx);
         file_tree::bind_keys(cx);
         editor::bind_keys(cx);
+        search::init(cx);
+        file_ops::init(cx);
 
         let bounds = Bounds::centered(None, size(px(1400.), px(900.)), cx);
         let options = WindowOptions {

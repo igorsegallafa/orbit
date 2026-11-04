@@ -4502,6 +4502,7 @@ dependencies = [
  "ignore",
  "lsp-types",
  "orbit-core",
+ "regex",
  "serde",
  "serde_json",
  "serde_yaml",

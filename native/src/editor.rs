@@ -254,7 +254,7 @@ const SYMBOL_KINDS: [&str; 26] = [
     "struct", "event", "operator",
 ];
 
-fn symbol_kind(kind: Option<u64>) -> &'static str {
+pub(crate) fn symbol_kind(kind: Option<u64>) -> &'static str {
     kind.and_then(|k| SYMBOL_KINDS.get(k as usize).copied()).unwrap_or("type param")
 }
 
@@ -481,6 +481,33 @@ impl EditorTab {
             Err(e) => self.last_error = Some(format!("save failed: {e}")),
         }
         cx.notify();
+    }
+
+    /// Takes the file from disk when it changed there and has no unsaved
+    /// edits (an agent, git, another editor); the cursor stays on its line.
+    pub fn reload_from_disk(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.dirty {
+            return false;
+        }
+        let Ok(text) = read_text(&self.path) else { return false };
+        let saved = self.saved.to_string();
+        if text == saved || text.replace("\r\n", "\n") == saved {
+            return false;
+        }
+        let cursor = self.state.read(cx).cursor_position();
+        self.state.update(cx, |s, cx| {
+            s.set_value(text, window, cx);
+            let line = cursor.line.min(s.text().lines_len().saturating_sub(1) as u32);
+            let at = s.text().position_to_offset(&lsp_types::Position::new(line, cursor.character));
+            s.set_selected_range(at..at, cx);
+        });
+        self.saved = self.state.read(cx).text().clone();
+        if let Some(doc) = &self.doc {
+            doc.sync(&self.saved);
+        }
+        self.message = Some("Reloaded from disk".into());
+        cx.notify();
+        true
     }
 
     pub fn set_diagnostics(&mut self, diagnostics: Vec<lsp_types::Diagnostic>, cx: &mut Context<Self>) {
@@ -1165,6 +1192,11 @@ impl EditorTab {
     fn render_breadcrumb(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let parts: Vec<String> = self.display_path.split('/').map(str::to_string).collect();
         let last = parts.len().saturating_sub(1);
+        // Crumb i's folder: the repo root, then the folders under it.
+        let folders: Vec<Option<PathBuf>> = match &self.repo {
+            Some((_, root)) => (0..last).map(|i| Some(parts[1..=i].iter().fold(root.clone(), |p, part| p.join(part)))).collect(),
+            None => vec![],
+        };
         div()
             .flex_1()
             .min_w_0()
@@ -1185,6 +1217,20 @@ impl EditorTab {
                             .hover(|s| s.bg(c(theme::PANEL_HOVER)))
                             .child(part)
                             .on_click(cx.listener(|this, _, window, cx| this.file_outline(&FileOutline, window, cx))),
+                    )
+                } else if let Some(dir) = folders.get(i).cloned().flatten() {
+                    // A folder: shown in the file tree.
+                    crumb.child(
+                        div()
+                            .id(("crumb-dir", i))
+                            .relative()
+                            .px_1()
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(c(theme::PANEL_HOVER)).text_color(c(theme::TEXT)))
+                            .child(part)
+                            .child(crate::probe::probe(format!("crumb:{i}")))
+                            .on_click(move |_, window, cx| crate::file_ops::reveal_in_tree(dir.clone(), window, cx)),
                     )
                 } else {
                     crumb.child(div().child(part))

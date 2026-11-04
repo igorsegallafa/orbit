@@ -29,7 +29,9 @@ Keys (JetBrains-style, as the Tauri app; `Ctrl+Shift+A` lists every command with
 `Ctrl+Shift+T` new terminal (a shell session) · `Ctrl+W` close the file tab (in a terminal the shell gets it; unsaved
 changes ask Save / Don't Save / Cancel) · `Ctrl+Shift+W` close any tab without saving ·
 `Ctrl+Tab` / `Ctrl+Shift+Tab` next / previous tab · `Alt+←` / `Alt+→` and the mouse side buttons
-back / forward (in a terminal `Alt+←/→` go to the shell) · `Ctrl+Shift+A` Find Action ·
+back / forward (in a terminal `Alt+←/→` go to the shell) · double `Shift` Search Everywhere
+(`Tab` switches its tabs) · `Ctrl+Shift+A` Find Action (its Actions tab) · `Ctrl+Shift+F` Find in Files
+(`Alt+C`/`Alt+W`/`Alt+X` case, words, regex; `Tab` to the file mask) ·
 `Ctrl+Alt+A` new agent session · `Ctrl+Alt+R` resume the last session · `Ctrl+Alt+I` next session
 needing input ·
 `Ctrl+Q` quit · in the editor `Ctrl+S` save, `F12` or `Ctrl+click` go to definition, hover for
@@ -39,6 +41,8 @@ completion (also as you type), `Ctrl+Shift+Space` parameter hints, `Ctrl+.`/`Alt
 fixes, `F2` rename, `Ctrl+Shift+I`/`Shift+Alt+F` format · in a terminal `Ctrl+Shift+C`/`Ctrl+Shift+V` copy/paste, drag to select (double click: word,
 triple: line; `Shift` overrides an app's mouse mode), middle click pastes the primary selection.
 Tabs: right click for the tab menu, middle click closes, double click keeps a preview tab.
+File tree: arrows, `Home`/`End`, `Enter` opens, `F2` rename, `Delete` to the Trash, right click for
+the menu; the editor's breadcrumb folders reveal in it.
 
 ### Self-test mode
 
@@ -85,11 +89,13 @@ first on `PATH`. Use `SHELL=/bin/bash` (zsh may start an interactive setup wizar
 
 `--do` runs shell steps last, separated by `;` (`src/steps.rs`). Mouse steps target elements that
 render a `probe("name")` (tabs `tab:<ix>`, menu items `menu:<label>`, dialog buttons
-`dialog:<label>`, palette rows `palette:<title>`, `tb-sidebar`, `tb-back`, `tb-forward`,
+`dialog:<label>`, palette rows `palette:<title>` (files by name, Find matches `palette:<path>:<line>`),
+Search Everywhere tabs `search-tab:<Label>`, Find's `find-toggle:case|word|regex` and
+`find-repo:<repo>|All repos`, tree rows `tree:<name>`, breadcrumb folders `crumb:<ix>`, `tb-sidebar`, `tb-back`, `tb-forward`,
 `tb-workspace`, `tb-dock`, `new-tab`, `resize-sidebar`, `resize-dock`, `resize-panel`,
 `panel-close`, `toast-close:<id>`, `ws:<name>`) and are dispatched with `Window::dispatch_event`:
 `click:` `rclick:` `mclick:` `dblclick:` `drag:<probe>:<dx>,<dy>`; plus `key:<spec>`,
-`type:<text>`, `mouse:back|forward`, `cmd:<command id>`, `open:<path>`, `preview:<path>`,
+`type:<text>`, `shift:<n>` (bare Shift taps as modifier events; `shift:2` is a double Shift), `mouse:back|forward`, `cmd:<command id>`, `open:<path>`, `preview:<path>`,
 `toast:<text>`, `wait:<ms>` and `dump:<label>` (the full dump, into the log, at that point).
 
 ## Commands and keymap (the extension point)
@@ -274,9 +280,8 @@ gpui-component limits met on the way:
 - Its code action menu's Enter also inserted a newline into the text, so `Ctrl+.` opens our own
   list instead (the component's provider hook stays installed).
 - No semantic tokens yet: the component wants range requests, which clangd doesn't serve.
-- Not done: the "hide this diagnostic" quick fix and the diagnostics filter from config, folder
-  crumbs revealing in the tree (needs the tree from the shell), Markdown preview, the Languages
-  settings section.
+- Not done: the "hide this diagnostic" quick fix and the diagnostics filter from config, Markdown
+  preview, the Languages settings section. (Folder crumbs reveal in the tree since the files stage.)
 
 ## Gate verdict
 
@@ -308,7 +313,9 @@ Caveats found:
 | `src/commands.rs` | command registry and keymap |
 | `src/nav.rs` | back/forward history (`src/lib/navHistory.ts`) |
 | `src/state.rs` | saved state (`<config dir>/native-state.json`): workspace, tabs, active tab, cursors, pane sizes |
-| `src/overlay.rs`, `src/palette.rs`, `src/toast.rs` | context menus and dialogs, Find Action, toasts |
+| `src/overlay.rs`, `src/toast.rs` | context menus and dialogs, toasts |
+| `src/palette.rs` | the search overlay: Search Everywhere (Find Action is its Actions tab) and Find in Files, rows in a virtual list |
+| `src/search/` | their commands and keys, symbol and text sources, Find's hit ranges (`mod.rs`); fuzzy ranking (`fuzzy.rs`, `src/lib/fuzzy.ts`) |
 | `src/icons.rs` | asset source: gpui-kit-assets' Lucide icons plus file-type glyphs (`FileIcons.tsx`) and tab icons (`Icons.tsx`) |
 | `src/probe.rs`, `src/steps.rs` | element bounds and `--do` steps for the self-test |
 | `src/editor.rs` | editor tab: `EditorState`, save, dirty, actions and keys (`editor_actions()`), pickers, problems, format, rename, signature help, breadcrumb, status bar, clangd banner |
@@ -318,7 +325,8 @@ Caveats found:
 | `src/diff_view.rs` | diff tab over `git diff HEAD` |
 | `src/terminal/` | terminal view over `orbit_core::pty`: VT parse, status tracking, scrollback replay (`mod.rs`), grid layout and paint (`grid.rs`), keys and mouse reports (`input.rs`) |
 | `src/sessions/` | sessions (`mod.rs`: keys, codenames, save/restore, inbox, recent, resume, actions), agent status heuristics and hooks (`status.rs`), the sidebar block (`panel.rs`) |
-| `src/file_tree.rs` | virtualized tree with background folder loads |
+| `src/file_tree.rs` | virtualized tree with background folder loads, reveal, refresh after disk changes, name prompt and file operations (`orbit_core::files`) |
+| `src/file_ops.rs` | the tree's ties to the app: context menu, the workspace watcher (`orbit_core::watch`; tree refresh, editor reload), following the active file, breadcrumb reveal |
 | `src/workspace.rs` | workspace list from `orbit_core::workspace` |
 | `src/script.rs` | self-test mode and dumps |
 | `src/theme.rs`, `src/orbit-dark.json` | Orbit Dark colours and shell metrics (`src/App.css`) |
@@ -454,6 +462,50 @@ stub agent on `PATH` (no real agent was started):
 - `pnpm run check` passes with the adapter (Tauri app unchanged for the frontend); core has two new
   PTY tests (round trip with exit; pause stops reading until resumed).
 
+## Files and search stage
+
+**How it hangs together.** The palette overlay (`src/palette.rs`) is now the search modal, with
+two modes: Search Everywhere and Find in Files; `OrbitApp::palette` still gates app shortcuts, and
+those now propagate while an overlay is open, so the overlay's own keys (Tab, `Alt+C`, double
+Shift to close) get them. `src/file_ops.rs` attaches to the root view with `cx.observe_new`: it
+handles the tree's `TreeRequest`s (context menu, toasts), moves the `orbit_core::watch` watcher
+when the workspace changes (started off the UI thread: Linux walks every folder), and observes the
+app to make the tree follow the active editor. File operations call `orbit_core::files`
+(`create_node`, `rename_node`, `delete_node`) with the tree path split into workspace, repo and
+repo-relative path; names are typed in a prompt above the tree. "Open in Terminal" starts a shell
+session in that folder (`SessionMeta::cwd`, saved with the session).
+
+**Verified** by self-tests: Search Everywhere and Find in Files on `add-items-skills`
+(read-only), file operations and watching in a scratch workspace with two git repos
+(`ORBIT_WORKSPACE_ROOT`, `ORBIT_CONFIG_DIR`, and `XDG_DATA_HOME` so the Trash is a scratch one):
+
+- Double Shift (`--do "shift:2"`, real modifier events) opens All: 8 files, then `Game.cpp` ranks
+  `aether-engine/src/game/Game.cpp` first; Tab → Files (60 rows), Shift+Tab twice → Text; double
+  Shift again closes it. `Ctrl+Shift+A` opens Actions (`toggle` → the three Toggle commands).
+- Symbols: with clangd on `Game.cpp`, `Initialize` lists 100 hits (`method Initialize
+  GPUProfiler.cpp:40`…); Enter opens `GPUProfiler.cpp` at 40:23. Before clangd has indexed, the
+  server answers `[]` (the editor's `Ctrl+T` shows nothing either).
+- Text: `GameLoop` lists 16 matches (git grep over the four repos takes 10–15 s on this
+  workspace, as in the Tauri app); Enter opens `Application.cpp` at 352 with `GameLoop` selected,
+  and the tree follows to that file.
+- Find in Files: `GameLoop::` → "2 matches in 1 file" under a `GameLoop.cpp` header; `Alt+C`,
+  `Alt+W`, the `aether-engine` chip and a `*.h` mask (Tab to it) are applied. In the scratch
+  workspace `println` → 2 matches in 2 files; Enter opens `api/src/main.rs` with `println` selected.
+- Tree: opening `api/src/main.rs` expands `src` and selects it; the breadcrumb's `src` crumb
+  selects the folder and focuses the tree. The context menu of `src` lists New File…, New Folder…,
+  Rename…, Copy Path, Copy Relative Path, Reveal in File Manager, Open in Terminal, Delete. New
+  File `new.rs` creates, selects and opens it; Rename → `renamed.rs`; Copy Relative Path gives
+  `src/main.rs`; Delete moves `renamed.rs` to the (scratch) Trash with a toast; Open in Terminal
+  starts a shell in `api/src`. `F2` opens the rename prompt, Escape cancels it; `Delete` trashes.
+- Watching: a script changed files while the app ran. Editing `main.rs` on disk reloaded its
+  unmodified editor ("changed on disk" in the buffer); a dirty editor of the same kind was left
+  alone. New `added.rs` and `newdir/` appeared in the open `src` folder; `build/` and `.cache/`
+  writes were dropped; removing `src/deep` removed its rows; a commit (git event) refreshed every
+  open folder.
+- Unit tests: the fuzzy ranking (the Tauri app's cases), Find's hit ranges and line display,
+  match positions in characters, the tree's refresh merge (expanded subtrees and the selection
+  kept) and path location, the noise filter.
+
 ## Next stages
 
 Ordered by dependency, with rough sizes (one focused agent-day ≈ 1 unit).
@@ -470,14 +522,15 @@ Ordered by dependency, with rough sizes (one focused agent-day ≈ 1 unit).
 4. **Editor completeness** (3): completion, signature help, code actions, references, document
    symbols, formatting and semantic tokens (providers exist in gpui-component), go to line, F8 next
    problem, the clangd setup banner, Markdown preview, and the Languages settings section.
-5. **File tree completeness** (1–2): create/rename/delete/move/drag, reveal, copy path, fs-watch
+5. ~~**File tree completeness**~~: done (files and search stage) except move/drag and "Add Files…";
+   originally: create/rename/delete/move/drag, reveal, copy path, fs-watch
    refresh, file icons, and a tree-structured model (the flat list does an O(n) path search per
    folder load).
 6. **Review** (4–5): changes review across repos, commit review, PR review with threads,
    send-to-PR, address review, F7 diff navigation, and review notes (REVIEW.md).
 7. **Git and workspace flows** (4): commit, push, PR, rebase and merge modals, checks, branch
-   drift, the repo page, workspace create and add repos, the dashboard, Search Everywhere and
-   Find in Files.
+   drift, the repo page, workspace create and add repos, the dashboard, ~~Search Everywhere and
+   Find in Files~~ (done in the files and search stage).
 8. **Run/Build/Debug** (3–4): run widget, bottom panel, problems, the DAP debugger UI (breakpoints
    in the gutter use `GutterDecoration`).
 9. **Settings, Ralph, integrations, usage, artifacts, updates** (3–4).
@@ -496,7 +549,7 @@ Status of everything the React app does: **done**, **partial** (with what's miss
 - [x] done: back/forward history: tab switches and cross-file jumps, with the cursor of each file; closed files reopen, closed terminals are skipped; `Alt+←/→`, mouse side buttons, titlebar arrows (`src/lib/navHistory.ts`). Jumps inside one file are not recorded yet (the editor emits no event for them).
 - [x] done: resizable sidebar (snaps to icons below 110 px), files dock and bottom panel; double click resets; sizes and hidden/open state persist (`PaneResizer.tsx`, `SidebarResizer.tsx`)
 - [x] done: persisted state: open workspace, editor and diff tabs (preview flag, cursor), active tab, pane sizes, restored on start. Terminal tabs are not restored (Sessions stage).
-- [x] done: command registry and keymap; Find Action palette (`Ctrl+Shift+A`, `src/lib/commands.ts`); Search Everywhere's other tabs are not ported
+- [x] done: command registry and keymap; Find Action (`Ctrl+Shift+A`, `src/lib/commands.ts`) is Search Everywhere's Actions tab
 - [ ] partial: bottom panel is a placeholder (Build/Run/Problems arrive with that stage)
 - [ ] — Error boundary / crash log (`ErrorBoundary.tsx`)
 - [ ] — Dashboard page (`src/pages/DashboardPage.tsx`)
@@ -538,8 +591,8 @@ Status of everything the React app does: **done**, **partial** (with what's miss
 - [x] done: theme-driven ANSI colours (Orbit Dark only)
 
 ### File tree / right dock
-- [ ] partial: file tree with lazy background loads, `.gitignore`, symlinked repos, keyboard navigation, single click previews, double click or Enter keeps the tab. No create/rename/delete/move/import/reveal/copy path (`FileTreePanel.tsx`).
-- [ ] — Auto-refresh on disk changes (`src/lib/useFsChanges.ts`)
+- [x] done: file tree with lazy background loads, `.gitignore`, symlinked repos, keyboard navigation (arrows, Home/End, Enter, F2, Delete), single click previews, double click or Enter keeps the tab; follows the active file; context menu: new file/folder, open, rename, copy path / relative path, reveal in file manager, open in terminal, delete to the Trash (`FileTreePanel.tsx`). Not ported: drag-and-drop move, "Add Files…" (import), dropping a path into a terminal; an open editor keeps the old path after its file is renamed.
+- [x] done: auto-refresh on disk changes: open folders re-read (expanded ones stay expanded), unmodified editors reload; `build*/` and `.cache/` changes ignored (`src/lib/useFsChanges.ts`). No refresh on window focus yet.
 - [ ] — Files / Git / Search dock toolbar, Git panel (`GitPanel.tsx`)
 
 ### Tabs
@@ -553,10 +606,11 @@ Status of everything the React app does: **done**, **partial** (with what's miss
 - [x] done: code editor with tree-sitter highlighting (C, C++, Rust, TS/TSX, JS, JSON), line numbers, undo/redo
 - [x] done: `Ctrl+S` save, dirty state
 - [x] done: `Ctrl+G` go to line, `F8`/`Shift+F8` problems, status bar (problems, Unsaved, Ln/Col and selection, LF/CRLF, indent, language, LSP chip with progress and restart) (`EditorPane.tsx`)
-- [ ] partial: breadcrumb; the file opens its outline, folders don't reveal in the tree yet
+- [x] done: breadcrumb; the file opens its outline, folders reveal in the tree
 - [x] done: clangd setup banner (missing compile DB, CMake with presets, restart clangd)
 - [x] done: symbol search in project (`Ctrl+T`) and in file (`Ctrl+Shift+O`) (`SymbolSearch.tsx`)
-- [ ] — Markdown editor/preview toggle, reload when changed on disk
+- [x] done: reload when changed on disk (unmodified editors; the cursor keeps its line)
+- [ ] — Markdown editor/preview toggle
 
 ### LSP
 - [x] done: client over stdio, one server per (repo, language), started on demand by `orbit_core::lsp` with the Tauri app's server choice and config (`src/lib/lsp/client.ts`, `manager.ts`)
@@ -568,8 +622,8 @@ Status of everything the React app does: **done**, **partial** (with what's miss
 - [ ] — Diagnostics filter from config; Languages settings (server per language, logs, restart) (`LanguagesSection.tsx`)
 
 ### Search
-- [ ] — Search Everywhere (double Shift, `Ctrl+Shift+A`) (`SearchEverywhereModal.tsx`, `src/lib/fuzzy.ts`, `src/lib/commands.ts`)
-- [ ] — Find in Files (`FindInFiles.tsx`)
+- [x] done: Search Everywhere (double Shift toggles, `Ctrl+Shift+A` on Actions): tabs All/Files/Symbols/Actions/Text with Tab/Shift+Tab, fuzzy-ranked files, `workspace/symbol` over the workspace's running servers, registry actions, text through orbit-core's search (debounced), "more ›" section headers (`SearchEverywhereModal.tsx`, `src/lib/fuzzy.ts`, `src/lib/commands.ts`)
+- [ ] partial: Find in Files (`Ctrl+Shift+F`): case/words/regex toggles (and Alt+C/W/X), repo chips, file mask, results grouped by file with the hits highlighted, Enter opens the match selected (`FindInFiles.tsx`). No live preview pane; the Tauri app has no replace either.
 - [ ] partial: find within a file. gpui-component's editor has search; it is untested and has no binding here.
 
 ### Review / diff / PR
@@ -599,5 +653,6 @@ Status of everything the React app does: **done**, **partial** (with what's miss
 ### Backend services
 - [x] done: the backend is shared through `crates/orbit-core` (config, workspaces, git, GitHub, LSP/DAP processes, watcher, builds, run configs, agents, Ralph, review, search, notes, files); the native app uses its workspace list and LSP manager
 - [ ] partial: no native UI writes state yet; the core functions for it exist (`workspace::create`, `repo::commit`, `notes::add`, …)
-- [ ] — FS/git watcher events in the native UI (`orbit_core::watch::watch` with a channel sink), run configs (`.orbit/run.json`)
+- [x] done: FS/git watcher events in the native UI (`orbit_core::watch::watch` with a channel sink; the tree and editors)
+- [ ] — run configs (`.orbit/run.json`)
 - [x] done: PTY registry, scrollback and flow control in core (`orbit_core::pty`); `src-tauri/src/pty.rs` is an adapter
