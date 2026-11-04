@@ -3,12 +3,15 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import * as monaco from "monaco-editor";
+import { comparablePath, mapUris } from "./paths";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 interface StartInfo {
   id: number;
   root: string;
+  /** `root` with links resolved: where the server works. */
+  realRoot: string;
   command: string;
   /** Binary name ("clangd"), even when `command` is a path with spaces. */
   server: string;
@@ -20,6 +23,9 @@ interface Pending {
 }
 
 type Listener = () => void;
+
+const isWindows = navigator.userAgent.includes("Windows");
+const toUri = (path: string) => monaco.Uri.file(path).toString();
 
 const clients = new Map<number, LspClient>();
 let listening: Promise<unknown> | null = null;
@@ -99,8 +105,11 @@ export type ClientState = "starting" | "ready" | "exited";
 
 export class LspClient {
   readonly id: number;
+  /** The repo folder as Orbit opens it. Every path the editor sees is under
+   *  it; the server only sees `realRoot` (they differ for symlinked repos). */
   readonly root: string;
   readonly rootUri: string;
+  readonly realRoot: string;
   readonly command: string;
   private readonly bin: string;
   readonly language: string;
@@ -120,6 +129,7 @@ export class LspClient {
     this.id = info.id;
     this.root = info.root;
     this.rootUri = monaco.Uri.file(info.root).toString();
+    this.realRoot = info.realRoot || info.root;
     this.command = info.command;
     this.bin = info.server;
     this.language = language;
@@ -173,8 +183,13 @@ export class LspClient {
     this.requestHandlers.set(method, handler);
   }
 
+  private get linked(): boolean {
+    return comparablePath(this.root, isWindows) !== comparablePath(this.realRoot, isWindows);
+  }
+
   private send(msg: object): Promise<unknown> {
-    return invoke("lsp_send", { id: this.id, message: JSON.stringify(msg) });
+    const out = this.linked ? mapUris(msg, this.root, this.realRoot, isWindows, toUri) : msg;
+    return invoke("lsp_send", { id: this.id, message: JSON.stringify(out) });
   }
 
   request<T = any>(method: string, params: unknown, token?: monaco.CancellationToken): Promise<T> {
@@ -207,6 +222,7 @@ export class LspClient {
     } catch {
       return;
     }
+    if (this.linked) msg = mapUris(msg, this.realRoot, this.root, isWindows, toUri);
     if (msg.method === undefined) {
       const p = this.pending.get(msg.id);
       if (!p) return;
@@ -276,7 +292,7 @@ export class LspClient {
       processId: null,
       clientInfo: { name: "Orbit" },
       rootUri: this.rootUri,
-      rootPath: this.root,
+      rootPath: this.realRoot,
       workspaceFolders: [{ uri: this.rootUri, name: this.root.split(/[\\/]/).pop() }],
       capabilities: CLIENT_CAPABILITIES,
       initializationOptions: {},

@@ -14,6 +14,7 @@ import { FindPopup, OpenMatch } from "./components/FindInFiles";
 import { AgentSignal, TerminalPane, TerminalTab, claudeSessionArgs, dropFilesIntoTerminal, sendToTerminal } from "./components/TerminalPane";
 import { InboxButton, InboxItem, InboxKind, notifyOs } from "./components/Inbox";
 import { FileTreePanel } from "./components/FileTreePanel";
+import { useStableHandlers } from "./lib/useStableHandlers";
 import { ReviewPane } from "./components/ReviewPane";
 import { CommitReviewPane } from "./components/CommitReviewPane";
 import { PrReviewPane } from "./components/PrReviewPane";
@@ -952,6 +953,21 @@ function App() {
           ? repoScope(focusName)
           : (workspaces.find((w) => w.name === focusName) ?? null);
 
+  // Stable callbacks: the file tree is memoized and would otherwise re-render
+  // on every App state change (agent status, usage, tab switches).
+  const treeHandlers = useStableHandlers({
+    onOpenFile: (repo: string, path: string) => focusWorkspace && openFileTab(focusWorkspace.name, repo, path),
+    onReviewFile: (repo: string, path: string) => focusWorkspace && openChanges(focusWorkspace.name, repo, path),
+    onReviewAll: () => focusWorkspace && openChanges(focusWorkspace.name),
+    onOpenFind: () => setFindOpen(true),
+    onReviewCommit: (repo: string, commit: GitCommit) => {
+      if (!focusWorkspace) return;
+      setNavPage({ kind: "dashboard" });
+      openTab({ kind: "commit", workspace: focusWorkspace.name, repo, commit });
+    },
+    onError: (msg: string) => setError(msg),
+  });
+
   /** Where the new-session menu points first: `scope` if given, else the
    *  workspace, repo or folder in focus. */
   const sessionFocus = (scope?: string): { scope: string; label: string; kind: "workspace" | "repo" | "folder" } | null => {
@@ -1768,17 +1784,10 @@ function App() {
           >
             <FileTreePanel
               workspace={focusWorkspace}
-              onOpenFile={(repo, path) => openFileTab(focusWorkspace.name, repo, path)}
-              onReviewFile={(repo, path) => openChanges(focusWorkspace.name, repo, path)}
-              onReviewAll={() => openChanges(focusWorkspace.name)}
-              onOpenFind={() => setFindOpen(true)}
+              {...treeHandlers}
               activeRepo={active?.kind === "editor" && active.repo ? active.repo : undefined}
               browsing={active?.kind === "editor" && !active.path}
-              onReviewCommit={(repo, commit) => {
-                setNavPage({ kind: "dashboard" });
-                openTab({ kind: "commit", workspace: focusWorkspace.name, repo, commit });
-              }}
-              onError={setError}
+              activePath={active?.kind === "editor" && active.path ? active.path : undefined}
             />
           </aside>
         </>

@@ -173,17 +173,6 @@ export function EditorPane({ workspace, repo, path, onError, onApplyPlan, onRunI
   }, [isPlan, ai?.agent]);
 
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === "s") {
-        e.preventDefault();
-        saveRef.current?.();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
-
-  useEffect(() => {
     setDirty(false);
     setMode("editor");
     // Empty path = repo browsing mode (no file open): the Files dock lists
@@ -260,7 +249,7 @@ export function EditorPane({ workspace, repo, path, onError, onApplyPlan, onRunI
   }, [cppGenerating, workspace, repo]);
 
   const save = async () => {
-    if (content === null) return;
+    if (content === null || !dirty) return;
     try {
       await invoke("write_file", { workspace, repo, path, content });
       diskRef.current = content;
@@ -383,6 +372,15 @@ export function EditorPane({ workspace, repo, path, onError, onApplyPlan, onRunI
       }
       if (!from || byEdit || Math.abs(e.position.lineNumber - from.lineNumber) < JUMP_LINES) return;
       navRef.current.onJump?.({ line: from.lineNumber, column: from.column }, { line: e.position.lineNumber, column: e.position.column });
+    });
+    // An editor action, not a window listener: hidden tabs stay mounted, and
+    // a window listener made every open file save. (addCommand is global in
+    // Monaco: the last editor created would win.)
+    editor.addAction({
+      id: "orbit.save",
+      label: "Save",
+      keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS],
+      run: () => saveRef.current?.(),
     });
     editor.addAction({
       id: "orbit.workspaceSymbols",
@@ -554,6 +552,7 @@ export function EditorPane({ workspace, repo, path, onError, onApplyPlan, onRunI
               theme={monacoTheme}
               beforeMount={beforeMount}
               path={lsp.fileUri(absPath)}
+              language={editorLanguage(path)}
               value={content}
               onMount={onMount}
               options={{
@@ -621,4 +620,10 @@ function LspChip({
         </span>
       );
   }
+}
+
+/** Monaco language for files it would guess wrong: C++ headers (it maps
+ *  `.h` to C, which clangd and the highlighter then treat as C). */
+function editorLanguage(path: string): string | undefined {
+  return /\.(h|hh|hpp|hxx|inl|ipp|tpp)$/i.test(path) ? "cpp" : undefined;
 }

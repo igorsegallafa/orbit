@@ -156,6 +156,18 @@ pub fn languages_in(dir: &Path) -> Vec<&'static str> {
         .collect()
 }
 
+/// `p` with symlinks and junctions resolved, or `p` itself when that fails.
+/// Drops the `\\?\` prefix Windows adds to drive paths, which servers and
+/// URIs don't use.
+pub fn real_path(p: &Path) -> PathBuf {
+    let Ok(real) = std::fs::canonicalize(p) else { return p.to_path_buf() };
+    let s = real.to_string_lossy();
+    match s.strip_prefix(r"\\?\") {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => PathBuf::from(rest),
+        _ => real,
+    }
+}
+
 // ---------- compile_commands.json (clangd) ----------
 
 /// The compilation database clangd should use: at the root, in `build/`, or
@@ -313,8 +325,11 @@ struct LspExit {
 #[serde(rename_all = "camelCase")]
 pub struct StartInfo {
     pub id: u32,
-    /// Absolute folder the server works in (the repo's worktree or clone).
+    /// The repo folder as Orbit opens it (may be a workspace symlink).
     pub root: String,
+    /// `root` with links resolved: the folder the server actually works in,
+    /// and the paths it reports back.
+    pub real_root: String,
     pub command: String,
     /// The binary's name ("clangd"), for display: `command` may be a path
     /// with spaces ("C:\Program Files\LLVM\bin\clangd.exe …").
@@ -368,10 +383,15 @@ pub fn start(app: &AppHandle, workspace: &str, repo: &str, language_id: &str) ->
     if !root.is_dir() {
         return Err(format!("'{repo}' folder not found"));
     }
+    // Repos shared into a workspace are symlinks (junctions on Windows).
+    // Servers resolve links and answer with real paths, and compilation
+    // databases list real paths, so the server works in the real folder and
+    // the client maps paths between the two.
+    let real_root = real_path(&root);
     if lang.id == "cpp" && !args.iter().any(|a| a.starts_with("--compile-commands-dir")) {
         // clangd finds <root> and <root>/build itself; deeper preset dirs need a pointer.
-        if let Some(dir) = find_compile_commands(&root).and_then(|p| p.parent().map(Path::to_path_buf)) {
-            if dir != root && dir != root.join("build") {
+        if let Some(dir) = find_compile_commands(&real_root).and_then(|p| p.parent().map(Path::to_path_buf)) {
+            if dir != real_root && dir != real_root.join("build") {
                 args.push(format!("--compile-commands-dir={}", dir.display()));
             }
         }
@@ -389,7 +409,7 @@ pub fn start(app: &AppHandle, workspace: &str, repo: &str, language_id: &str) ->
 
     let mut child = crate::proc::cmd(&bin)
         .args(&args)
-        .current_dir(&root)
+        .current_dir(&real_root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -434,7 +454,13 @@ pub fn start(app: &AppHandle, workspace: &str, repo: &str, language_id: &str) ->
         Running { language: lang.id.to_string(), root: root.clone(), command: command.clone(), started: now(), child, stdin, log },
     );
     let server = Path::new(&bin).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or(bin);
-    Ok(StartInfo { id, root: root.to_string_lossy().to_string(), command, server })
+    Ok(StartInfo {
+        id,
+        root: root.to_string_lossy().to_string(),
+        real_root: real_root.to_string_lossy().to_string(),
+        command,
+        server,
+    })
 }
 
 pub fn send(id: u32, message: &str) -> Result<(), String> {
@@ -679,6 +705,22 @@ mod tests {
         assert!(s.contains("call \"C:\\VS\\vcvars64.bat\" >nul 2>nul\r\n"));
         assert!(s.contains("cd /d \"%ORBIT_CWD%\"\r\n"));
         assert!(s.ends_with("cmake --preset \"win debug\" -DX=50%%\r\n"));
+    }
+
+    #[test]
+    fn real_path_follows_links() {
+        let base = std::env::temp_dir().join(format!("orbit-real-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("clone/src")).unwrap();
+        let real = real_path(&base.join("clone"));
+        assert!(!real.to_string_lossy().starts_with(r"\\?\"));
+        assert_eq!(real_path(&base.join("missing")), base.join("missing"));
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(base.join("clone"), base.join("link")).unwrap();
+            assert_eq!(real_path(&base.join("link")), real);
+        }
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

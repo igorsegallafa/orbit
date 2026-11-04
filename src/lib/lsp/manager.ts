@@ -192,7 +192,9 @@ async function ensureModel(uriStr: string): Promise<monaco.Uri> {
   if (!monaco.editor.getModel(uri)) {
     try {
       const text = await invoke<string>("lsp_read_file", { path: uri.fsPath });
-      if (!monaco.editor.getModel(uri)) monaco.editor.createModel(text, undefined, uri);
+      // C++ headers: Monaco would guess C from ".h" (same rule as EditorPane).
+      const lang = /\.(h|hh|hpp|hxx|inl|ipp|tpp)$/i.test(uri.path) ? "cpp" : undefined;
+      if (!monaco.editor.getModel(uri)) monaco.editor.createModel(text, lang, uri);
     } catch {
       // Unreadable (binary, gone): the location still shows, without preview.
     }

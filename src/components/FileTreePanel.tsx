@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, ReactNode, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { FolderIcon, GitIcon, SearchIcon } from "./Icons";
@@ -7,6 +7,7 @@ import { ContextMenu, MenuItem, useContextMenu } from "./ContextMenu";
 import { GitPanel } from "./GitPanel";
 import { useFsChanges } from "../lib/useFsChanges";
 import { GitCommit, Workspace } from "../types/config";
+import { useStableHandlers } from "../lib/useStableHandlers";
 
 interface FileNode {
   name: string;
@@ -38,7 +39,54 @@ interface Props {
   activeRepo?: string;
   /** The active tab browses a repo (no file open): show its files. */
   browsing?: boolean;
+  /** File of the active editor tab (in `activeRepo`): highlighted and revealed. */
+  activePath?: string;
 }
+
+type RowHandlers = {
+  click: (n: FileNode) => void;
+  contextMenu: (e: React.MouseEvent, n: FileNode) => void;
+  mouseDown: (e: React.MouseEvent, n: FileNode) => void;
+  pointerDown: (e: React.PointerEvent, n: FileNode) => void;
+};
+
+/** One tree row. Memoized: hovering or re-rendering the panel only touches
+ *  rows whose own state changed. */
+const TreeRow = memo(function TreeRow({ node, depth, open, active, dropTarget, rename, h }: {
+  node: FileNode;
+  depth: number;
+  open: boolean;
+  active: boolean;
+  dropTarget: boolean;
+  rename: ReactNode;
+  h: RowHandlers;
+}) {
+  return (
+    <button
+      className={`tree-item ${node.is_dir ? "tree-dir" : "tree-file"}${active ? " tree-active" : ""}${dropTarget ? " tree-drop-target" : ""}`}
+      style={{ "--depth": depth } as React.CSSProperties}
+      data-path={node.path}
+      data-drop-dir={node.is_dir ? node.path : undefined}
+      onClick={() => h.click(node)}
+      onContextMenu={(e) => h.contextMenu(e, node)}
+      onMouseDown={(e) => h.mouseDown(e, node)}
+      onPointerDown={(e) => h.pointerDown(e, node)}
+    >
+      {node.is_dir ? (
+        <>
+          <span className="tree-chevron-small">{open ? "▾" : "▸"}</span>
+          <FolderTreeIcon open={open} />
+        </>
+      ) : (
+        <>
+          <span className="tree-chevron-small invisible" />
+          <FileTypeIcon name={node.name} />
+        </>
+      )}
+      {rename ?? <span className="tree-name">{node.name}</span>}
+    </button>
+  );
+});
 
 /**
  * Fixed right dock (Orca/VS Code style): Files/Git/Search icon toolbar,
@@ -50,7 +98,18 @@ interface Props {
  * move past a 4px threshold → hit-test folders with elementFromPoint →
  * move on mouseup, with a floating ghost and target highlight.
  */
-export function FileTreePanel({ workspace, onOpenFile, onReviewFile, onReviewAll, onReviewCommit, onOpenFind, onError, activeRepo, browsing }: Props) {
+export const FileTreePanel = memo(function FileTreePanel({
+  workspace,
+  onOpenFile,
+  onReviewFile,
+  onReviewAll,
+  onReviewCommit,
+  onOpenFind,
+  onError,
+  activeRepo,
+  browsing,
+  activePath,
+}: Props) {
   const [view, setView] = useState<DockView>("files");
   // The picked repo only counts while it belongs to the focused workspace:
   // switching focus must never pair the new workspace with the old repo.
@@ -381,71 +440,67 @@ export function FileTreePanel({ workspace, onOpenFile, onReviewFile, onReviewAll
     />
   );
 
+  const target = (n: FileNode): TreeTarget => ({ repo, path: n.path, isDir: n.is_dir });
+  const rowHandlers = useStableHandlers<RowHandlers>({
+    click: (n) => {
+      if (justDraggedRef.current) return;
+      if (n.is_dir) toggleDir(n.path);
+      else onOpenFile(repo, n.path);
+    },
+    contextMenu: (e, n) => {
+      e.preventDefault();
+      menu.setMenu({ x: e.clientX, y: e.clientY, payload: target(n) });
+    },
+    mouseDown: (e, n) => {
+      menu.openFromEvent(e, target(n));
+      startPotentialDrag(e, target(n));
+    },
+    pointerDown: (e, n) => menu.openFromEvent(e, target(n)),
+  });
+
+  // Follow the active editor: open the folders down to its file and scroll
+  // the row into view.
+  const shownPath = activeRepo === repo ? activePath : undefined;
+  useEffect(() => {
+    if (!shownPath || view !== "files") return;
+    const parts = shownPath.split("/").slice(0, -1);
+    const dirs = parts.map((_, i) => parts.slice(0, i + 1).join("/"));
+    setExpanded((x) => (dirs.every((d) => x[d]) ? x : { ...x, ...Object.fromEntries(dirs.map((d) => [d, true])) }));
+    for (const d of dirs) if (!tree[d]) loadDir(d);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shownPath, repo, view]);
+  const shownLoaded = !!shownPath && !!tree[shownPath.includes("/") ? shownPath.slice(0, shownPath.lastIndexOf("/")) : ""];
+  useEffect(() => {
+    if (!shownPath || !shownLoaded) return;
+    const row = hostRef.current?.querySelector<HTMLElement>(`[data-path="${CSS.escape(shownPath)}"]`);
+    row?.scrollIntoView({ block: "nearest" });
+  }, [shownPath, shownLoaded]);
+
   const renderDir = (dir: string, depth: number): React.ReactNode => {
     const children = tree[dir] ?? [];
+    const row = (n: FileNode) => (
+      <TreeRow
+        key={n.path}
+        node={n}
+        depth={depth}
+        open={!!expanded[n.path]}
+        active={n.path === shownPath}
+        dropTarget={dragHover === n.path}
+        rename={renameTarget?.path === n.path ? renameInput(n.name) : null}
+        h={rowHandlers}
+      />
+    );
     return (
       <>
         {children
           .filter((n) => n.is_dir)
           .map((n) => (
             <div key={n.path}>
-              <button
-                className={`tree-item tree-dir depth-${Math.min(depth, 6)} ${dragHover === n.path ? "tree-drop-target" : ""}`}
-                data-drop-dir={n.path}
-                onClick={() => {
-                  if (justDraggedRef.current) return;
-                  toggleDir(n.path);
-                }}
-                onContextMenu={(e) => {
-                  e.preventDefault();
-                  menu.setMenu({ x: e.clientX, y: e.clientY, payload: { repo, path: n.path, isDir: true } });
-                }}
-                onMouseDown={(e) => {
-                  menu.openFromEvent(e, { repo, path: n.path, isDir: true });
-                  startPotentialDrag(e, { repo, path: n.path, isDir: true });
-                }}
-                onPointerDown={(e) => menu.openFromEvent(e, { repo, path: n.path, isDir: true })}
-              >
-                <span className="tree-chevron-small">{expanded[n.path] ? "▾" : "▸"}</span>
-                <FolderTreeIcon open={!!expanded[n.path]} />
-                {renameTarget?.path === n.path ? (
-                  renameInput(n.name)
-                ) : (
-                  <span className="tree-name">{n.name}</span>
-                )}
-              </button>
+              {row(n)}
               {expanded[n.path] && renderDir(n.path, depth + 1)}
             </div>
           ))}
-        {children
-          .filter((n) => !n.is_dir)
-          .map((n) => (
-            <button
-              key={n.path}
-              className={`tree-item tree-file depth-${Math.min(depth, 6)}`}
-              onClick={() => {
-                if (justDraggedRef.current) return;
-                onOpenFile(repo, n.path);
-              }}
-              onContextMenu={(e) => {
-                e.preventDefault();
-                menu.setMenu({ x: e.clientX, y: e.clientY, payload: { repo, path: n.path, isDir: false } });
-              }}
-              onMouseDown={(e) => {
-                menu.openFromEvent(e, { repo, path: n.path, isDir: false });
-                startPotentialDrag(e, { repo, path: n.path, isDir: false });
-              }}
-              onPointerDown={(e) => menu.openFromEvent(e, { repo, path: n.path, isDir: false })}
-            >
-              <span className="tree-chevron-small invisible" />
-              <FileTypeIcon name={n.name} />
-              {renameTarget?.path === n.path ? (
-                renameInput(n.name)
-              ) : (
-                <span className="tree-name">{n.name}</span>
-              )}
-            </button>
-          ))}
+        {children.filter((n) => !n.is_dir).map(row)}
       </>
     );
   };
@@ -560,4 +615,4 @@ export function FileTreePanel({ workspace, onOpenFile, onReviewFile, onReviewAll
       )}
     </div>
   );
-}
+});

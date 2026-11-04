@@ -20,7 +20,29 @@ function base(size: number, children: React.ReactNode) {
   );
 }
 
+/** A short label (C, C++, H) in the file outline, for languages without a
+ *  distinctive glyph. */
+function labeled(size: number, text: string) {
+  return base(
+    size,
+    <>
+      <path d="M6 3h8l4 4v14H6z" />
+      <text x="12" y="17.5" textAnchor="middle" fontSize={text.length > 1 ? 7 : 9} fontWeight="700" fill="currentColor" stroke="none">
+        {text}
+      </text>
+    </>,
+  );
+}
+
+const cpp = (s: number) => labeled(s, "C+");
+const header = (s: number) => labeled(s, "H");
+const cmake = (s: number) => base(s, <><path d="M12 3 3 20h18z" /><path d="M12 3v17" /></>);
+
 const FILE_ICONS: Record<string, (size: number) => React.ReactNode> = {
+  c: (s) => labeled(s, "C"),
+  cpp, cc: cpp, cxx: cpp,
+  h: header, hpp: header, hh: header, hxx: header, inl: header,
+  cmake,
   ts: (s) => base(s, <><path d="M4 4h16v14H4z" /><path d="m9 9-2 3 2 3" /><path d="m14 9 2 3-2 3" /></>),
   tsx: (s) => base(s, <><path d="M4 4h16v14H4z" /><path d="m9 9-2 3 2 3" /><path d="m14 9 2 3-2 3" /></>),
   js: (s) => base(s, <><path d="M4 4h16v14H4z" /><path d="M9 15c-.6.6-1.4.8-2.2.6" /><path d="M15 9.5c-1.8-.8-3.6.5-3.6 2.2 0 1.9 1.9 3 3.6 2.2" /></>),
@@ -41,6 +63,10 @@ const FILE_ICONS: Record<string, (size: number) => React.ReactNode> = {
 };
 
 const ICON_COLORS: Record<string, string> = {
+  c: "#a8b9cc",
+  cpp: "#f34b7d", cc: "#f34b7d", cxx: "#f34b7d",
+  h: "#a074c4", hpp: "#a074c4", hh: "#a074c4", hxx: "#a074c4", inl: "#a074c4",
+  cmake: "#3fb950",
   ts: "#519aba",
   tsx: "#519aba",
   js: "#f1e05a",
@@ -61,7 +87,7 @@ const ICON_COLORS: Record<string, string> = {
 };
 
 export function FileTypeIcon({ name, size = 14 }: { name: string; size?: number }) {
-  const ext = name.split(".").pop()?.toLowerCase() ?? "";
+  const ext = name === "CMakeLists.txt" ? "cmake" : (name.split(".").pop()?.toLowerCase() ?? "");
   const icon = FILE_ICONS[ext];
   if (icon) {
     return (
