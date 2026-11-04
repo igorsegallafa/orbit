@@ -1,6 +1,7 @@
 //! Lays out and paints the visible grid: background runs as quads, text as one
 //! shaped run per style change, positioned on the cell grid so fallback glyphs
 //! can't drift the columns.
+use super::graphics::{self, PlaceholderCell, PLACEHOLDER};
 use super::{GridSize, Shared, LINE_HEIGHT, PADDING};
 use crate::theme::{self, hsla};
 use alacritty_terminal::{
@@ -9,8 +10,13 @@ use alacritty_terminal::{
     term::cell::Flags,
     vte::ansi::{Color, CursorShape, NamedColor, Rgb},
 };
-use gpui::{font, point, px, size, Bounds, FontStyle, FontWeight, Hsla, Pixels, ShapedLine, SharedString, TextRun, Window};
-use std::sync::atomic::{AtomicU64, Ordering};
+use gpui::{
+    font, point, px, size, Bounds, FontStyle, FontWeight, Hsla, Pixels, RenderImage, ShapedLine, SharedString, TextRun, Window,
+};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 
 /// Frame statistics of every terminal canvas (layout + paint), for the self-test.
 pub static FRAMES: AtomicU64 = AtomicU64::new(0);
@@ -105,6 +111,16 @@ pub struct Frame {
     pub lines: Vec<(gpui::Point<Pixels>, ShapedLine)>,
     pub cursor: Option<(Bounds<Pixels>, CursorShape)>,
     pub line_height: Pixels,
+    /// Kitty pictures: the cells they show in, the whole picture's bounds, the picture.
+    pub images: Vec<(Bounds<Pixels>, Bounds<Pixels>, Arc<RenderImage>)>,
+}
+
+/// A row's run of placeholder cells showing consecutive columns of one picture.
+struct ImageRun {
+    line: i32,
+    col: usize,
+    count: usize,
+    at: PlaceholderCell,
 }
 
 type Run = Option<(i32, usize, String, (Hsla, bool, bool))>;
@@ -144,8 +160,13 @@ pub fn layout(shared: &Shared, bounds: Bounds<Pixels>, window: &mut Window) -> F
     }
     *shared.geometry.lock().unwrap() = Some(Geometry { origin, cell_w, line_h: line_height, size: new_size });
 
+    for image in std::mem::take(&mut shared.graphics.lock().unwrap().retired) {
+        let _ = window.drop_image(image);
+    }
     let term = shared.term.lock();
     let content = term.renderable_content();
+    let mut runs: Vec<ImageRun> = Vec::new();
+    let mut prev_placeholder: Option<(i32, usize, PlaceholderCell)> = None;
     let offset = content.display_offset as i32;
     let selection = content.selection;
     let default_bg = hsla(theme::BG);
@@ -208,6 +229,19 @@ pub fn layout(shared: &Shared, bounds: Bounds<Pixels>, window: &mut Window) -> F
                 _ => rects.push((b, bg)),
             }
         }
+        if cell.c == PLACEHOLDER {
+            let prev = prev_placeholder.filter(|(l, c, _)| *l == line && c + 1 == col).map(|p| p.2);
+            let at = graphics::read_placeholder(cell.zerowidth().unwrap_or(&[]), graphics::colour_id(cell.fg), prev);
+            prev_placeholder = Some((line, col, at));
+            match runs.last_mut() {
+                Some(r) if r.line == line && r.col + r.count == col && r.at.id == at.id && r.at.row == at.row && r.at.col + r.count as u32 == at.col => {
+                    r.count += 1
+                }
+                _ => runs.push(ImageRun { line, col, count: 1, at }),
+            }
+            flush(&mut run, &mut lines);
+            continue;
+        }
         let ch = if cell.flags.contains(Flags::HIDDEN) { ' ' } else { cell.c };
         let style = (fg, bold, cell.flags.contains(Flags::ITALIC));
         let simple = ch.is_ascii() && width == 1;
@@ -240,5 +274,22 @@ pub fn layout(shared: &Shared, bounds: Bounds<Pixels>, window: &mut Window) -> F
         let p = content.cursor.point;
         (Bounds::new(cell_origin(p.line.0, p.column.0), size(cell_w, line_height)), content.cursor.shape)
     });
-    Frame { rects, lines, cursor, line_height }
+    let mut images = Vec::new();
+    if !runs.is_empty() {
+        let store = shared.graphics.lock().unwrap();
+        let cell = (f32::from(cell_w), LINE_HEIGHT);
+        for r in runs {
+            let Some((image, (w, h), (cols, rows))) = store.lookup(r.at.id, cell) else { continue };
+            // Fit in the placement's box, centred, as the React port does.
+            let (box_w, box_h) = (cols as f32 * cell.0, rows as f32 * cell.1);
+            let scale = (box_w / w).min(box_h / h);
+            let (iw, ih) = (w * scale, h * scale);
+            let cells = cell_origin(r.line, r.col);
+            let top_left = cells - point(px(r.at.col as f32 * cell.0), px(r.at.row as f32 * cell.1));
+            let image_bounds = Bounds::new(top_left + point(px((box_w - iw) / 2.), px((box_h - ih) / 2.)), size(px(iw), px(ih)));
+            let clip = Bounds::new(cells, size(cell_w * r.count as f32, line_height));
+            images.push((clip, image_bounds, image));
+        }
+    }
+    Frame { rects, lines, cursor, line_height, images }
 }

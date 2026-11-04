@@ -34,6 +34,11 @@ dirs = "6"
 futures = "0.3"
 anyhow = "1"
 regex = "1"
+# kitty graphics in the terminal (versions already in the lock via gpui).
+base64 = "0.22"
+flate2 = "1"
+image = { version = "0.25", default-features = false, features = ["png"] }
+memchr = "2"
 
 [profile.release]
 debug = false

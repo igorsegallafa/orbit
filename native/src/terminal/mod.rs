@@ -5,6 +5,8 @@
 //! ever waits for one small slice of parsing.
 //! Mouse drags select text (double click: words, triple: lines) unless the
 //! application asked for mouse reports, which Shift overrides.
+mod diacritics;
+mod graphics;
 mod grid;
 mod input;
 
@@ -26,7 +28,7 @@ use futures::{channel::mpsc, StreamExt};
 use gpui::{
     canvas, div, fill, outline, point, prelude::*, px, size, App, Bounds, ClipboardItem, Context, FocusHandle,
     EventEmitter, Focusable, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollEvent,
-    SharedString, Task, Window,
+    SharedString, Subscription, Task, Window,
 };
 use grid::Geometry;
 use input::{key_to_bytes, mouse_report, MouseReport};
@@ -108,6 +110,20 @@ pub struct Shared {
     size: Mutex<GridSize>,
     window_size: Arc<Mutex<WindowSize>>,
     geometry: Mutex<Option<Geometry>>,
+    graphics: Mutex<graphics::Store>,
+}
+
+impl Shared {
+    /// Cell size in pixels, for pictures placed without a size.
+    fn cell_px(&self) -> (f32, f32) {
+        self.geometry.lock().unwrap().map_or((8., LINE_HEIGHT), |g| (f32::from(g.cell_w), f32::from(g.line_h)))
+    }
+
+    /// Output through the kitty graphics filter; `reply` answers its queries.
+    fn feed(&self, kitty: &mut graphics::Kitty, parser: &mut Processor, bytes: &[u8], reply: Option<graphics::Reply>) {
+        let target = graphics::Target { term: &self.term, store: &self.graphics, cell: self.cell_px(), reply };
+        kitty.feed(bytes, parser, &target);
+    }
 }
 
 /// The size the last painted terminal had: new sessions start at it, since
@@ -156,6 +172,7 @@ pub struct TerminalView {
     pub last_copied: Option<String>,
     _pump: Task<()>,
     _status_poll: Task<()>,
+    _free_images: Subscription,
 }
 
 impl EventEmitter<TerminalEvent> for TerminalView {}
@@ -205,10 +222,19 @@ impl TerminalView {
         }));
         let listener = Listener { pty_id, title: title.clone(), window_size: window_size.clone() };
         let term = Term::new(Config::default(), &size, listener);
-        let shared = Arc::new(Shared { term: FairMutex::new(term), pty_id, size: Mutex::new(size), window_size, geometry: Mutex::new(None) });
+        let shared = Arc::new(Shared {
+            term: FairMutex::new(term),
+            pty_id,
+            size: Mutex::new(size),
+            window_size,
+            geometry: Mutex::new(None),
+            graphics: Mutex::default(),
+        });
         let mut parser: Processor = Processor::new();
+        let mut kitty = graphics::Kitty::default();
         if let Some(saved) = replay.filter(|r| !r.is_empty()) {
-            parser.advance(&mut *shared.term.lock(), &restored_output(&saved, size.rows));
+            shared.feed(&mut kitty, &mut parser, &restored_output(&saved, size.rows), None);
+            kitty = graphics::Kitty::default();
         }
 
         // The output thread parses everything; the UI only learns that
@@ -220,11 +246,14 @@ impl TerminalView {
         let tracker = Arc::new(Mutex::new(Tracker::default()));
         let on_output = {
             let (shared, dirty, exited, tracker) = (shared.clone(), dirty.clone(), exited.clone(), tracker.clone());
+            let reply = move |b: &[u8]| {
+                let _ = pty::write(pty_id, b);
+            };
             move |out: pty::Output| {
                 match out {
                     pty::Output::Data(bytes) => {
                         for slice in bytes.chunks(PARSE_SLICE) {
-                            parser.advance(&mut *shared.term.lock(), slice);
+                            shared.feed(&mut kitty, &mut parser, slice, Some(&reply));
                         }
                         let tail = &bytes[bytes.len().saturating_sub(status::TAIL_BYTES)..];
                         tracker.lock().unwrap().feed(&String::from_utf8_lossy(tail), Instant::now());
@@ -264,6 +293,13 @@ impl TerminalView {
         if let Some(input) = input {
             let _ = pty::write(pty_id, format!("{input}\r").as_bytes());
         }
+        // Pictures leave the GPU atlas with the terminal.
+        let free_images = cx.on_release(|this, cx| {
+            let images = this.shared.graphics.lock().unwrap().take_all();
+            for image in images {
+                cx.drop_image(image, None);
+            }
+        });
         Self {
             shared,
             meta,
@@ -279,6 +315,7 @@ impl TerminalView {
             last_copied: None,
             _pump: pump,
             _status_poll: status_poll,
+            _free_images: free_images,
         }
     }
 
@@ -369,6 +406,11 @@ impl TerminalView {
             }
         }
         out
+    }
+
+    /// Kitty graphics held by this terminal (self-test dumps).
+    pub fn graphics_summary(&self) -> String {
+        self.shared.graphics.lock().unwrap().summary()
     }
 
     pub fn selection_text(&self) -> Option<String> {
@@ -615,6 +657,9 @@ impl Render for TerminalView {
                         window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
                             for (b, color) in &frame.rects {
                                 window.paint_quad(fill(*b, *color));
+                            }
+                            for (clip, image_bounds, image) in &frame.images {
+                                let _ = window.paint_image(*clip, *image_bounds, Default::default(), image.clone(), 0, false);
                             }
                             if let Some((b, shape)) = frame.cursor {
                                 let accent = hsla(theme::ACCENT);

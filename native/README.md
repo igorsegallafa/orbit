@@ -351,7 +351,7 @@ Caveats found:
 | `src/lsp/` | `mod.rs` file → language and the server registry · `server.rs` JSON-RPC client and URI mapping over `orbit_core::lsp` (which picks, starts and feeds the process) · `paths.rs` URIs and root rebase |
 | `src/diff_view.rs` | diff tab over `git diff HEAD` (untracked files too), F7 navigation, and REVIEW.md notes inline in a workspace repo |
 | `src/review/` | the review tabs (`mod.rs`: tab, commands, sidebar entries, dump) · `changes.rs` changed files and notes · `prs.rs` PRs, status, checks, logs, creation · `send.rs` notes to a PR review · `notes.rs` REVIEW.md and note anchoring · `ui.rs` small widgets |
-| `src/terminal/` | terminal view over `orbit_core::pty`: VT parse, status tracking, scrollback replay (`mod.rs`), grid layout and paint (`grid.rs`), keys and mouse reports (`input.rs`) |
+| `src/terminal/` | terminal view over `orbit_core::pty`: VT parse, status tracking, scrollback replay (`mod.rs`), grid layout and paint (`grid.rs`), keys and mouse reports (`input.rs`), kitty graphics (`graphics.rs`, `diacritics.rs`) |
 | `src/sessions/` | sessions (`mod.rs`: keys, codenames, save/restore, inbox, recent, resume, actions), agent status heuristics and hooks (`status.rs`) |
 | `src/file_tree.rs` | virtualized tree with background folder loads, reveal, refresh after disk changes, name prompt and file operations (`orbit_core::files`) |
 | `src/file_ops.rs` | the tree's ties to the app: context menu, the workspace watcher (`orbit_core::watch`; tree refresh, editor reload), following the active file, breadcrumb reveal |
@@ -519,6 +519,37 @@ stub agent on `PATH` (no real agent was started):
   gave the prompt back within 50 ms.
 - `pnpm run check` passes with the adapter (Tauri app unchanged for the frontend); core has two new
   PTY tests (round trip with exit; pause stops reading until resumed).
+
+### Kitty graphics
+
+Programs draw pictures with the kitty graphics protocol, as in the Tauri app (`src/lib/kittyGraphics.ts`).
+`terminal/graphics.rs` cuts `ESC _ G … ESC \` out of the PTY output on the output thread (a streaming
+state machine: sequences may be split across reads), before alacritty parses it, and answers on the PTY.
+It supports what the React port does: base64 `t=d` in `m=1` chunks, files `t=f` / `t=t` (the same path
+rules as `term_image.rs`; `t=t` deletes only `tty-graphics-protocol` temp files), `f=100` PNG,
+`f=24`/`f=32` raw with `s`/`v`, `o=z`, actions `T`, `t`, `p`, `q`, and `d` with `d=a|A|i|I`; replies
+honour `q`. Not supported, as in React: shared memory `t=s`, source rects `x/y/w/h`, other deletes,
+animation.
+
+Pictures show over Unicode placeholder cells (U+10EEEE with row/column diacritics, the image id in
+the foreground colour), which is how Claude Code draws them. Direct placements (`a=T`/`a=p` without
+`U=1`, e.g. icat) go further than the React port: they are written into the grid at the cursor as
+placeholder cells of an alias id, `c`/`r` cells or the picture's size, with the cursor moved past the
+picture unless `C=1`. So a picture scrolls with its lines, goes into the scrollback, and disappears
+with them (clear, scrollback trimmed). Text written over it later replaces it (kitty keeps the image;
+`z` has no effect). Pictures fit their cell box, centred, painted over cell backgrounds.
+
+Decoding happens on the output thread; the store holds BGRA `RenderImage`s by id (larger than
+4096 px scaled down), capped at 320 MB per terminal as in React, oldest dropped first. Above 64 MB,
+direct placements whose cells left the grid are collected with their anonymous pictures. Freed
+pictures leave the GPU atlas on the next paint, all of them when the terminal closes. The dump has a
+`kitty graphics:` line.
+
+Verified with a script printing a chunked PNG (`a=T,m=1`), a PNG file (`t=f`, `c=6,r=3`), raw RGB
+(`a=t` then `a=p`) and an `a=q` query (reply `ESC _Gi=31;OK ESC \`), and a Claude-style virtual
+placement with placeholders: captures show them in place, scrolled half off the top, and gone after
+`clear`. `yes | head -n 2000000` took 0.64 s (UI timers at most 9 ms late); 20 M lines took 6.4 s
+(12 ms); `cat` of a 23 MB file 1.3 s (5 ms).
 
 ## Files and search stage
 
@@ -1273,7 +1304,7 @@ Status of everything the React app does: **done**, **partial** (with what's miss
 - [x] done: PTY terminal on `orbit_core::pty` with spawn at the real size, write, resize, 10k scrollback, 256/true colour, cursor shapes, OSC title, bracketed paste, alternate-screen wheel, flow control, scrollback restore after restart and forget on close (`TerminalPane.tsx`)
 - [x] done: selection (drag, word, line), copy (`Ctrl+Shift+C`, primary on select), paste (`Ctrl+Shift+V`, `Shift+Insert`, middle click)
 - [x] done: mouse reporting to TUIs (X10/normal and SGR; click, drag, motion, wheel)
-- [ ] — Kitty graphics (`src/lib/kittyGraphics.ts`)
+- [x] done: kitty graphics: Unicode placeholders (Claude Code) and direct placements; `t=d` chunked, `t=f`/`t=t` files, PNG and raw RGB(A), `o=z`, `a=T`/`t`/`p`/`d`/`q` (`src/lib/kittyGraphics.ts`, `src-tauri/src/term_image.rs`)
 - [x] done: theme-driven ANSI colours (every theme)
 
 ### File tree / right dock
