@@ -1,7 +1,8 @@
 //! The PR review tab (`PrReviewPane.tsx`): the PR's header, overview and
 //! files on the left; the overview or a file's diff with its review threads
 //! on the right. Comments go out at once or wait in a pending review that is
-//! submitted with a verdict.
+//! submitted with a verdict. An agent can address the open threads in the
+//! workspace that has the PR checked out (`AddressReview.tsx`).
 use super::pr_ui::{self, lucide, tint, Tone};
 use super::Load;
 use crate::app::OrbitApp;
@@ -11,17 +12,20 @@ use crate::probe::probe;
 use crate::theme::{self, c};
 use crate::toast::ToastKind;
 use gpui::{
-    div, prelude::*, px, AnyElement, App, Context, ElementId, Entity, FontWeight, MouseButton, SharedString, Subscription, Window,
+    div, prelude::*, px, AnyElement, App, Context, ElementId, Entity, FontWeight, KeyDownEvent, MouseButton, SharedString, Subscription,
+    Task, Window,
 };
 use gpui_component::diff::{Diff, DiffAnnotation, DiffDecoration, DiffFile, DiffLinePosition, DiffLineRange, DiffMode, DiffSide, DiffState};
 use gpui_component::highlighter::SyntaxHighlighter;
 use gpui_component::input::{InputEvent, Rope, Textarea, TextareaState};
 use gpui_component::text::TextView;
 use gpui_component::ActiveTheme;
+use orbit_core::agent::ThreadReply;
 use orbit_core::github::{PrDetail, PullRequest};
 use orbit_core::review::{DraftComment, ReviewData, ReviewThread};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -113,6 +117,9 @@ enum Sel {
 enum ComposerKind {
     New { side: DiffSide, start: u64, end: u64 },
     Reply(String),
+    /// One of the viewer's posted comments, by REST id.
+    Edit(u64),
+    EditDraft(String),
 }
 
 struct Composer {
@@ -132,6 +139,57 @@ struct Submit {
     body: Entity<TextareaState>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+enum AddressState {
+    Running,
+    Done(usize),
+    Failed(String),
+}
+
+/// An agent run over the open threads, in the workspace's worktree.
+struct Address {
+    run: String,
+    repo: String,
+    threads: usize,
+    state: AddressState,
+    /// The agent's latest step, from its live feed.
+    step: Arc<Mutex<String>>,
+    _tick: Option<Task<()>>,
+}
+
+/// Where a file's threads go: under a diff line, or in the list above the
+/// diff (outdated, or on a side the view doesn't show).
+fn anchor<'a>(threads: &[&'a ReviewThread], split: bool, lines: (u64, u64)) -> (Vec<&'a ReviewThread>, Vec<&'a ReviewThread>) {
+    threads.iter().copied().partition(|t| {
+        let max = if t.side == "LEFT" { lines.0 } else { lines.1 };
+        t.line.is_some_and(|l| l >= 1 && l <= max) && (t.side == "RIGHT" || split)
+    })
+}
+
+/// Where an off-diff thread was left.
+fn off_location(t: &ReviewThread) -> String {
+    match (t.line, t.original_line) {
+        (Some(l), _) if t.side == "LEFT" => format!("Removed line {l}"),
+        (Some(l), _) => format!("Line {l}"),
+        (None, Some(l)) => format!("Line {l} (original)"),
+        _ => "File".into(),
+    }
+}
+
+/// The header of an open thread (a range) or a closed one (who said what).
+fn thread_title(t: &ReviewThread, open: bool) -> String {
+    if !open {
+        return match t.comments.first() {
+            Some(c) => format!("{}: {}", c.author, c.body.lines().next().unwrap_or("")),
+            None => "Thread".into(),
+        };
+    }
+    match (t.start_line, t.line) {
+        (Some(s), Some(e)) if s < e => format!("Lines {s}–{e}"),
+        _ => "Conversation".into(),
+    }
+}
+
 pub struct PrReviewPage {
     host: Host,
     pub prs: Vec<PullRequest>,
@@ -147,6 +205,16 @@ pub struct PrReviewPage {
     composer: Option<Composer>,
     submit: Option<Submit>,
     busy: bool,
+    /// Line counts of the shown file (base, head), to anchor threads.
+    lines: (u64, u64),
+    /// Threads opened or closed by hand (resolved ones start closed).
+    toggled: HashSet<String>,
+    confirm_delete: Option<u64>,
+    /// The workspace with this PR's branch checked out.
+    workspace: Option<crate::workspace::Workspace>,
+    address: Option<Address>,
+    /// Replies the agent drafted, by thread id.
+    suggestions: HashMap<String, ThreadReply>,
 }
 
 fn side_of(s: &str) -> DiffSide {
@@ -181,6 +249,12 @@ impl PrReviewPage {
             composer: None,
             submit: None,
             busy: false,
+            lines: (0, 0),
+            toggled: HashSet::new(),
+            confirm_delete: None,
+            workspace: None,
+            address: None,
+            suggestions: HashMap::new(),
         };
         page.load(window, cx);
         page
@@ -200,14 +274,25 @@ impl PrReviewPage {
         self.selected = Sel::Overview;
         self.diff = Load::Idle;
         self.composer = None;
+        self.suggestions.clear();
+        self.toggled.clear();
         self.saved = load_saved(&self.key());
         let (or, n) = (self.pr().owner_repo.clone(), self.pr().number);
+        let pr = self.pr().clone();
         cx.spawn_in(window, async move |this, cx| {
             let d = cx.background_spawn(async move { orbit_core::github::pr_detail(&or, n) }).await;
+            let ws = match &d {
+                Ok(d) => {
+                    let pr = PullRequest { branch: d.branch.clone(), ..pr };
+                    cx.background_spawn(async move { super::code_review::workspace_for(&[pr], &crate::workspace::list_workspaces()) }).await
+                }
+                Err(_) => None,
+            };
             let _ = this.update(cx, |p, cx| {
                 if let Err(e) = &d {
                     p.host.error("Couldn't load the pull request", e.clone(), cx);
                 }
+                p.workspace = ws;
                 p.detail = d.map_or_else(Load::Failed, Load::Ready);
                 cx.notify();
             });
@@ -255,13 +340,18 @@ impl PrReviewPage {
             let patch = cx
                 .background_spawn(async move {
                     let d = orbit_core::github::pr_file_diff(&or, &head, &base, &p2)?;
-                    patch_of(&p2, &d.original, &d.modified)
+                    let count = |t: &str| t.lines().count() as u64;
+                    Ok::<_, String>(((count(&d.original), count(&d.modified)), patch_of(&p2, &d.original, &d.modified)?))
                 })
                 .await;
             let _ = this.update(cx, |page, cx| {
                 if page.selected != Sel::File(path.clone()) {
                     return;
                 }
+                let patch = patch.map(|(lines, p)| {
+                    page.lines = lines;
+                    p
+                });
                 let language = crate::lsp::file_language(Path::new(&path)).highlight;
                 let files = patch.and_then(|p| DiffFile::parse(&p).map(|f| (f, p)).map_err(|e| e.message().to_string()));
                 page.diff = match files {
@@ -317,18 +407,95 @@ impl PrReviewPage {
         cx.notify();
     }
 
-    fn open_composer(&mut self, kind: ComposerKind, window: &mut Window, cx: &mut Context<Self>) {
-        let placeholder = if matches!(kind, ComposerKind::Reply(_)) { "Reply…" } else { "Leave a comment" };
-        let input = cx.new(|cx| TextareaState::new(window, cx).placeholder(placeholder).rows(3));
-        let sub = cx.subscribe_in(&input, window, |_, _, _: &InputEvent, _, _| {});
+    fn open_composer(&mut self, kind: ComposerKind, initial: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let placeholder = match kind {
+            ComposerKind::Reply(_) => "Reply…",
+            ComposerKind::New { .. } => "Leave a comment",
+            _ => "Edit comment",
+        };
+        let initial = initial.to_string();
+        let input = cx.new(|cx| TextareaState::new(window, cx).placeholder(placeholder).rows(3).default_value(initial));
+        // Ctrl+Enter runs the primary action (`Editor` in ReviewThreads.tsx).
+        let sub = cx.subscribe_in(&input, window, |p, _, ev: &InputEvent, window, cx| {
+            if matches!(ev, InputEvent::PressEnter { secondary: true, .. }) {
+                p.submit_composer(window, cx);
+            }
+        });
         input.update(cx, |i, cx| i.focus(window, cx));
         self.composer = Some(Composer { kind, input, _sub: sub });
         cx.notify();
     }
 
+    fn cancel_composer(&mut self, cx: &mut Context<Self>) {
+        self.composer = None;
+        cx.notify();
+    }
+
+    fn submit_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.composer.as_ref().map(|c| c.kind.clone()) {
+            Some(ComposerKind::New { .. }) => self.add_draft(cx),
+            Some(ComposerKind::Reply(_)) => self.comment_now(window, cx),
+            Some(ComposerKind::Edit(id)) => self.edit_comment(id, window, cx),
+            Some(ComposerKind::EditDraft(id)) => {
+                let Some(body) = self.composer_text(cx) else { return };
+                if let Some(d) = self.saved.drafts.iter_mut().find(|d| d.id == id) {
+                    d.body = body;
+                }
+                self.persist();
+                self.cancel_composer(cx);
+            }
+            None => {}
+        }
+    }
+
+    /// Runs a GitHub write in the background, then reloads the threads.
+    fn write(
+        &mut self,
+        what: &'static str,
+        done: Option<&'static str>,
+        f: impl FnOnce() -> Result<(), String> + Send + 'static,
+        on_ok: impl FnOnce(&mut Self) + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.busy = true;
+        cx.spawn_in(window, async move |this, cx| {
+            let r = cx.background_spawn(async move { f() }).await;
+            let _ = this.update_in(cx, |p, window, cx| {
+                p.busy = false;
+                match r {
+                    Ok(()) => {
+                        on_ok(p);
+                        p.composer = None;
+                        p.confirm_delete = None;
+                        if let Some(done) = done {
+                            p.host.toast(ToastKind::Success, done, None, cx);
+                        }
+                        p.load_review(false, window, cx);
+                    }
+                    Err(e) => p.host.error(what, e, cx),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn edit_comment(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(body) = self.composer_text(cx) else { return };
+        let or = self.pr().owner_repo.clone();
+        self.write("Couldn't edit the comment", None, move || orbit_core::review::edit_comment(&or, id, &body), |_| {}, window, cx);
+    }
+
+    fn delete_comment(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let or = self.pr().owner_repo.clone();
+        self.write("Couldn't delete the comment", Some("Comment deleted"), move || orbit_core::review::delete_comment(&or, id), |_| {}, window, cx);
+    }
+
     fn comment_on(&mut self, range: &DiffLineRange, window: &mut Window, cx: &mut Context<Self>) {
         let (start, end) = (range.start().min(range.end()) as u64, range.start().max(range.end()) as u64);
-        self.open_composer(ComposerKind::New { side: range.side(), start, end }, window, cx);
+        self.open_composer(ComposerKind::New { side: range.side(), start, end }, "", window, cx);
     }
 
     fn composer_text(&self, cx: &App) -> Option<String> {
@@ -358,46 +525,22 @@ impl PrReviewPage {
         let Some(kind) = self.composer.as_ref().map(|c| c.kind.clone()) else { return };
         let (or, n) = (self.pr().owner_repo.clone(), self.pr().number);
         let head = self.detail.ready().map(|d| d.head_sha.clone()).unwrap_or_default();
-        let reply_to = match &kind {
-            ComposerKind::Reply(tid) => self.review.as_ref().and_then(|r| r.threads.iter().find(|t| &t.id == tid)).and_then(|t| t.comments.first()).map(|c| c.id),
-            _ => None,
-        };
-        let comment = match (&kind, &self.selected) {
-            (ComposerKind::New { side, start, end }, Sel::File(path)) => Some(DraftComment {
-                path: path.clone(),
-                side: side_name(*side).into(),
-                line: *end,
-                start_line: (start < end).then_some(*start),
-                body: body.clone(),
-            }),
-            _ => None,
-        };
-        self.busy = true;
-        cx.spawn_in(window, async move |this, cx| {
-            let r = cx
-                .background_spawn(async move {
-                    match (reply_to, comment) {
-                        (Some(id), _) => orbit_core::review::reply(&or, n, id, &body),
-                        (None, Some(c)) => orbit_core::review::add_comment(&or, n, &head, &c),
-                        _ => Err("nothing to post".into()),
-                    }
-                })
-                .await;
-            let _ = this.update_in(cx, |p, window, cx| {
-                p.busy = false;
-                match r {
-                    Ok(()) => {
-                        p.composer = None;
-                        p.host.toast(ToastKind::Success, "Comment posted", None, cx);
-                        p.load_review(false, window, cx);
-                    }
-                    Err(e) => p.host.error("Couldn't post the comment", e, cx),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
+        match (&kind, &self.selected) {
+            (ComposerKind::Reply(tid), _) => {
+                let Some(id) = self.first_comment(tid) else { return };
+                self.write("Couldn't post the reply", Some("Reply posted"), move || orbit_core::review::reply(&or, n, id, &body), |_| {}, window, cx);
+            }
+            (ComposerKind::New { side, start, end }, Sel::File(path)) => {
+                let c = DraftComment { path: path.clone(), side: side_name(*side).into(), line: *end, start_line: (start < end).then_some(*start), body };
+                self.write("Couldn't post the comment", Some("Comment posted"), move || orbit_core::review::add_comment(&or, n, &head, &c), |_| {}, window, cx);
+            }
+            _ => {}
+        }
+    }
+
+    /// The REST id replies go to: the thread's first comment.
+    fn first_comment(&self, thread: &str) -> Option<u64> {
+        self.review.as_ref()?.threads.iter().find(|t| t.id == thread)?.comments.first().map(|c| c.id)
     }
 
     fn resolve(&mut self, thread: &ReviewThread, window: &mut Window, cx: &mut Context<Self>) {
@@ -410,6 +553,88 @@ impl PrReviewPage {
             });
         })
         .detach();
+    }
+
+    /// `ws_address_review` on every open thread plus the reviewers' change
+    /// requests; the agent edits the worktree and drafts one reply per thread.
+    fn address_with_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(ws), Some(review)) = (&self.workspace, &self.review) else { return };
+        let threads: Vec<String> = review.threads.iter().filter(|t| !t.is_resolved).map(|t| t.id.clone()).collect();
+        let notes = orbit_core::review::change_request_notes(review);
+        if threads.is_empty() && notes.is_empty() {
+            return;
+        }
+        let (wsn, repo, or, n) = (ws.meta.name.clone(), self.pr().repo.clone(), self.pr().owner_repo.clone(), self.pr().number);
+        let run = format!("review:{wsn}:{repo}:{}", pr_ui::now());
+        let step = Arc::new(Mutex::new(String::new()));
+        let (sink, run_id) = (step.clone(), run.clone());
+        let events = orbit_core::events::Events::new(move |_: &str, v: serde_json::Value| {
+            if v["run"] == run_id.as_str() && v["kind"] == "tool" {
+                let line = format!("{} {}", v["name"].as_str().unwrap_or(""), v["text"].as_str().unwrap_or(""));
+                *sink.lock().unwrap() = line.trim().to_string();
+            }
+        });
+        // Repaints the latest step while the agent works.
+        let tick = cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(std::time::Duration::from_millis(500)).await;
+            if this.update(cx, |_, cx| cx.notify()).is_err() {
+                break;
+            }
+        });
+        self.suggestions.clear();
+        self.address = Some(Address { run: run.clone(), repo: repo.clone(), threads: threads.len(), state: AddressState::Running, step, _tick: Some(tick) });
+        cx.spawn_in(window, async move |this, cx| {
+            let r = cx
+                .background_spawn(async move { orbit_core::agent::address_review(&events, &run, &wsn, &repo, &or, n, &threads, &notes) })
+                .await;
+            let _ = this.update(cx, |p, cx| {
+                let Some(a) = &mut p.address else { return };
+                a._tick = None;
+                match r {
+                    Ok(replies) => {
+                        a.state = AddressState::Done(replies.len());
+                        p.suggestions = replies.into_iter().map(|r| (r.id.clone(), r)).collect();
+                    }
+                    Err(e) if e == "cancelled" => p.address = None,
+                    Err(e) => a.state = AddressState::Failed(e),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn stop_agent(&mut self, cx: &mut Context<Self>) {
+        if let Some(a) = &self.address {
+            orbit_core::agent::live::cancel(&a.run);
+        }
+        self.address = None;
+        cx.notify();
+    }
+
+    /// Posts the agent's reply to a thread, and resolves it when asked.
+    fn post_suggestion(&mut self, thread: &str, resolve: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(s), Some(id)) = (self.suggestions.get(thread).cloned(), self.first_comment(thread)) else { return };
+        let (or, n, tid) = (self.pr().owner_repo.clone(), self.pr().number, thread.to_string());
+        let done = if resolve { "Replied and resolved" } else { "Reply posted" };
+        let t2 = tid.clone();
+        self.write(
+            "Couldn't post the reply",
+            Some(done),
+            move || {
+                orbit_core::review::reply(&or, n, id, &s.reply)?;
+                if resolve {
+                    orbit_core::review::set_thread_resolved(&tid, true)?;
+                }
+                Ok(())
+            },
+            move |p| {
+                p.suggestions.remove(&t2);
+            },
+            window,
+            cx,
+        );
     }
 
     fn toggle_submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -856,6 +1081,23 @@ impl PrReviewPage {
                     "Mark as viewed and open the next file",
                 ));
         }
+        let open_threads = self.review.iter().flat_map(|r| &r.threads).filter(|t| !t.is_resolved).count();
+        if open_threads > 0 && !matches!(self.address.as_ref().map(|a| &a.state), Some(AddressState::Running)) {
+            let local = self.workspace.is_some();
+            let btn = pr_ui::btn_mini("pr-address", "Address with agent").when(!local, |b| b.opacity(0.5));
+            actions = actions.child(pr_ui::tip(
+                btn.on_click(cx.listener(move |p, _, window, cx| {
+                    if local {
+                        p.address_with_agent(window, cx)
+                    }
+                })),
+                if local {
+                    "An agent applies the open conversations in the workspace and drafts a reply for each"
+                } else {
+                    "Check out the PR as a workspace to address it with an agent"
+                },
+            ));
+        }
         actions = actions.child(
             div()
                 .relative()
@@ -1023,7 +1265,7 @@ impl PrReviewPage {
             )
     }
 
-    fn render_overview(&self) -> AnyElement {
+    fn render_overview(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(detail) = self.detail.ready() else {
             return table_loading("pr-overview-spin", "Loading…");
         };
@@ -1120,8 +1362,16 @@ impl PrReviewPage {
                     .child(div().border_1().border_color(c(theme::BORDER)).rounded(px(10.)).bg(c(theme::PANEL)).px(px(18.)).py(px(16.)).child(head).child(body))
                     .child(div().child(h4("Reviews")).child(reviews))
                     .when(!threads.is_empty(), |d| {
-                        d.child(div().child(h4("Conversations")).children(threads.iter().map(|t| {
+                        d.child(div().child(h4("Conversations")).children(threads.iter().enumerate().map(|(i, t)| {
+                            let path = t.path.clone();
                             div()
+                                .id(SharedString::from(format!("pr-conv:{i}")))
+                                .relative()
+                                .cursor_pointer()
+                                .rounded(px(4.))
+                                .hover(|s| s.bg(c(theme::PANEL_RAISED)))
+                                .on_click(cx.listener(move |p, _, window, cx| p.select(Sel::File(path.clone()), window, cx)))
+                                .child(probe(format!("pr-conv:{i}")))
                                 .flex()
                                 .items_center()
                                 .gap(px(8.))
@@ -1138,9 +1388,10 @@ impl PrReviewPage {
                                         .font_family(theme::MONO_FONT)
                                         .text_size(px(11.5))
                                         .text_color(c(theme::TEXT_DIM))
-                                        .child(format!("{}{}", t.path, t.line.map(|l| format!(":{l}")).unwrap_or_default())),
+                                        .child(format!("{}{}", t.path, t.line.or(t.original_line).map(|l| format!(":{l}")).unwrap_or_default())),
                                 )
                                 .child(div().flex_1().min_w_0().truncate().child(t.comments.first().map(|c| c.body.lines().next().unwrap_or("").to_string()).unwrap_or_default()))
+                                .when(t.is_outdated, |d| d.child(pr_ui::decision_pill("Outdated", Tone::Muted)))
                                 .child(div().text_size(px(11.5)).text_color(c(theme::TEXT_FAINT)).child(t.comments.len().to_string()))
                         })))
                     }),
@@ -1157,8 +1408,8 @@ impl PrReviewPage {
         };
         let diff_path: SharedString = state.read(cx).files().first().map(|f| f.path().clone()).unwrap_or_else(|| path.clone().into());
         let threads = self.threads_of(path);
-        let placed: Vec<&ReviewThread> = threads.iter().copied().filter(|t| t.line.is_some() && (t.side == "RIGHT" || self.split)).collect();
-        let off: Vec<ReviewThread> = threads.iter().filter(|t| !placed.iter().any(|p| p.id == t.id)).map(|t| (*t).clone()).collect();
+        let (placed, off) = anchor(&threads, self.split, self.lines);
+        let off: Vec<ReviewThread> = off.into_iter().cloned().collect();
         let mut annotations = vec![];
         let mut ranges = vec![];
         let mut lines: Vec<(DiffSide, u64)> = vec![];
@@ -1205,8 +1456,7 @@ impl PrReviewPage {
                     return div().into_any_element();
                 };
                 page.update(cx, |p, cx| p.render_zone(&side, line, window, cx))
-            })
-;
+            });
         // Old lines take notes in split view only, as in the Tauri app.
         let sides: &[DiffSide] = if self.split { &[DiffSide::Original, DiffSide::Modified] } else { &[DiffSide::Modified] };
         let diff = crate::diff_select::attach(
@@ -1218,13 +1468,14 @@ impl PrReviewPage {
                 let _ = w2.update(cx, |p, cx| p.comment_on(range, window, cx));
             })),
         );
+        let outdated = off.iter().any(|t| t.line.is_none() || t.is_outdated);
+        let removed = !self.split && off.iter().any(|t| t.line.is_some() && t.side == "LEFT");
         div()
             .flex_1()
             .min_h_0()
             .flex()
             .flex_col()
             .when(!off.is_empty(), |d| {
-                let outdated = off.iter().any(|t| t.line.is_none());
                 d.child(
                     div()
                         .id("pr-offdiff")
@@ -1241,16 +1492,35 @@ impl PrReviewPage {
                         .child(
                             div()
                                 .flex()
+                                .items_center()
                                 .gap(px(12.))
                                 .text_size(px(11.))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(c(theme::TEXT_FAINT))
-                                .child(if outdated { "OUTDATED COMMENTS" } else { "COMMENTS ON REMOVED LINES" }),
+                                .child(match (outdated, removed) {
+                                    (true, true) => "OUTDATED COMMENTS AND COMMENTS ON REMOVED LINES",
+                                    (true, false) => "OUTDATED COMMENTS",
+                                    _ => "COMMENTS ON REMOVED LINES",
+                                })
+                                .when(removed, |d| {
+                                    d.child(
+                                        div()
+                                            .id("pr-offdiff-split")
+                                            .relative()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(c(theme::ACCENT))
+                                            .cursor_pointer()
+                                            .hover(|s| s.underline())
+                                            .child("Show them inline in split view")
+                                            .child(probe("pr-offdiff-split"))
+                                            .on_click(cx.listener(|p, _, _, cx| p.set_split(true, cx))),
+                                    )
+                                }),
                         )
-                        .children(off.iter().map(|t| self.render_thread(t, cx))),
+                        .children(off.iter().map(|t| self.render_thread(t, Some(off_location(t)), cx))),
                 )
             })
-            .child(div().flex_1().min_h_0().child(diff))
+            .child(div().flex_1().min_h_0().relative().child(diff).child(probe("pr-diff")))
             .into_any_element()
     }
 
@@ -1269,105 +1539,264 @@ impl PrReviewPage {
             .flex_col()
             .gap(px(8.))
             .font_family(theme::UI_FONT)
-            .children(threads.iter().map(|t| self.render_thread(t, cx)))
+            .children(threads.iter().map(|t| self.render_thread(t, None, cx)))
             .children(drafts.iter().map(|d| self.render_draft(d, cx)))
             .when(composer_here, |d| d.child(self.render_composer(cx)))
             .into_any_element()
     }
 
-    fn render_thread(&self, t: &ReviewThread, cx: &mut Context<Self>) -> AnyElement {
+    fn render_thread(&self, t: &ReviewThread, location: Option<String>, cx: &mut Context<Self>) -> AnyElement {
         let now = pr_ui::now();
-        let first = t.comments.first().map(|c| c.body.lines().next().unwrap_or("").to_string()).unwrap_or_default();
+        let open = t.is_resolved == self.toggled.contains(&t.id);
         let replying = matches!(self.composer.as_ref().map(|c| &c.kind), Some(ComposerKind::Reply(id)) if *id == t.id);
-        let (t1, t2) = (t.clone(), t.id.clone());
-        thread_card(false)
-            .when(t.is_resolved, |d| d.opacity(0.85))
+        let title = thread_title(t, open);
+        let title = match location {
+            Some(l) => format!("{l} · {title}"),
+            None => title,
+        };
+        let (t1, t2, t3) = (t.clone(), t.id.clone(), t.id.clone());
+        let head = div()
+            .id(SharedString::from(format!("pr-thread:{}", t.id)))
+            .relative()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .px(px(10.))
+            .py(px(7.))
+            .bg(c(theme::PANEL_RAISED))
+            .text_size(px(12.))
+            .text_color(c(theme::TEXT_DIM))
+            .cursor_pointer()
+            .child(lucide(if open { "chevron-down" } else { "chevron-right" }, 12., c(theme::TEXT_FAINT)))
+            .when(!open, |d| d.when_some(t.comments.first(), |d, cm| d.child(avatar(&cm.author))))
+            .child(div().flex_1().min_w_0().truncate().child(title))
+            .when(t.comments.len() > 1, |d| d.child(div().text_size(px(11.)).text_color(c(theme::TEXT_FAINT)).child(t.comments.len().to_string())))
+            .when(t.is_outdated, |d| d.child(pr_ui::decision_pill("Outdated", Tone::Muted)))
+            .when(t.is_resolved, |d| d.child(pr_ui::decision_pill("Resolved", Tone::Ok)))
+            .child(probe(format!("pr-thread:{}", t.id)))
+            .on_click(cx.listener(move |p, _, _, cx| {
+                if !p.toggled.remove(&t3) {
+                    p.toggled.insert(t3.clone());
+                }
+                cx.notify();
+            }));
+        let mut card = thread_card(false).when(t.is_resolved, |d| d.opacity(0.85)).child(head);
+        if !open {
+            return card.into_any_element();
+        }
+        card = card.children(t.comments.iter().enumerate().map(|(i, cm)| self.render_comment(cm, i, now, cx)));
+        if let Some(s) = self.suggestions.get(&t.id) {
+            card = card.child(self.render_suggestion(&t.id, s, cx));
+        }
+        card.child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .px(px(12.))
+                .py(px(8.))
+                .border_t_1()
+                .border_color(c(theme::BORDER))
+                .bg(c(theme::BG))
+                .when(replying, |d| d.child(self.render_composer(cx)))
+                .when(!replying, |d| {
+                    d.child(
+                        div()
+                            .id(SharedString::from(format!("pr-reply:{}", t.id)))
+                            .relative()
+                            .flex_1()
+                            .h(px(26.))
+                            .px(px(8.))
+                            .flex()
+                            .items_center()
+                            .rounded(px(6.))
+                            .border_1()
+                            .border_color(c(theme::BORDER))
+                            .bg(c(theme::PANEL))
+                            .text_size(px(12.))
+                            .text_color(c(theme::TEXT_FAINT))
+                            .cursor_text()
+                            .child("Reply…")
+                            .child(probe(format!("pr-reply:{}", t.id)))
+                            .on_click(cx.listener(move |p, _, window, cx| p.open_composer(ComposerKind::Reply(t2.clone()), "", window, cx))),
+                    )
+                    .child(
+                        pr_ui::btn_mini(format!("pr-resolve:{}", t.id), if t.is_resolved { "Unresolve" } else { "Resolve" })
+                            .on_click(cx.listener(move |p, _, window, cx| p.resolve(&t1, window, cx))),
+                    )
+                }),
+        )
+        .into_any_element()
+    }
+
+    /// One comment of a thread; the viewer's own can be edited and deleted.
+    fn render_comment(&self, cm: &orbit_core::review::ReviewComment, i: usize, now: i64, cx: &mut Context<Self>) -> impl IntoElement {
+        let editing = matches!(self.composer.as_ref().map(|c| &c.kind), Some(ComposerKind::Edit(id)) if *id == cm.id);
+        let confirming = self.confirm_delete == Some(cm.id);
+        let (id, body) = (cm.id, cm.body.clone());
+        let tools = div()
+            .ml_auto()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .when(!confirming, |d| {
+                d.child(pr_ui::tip(
+                    div()
+                        .id(SharedString::from(format!("pr-edit:{id}")))
+                        .relative()
+                        .cursor_pointer()
+                        .child(lucide("pencil", 12., c(theme::TEXT_FAINT)))
+                        .child(probe(format!("pr-edit:{id}")))
+                        .on_click(cx.listener(move |p, _, window, cx| p.open_composer(ComposerKind::Edit(id), &body, window, cx))),
+                    "Edit comment",
+                ))
+                .child(pr_ui::tip(
+                    div()
+                        .id(SharedString::from(format!("pr-del:{id}")))
+                        .relative()
+                        .cursor_pointer()
+                        .child(lucide("trash", 12., c(theme::TEXT_FAINT)))
+                        .child(probe(format!("pr-del:{id}")))
+                        .on_click(cx.listener(move |p, _, _, cx| {
+                            p.confirm_delete = Some(id);
+                            cx.notify();
+                        })),
+                    "Delete comment",
+                ))
+            })
+            .when(confirming, |d| {
+                d.child(
+                    pr_ui::btn_mini(format!("pr-del-yes:{id}"), "Delete")
+                        .text_color(c(theme::DANGER))
+                        .border_color(tint(theme::DANGER, 0.5))
+                        .on_click(cx.listener(move |p, _, window, cx| p.delete_comment(id, window, cx))),
+                )
+                .child(pr_ui::btn_mini(format!("pr-del-no:{id}"), "Keep").on_click(cx.listener(|p, _, _, cx| {
+                    p.confirm_delete = None;
+                    cx.notify();
+                })))
+            });
+        div()
+            .flex()
+            .gap(px(10.))
+            .px(px(12.))
+            .py(px(10.))
+            .when(i > 0, |d| d.border_t_1().border_color(c(theme::BORDER)))
+            .child(avatar(&cm.author))
             .child(
                 div()
+                    .flex_1()
+                    .min_w_0()
                     .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .px(px(10.))
-                    .py(px(7.))
-                    .bg(c(theme::PANEL_RAISED))
-                    .text_size(px(12.))
-                    .text_color(c(theme::TEXT_DIM))
-                    .child(div().flex_1().min_w_0().truncate().child(first))
-                    .when(t.comments.len() > 1, |d| d.child(div().text_size(px(11.)).text_color(c(theme::TEXT_FAINT)).child(t.comments.len().to_string())))
-                    .when(t.is_outdated, |d| d.child(pr_ui::decision_pill("Outdated", Tone::Muted)))
-                    .when(t.is_resolved, |d| d.child(pr_ui::decision_pill("Resolved", Tone::Ok))),
-            )
-            .children(t.comments.iter().enumerate().map(|(i, cm)| {
-                div()
-                    .flex()
-                    .gap(px(10.))
-                    .px(px(12.))
-                    .py(px(10.))
-                    .when(i > 0, |d| d.border_t_1().border_color(c(theme::BORDER)))
-                    .child(avatar(&cm.author))
+                    .flex_col()
+                    .gap(px(4.))
                     .child(
                         div()
-                            .flex_1()
-                            .min_w_0()
                             .flex()
-                            .flex_col()
-                            .gap(px(4.))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(8.))
-                                    .text_size(px(12.))
-                                    .child(div().font_weight(FontWeight::BOLD).child(cm.author.clone()))
-                                    .child(div().text_size(px(11.5)).text_color(c(theme::TEXT_FAINT)).child(pr_ui::rel_time(&cm.created_at, now)))
-                                    .when(cm.state == "PENDING", |d| d.child(pr_ui::decision_pill("Pending", Tone::Warn))),
-                            )
-                            .child(div().text_size(px(12.5)).child(TextView::markdown(SharedString::from(format!("pr-comment:{}", cm.id)), cm.body.clone()))),
+                            .items_center()
+                            .gap(px(8.))
+                            .text_size(px(12.))
+                            .child(div().font_weight(FontWeight::BOLD).child(cm.author.clone()))
+                            .child(div().text_size(px(11.5)).text_color(c(theme::TEXT_FAINT)).child(pr_ui::rel_time(&cm.created_at, now)))
+                            .when(cm.state == "PENDING", |d| d.child(pr_ui::decision_pill("Pending", Tone::Warn)))
+                            .when(cm.is_mine && !editing, |d| d.child(tools)),
                     )
-            }))
+                    .child(if editing {
+                        self.render_composer(cx)
+                    } else {
+                        div()
+                            .text_size(px(12.5))
+                            .child(TextView::markdown(SharedString::from(format!("pr-comment:{}", cm.id)), cm.body.clone()))
+                            .into_any_element()
+                    }),
+            )
+    }
+
+    /// The agent's drafted reply to a thread, to post as is or edit first.
+    fn render_suggestion(&self, thread: &str, s: &ThreadReply, cx: &mut Context<Self>) -> impl IntoElement {
+        let fixed = s.status == "fixed";
+        let (t1, t2, t3, t4, reply) = (thread.to_string(), thread.to_string(), thread.to_string(), thread.to_string(), s.reply.clone());
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .mx(px(12.))
+            .mb(px(10.))
+            .p(px(10.))
+            .rounded(px(6.))
+            .border_1()
+            .border_color(tint(theme::ACCENT, 0.4))
+            .bg(theme::accent_soft())
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap(px(8.))
-                    .px(px(12.))
-                    .py(px(8.))
-                    .border_t_1()
-                    .border_color(c(theme::BORDER))
-                    .bg(c(theme::BG))
-                    .when(replying, |d| d.child(self.render_composer(cx)))
-                    .when(!replying, |d| {
-                        d.child(
-                            div()
-                                .id(SharedString::from(format!("pr-reply:{}", t.id)))
-                                .flex_1()
-                                .h(px(26.))
-                                .px(px(8.))
-                                .flex()
-                                .items_center()
-                                .rounded(px(6.))
-                                .border_1()
-                                .border_color(c(theme::BORDER))
-                                .bg(c(theme::PANEL))
-                                .text_size(px(12.))
-                                .text_color(c(theme::TEXT_FAINT))
-                                .cursor_text()
-                                .child("Reply…")
-                                .on_click(cx.listener(move |p, _, window, cx| p.open_composer(ComposerKind::Reply(t2.clone()), window, cx))),
-                        )
-                        .child(
-                            pr_ui::btn_mini(format!("pr-resolve:{}", t.id), if t.is_resolved { "Unresolve" } else { "Resolve" })
-                                .on_click(cx.listener(move |p, _, window, cx| p.resolve(&t1, window, cx))),
-                        )
-                    }),
+                    .text_size(px(11.5))
+                    .text_color(c(theme::TEXT_DIM))
+                    .child(lucide("sparkles", 12., c(theme::ACCENT)))
+                    .child("Agent reply")
+                    .child(pr_ui::decision_pill(if fixed { "Fixed" } else { "Answered" }, if fixed { Tone::Ok } else { Tone::Muted })),
             )
-            .into_any_element()
+            .child(div().text_size(px(12.5)).child(TextView::markdown(SharedString::from(format!("pr-suggestion:{thread}")), s.reply.clone())))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(pr_ui::btn_mini(format!("pr-sugg-dismiss:{thread}"), "Dismiss").on_click(cx.listener(move |p, _, _, cx| {
+                        p.suggestions.remove(&t1);
+                        cx.notify();
+                    })))
+                    .child(pr_ui::btn_mini(format!("pr-sugg-edit:{thread}"), "Edit").on_click(cx.listener(move |p, _, window, cx| {
+                        p.suggestions.remove(&t2);
+                        p.open_composer(ComposerKind::Reply(t2.clone()), &reply, window, cx);
+                    })))
+                    .child(div().flex_1())
+                    .child(
+                        pr_ui::btn_mini(format!("pr-sugg-post:{thread}"), "Reply")
+                            .on_click(cx.listener(move |p, _, window, cx| p.post_suggestion(&t3, false, window, cx))),
+                    )
+                    .child(
+                        pr_ui::button(format!("pr-sugg-resolve:{thread}"), "Reply and resolve", true, 24.)
+                            .text_size(px(11.5))
+                            .on_click(cx.listener(move |p, _, window, cx| p.post_suggestion(&t4, true, window, cx))),
+                    ),
+            )
     }
 
     fn render_draft(&self, d: &Draft, cx: &mut Context<Self>) -> AnyElement {
         let range = d.start_line.map(|s| format!("Lines {s}–{}", d.line));
         let viewer = self.review.as_ref().map(|r| r.viewer.clone()).unwrap_or_default();
-        let id = d.id.clone();
+        let editing = matches!(self.composer.as_ref().map(|c| &c.kind), Some(ComposerKind::EditDraft(id)) if *id == d.id);
+        let (id, id2, body) = (d.id.clone(), d.id.clone(), d.body.clone());
+        let tools = div()
+            .ml_auto()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .child(
+                div()
+                    .id(SharedString::from(format!("pr-draft-edit:{}", d.id)))
+                    .relative()
+                    .cursor_pointer()
+                    .child(lucide("pencil", 12., c(theme::TEXT_FAINT)))
+                    .child(probe(format!("pr-draft-edit:{}", d.id)))
+                    .on_click(cx.listener(move |p, _, window, cx| p.open_composer(ComposerKind::EditDraft(id2.clone()), &body, window, cx))),
+            )
+            .child(
+                div()
+                    .id(SharedString::from(format!("pr-draft-del:{}", d.id)))
+                    .relative()
+                    .cursor_pointer()
+                    .child(lucide("trash", 12., c(theme::TEXT_FAINT)))
+                    .child(probe(format!("pr-draft-del:{}", d.id)))
+                    .on_click(cx.listener(move |p, _, _, cx| {
+                        p.saved.drafts.retain(|x| x.id != id);
+                        p.persist();
+                        cx.notify();
+                    })),
+            );
         thread_card(true)
             .child(
                 div()
@@ -1375,7 +1804,7 @@ impl PrReviewPage {
                     .gap(px(10.))
                     .px(px(12.))
                     .py(px(10.))
-                    .child(avatar(&viewer))
+                    .child(avatar(if viewer.is_empty() { "you" } else { &viewer }))
                     .child(
                         div()
                             .flex_1()
@@ -1389,23 +1818,19 @@ impl PrReviewPage {
                                     .items_center()
                                     .gap(px(8.))
                                     .text_size(px(12.))
-                                    .child(div().font_weight(FontWeight::BOLD).child(viewer))
+                                    .child(div().font_weight(FontWeight::BOLD).child(if viewer.is_empty() { "You".to_string() } else { viewer.clone() }))
                                     .child(pr_ui::decision_pill("Pending", Tone::Warn))
                                     .when_some(range, |el, r| el.child(div().text_size(px(11.5)).text_color(c(theme::TEXT_FAINT)).child(r)))
-                                    .child(
-                                        div()
-                                            .id(SharedString::from(format!("pr-draft-del:{}", d.id)))
-                                            .ml_auto()
-                                            .cursor_pointer()
-                                            .child(lucide("trash", 12., c(theme::TEXT_FAINT)))
-                                            .on_click(cx.listener(move |p, _, _, cx| {
-                                                p.saved.drafts.retain(|x| x.id != id);
-                                                p.persist();
-                                                cx.notify();
-                                            })),
-                                    ),
+                                    .when(!editing, |el| el.child(tools)),
                             )
-                            .child(div().text_size(px(12.5)).child(TextView::markdown(SharedString::from(format!("pr-draft:{}", d.id)), d.body.clone()))),
+                            .child(if editing {
+                                self.render_composer(cx)
+                            } else {
+                                div()
+                                    .text_size(px(12.5))
+                                    .child(TextView::markdown(SharedString::from(format!("pr-draft:{}", d.id)), d.body.clone()))
+                                    .into_any_element()
+                            }),
                     ),
             )
             .into_any_element()
@@ -1413,19 +1838,31 @@ impl PrReviewPage {
 
     fn render_composer(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(composer) = &self.composer else { return div().into_any_element() };
-        let reply = matches!(composer.kind, ComposerKind::Reply(_));
+        let new = matches!(composer.kind, ComposerKind::New { .. });
         let label = match composer.kind {
             ComposerKind::New { start, end, .. } if start < end => format!("Comment on lines {start}–{end}"),
             ComposerKind::New { end, .. } => format!("Comment on line {end}"),
-            ComposerKind::Reply(_) => String::new(),
+            _ => String::new(),
         };
-        let in_review = !self.saved.drafts.is_empty();
+        let primary = match composer.kind {
+            ComposerKind::Reply(_) => ("pr-composer-reply", "Reply"),
+            ComposerKind::New { .. } if self.saved.drafts.is_empty() => ("pr-composer-add", "Start a review"),
+            ComposerKind::New { .. } => ("pr-composer-add", "Add review comment"),
+            _ => ("pr-composer-save", "Save"),
+        };
         let busy = self.busy;
         let inner = div()
             .flex_1()
             .flex()
             .flex_col()
             .gap(px(6.))
+            // Escape cancels (`Editor`'s onCancel).
+            .on_key_down(cx.listener(|p, ev: &KeyDownEvent, _, cx| {
+                if ev.keystroke.key == "escape" {
+                    cx.stop_propagation();
+                    p.cancel_composer(cx);
+                }
+            }))
             .when(!label.is_empty(), |d| d.child(div().text_size(px(11.5)).text_color(c(theme::TEXT_FAINT)).child(label)))
             .child(div().relative().child(Textarea::new(&composer.input)).child(probe("pr-composer")))
             .child(
@@ -1433,32 +1870,31 @@ impl PrReviewPage {
                     .flex()
                     .items_center()
                     .gap(px(6.))
-                    .child(div().mr_auto().text_size(px(11.)).text_color(c(theme::TEXT_FAINT)).child("Markdown"))
-                    .child(pr_ui::btn_mini("pr-composer-cancel", "Cancel").on_click(cx.listener(|p, _, _, cx| {
-                        p.composer = None;
-                        cx.notify();
-                    })))
-                    .when(!reply, |d| {
+                    .child(div().mr_auto().text_size(px(11.)).text_color(c(theme::TEXT_FAINT)).child("Markdown · Ctrl+Enter"))
+                    .child(pr_ui::btn_mini("pr-composer-cancel", "Cancel").on_click(cx.listener(|p, _, _, cx| p.cancel_composer(cx))))
+                    .when(new, |d| {
                         d.child(
-                            pr_ui::btn_mini("pr-composer-now", if in_review { "Add single comment" } else { "Comment now" })
+                            pr_ui::btn_mini("pr-composer-now", "Post to GitHub now")
                                 .when(busy, |b| b.opacity(0.5))
-                                .on_click(cx.listener(|p, _, window, cx| p.comment_now(window, cx))),
-                        )
-                        .child(
-                            pr_ui::button("pr-composer-add", if in_review { "Add to review" } else { "Start a review" }, true, 24.)
-                                .text_size(px(11.5))
-                                .on_click(cx.listener(|p, _, _, cx| p.add_draft(cx))),
+                                .on_click(cx.listener(|p, _, window, cx| {
+                                    if !p.busy {
+                                        p.comment_now(window, cx)
+                                    }
+                                })),
                         )
                     })
-                    .when(reply, |d| {
-                        d.child(
-                            pr_ui::button("pr-composer-reply", "Reply", true, 24.)
-                                .text_size(px(11.5))
-                                .on_click(cx.listener(|p, _, window, cx| p.comment_now(window, cx))),
-                        )
-                    }),
+                    .child(
+                        pr_ui::button(primary.0, if busy && !new { "Sending…" } else { primary.1 }, true, 24.)
+                            .text_size(px(11.5))
+                            .when(busy, |b| b.opacity(0.5))
+                            .on_click(cx.listener(|p, _, window, cx| {
+                                if !p.busy {
+                                    p.submit_composer(window, cx)
+                                }
+                            })),
+                    ),
             );
-        if reply {
+        if !new {
             return inner.into_any_element();
         }
         thread_card(false).border_color(tint(theme::ACCENT, 0.5)).px(px(12.)).py(px(10.)).child(inner).into_any_element()
@@ -1533,7 +1969,7 @@ fn checkbox(name: String, on: bool) -> gpui::Stateful<gpui::Div> {
 impl Render for PrReviewPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let main = match self.selected {
-            Sel::Overview => self.render_overview(),
+            Sel::Overview => self.render_overview(cx),
             Sel::File(_) => self.render_diff(cx),
         };
         div()
@@ -1550,7 +1986,72 @@ impl Render for PrReviewPage {
                 }),
             )
             .child(self.render_side(cx))
-            .child(div().flex_1().min_w_0().h_full().flex().flex_col().child(self.render_filebar(cx)).child(main))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .child(self.render_filebar(cx))
+                    .when_some(self.render_address(cx), |d, b| d.child(b))
+                    .child(main),
+            )
+    }
+}
+
+impl PrReviewPage {
+    /// The agent run's banner: its latest step, then what's left to do.
+    fn render_address(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let a = self.address.as_ref()?;
+        let ws = self.workspace.as_ref().map(|w| w.meta.name.clone()).unwrap_or_default();
+        let s = if a.threads == 1 { "" } else { "s" };
+        let (icon, tone, text) = match &a.state {
+            AddressState::Running => {
+                let step = a.step.lock().map(|s| s.clone()).unwrap_or_default();
+                let step = if step.is_empty() { "Reading the feedback and the code…".to_string() } else { step };
+                ("loader", theme::ACCENT, format!("Agent addressing {} conversation{s} in {ws}/{}: {step}", a.threads, a.repo))
+            }
+            AddressState::Done(n) => (
+                "sparkles",
+                theme::OK,
+                format!("Agent drafted {n} repl{}. Its changes are uncommitted in {ws}/{}: commit and push them before posting replies that say fixed.", if *n == 1 { "y" } else { "ies" }, a.repo),
+            ),
+            AddressState::Failed(e) => ("circle-alert", theme::DANGER, format!("The agent failed: {e}")),
+        };
+        let running = a.state == AddressState::Running;
+        Some(
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .px(px(12.))
+                .py(px(7.))
+                .bg(tint(tone, 0.08))
+                .border_b_1()
+                .border_color(tint(tone, 0.3))
+                .text_size(px(12.))
+                .child(lucide(icon, 13., c(tone)))
+                .child(div().flex_1().min_w_0().truncate().child(text))
+                .child(probe("pr-address-banner"))
+                .when(running, |d| d.child(pr_ui::btn_mini("pr-address-stop", "Stop").on_click(cx.listener(|p, _, _, cx| p.stop_agent(cx)))))
+                .when(!running && !ws.is_empty(), |d| {
+                    d.child(pr_ui::btn_mini("pr-address-ws", "Open workspace").on_click(cx.listener(move |p, _, window, cx| {
+                        let name = ws.clone();
+                        super::code_review::with_app(&p.host, window, cx, move |a, w, cx| {
+                            crate::workspace_ui::open(a, crate::workspace_ui::PageId::Workspace(name), w, cx);
+                        });
+                    })))
+                })
+                .when(!running, |d| {
+                    d.child(pr_ui::btn_mini("pr-address-close", "Close").on_click(cx.listener(|p, _, _, cx| {
+                        p.address = None;
+                        cx.notify();
+                    })))
+                })
+                .into_any_element(),
+        )
     }
 }
 
@@ -1559,16 +2060,49 @@ impl PageView for PrReviewPage {
         format!("#{}", self.pr().number).into()
     }
 
-    fn dump(&self, out: &mut String, _: &App) {
+    fn dump(&self, out: &mut String, cx: &App) {
         let pr = self.pr();
         let _ = writeln!(out, "  pr review {} #{}: detail {} selected {:?}", pr.repo, pr.number, crate::pages::ui::load_label(&self.detail), self.selected);
         if let Some(d) = self.detail.ready() {
             let _ = writeln!(out, "    {} files, {} viewed, {} drafts", d.files.len(), self.saved.viewed.len(), self.saved.drafts.len());
         }
         if let Some(r) = &self.review {
-            let _ = writeln!(out, "    review: viewer {} {} threads {} reviews", r.viewer, r.threads.len(), r.reviews.len());
+            let _ = writeln!(out, "    review: viewer {} {} threads {} reviews, workspace {:?}", r.viewer, r.threads.len(), r.reviews.len(), self.workspace.as_ref().map(|w| &w.meta.name));
         }
-        let _ = writeln!(out, "    diff: {}", crate::pages::ui::load_label(&self.diff));
+        let _ = writeln!(out, "    diff: {} lines {:?} split {}", crate::pages::ui::load_label(&self.diff), self.lines, self.split);
+        if let Sel::File(path) = &self.selected {
+            let threads = self.threads_of(path);
+            let (placed, off) = anchor(&threads, self.split, self.lines);
+            for (where_, list) in [("inline", placed), ("above", off)] {
+                for t in list {
+                    let open = t.is_resolved == self.toggled.contains(&t.id);
+                    let _ = writeln!(
+                        out,
+                        "    thread {} {where_} {} {:?}..{:?} resolved {} outdated {} open {} comments {:?}",
+                        t.id,
+                        t.side,
+                        t.start_line,
+                        t.line.or(t.original_line),
+                        t.is_resolved,
+                        t.is_outdated,
+                        open,
+                        t.comments.iter().map(|c| format!("{}#{}{}", c.author, c.id, if c.is_mine { "*" } else { "" })).collect::<Vec<_>>()
+                    );
+                }
+            }
+        }
+        for d in &self.saved.drafts {
+            let _ = writeln!(out, "    draft {} {}:{}{} {:?}", d.id, d.path, d.side, d.start_line.map(|s| format!(" {s}-")).unwrap_or_default() + &d.line.to_string(), d.body);
+        }
+        if let Some(c) = &self.composer {
+            let _ = writeln!(out, "    composer {:?}: {:?}", c.kind, c.input.read(cx).value());
+        }
+        if let Some(a) = &self.address {
+            let _ = writeln!(out, "    address {:?} threads {} run {}", a.state, a.threads, a.run);
+        }
+        for (id, s) in &self.suggestions {
+            let _ = writeln!(out, "    suggestion {id} {}: {:?}", s.status, s.reply);
+        }
     }
 
     fn reopen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1601,6 +2135,43 @@ pub(crate) fn table_loading(id: &'static str, label: &'static str) -> AnyElement
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fixture() -> ReviewData {
+        let v: serde_json::Value = serde_json::from_str(include_str!("../../../crates/orbit-core/tests/fixtures/review_threads.json")).unwrap();
+        orbit_core::review::parse_review_data(&v["data"]).unwrap()
+    }
+
+    fn ids(list: &[&ReviewThread]) -> Vec<String> {
+        list.iter().map(|t| t.id.trim_start_matches("PRRT_kwDONx2Hfc5h1a").to_string()).collect()
+    }
+
+    #[test]
+    fn threads_anchor_inline_or_above_the_diff() {
+        let data = fixture();
+        let health: Vec<&ReviewThread> = data.threads.iter().filter(|t| t.path == "src-tauri/src/health.rs").collect();
+        // health.rs at PR #26: 142 lines at the base, 168 at the head.
+        let (placed, off) = anchor(&health, false, (142, 168));
+        assert_eq!(ids(&placed), ["A1", "A2", "A5"], "the outdated thread GitHub still maps stays inline");
+        assert_eq!(ids(&off), ["A3", "A4"], "removed line in unified view, and the unmapped outdated one");
+        let (placed, off) = anchor(&health, true, (142, 168));
+        assert_eq!(ids(&placed), ["A1", "A2", "A3", "A5"]);
+        assert_eq!(ids(&off), ["A4"]);
+        // A line past the end of its side (the file shrank) can't be placed.
+        let (placed, off) = anchor(&health, true, (142, 100));
+        assert_eq!(ids(&placed), ["A1", "A2", "A3"]);
+        assert_eq!(ids(&off), ["A4", "A5"]);
+    }
+
+    #[test]
+    fn off_diff_threads_say_where_they_were() {
+        let data = fixture();
+        let by = |id: &str| data.threads.iter().find(|t| t.id.ends_with(id)).unwrap();
+        assert_eq!(off_location(by("A3")), "Removed line 132");
+        assert_eq!(off_location(by("A4")), "Line 70 (original)");
+        assert_eq!(thread_title(by("A1"), true), "Lines 61–66");
+        assert_eq!(thread_title(by("A2"), true), "Conversation");
+        assert_eq!(thread_title(by("A2"), false), "marina-dev: Nit: `--get` is the default for a single key.");
+    }
 
     #[test]
     fn patches_two_texts_under_the_file_path() {

@@ -916,6 +916,7 @@ mod address_tests {
             line: None,
             start_line: None,
             original_line: Some(7),
+            original_start_line: None,
             is_resolved: false,
             is_outdated: true,
             comments: vec![],

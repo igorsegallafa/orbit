@@ -276,6 +276,26 @@ fn active_diff(app: &OrbitApp) -> Option<Entity<DiffTab>> {
     }
 }
 
+/// Opens a PR's review tab by number (self-test step `pr-review:`).
+pub fn open_pr_review(app: &mut OrbitApp, owner_repo: &str, number: u64, window: &mut Window, cx: &mut Context<OrbitApp>) {
+    let repo = owner_repo.rsplit('/').next().unwrap_or(owner_repo).to_string();
+    let pr = orbit_core::github::PullRequest {
+        repo,
+        owner_repo: owner_repo.into(),
+        number,
+        title: String::new(),
+        branch: String::new(),
+        base: String::new(),
+        author: String::new(),
+        is_draft: false,
+        url: format!("https://github.com/{owner_repo}/pull/{number}"),
+        updated_at: String::new(),
+        status: None,
+    };
+    let host = crate::pages::Host(cx.entity().downgrade());
+    pr_review::open(app, host, vec![pr], window, cx);
+}
+
 /// The review's commands and keys.
 pub fn init(cx: &mut App) {
     let has_ws = |a: &OrbitApp, _: &App| a.workspace().is_some();

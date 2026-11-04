@@ -88,6 +88,7 @@ pub struct ReviewThread {
     pub line: Option<u64>,
     pub start_line: Option<u64>,
     pub original_line: Option<u64>,
+    pub original_start_line: Option<u64>,
     pub is_resolved: bool,
     pub is_outdated: bool,
     pub comments: Vec<ReviewComment>,
@@ -137,7 +138,7 @@ query($owner: String!, $name: String!, $number: Int!) {
       }
       reviewThreads(first: 100) {
         nodes {
-          id isResolved isOutdated path line startLine originalLine diffSide
+          id isResolved isOutdated path line startLine originalLine originalStartLine diffSide
           comments(first: 100) {
             nodes { id databaseId body createdAt url state author { login avatarUrl } }
           }
@@ -156,9 +157,19 @@ fn s(v: &Value, ptr: &str) -> String {
 pub fn review_data(owner_repo: &str, number: u64, with_lines: bool) -> Result<ReviewData, String> {
     let (owner, name) = split_owner_repo(owner_repo)?;
     let data = graphql(THREADS_QUERY, json!({ "owner": owner, "name": name, "number": number }))?;
+    let mut out = parse_review_data(&data)?;
+    if with_lines {
+        out.commentable = commentable_lines(owner_repo, number)?;
+    }
+    Ok(out)
+}
+
+/// `THREADS_QUERY`'s `data`, without the commentable lines.
+pub fn parse_review_data(data: &Value) -> Result<ReviewData, String> {
     let viewer = s(&data, "/viewer/login");
     let pr = data
         .pointer("/repository/pullRequest")
+        .filter(|v| !v.is_null())
         .ok_or("pull request not found")?;
 
     let threads = pr
@@ -174,6 +185,7 @@ pub fn review_data(owner_repo: &str, number: u64, with_lines: bool) -> Result<Re
                     line: t.get("line").and_then(Value::as_u64),
                     start_line: t.get("startLine").and_then(Value::as_u64),
                     original_line: t.get("originalLine").and_then(Value::as_u64),
+                    original_start_line: t.get("originalStartLine").and_then(Value::as_u64),
                     is_resolved: t.get("isResolved").and_then(Value::as_bool).unwrap_or(false),
                     is_outdated: t.get("isOutdated").and_then(Value::as_bool).unwrap_or(false),
                     comments: t
@@ -226,8 +238,22 @@ pub fn review_data(owner_repo: &str, number: u64, with_lines: bool) -> Result<Re
         review_decision: pr.get("reviewDecision").and_then(Value::as_str).map(String::from),
         threads,
         reviews,
-        commentable: if with_lines { commentable_lines(owner_repo, number)? } else { HashMap::new() },
+        commentable: HashMap::new(),
     })
+}
+
+/// The latest general comment of each other reviewer who asked for changes
+/// (`notesOf`), as "@author: body", for the agent addressing the review.
+pub fn change_request_notes(data: &ReviewData) -> Vec<String> {
+    let mut latest: Vec<(&str, &str)> = vec![];
+    for r in &data.reviews {
+        if r.state != "CHANGES_REQUESTED" || r.body.trim().is_empty() || r.author == data.viewer {
+            continue;
+        }
+        latest.retain(|(a, _)| *a != r.author);
+        latest.push((&r.author, r.body.trim()));
+    }
+    latest.into_iter().map(|(a, b)| format!("@{a}: {b}")).collect()
 }
 
 /// Commentable line ranges per file, from the PR files' patches.
@@ -360,6 +386,60 @@ pub fn submit_review(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const FIXTURE: &str = include_str!("../tests/fixtures/review_threads.json");
+
+    fn fixture() -> ReviewData {
+        let v: Value = serde_json::from_str(FIXTURE).unwrap();
+        parse_review_data(&v["data"]).unwrap()
+    }
+
+    #[test]
+    fn parses_threads_comments_and_reviews() {
+        let d = fixture();
+        assert_eq!((d.viewer.as_str(), d.pr_author.as_str()), ("igorsegallafa", "igorsegallafa"));
+        assert_eq!(d.review_decision.as_deref(), Some("CHANGES_REQUESTED"));
+        assert_eq!(d.threads.len(), 6);
+        assert_eq!(d.reviews.len(), 2);
+        let t = &d.threads[0];
+        assert_eq!((t.side.as_str(), t.start_line, t.line, t.original_start_line), ("RIGHT", Some(61), Some(66), Some(61)));
+        assert!(!t.is_resolved && !t.is_outdated);
+        assert_eq!(t.comments.len(), 2);
+        assert_eq!(t.comments[0].id, 2461000101);
+        assert_eq!(t.comments[0].node_id, "PRRC_kwDONx2Hfc6Aa001");
+        assert!(!t.comments[0].is_mine && t.comments[1].is_mine);
+        assert!(t.comments[0].body.contains("```rust"));
+        assert!(d.threads[1].is_resolved);
+        assert_eq!(d.threads[2].side, "LEFT");
+        let outdated = &d.threads[3];
+        assert!(outdated.is_outdated);
+        assert_eq!((outdated.line, outdated.original_line), (None, Some(70)));
+        assert_eq!((d.threads[4].line, d.threads[4].original_line), (Some(157), Some(155)));
+        assert_eq!(d.threads[5].comments[0].state, "PENDING");
+    }
+
+    #[test]
+    fn missing_fields_fall_back() {
+        let v = json!({ "viewer": { "login": "me" }, "repository": { "pullRequest": {
+            "author": null, "reviewDecision": null,
+            "reviewThreads": { "nodes": [ { "id": "T", "path": "a", "comments": { "nodes": [ { "author": null, "body": "x" } ] } } ] }
+        } } });
+        let d = parse_review_data(&v).unwrap();
+        let t = &d.threads[0];
+        assert_eq!((t.side.as_str(), t.line, t.is_resolved), ("RIGHT", None, false));
+        assert!(!t.comments[0].is_mine, "a ghost author is never the viewer");
+        assert!(parse_review_data(&json!({ "repository": { "pullRequest": null } })).is_err());
+    }
+
+    #[test]
+    fn change_request_notes_keep_each_reviewers_latest() {
+        let mut d = fixture();
+        assert_eq!(d.reviews.len(), 2);
+        assert_eq!(change_request_notes(&d), vec!["@marina-dev: Looks good overall. Please cover the **whitespace-only** case before merging."]);
+        d.reviews.push(ReviewSummary { author: "igorsegallafa".into(), avatar_url: String::new(), state: "CHANGES_REQUESTED".into(), body: "mine".into(), submitted_at: None });
+        d.reviews.push(ReviewSummary { author: "marina-dev".into(), avatar_url: String::new(), state: "CHANGES_REQUESTED".into(), body: "newer".into(), submitted_at: None });
+        assert_eq!(change_request_notes(&d), vec!["@marina-dev: newer"]);
+    }
 
     #[test]
     fn parses_hunk_ranges_on_both_sides() {

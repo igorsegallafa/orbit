@@ -201,6 +201,27 @@ pub async fn run(steps: &[String], window: AnyWindowHandle, app: &Entity<OrbitAp
                 let focus = focus_text(window, app, cx);
                 let _ = writeln!(log, "=== dump {arg}\n{text}{focus}=== end {arg}");
             }
+            // shot:<name> keeps the current ORBIT_CAPTURE frame as <file>-<name>.png.
+            "shot" => {
+                sleep(cx, 400).await;
+                let _ = window.update(cx, |_, window, _| window.refresh());
+                sleep(cx, 300).await;
+                if let Some(src) = std::env::var_os("ORBIT_CAPTURE").map(PathBuf::from) {
+                    let dst = src.with_file_name(format!("{}-{arg}.png", src.file_stem().unwrap_or_default().to_string_lossy()));
+                    if let Err(e) = std::fs::copy(&src, &dst) {
+                        let _ = writeln!(log, "  shot failed: {e}");
+                    }
+                }
+            }
+            // pr-review:<owner>/<repo>#<n> opens that PR's review tab.
+            "pr-review" => {
+                let Some((or, n)) = arg.split_once('#').and_then(|(or, n)| Some((or.to_string(), n.parse::<u64>().ok()?))) else {
+                    let _ = writeln!(log, "  bad pr {arg:?}");
+                    continue;
+                };
+                let _ = window.update(cx, |_, window, cx| app.update(cx, |a, cx| crate::review::open_pr_review(a, &or, n, window, cx)));
+                sleep(cx, 200).await;
+            }
             _ if crate::run::script::step(verb, arg, window, app, log, cx).await => {}
             _ => {
                 let _ = writeln!(log, "  unknown step");
