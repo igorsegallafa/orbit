@@ -166,7 +166,7 @@ pub fn review_data(owner_repo: &str, number: u64, with_lines: bool) -> Result<Re
 
 /// `THREADS_QUERY`'s `data`, without the commentable lines.
 pub fn parse_review_data(data: &Value) -> Result<ReviewData, String> {
-    let viewer = s(&data, "/viewer/login");
+    let viewer = s(data, "/viewer/login");
     let pr = data
         .pointer("/repository/pullRequest")
         .filter(|v| !v.is_null())

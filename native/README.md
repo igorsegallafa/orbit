@@ -682,6 +682,27 @@ Changes*, *Pull Requests and Checks*), plus review notes in every diff tab of a 
 - **Send to PR** (`src/review/send.rs`): the Tauri modal's checks (file in the PR, code pushed, inside
   a hunk of the PR's diff) and one `COMMENT` review per PR, after a dialog listing what can't go and
   why; *Post and remove notes* drops the posted ones from REVIEW.md.
+- **PR review threads** (`src/review/pr_review.rs`, `ReviewThreads.tsx`): GitHub's `reviewThreads`
+  (`orbit_core::review::review_data`, parsed by `parse_review_data`) show under their lines, or in a
+  list above the diff when outdated and unmapped, on removed lines in the unified view (*Show them
+  inline in split view*), or past the end of their side. Cards: author initial, time, Markdown
+  body, Outdated / Resolved / Pending pills, replies; resolved threads start collapsed. Reply,
+  Resolve / Unresolve, edit and delete your own comments (Delete asks Delete / Keep). The `+` lane
+  or a drag opens a comment on a line or range: *Start a review* keeps it as a pending draft
+  (editable, saved in `<config>/pr-review.json`), *Post to GitHub now* posts it alone; *Review*
+  submits Comment / Approve / Request changes with the drafts. Ctrl+Enter is the primary action,
+  Escape cancels. *Address with agent* (when a workspace has the PR's branch) runs
+  `agent::address_review` on the open threads plus the reviewers' change requests
+  (`review::change_request_notes`); each thread then shows the agent's reply to post, post and
+  resolve, edit or dismiss, and a banner says the changes wait uncommitted in the worktree. Self-test
+  step `pr-review:<owner>/<repo>#<n>` opens a PR, `shot:<name>` keeps the current `ORBIT_CAPTURE`
+  frame; probes `pr-file:<i>`, `pr-diff`, `pr-thread|pr-reply|pr-resolve:<thread id>`,
+  `pr-edit|pr-del|pr-del-yes|pr-del-no:<comment id>`, `pr-draft-edit|pr-draft-del:<id>`,
+  `pr-composer(-add|-now|-reply|-save|-cancel)`, `pr-review-btn`, `pr-submit-go`, `pr-address`,
+  `pr-offdiff-split`. Verified with a stub `gh` serving PR #26's recorded files and contents plus
+  `crates/orbit-core/tests/fixtures/review_threads.json`, which recorded every write: reply,
+  edit (PATCH), delete, resolve, a range draft submitted in a review. The agent run itself was not
+  run end to end.
 
 **Core move.** `ws_create_pr(s)`, `ws_prs(_flat)`, `ws_owner_repo`, `ws_pr_status`, `ws_checks`,
 `pr_group_checks`, `check_rerun` and `check_logs` held their logic inline in
@@ -1478,7 +1499,7 @@ Status of everything the React app did: **done**, **partial** (with what's missi
 - [x] done: changes review across repos: changed files per repo with +/− and open-note counts, refreshed from disk every 3 s; each file opens as a diff tab (`ChangesReview.tsx`). The React page shows every diff in one scrolling list; here each is a tab. No "viewed" checkboxes.
 - [x] done: local review notes in REVIEW.md (same file and format as the Tauri app, through `orbit_core::notes`): `+` beside a line or a selection (or *Add Review Note on Selected Lines*) leaves one, notes show under their lines and follow moved code (`anchorNote`), resolve/reopen, reply, edit, delete, show/clear resolved, the notes list, *Fix N notes with agent* (an open agent session or a new one), *Send to PR…* (`useReviewZones.tsx`, `src/lib/notes.ts`, `SendToPrModal.tsx`). Replies are paragraphs appended to the note (`Reply: …`), since REVIEW.md has no threads. Note bodies are plain text, not Markdown.
 - [ ] — Commit review (`CommitReviewPane.tsx`)
-- [ ] — GitHub PR review threads and submit, Code Review page, feature page, PR checkout, address review (`PrReviewPane.tsx`, `ReviewThreads.tsx`, `SubmitReview.tsx`, `CodeReviewPage.tsx`, `FeaturePage.tsx`, `PrCheckoutModal.tsx`, `AddressReview.tsx`)
+- [x] done: GitHub PR review threads (reply, resolve, edit, delete), pending comments and submit, address review with an agent. Code Review page, feature page and PR checkout are tracked elsewhere (`PrReviewPane.tsx`, `ReviewThreads.tsx`, `SubmitReview.tsx`, `CodeReviewPage.tsx`, `FeaturePage.tsx`, `PrCheckoutModal.tsx`, `AddressReview.tsx`)
 
 ### Git operations
 - [ ] partial: PRs (`PrsModal.tsx`): the workspace's open PRs and saved PRs' live state, create PRs for the repos without one (title from the branch or *Draft with AI*, description), into the workspace base.

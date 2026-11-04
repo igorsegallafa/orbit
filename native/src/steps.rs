@@ -214,9 +214,10 @@ pub async fn run(steps: &[String], window: AnyWindowHandle, app: &Entity<OrbitAp
             }
             // shot:<name> keeps the current ORBIT_CAPTURE frame as <file>-<name>.png.
             "shot" => {
-                sleep(cx, 400).await;
-                let _ = window.update(cx, |_, window, _| window.refresh());
-                sleep(cx, 300).await;
+                // A platform event, so the window draws a fresh frame.
+                let event = gpui::ModifiersChangedEvent { modifiers: Modifiers::default(), capslock: Default::default() };
+                send(window, PlatformInput::ModifiersChanged(event), cx);
+                sleep(cx, 500).await;
                 if let Some(src) = std::env::var_os("ORBIT_CAPTURE").map(PathBuf::from) {
                     let dst = src.with_file_name(format!("{}-{arg}.png", src.file_stem().unwrap_or_default().to_string_lossy()));
                     if let Err(e) = std::fs::copy(&src, &dst) {

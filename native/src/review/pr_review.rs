@@ -640,6 +640,7 @@ impl PrReviewPage {
     fn toggle_submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.submit.take().is_none() {
             let body = cx.new(|cx| TextareaState::new(window, cx).placeholder("Leave a comment").rows(4));
+            body.update(cx, |b, cx| b.focus(window, cx));
             self.submit = Some(Submit { event: "COMMENT", body });
         }
         cx.notify();
@@ -1137,7 +1138,7 @@ impl PrReviewPage {
                             }
                         })),
                 )
-                .when(self.submit.is_some(), |d| d.child(self.render_submit(cx))),
+                .when(self.submit.is_some(), |d| d.child(gpui::deferred(self.render_submit(cx)).with_priority(1))),
         );
         let title = match &path {
             Some(p) => {
@@ -1517,7 +1518,7 @@ impl PrReviewPage {
                                     )
                                 }),
                         )
-                        .children(off.iter().map(|t| self.render_thread(t, Some(off_location(t)), cx))),
+                        .children(off.iter().map(|t| div().flex_none().child(self.render_thread(t, Some(off_location(t)), cx)))),
                 )
             })
             .child(div().flex_1().min_h_0().relative().child(diff).child(probe("pr-diff")))
