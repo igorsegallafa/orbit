@@ -252,6 +252,15 @@ export function TerminalPane({ tab, onError, onStatusChange, onSignal, active }:
         term.clearSelection();
         return false;
       }
+      // Ctrl+Shift+V (Toshy sends it for Cmd+V in terminals): the webview
+      // doesn't paste on it. No text means an image: ^V lets Claude Code read it.
+      if (key === "v" && e.shiftKey) {
+        e.preventDefault();
+        invoke<string | null>("clipboard_text")
+          .then((text) => (text ? term.paste(text) : term.input("\x16")))
+          .catch(() => null);
+        return false;
+      }
       // Unhandled, the webview pastes into xterm (bracketed when the program asks).
       return key !== "v";
     });

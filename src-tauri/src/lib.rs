@@ -229,6 +229,7 @@ pub fn run() {
             pty::pty_kill,
             search::search_workspace,
             pty::pty_scrollback,
+            pty::clipboard_text,
             pty::pty_forget,
             term_image::pty_read_image,
             pty::claude_session_exists,

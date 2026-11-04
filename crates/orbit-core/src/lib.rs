@@ -3,6 +3,7 @@
 //! here depends on Tauri; events go through [`events::EventSink`].
 pub mod agent;
 pub mod agent_hooks;
+pub mod clipboard;
 pub mod artifacts;
 pub mod build;
 pub mod config;

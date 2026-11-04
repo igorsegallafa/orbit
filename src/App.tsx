@@ -41,6 +41,7 @@ import { ToastHost, toast } from "./components/Toast";
 import { useRalphRunning } from "./lib/useRalphRunning";
 import { startUpdateChecks } from "./lib/updater";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { reasonLabel, StopReason } from "./types/ralph";
 import {
   HomeIcon, SettingsIcon, SatelliteIcon, DocIcon, TerminalIcon, PlusIcon, FolderIcon,
@@ -174,6 +175,14 @@ function App() {
   const [initialSession] = useState(loadSession);
   const [tabs, setTabs] = useState<Tab[]>(initialSession.tabs);
   const [activeTab, setActiveTab] = useState<string | null>(initialSession.active);
+  // "· terminal" in the title tells Toshy (macOS-style keys) to use its
+  // terminal keymap while a terminal tab is in focus: Ctrl stays Ctrl there.
+  const terminalFocused = tabs.find((t) => tabId(t) === activeTab)?.kind === "terminal";
+  useEffect(() => {
+    getCurrentWindow()
+      .setTitle(terminalFocused ? "Orbit · terminal" : "Orbit")
+      .catch(() => null);
+  }, [terminalFocused]);
   /** Editor tabs with unsaved changes. */
   const [dirtyTabs, setDirtyTabs] = useState<Record<string, true>>({});
   /** Editor tab waiting for Save / Don't save before it closes. */

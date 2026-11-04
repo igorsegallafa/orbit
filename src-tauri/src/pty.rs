@@ -100,3 +100,9 @@ pub fn pty_resize(id: u32, cols: u16, rows: u16, pixel_width: Option<u16>, pixel
 pub fn pty_kill(id: u32) -> Result<(), String> {
     pty::kill(id)
 }
+
+/// The clipboard's text for a terminal paste (None: an image or nothing).
+#[tauri::command]
+pub async fn clipboard_text() -> Option<String> {
+    orbit_core::clipboard::text()
+}

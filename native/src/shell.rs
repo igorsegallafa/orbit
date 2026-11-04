@@ -1405,6 +1405,7 @@ impl OrbitApp {
 impl Render for OrbitApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.schedule_save(cx);
+        terminal_title(window, self.active_terminal().is_some());
         let focus = self.focus_workspace(cx).is_some();
         // Settings is its own screen: no tabs over it, and its nav replaces the
         // sidebar (the page draws it). No tabs at all: no strip.
@@ -1479,5 +1480,14 @@ impl Render for OrbitApp {
             .children(self.render_ws_switcher(cx))
             .children(self.render_menu(window, cx))
             .children(self.render_dialog(cx))
+    }
+}
+
+/// "· terminal" in the title tells Toshy (macOS-style keys) to use its terminal
+/// keymap while a terminal tab is in focus: Ctrl stays Ctrl there.
+fn terminal_title(window: &mut Window, terminal: bool) {
+    thread_local!(static LAST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) });
+    if LAST.with(|l| l.replace(Some(terminal))) != Some(terminal) {
+        window.set_window_title(if terminal { "Orbit · terminal" } else { "Orbit" });
     }
 }
