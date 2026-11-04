@@ -64,7 +64,10 @@ fn main() {
         workspace_ui::init(cx);
         pages::init(cx);
 
-        let bounds = Bounds::centered(None, size(px(1400.), px(900.)), cx);
+        let bounds = Bounds::centered(None, {
+            let (w, h) = script.window_size.unwrap_or((1400., 900.));
+            size(px(w), px(h))
+        }, cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             app_id: Some("orbit-native".into()),
