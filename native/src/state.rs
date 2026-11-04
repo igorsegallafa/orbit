@@ -101,6 +101,11 @@ pub struct SavedState {
     /// Index into `tabs`.
     pub active: Option<usize>,
     pub layout: Layout,
+    /// Theme id from `theme::list()`, or "system" (`orbit.theme`).
+    pub theme: Option<String>,
+    /// Workspaces whose sessions are collapsed in the sidebar (`orbit.ws-expanded` false).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ws_collapsed: Vec<String>,
 }
 
 pub fn default_path() -> Option<PathBuf> {
@@ -146,6 +151,8 @@ mod tests {
             ],
             active: Some(1),
             layout: Layout { sidebar_width: 300., ..Default::default() },
+            theme: Some("nord".into()),
+            ws_collapsed: vec!["ws".into()],
         };
         let json = serde_json::to_string(&s).unwrap();
         assert_eq!(serde_json::from_str::<SavedState>(&json).unwrap(), s);

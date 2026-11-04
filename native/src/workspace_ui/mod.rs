@@ -11,7 +11,6 @@ pub mod workspace_page;
 use crate::app::{OrbitApp, Tab, TabKind};
 use crate::commands::{self, Command};
 use crate::git::{self, Flow};
-use crate::probe::probe;
 use crate::review::Load;
 use crate::theme::{self, c};
 use crate::toast::ToastKind;
@@ -276,35 +275,6 @@ pub fn init(cx: &mut App) {
     ] {
         commands::register(cx, command);
     }
-}
-
-/// The sidebar's entries: the dashboard, and the selected workspace's page.
-pub fn sidebar(app: &OrbitApp, cx: &mut Context<OrbitApp>) -> impl IntoElement {
-    let entry = |id: &'static str, label: SharedString, cx: &mut Context<OrbitApp>, f: fn(&mut OrbitApp, &mut Window, &mut Context<OrbitApp>)| {
-        div()
-            .id(id)
-            .relative()
-            .mx_2()
-            .px_2()
-            .py_1()
-            .rounded_md()
-            .cursor_pointer()
-            .text_sm()
-            .text_color(c(theme::TEXT_DIM))
-            .hover(|s| s.bg(c(theme::PANEL_HOVER)).text_color(c(theme::TEXT)))
-            .child(label)
-            .child(probe(id))
-            .on_click(cx.listener(move |a, _, w, cx| f(a, w, cx)))
-    };
-    let ws = app.workspace().map(|w| w.meta.name.clone());
-    div()
-        .pt_2()
-        .child(entry("side-dashboard", "Dashboard".into(), cx, |a, w, cx| {
-            open(a, PageId::Dashboard, w, cx);
-        }))
-        .when_some(ws, |d, name| {
-            d.child(entry("side-workspace", format!("Overview · {name}").into(), cx, |a, w, cx| open_ws_with(a, w, cx, |_, _, _| {})))
-        })
 }
 
 /// The pages' part of the self-test dump.

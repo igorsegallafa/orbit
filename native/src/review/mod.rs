@@ -12,7 +12,6 @@ pub mod ui;
 use crate::app::{OrbitApp, Tab, TabKind};
 use crate::commands::{self, Command};
 use crate::diff_view::DiffTab;
-use crate::probe::probe;
 use crate::theme::{self, c};
 use crate::workspace::Workspace;
 use gpui::{
@@ -251,40 +250,6 @@ pub fn init(cx: &mut App) {
     ] {
         commands::register(cx, command);
     }
-}
-
-/// The sidebar's entries for the selected workspace.
-pub fn sidebar(app: &OrbitApp, cx: &mut Context<OrbitApp>) -> impl IntoElement {
-    let entry = |id: &'static str, label: &'static str, page: Page, cx: &mut Context<OrbitApp>| {
-        div()
-            .id(id)
-            .relative()
-            .mx_2()
-            .px_2()
-            .py_1()
-            .rounded_md()
-            .cursor_pointer()
-            .text_sm()
-            .text_color(c(theme::TEXT_DIM))
-            .hover(|s| s.bg(c(theme::PANEL_HOVER)).text_color(c(theme::TEXT)))
-            .child(label)
-            .child(probe(id))
-            .on_click(cx.listener(move |a, _, w, cx| open(a, page, w, cx)))
-    };
-    div().when(app.workspace().is_some(), |d| {
-        d.child(
-            div()
-                .px_3()
-                .pt_3()
-                .pb_1()
-                .text_xs()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(c(theme::TEXT_FAINT))
-                .child("REVIEW"),
-        )
-        .child(entry("review-changes", "Changes", Page::Changes, cx))
-        .child(entry("review-prs", "Pull requests", Page::PullRequests, cx))
-    })
 }
 
 /// The review part of the self-test dump.

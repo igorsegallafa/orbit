@@ -151,6 +151,9 @@ impl OrbitApp {
     }
 
     pub(crate) fn on_overlay_cancel(&mut self, _: &OverlayCancel, window: &mut Window, cx: &mut Context<Self>) {
+        if self.menu.is_none() && self.close_popovers(window, cx) {
+            return;
+        }
         if self.menu.is_some() {
             self.close_menu(window, cx);
         } else if self.dialog.is_some() {

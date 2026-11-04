@@ -26,10 +26,6 @@ impl Status {
             Status::Exited => "exited",
         }
     }
-
-    pub fn working(self) -> bool {
-        matches!(self, Status::Busy | Status::Thinking | Status::Running | Status::Editing)
-    }
 }
 
 /// Lifecycle reported by the agent itself (Claude Code hooks).
