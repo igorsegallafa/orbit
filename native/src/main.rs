@@ -14,6 +14,7 @@ mod icons;
 mod lsp;
 mod motion;
 mod nav;
+mod notifications;
 mod overlay;
 mod pages;
 mod palette;
@@ -73,6 +74,7 @@ fn run() {
     gpui_platform::application().with_assets(icons::Assets::new()).run(move |cx: &mut App| {
         gpui_component::init(cx);
         theme::init(cx, script.theme.as_deref().or(saved.theme.as_deref()));
+        notifications::init(saved.notifications.unwrap_or(true), cx);
         // Commands and keys, per stage.
         app::init(cx);
         file_tree::bind_keys(cx);

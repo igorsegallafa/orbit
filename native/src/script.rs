@@ -374,6 +374,7 @@ fn dump_sessions(out: &mut String, cx: &gpui::App) {
     for r in &store.recent {
         let _ = writeln!(out, "  {} {} {} in {}", r.agent, r.resume_id, r.session_name, r.workspace);
     }
+    crate::notifications::dump(out, cx);
 }
 
 /// Starts the scripted steps that happen at window creation.
@@ -549,6 +550,7 @@ pub async fn run(script: Script, window: WindowHandle<Root>, app: Entity<OrbitAp
 /// `status:<status>[@secs]` until some session has that status ·
 /// `action:<name>` dispatches a GPUI action by name (`sessions::NextSessionNeedingInput`) ·
 /// `type:<text>` types into the focused view, `keys:<specs>` presses keys (`ctrl-c`) (`\n` is Enter) · `sleep:<ms>` ·
+/// `notify-click` clicks the newest desktop notification (the handler a real click runs) ·
 /// `dump` writes the sessions, inbox and recent list into the log.
 /// Waits also record how late the UI thread ran its timers (a blocked UI).
 async fn run_steps(steps: &[String], window: AnyWindowHandle, app: &Entity<OrbitApp>, log: &mut String, cx: &mut AsyncApp) {
@@ -612,6 +614,11 @@ async fn run_steps(steps: &[String], window: AnyWindowHandle, app: &Entity<Orbit
                 let _ = writeln!(log, "step {step}: typed");
             }
             "sleep" => sleep(cx, arg.parse().unwrap_or(0)).await,
+            "notify-click" => {
+                let tag = cx.update(crate::notifications::click_latest);
+                let _ = writeln!(log, "step {step}: clicked {tag:?}");
+                sleep(cx, 300).await;
+            }
             "dump" => {
                 let _ = writeln!(log, "step dump:");
                 cx.update(|cx| dump_sessions(log, cx));

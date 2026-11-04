@@ -4505,6 +4505,7 @@ dependencies = [
  "image",
  "lsp-types",
  "memchr",
+ "notify-rust",
  "orbit-core",
  "regex",
  "serde",

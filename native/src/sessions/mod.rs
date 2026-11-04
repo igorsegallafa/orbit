@@ -251,6 +251,7 @@ impl SessionStore {
     /// An item from outside the sessions (a Ralph run ending); `key` is what a click opens.
     pub fn notify(&mut self, key: String, done: bool, title: String, detail: String, cx: &mut Context<Self>) {
         let kind = if done { InboxKind::Done } else { InboxKind::Waiting };
+        crate::notifications::post(key.clone(), title.clone(), detail.clone(), cx);
         self.push_inbox(InboxItem { key, kind, title, detail, at: now_ms(), read: false }, cx);
     }
 
@@ -524,7 +525,29 @@ fn on_terminal_event(s: &mut SessionStore, view: &Entity<TerminalView>, ev: &Ter
             msg.as_ref().map_or(where_.clone(), |m| format!("{where_} · {m}")),
         ),
     };
+    if !looking {
+        crate::notifications::post(meta.id.clone(), title.clone(), detail.clone(), cx);
+    }
     s.push_inbox(InboxItem { key: meta.id, kind, title, detail, at: now_ms(), read: looking }, cx);
+}
+
+/// Whether the window is focused, and whether inbox item `key`'s tab is the active one.
+pub fn focus_of(key: &str, cx: &mut App) -> (bool, bool) {
+    let Some(g) = cx.try_global::<Store>() else { return (false, false) };
+    let (app, window) = (g.app.clone(), g.window);
+    let window_active = window.update(cx, |_, w, _| w.is_window_active()).unwrap_or(false);
+    let tab_active = app.upgrade().is_some_and(|a| {
+        a.read(cx).active_tab().is_some_and(|t| t.saved_key(cx) == format!("session:{key}") || t.key(cx) == format!("page:{key}"))
+    });
+    (window_active, tab_active)
+}
+
+/// Brings the window forward on inbox item `key`'s tab (a notification click).
+pub fn reveal(key: String, cx: &mut App) {
+    with_app(cx, move |a, window, cx| {
+        window.activate_window();
+        activate(a, &key, window, cx);
+    });
 }
 
 /// The tab of session `key` is gone for good: stop it, forget its saved
