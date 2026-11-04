@@ -215,6 +215,7 @@ impl OrbitApp {
                         )
                 }
             }))
+            .when(!collapsed, |d| d.child(self.sessions.clone()))
     }
 
     fn render_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {

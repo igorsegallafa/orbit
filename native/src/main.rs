@@ -12,6 +12,7 @@ mod overlay;
 mod palette;
 mod probe;
 mod script;
+mod sessions;
 mod shell;
 mod state;
 mod steps;

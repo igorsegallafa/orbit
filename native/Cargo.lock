@@ -4478,6 +4478,7 @@ version = "0.1.0"
 dependencies = [
  "ignore",
  "notify",
+ "portable-pty",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -4501,7 +4502,6 @@ dependencies = [
  "ignore",
  "lsp-types",
  "orbit-core",
- "portable-pty",
  "serde",
  "serde_json",
  "serde_yaml",

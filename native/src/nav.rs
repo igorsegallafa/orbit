@@ -68,7 +68,8 @@ impl<T: Clone> NavHistory<T> {
     pub fn step(&mut self, back: bool, usable: impl Fn(&NavEntry<T>) -> bool) -> Option<NavEntry<T>> {
         let (from, to) = if back { (&mut self.back, &mut self.forward) } else { (&mut self.forward, &mut self.back) };
         while let Some(e) = from.pop() {
-            if !usable(&e) {
+            // Skipped places can leave the shown one next to itself.
+            if !usable(&e) || self.current.as_ref().is_some_and(|c| c.key == e.key) {
                 continue;
             }
             if let Some(cur) = self.current.take() {
@@ -114,6 +115,16 @@ mod tests {
         assert!(h.step(true, |_| true).is_none());
         // The skipped entry is gone, not moved to the forward list.
         assert_eq!(h.depth(), (0, 1));
+    }
+
+    #[test]
+    fn never_steps_to_the_shown_place() {
+        let mut h = NavHistory::<u8>::default();
+        for (k, t) in [("a", 1), ("c", 3), ("t", 0), ("c", 3)] {
+            h.visit(k.into(), t);
+        }
+        // "t" is unusable, and the "c" before it is where we are.
+        assert_eq!(h.step(true, |e| e.key != "t").unwrap().key, "a");
     }
 
     #[test]

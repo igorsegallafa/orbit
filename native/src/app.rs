@@ -11,7 +11,7 @@ use crate::nav::NavHistory;
 use crate::overlay::{ButtonStyle, ContextMenu, Dialog, DialogButton, MenuItem};
 use crate::palette::Palette;
 use crate::state::{self, Layout, SavedState, SavedTab};
-use crate::terminal::{self, TerminalView};
+use crate::terminal::TerminalView;
 use crate::toast::{ToastKind, Toasts};
 use crate::workspace::{self, Workspace};
 use futures::StreamExt;
@@ -132,6 +132,7 @@ pub struct OrbitApp {
     /// Views shown at the right of the titlebar, before the files-panel
     /// toggle: where the run widget and the inbox go.
     pub titlebar_items: Vec<AnyView>,
+    pub sessions: Entity<crate::sessions::SessionsPanel>,
     persist: Persist,
     _subscriptions: Vec<Subscription>,
 }
@@ -198,6 +199,18 @@ pub fn init(cx: &mut App) {
             .keys(["f12"])
             .context("Input")
             .action(gpui_component::input::GoToDefinition),
+        // Sessions (`sessions.rs`); Ctrl+Shift+T above opens a shell session.
+        Command::new("sessions.newAgent", "New Agent Session").keys(["ctrl-alt-a"]).action(crate::sessions::NewAgentSession),
+        Command::new("sessions.newClaude", "New Claude Session").action(crate::sessions::NewClaudeSession),
+        Command::new("sessions.newOpencode", "New OpenCode Session").action(crate::sessions::NewOpencodeSession),
+        Command::new("sessions.newOmp", "New omp Session").action(crate::sessions::NewOmpSession),
+        Command::new("sessions.newShell", "New Shell Session").action(crate::sessions::NewShellSession),
+        Command::new("sessions.resumeLast", "Resume Last Session").keys(["ctrl-alt-r"]).action(crate::sessions::ResumeLastSession),
+        Command::new("sessions.nextNeedingInput", "Next Session Needing Input")
+            .keys(["ctrl-alt-i"])
+            .action(crate::sessions::NextSessionNeedingInput),
+        Command::new("sessions.markInboxRead", "Mark Inbox Read").action(crate::sessions::MarkInboxRead),
+        Command::new("sessions.clearInbox", "Clear Inbox").action(crate::sessions::ClearInbox),
         Command::new("app.quit", "Quit").keys(["ctrl-q"]).run(|a, _, cx| {
             a.save_now(cx);
             cx.quit()
@@ -234,6 +247,7 @@ impl OrbitApp {
             }
         })
         .detach();
+        let sessions = crate::sessions::init(window, cx);
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         Self {
@@ -254,6 +268,7 @@ impl OrbitApp {
             palette: None,
             overlay_focus: cx.focus_handle(),
             titlebar_items: vec![],
+            sessions,
             persist: Persist { path: state_path, ..Default::default() },
             _subscriptions: vec![sub],
         }
@@ -269,10 +284,6 @@ impl OrbitApp {
 
     pub fn workspace(&self) -> Option<&Workspace> {
         self.selected.map(|ix| &self.workspaces[ix])
-    }
-
-    fn cwd(&self) -> PathBuf {
-        self.workspace().map(|w| w.dir.clone()).unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from("/")))
     }
 
     /// The selected workspace's repo holding `path`, and its folder in the workspace.
@@ -305,7 +316,7 @@ impl OrbitApp {
     }
 
     /// Adds a tab in its group (sessions before files) and returns its index.
-    fn insert_tab(&mut self, tab: Tab) -> usize {
+    pub(crate) fn insert_tab(&mut self, tab: Tab) -> usize {
         let ix = if tab.is_file() { self.tabs.len() } else { self.tabs.iter().take_while(|t| !t.is_file()).count() };
         self.tabs.insert(ix, tab);
         if let Some(active) = self.active.as_mut().filter(|a| **a >= ix) {
@@ -354,14 +365,7 @@ impl OrbitApp {
     }
 
     pub fn new_terminal(&mut self, input: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
-        let pty = match terminal::Pty::spawn(&self.cwd()) {
-            Ok(pty) => pty,
-            Err(e) => return self.toast_error(format!("Terminal failed: {e}"), cx),
-        };
-        let view = cx.new(|cx| TerminalView::new(pty, input, cx));
-        cx.observe(&view, |_, _, cx| cx.notify()).detach();
-        let ix = self.insert_tab(Tab { kind: TabKind::Terminal(view), preview: false });
-        self.activate(ix, window, cx);
+        crate::sessions::new_session(self, None, input, window, cx);
     }
 
     /// Opens (or focuses) a file's editor tab. `preview` reuses the preview
@@ -450,6 +454,9 @@ impl OrbitApp {
         if tab.dirty(cx) && !force {
             return self.confirm_unsaved(ix, window, cx);
         }
+        if let TabKind::Terminal(t) = &tab.kind {
+            crate::sessions::closed(t, cx);
+        }
         self.tabs.remove(ix);
         self.active = match self.active {
             _ if self.tabs.is_empty() => None,
@@ -527,6 +534,11 @@ impl OrbitApp {
                 picked && !dirty
             })
             .collect();
+        for (t, _) in self.tabs.iter().zip(&remove).filter(|(_, r)| **r) {
+            if let TabKind::Terminal(v) = &t.kind {
+                crate::sessions::closed(v, cx);
+            }
+        }
         let mut flags = remove.into_iter();
         self.tabs.retain(|_| !flags.next().unwrap_or(false));
         let still = active_key.and_then(|k| self.tab_index(&k, cx));
