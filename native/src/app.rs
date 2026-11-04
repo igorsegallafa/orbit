@@ -27,6 +27,7 @@ pub enum TabKind {
     Terminal(Entity<TerminalView>),
     Editor(Entity<EditorTab>),
     Diff(Entity<DiffTab>),
+    Review(Entity<crate::review::ReviewTab>),
 }
 
 pub struct Tab {
@@ -40,6 +41,8 @@ pub struct Tab {
 pub enum NavTarget {
     Editor(PathBuf),
     Diff(PathBuf),
+    /// Review pages reopen from the sidebar; like terminals, closed ones are skipped.
+    Review,
     /// Closed terminals are skipped: reopening one would be a new session.
     Terminal,
 }
@@ -54,6 +57,7 @@ impl Tab {
             TabKind::Terminal(t) => t.read(cx).title(),
             TabKind::Editor(e) => e.read(cx).title.clone(),
             TabKind::Diff(d) => d.read(cx).title.clone(),
+            TabKind::Review(r) => r.read(cx).title(),
         }
     }
 
@@ -66,6 +70,7 @@ impl Tab {
             TabKind::Terminal(t) => t.focus_handle(cx),
             TabKind::Editor(e) => e.focus_handle(cx),
             TabKind::Diff(d) => d.read(cx).state.focus_handle(cx),
+            TabKind::Review(r) => r.focus_handle(cx),
         }
     }
 
@@ -75,6 +80,7 @@ impl Tab {
             TabKind::Terminal(t) => format!("term:{}", t.entity_id()),
             TabKind::Editor(e) => format!("ed:{}", e.read(cx).path.display()),
             TabKind::Diff(d) => format!("diff:{}", d.read(cx).path.display()),
+            TabKind::Review(r) => r.read(cx).key(),
         }
     }
 
@@ -83,6 +89,7 @@ impl Tab {
             TabKind::Terminal(_) => NavTarget::Terminal,
             TabKind::Editor(e) => NavTarget::Editor(e.read(cx).path.clone()),
             TabKind::Diff(d) => NavTarget::Diff(d.read(cx).path.clone()),
+            TabKind::Review(_) => NavTarget::Review,
         }
     }
 }
@@ -651,7 +658,7 @@ impl OrbitApp {
         }
         self.remember_cursor(cx);
         let open: Vec<String> = self.tabs.iter().map(|t| t.key(cx)).collect();
-        let Some(entry) = self.nav.step(back, |e| open.contains(&e.key) || e.target != NavTarget::Terminal) else {
+        let Some(entry) = self.nav.step(back, |e| open.contains(&e.key) || !matches!(e.target, NavTarget::Terminal | NavTarget::Review)) else {
             cx.notify();
             return;
         };
@@ -666,7 +673,7 @@ impl OrbitApp {
                 self.open_diff(path.clone(), window, cx);
                 None
             }
-            (None, NavTarget::Terminal) => None,
+            (None, NavTarget::Terminal | NavTarget::Review) => None,
         };
         self.applying_nav = false;
         if let (Some(editor), Some((line, col))) = (editor, entry.position) {
@@ -746,7 +753,7 @@ impl OrbitApp {
                 }
                 TabKind::Diff(d) => Some(SavedTab::Diff { path: d.read(cx).path.clone() }),
                 // Sessions come back with the Sessions stage (scrollback restore).
-                TabKind::Terminal(_) => None,
+                TabKind::Terminal(_) | TabKind::Review(_) => None,
             })
             .collect();
         let active = self.active.and_then(|a| {

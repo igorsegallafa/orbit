@@ -12,6 +12,7 @@ mod nav;
 mod overlay;
 mod palette;
 mod probe;
+mod review;
 mod run;
 mod script;
 mod sessions;
@@ -48,6 +49,7 @@ fn main() {
         app::init(cx);
         file_tree::bind_keys(cx);
         editor::bind_keys(cx);
+        review::init(cx);
         run::init(cx);
 
         let bounds = Bounds::centered(None, size(px(1400.), px(900.)), cx);

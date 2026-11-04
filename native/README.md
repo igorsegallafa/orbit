@@ -321,7 +321,8 @@ Caveats found:
 | `src/editor/provider.rs` | the LSP document (sync) and gpui-component providers: definition, hover, completion, code actions; WorkspaceEdit and location parsing |
 | `src/editor/picker.rs` | the quick-pick overlay: go to line, outline, project symbols, references, rename, quick fixes |
 | `src/lsp/` | `mod.rs` file → language and the server registry · `server.rs` JSON-RPC client and URI mapping over `orbit_core::lsp` (which picks, starts and feeds the process) · `paths.rs` URIs and root rebase |
-| `src/diff_view.rs` | diff tab over `git diff HEAD` |
+| `src/diff_view.rs` | diff tab over `git diff HEAD` (untracked files too), F7 navigation, and REVIEW.md notes inline in a workspace repo |
+| `src/review/` | the review tabs (`mod.rs`: tab, commands, sidebar entries, dump) · `changes.rs` changed files and notes · `prs.rs` PRs, status, checks, logs, creation · `send.rs` notes to a PR review · `notes.rs` REVIEW.md and note anchoring · `ui.rs` small widgets |
 | `src/terminal/` | terminal view over `orbit_core::pty`: VT parse, status tracking, scrollback replay (`mod.rs`), grid layout and paint (`grid.rs`), keys and mouse reports (`input.rs`) |
 | `src/sessions/` | sessions (`mod.rs`: keys, codenames, save/restore, inbox, recent, resume, actions), agent status heuristics and hooks (`status.rs`), the sidebar block (`panel.rs`) |
 | `src/file_tree.rs` | virtualized tree with background folder loads |
@@ -372,9 +373,8 @@ held logic became core functions (`notes::add`, `lsp::cpp_setup`, `ralph::start`
 - `term_image.rs`: reads files named by kitty graphics commands for the webview.
   (`pty.rs` moved to core in stage 3 and is now a thin adapter, see *Stage 3*.)
 - `commands.rs` (93 commands): most are one-line wrappers over core, but some still hold logic
-  inline: service/folder/group editing in the config, `ws_create_pr(s)`, `ws_checks` aggregation,
-  `check_logs`, `open_in_editor`. Not moved here to keep this stage reviewable; the *Git and
-  workspace flows* stage should move each into core as it gets a native UI.
+  inline: service/folder/group editing in the config and `open_in_editor`. (The PR commands moved
+  to `orbit_core::prs` in the review stage.)
 - `lib.rs`: the Tauri builder, plugins, the handler list, `events()` and `blocking()`.
 - Plugin calls (`tauri_plugin_opener` for reveal/open after an artifact download) stay in the wrappers.
 
@@ -462,6 +462,78 @@ stub agent on `PATH` (no real agent was started):
 - `pnpm run check` passes with the adapter (Tauri app unchanged for the frontend); core has two new
   PTY tests (round trip with exit; pause stops reading until resumed).
 
+## Stage: review and pull requests
+
+Two review tabs per workspace, opened from the sidebar's *REVIEW* entries or the palette (*Review
+Changes*, *Pull Requests and Checks*), plus review notes in every diff tab of a workspace repo.
+
+- **Changes** (`src/review/changes.rs`): `orbit_core::git::changes` for each repo (the dock Git
+  tab's list), re-read every 3 s in the background; a click opens the file's diff tab. On the right,
+  the workspace's REVIEW.md notes: resolve, delete, jump (to the diff while the file has changes,
+  else to the file), show/clear resolved, *Fix N notes with agent* (the prompt of `notesPrompt`, sent
+  to an agent session of the workspace or a new one) and *Send to PR…*.
+- **Diff tab notes** (`src/diff_view.rs`), on gpui-component's `Diff` hooks: `on_add_annotation`
+  (the `+` beside the hovered line and at the end of a selection) opens a composer, `annotations` +
+  `render_annotation` put each note's card under its line, `decorations` tint multi-line notes.
+  Cards have Resolve/Reopen, Reply, Edit and Delete; the composer is an `InputState` (Enter saves,
+  Escape cancels). Notes are written with `orbit_core::notes`, so both apps read and write the same
+  REVIEW.md, and an agent ticking a box shows up within 2 s. Notes go on the new side only, as in the
+  Tauri app. The patch carries the whole file (`--unified=1000000`) and the view folds unchanged
+  lines, so a note can sit on any line.
+- **Pull requests** (`src/review/prs.rs`): `orbit_core::prs::{list, status, checks}` side by side in
+  the background; failed Actions checks get *Logs* (`check_logs`, shown in the page) and *Re-run*;
+  repos with no open PR get a create form (include, title, description, *Draft with AI* through
+  `agent::pr_draft`) and *Create pull requests* (`prs::create_all`, which saves the refs).
+- **Send to PR** (`src/review/send.rs`): the Tauri modal's checks (file in the PR, code pushed, inside
+  a hunk of the PR's diff) and one `COMMENT` review per PR, after a dialog listing what can't go and
+  why; *Post and remove notes* drops the posted ones from REVIEW.md.
+
+**Core move.** `ws_create_pr(s)`, `ws_prs(_flat)`, `ws_owner_repo`, `ws_pr_status`, `ws_checks`,
+`pr_group_checks`, `check_rerun` and `check_logs` held their logic inline in
+`src-tauri/src/commands.rs`. It is now `crates/orbit-core/src/prs.rs` (`create`, `create_all`,
+`list`, `status`, `checks`, `group_checks`, `rerun`, `check_logs`, plus `worktree_of`, `remote_of`,
+`owner_repo`), and the commands are one-line wrappers with the same arguments and results. Core
+tests: the check aggregate, PR number and benign-error parsing, the log tail, and `create_all` +
+`check_logs` end to end against a scratch workspace with a **stub `gh`** on `PATH` (three repos: one
+PR created and saved, one "No commits between" skipped, one failure reported only when no PR
+exists).
+
+Keys: `F7` / `Shift+F7` next/previous change in a diff tab. Commands: `review.changes`,
+`review.pullRequests`, `review.commentSelection`, `diff.nextChange`, `diff.previousChange`,
+`diff.toggleMode`. Self-test probes: `review-changes`, `review-prs` (sidebar),
+`review-file:<repo>/<path>`, `review-note:<n>[:done|:delete]`, `review-fix`, `review-send-pr`,
+`review-refresh`, `review-show-done`, `review-clear-done`, `note:<n>:done|reply|edit|delete` (cards in
+a diff tab, in line order), `composer:submit|cancel|input`, `diff-mode`, `diff-show-done`,
+`prs-refresh`, `pr:<repo>#<n>`, `check:<repo>#<n>:<k>:logs|rerun`, `create:<repo>:include|draft`,
+`create-prs`, `log-close`. The dump lists each review tab (files, notes, PRs, status, checks, create
+rows, log) and each diff tab's notes with their anchored lines and the composer.
+
+Verified by self-tests against a scratch root (`ORBIT_WORKSPACE_ROOT`, `ORBIT_CONFIG_DIR`): a
+workspace with two repos cloned from local bare remotes, origins set to GitHub-looking fetch URLs
+(never contacted; nothing pushed) and a stub `gh` first on `PATH`. No real PR was created.
+
+- Changes listed `web: M main.rs +3 -2`, `web: U added.txt`, `api: D notes.txt +0 -3`.
+- In `main.rs`'s diff, *Add Review Note* (no selection: the first added line), typing and Enter wrote
+  ``- [ ] `web/main.rs:3` `` with its snippet to REVIEW.md; Reply appended `Reply: …`; Resolve ticked
+  it; the Changes tab showed it on its next refresh.
+- Show resolved → Reopen → Edit (`Ctrl+A`, retype, Save) rewrote the body. A script then put two
+  lines on top of `main.rs`: within the 2 s poll the diff reloaded (`+5 −2`) and the note sat at line
+  5, `moved`. Delete removed the last note, and REVIEW.md with it (as core does).
+- Split → Unified with `diff.toggleMode`; F7 dispatched.
+- Pull requests: `web #42` with its live state, checks `pass build` / `fail test` (aggregate `fail`).
+  *Logs* on the failed one ran `gh api …/jobs/7` and `gh run view 5 -R o/web --log-failed` and showed
+  201 lines starting `failed step: Run tests`. *Create pull requests* ran `gh pr create -R o/api
+  --base main --head feat/review-ui --title "Review ui" --body ""`, saved `api #43` in
+  `.workspace.yaml` and listed it. *Re-run* called `gh api -X POST
+  repos/o/web/actions/runs/5/rerun-failed-jobs` (the stub refuses it, and the page showed the error).
+- Send to PR was tested on its logic only (unit tests of the line checks): posting needs GitHub's
+  GraphQL and contents APIs, which the stub doesn't answer.
+
+gpui-component limits met: the `+` button and line selection are pointer gestures inside the `Diff`
+element, which the self-test can't target (no probes inside it), so the composer was opened with the
+command that shares its path; notes on folded lines show once the fold is expanded; the diff view is
+read-only, so there is no editing in the diff.
+
 ## Next stages
 
 Ordered by dependency, with rough sizes (one focused agent-day ≈ 1 unit).
@@ -481,8 +553,8 @@ Ordered by dependency, with rough sizes (one focused agent-day ≈ 1 unit).
 5. **File tree completeness** (1–2): create/rename/delete/move/drag, reveal, copy path, fs-watch
    refresh, file icons, and a tree-structured model (the flat list does an O(n) path search per
    folder load).
-6. **Review** (4–5): changes review across repos, commit review, PR review with threads,
-   send-to-PR, address review, F7 diff navigation, and review notes (REVIEW.md).
+6. **Review** (4–5): mostly done (stage above: changes review, REVIEW.md notes, send-to-PR, F7,
+   PRs, checks and logs); left: commit review, GitHub PR review with threads, address review.
 7. **Git and workspace flows** (4): commit, push, PR, rebase and merge modals, checks, branch
    drift, the repo page, workspace create and add repos, the dashboard, Search Everywhere and
    Find in Files.
@@ -498,8 +570,8 @@ Status of everything the React app does: **done**, **partial** (with what's miss
 (not started). Files are the React sources.
 
 ### App shell & layout
-- [ ] partial: main area with tabs, sidebar and focused workspace (`src/App.tsx`). Only terminal, editor and diff tab kinds exist.
-- [ ] — Tab kinds dashboard, reviews, settings, integrations, repo, workspace, changes, commit, pr, feature, ralph (`src/App.tsx`)
+- [ ] partial: main area with tabs, sidebar and focused workspace (`src/App.tsx`). Tab kinds: terminal, editor, diff, review (changes, pull requests).
+- [ ] partial: tab kinds: changes is done (review stage); dashboard, reviews, settings, integrations, repo, workspace, commit, pr, feature, ralph are not (`src/App.tsx`)
 - [x] done: custom titlebar (client-side decorations; gpui-component's `TitleBar` draws the window controls and moves/maximizes the window): sidebar toggle, back/forward, workspace switcher, slots for the run widget and inbox, files-panel toggle (`WindowControls.tsx`)
 - [x] done: back/forward history: tab switches and cross-file jumps, with the cursor of each file; closed files reopen, closed terminals are skipped; `Alt+←/→`, mouse side buttons, titlebar arrows (`src/lib/navHistory.ts`). Jumps inside one file are not recorded yet (the editor emits no event for them).
 - [x] done: resizable sidebar (snaps to icons below 110 px), files dock and bottom panel; double click resets; sizes and hidden/open state persist (`PaneResizer.tsx`, `SidebarResizer.tsx`)
@@ -581,14 +653,15 @@ Status of everything the React app does: **done**, **partial** (with what's miss
 - [ ] partial: find within a file. gpui-component's editor has search; it is untested and has no binding here.
 
 ### Review / diff / PR
-- [ ] partial: diff tab for one file's working-tree changes, split/unified (`ReviewPane.tsx`). No commit diffs, no F7 navigation (`useDiffNav.ts`).
-- [ ] — Changes review across repos, commit review (`ChangesReview.tsx`, `CommitReviewPane.tsx`)
-- [ ] — Inline review zones and threads, REVIEW.md notes, send to PR (`useReviewZones.tsx`, `ReviewThreads.tsx`, `src/lib/notes.ts`, `SendToPrModal.tsx`)
-- [ ] — PR review and submit, Code Review page, feature page, PR checkout, address review (`PrReviewPane.tsx`, `SubmitReview.tsx`, `CodeReviewPage.tsx`, `FeaturePage.tsx`, `PrCheckoutModal.tsx`, `AddressReview.tsx`)
+- [x] done: diff tab for one file's working-tree changes (untracked and deleted files too), split/unified, unchanged lines folded, F7/Shift+F7 next/previous change (`ReviewPane.tsx`, `useDiffNav.ts`). No commit diffs yet.
+- [x] done: changes review across repos: changed files per repo with +/− and open-note counts, refreshed from disk every 3 s; each file opens as a diff tab (`ChangesReview.tsx`). The React page shows every diff in one scrolling list; here each is a tab. No "viewed" checkboxes.
+- [x] done: local review notes in REVIEW.md (same file and format as the Tauri app, through `orbit_core::notes`): `+` beside a line or a selection (or *Add Review Note on Selected Lines*) leaves one, notes show under their lines and follow moved code (`anchorNote`), resolve/reopen, reply, edit, delete, show/clear resolved, the notes list, *Fix N notes with agent* (an open agent session or a new one), *Send to PR…* (`useReviewZones.tsx`, `src/lib/notes.ts`, `SendToPrModal.tsx`). Replies are paragraphs appended to the note (`Reply: …`), since REVIEW.md has no threads. Note bodies are plain text, not Markdown.
+- [ ] — Commit review (`CommitReviewPane.tsx`)
+- [ ] — GitHub PR review threads and submit, Code Review page, feature page, PR checkout, address review (`PrReviewPane.tsx`, `ReviewThreads.tsx`, `SubmitReview.tsx`, `CodeReviewPage.tsx`, `FeaturePage.tsx`, `PrCheckoutModal.tsx`, `AddressReview.tsx`)
 
 ### Git operations
-- [ ] — Commit, push, PRs, rebase, merge modals (`CommitModal.tsx`, `PushModal.tsx`, `PrsModal.tsx`, `RebaseModal.tsx`, `MergeModal.tsx`)
-- [ ] — Checks: list, rerun, logs, investigate, fix; discard, sync branch
+- [ ] partial: PRs (`PrsModal.tsx`): the workspace's open PRs and saved PRs' live state, create PRs for the repos without one (title from the branch or *Draft with AI*, description), into the workspace base. Commit, push, rebase, merge modals are not ported (`CommitModal.tsx`, `PushModal.tsx`, `RebaseModal.tsx`, `MergeModal.tsx`).
+- [ ] partial: checks: list per PR with the aggregate, failed-check logs (the tail the AI gets), re-run failed jobs. No investigate/fix with AI; discard and sync branch not ported.
 
 ### Run / Build / Debug
 - [x] done: run widget with configurations (all repos of the workspace) and CMake presets, remembered per workspace, `Ctrl+F9`/`Shift+F10`/`Shift+F9`/`Ctrl+F2` (`RunWidget.tsx`, `src/lib/runStore.ts`)
