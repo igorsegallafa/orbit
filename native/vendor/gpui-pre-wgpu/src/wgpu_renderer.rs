@@ -462,7 +462,7 @@ impl WgpuRenderer {
         }
 
         let surface_config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | orbit_capture::extra_usage(&surface_caps),
             format: surface_format,
             color_space: wgpu::SurfaceColorSpace::Auto,
             width: clamped_width.max(1),
@@ -1232,8 +1232,95 @@ impl WgpuRenderer {
             return false;
         }
 
+        orbit_capture::save(core, &frame.texture);
         core.resources.queue.present(frame);
         true
+    }
+}
+
+/// Orbit patch: with the `orbit-capture` feature and `ORBIT_CAPTURE=<file.png>`, every drawn
+/// frame is copied back and written to that file, so the app can show itself without a
+/// screenshot tool.
+mod orbit_capture {
+    use super::WgpuRendererCore;
+
+    #[cfg(feature = "orbit-capture")]
+    fn path() -> Option<&'static std::path::Path> {
+        static PATH: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+        PATH.get_or_init(|| std::env::var_os("ORBIT_CAPTURE").map(Into::into)).as_deref()
+    }
+
+    pub(super) fn extra_usage(caps: &wgpu::SurfaceCapabilities) -> wgpu::TextureUsages {
+        #[cfg(feature = "orbit-capture")]
+        if path().is_some() && caps.usages.contains(wgpu::TextureUsages::COPY_SRC) {
+            return wgpu::TextureUsages::COPY_SRC;
+        }
+        let _ = caps;
+        wgpu::TextureUsages::empty()
+    }
+
+    pub(super) fn save(core: &WgpuRendererCore, texture: &wgpu::Texture) {
+        #[cfg(feature = "orbit-capture")]
+        if let Some(path) = path() {
+            if !texture.usage().contains(wgpu::TextureUsages::COPY_SRC) {
+                return;
+            }
+            if let Err(e) = write(core, texture, path) {
+                log::error!("orbit capture: {e:#}");
+            }
+        }
+        let _ = (core, texture);
+    }
+
+    #[cfg(feature = "orbit-capture")]
+    fn write(core: &WgpuRendererCore, texture: &wgpu::Texture, path: &std::path::Path) -> anyhow::Result<()> {
+        let device = &core.resources.device;
+        let (width, height) = (texture.width(), texture.height());
+        let row = width * 4;
+        let padded = row.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("orbit_capture"),
+            size: u64::from(padded) * u64::from(height),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("orbit_capture") });
+        encoder.copy_texture_to_buffer(
+            texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(padded), rows_per_image: Some(height) },
+            },
+            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        );
+        let submission = core.resources.queue.submit(std::iter::once(encoder.finish()));
+        let (tx, rx) = std::sync::mpsc::channel();
+        buffer.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        device
+            .poll(wgpu::PollType::Wait { submission_index: Some(submission), timeout: Some(std::time::Duration::from_secs(10)) })
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        rx.recv_timeout(std::time::Duration::from_secs(10))??;
+        let mapped = buffer.slice(..).get_mapped_range()?;
+        let mut pixels = Vec::with_capacity((row * height) as usize);
+        for line in mapped.chunks_exact(padded as usize).take(height as usize) {
+            pixels.extend_from_slice(&line[..row as usize]);
+        }
+        drop(mapped);
+        buffer.unmap();
+        let bgra = matches!(texture.format(), wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb);
+        for px in pixels.chunks_exact_mut(4) {
+            if bgra {
+                px.swap(0, 2);
+            }
+            px[3] = 255;
+        }
+        let image = image::RgbaImage::from_raw(width, height, pixels).ok_or_else(|| anyhow::anyhow!("bad frame size"))?;
+        let tmp = path.with_extension("tmp.png");
+        image.save(&tmp)?;
+        std::fs::rename(tmp, path)?;
+        Ok(())
     }
 }
 

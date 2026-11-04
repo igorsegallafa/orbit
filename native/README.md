@@ -64,6 +64,7 @@ dispatch (`Window::dispatch_keystroke` / `dispatch_event`), and the result is a 
     --do "rclick:tab:1;click:menu:Close Other Files;dump:after"   # shell steps, below
     --state /tmp/s.json                 # restore from / save to this state file (none otherwise)
     --exit-after 40 --dump out.txt      # quit after 40 s and write the dump (tabs, editor, LSP, diagnostics, terminal grid, layout, history, overlays…)
+ORBIT_CAPTURE=shot.png ./target/release/orbit-native …   # built with --features capture: saves each frame as PNG
 scripts/measure.sh 8 [args…]            # PSS (+SwapPss) of the process tree after 8 s; language servers apart
 ```
 

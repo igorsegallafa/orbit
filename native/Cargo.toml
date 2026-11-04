@@ -45,5 +45,13 @@ codegen-units = 16
 debug = 0
 
 # Vulkan-only renderer on Linux (GL fallback); see vendor/PATCHES.md.
+# `cargo run --release --features capture` + `ORBIT_CAPTURE=shot.png` saves each frame
+# (vendor/PATCHES.md); for looking at the UI without a screenshot tool.
+[target.'cfg(target_os = "linux")'.dependencies]
+gpui-pre-wgpu = { version = "=0.3.11", optional = true, features = ["orbit-capture"] }
+
+[features]
+capture = ["dep:gpui-pre-wgpu"]
+
 [patch.crates-io]
 gpui-pre-wgpu = { path = "vendor/gpui-pre-wgpu" }

@@ -37,6 +37,8 @@ bench-support = [
     "dep:image",
 ]
 default = []
+# Orbit patch: ORBIT_CAPTURE=<file.png> saves each drawn frame (see PATCHES.md).
+orbit-capture = ["dep:image"]
 font-kit = ["dep:font-kit"]
 test-support = [
     "gpui/test-support",

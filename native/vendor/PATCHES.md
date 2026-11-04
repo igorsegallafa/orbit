@@ -34,3 +34,9 @@ measurements). The GL path stays for machines without a Vulkan driver (old GPUs,
 
 Drop the vendored copy when upstream makes the backend set configurable (Zed has no such option
 at f816e1f).
+
+**Frame capture (feature `orbit-capture`).** `src/wgpu_renderer.rs` gains a small
+`orbit_capture` module: when built with the feature and `ORBIT_CAPTURE=<file.png>` is set, the
+surface gets `COPY_SRC` and each drawn frame is read back and written to that file. Off by
+default; the native crate enables it with `--features capture`. To re-apply, copy the module
+and its two call sites (the surface `usage` and the `save` call before `present`).
