@@ -10,7 +10,6 @@ pub mod kit;
 mod ralph;
 mod repos;
 mod settings;
-pub mod themes;
 pub mod ui;
 pub mod updates;
 mod usage;
@@ -18,7 +17,6 @@ mod usage;
 use crate::app::{OrbitApp, Tab, TabKind};
 use crate::commands::{self, Command};
 use crate::overlay::{ButtonStyle, Dialog, DialogButton, MenuItem};
-use crate::probe::probe;
 use crate::theme::{self, c};
 use crate::toast::ToastKind;
 use gpui::{
@@ -274,40 +272,6 @@ fn open_repo_in_editor(app: &mut OrbitApp, window: &mut Window, cx: &mut Context
         .collect();
     let origin = window.mouse_position();
     app.open_menu(origin, items, window, cx);
-}
-
-/// The sidebar's entries: the workspace's pages, then Settings and Integrations.
-pub fn sidebar(app: &OrbitApp, cx: &mut Context<OrbitApp>) -> impl IntoElement {
-    let entry = |id: &'static str, label: &'static str, run: fn(&mut OrbitApp, &mut Window, &mut Context<OrbitApp>), cx: &mut Context<OrbitApp>| {
-        div()
-            .id(id)
-            .relative()
-            .mx_2()
-            .px_2()
-            .py_1()
-            .rounded_md()
-            .cursor_pointer()
-            .text_sm()
-            .text_color(c(theme::TEXT_DIM))
-            .hover(|s| s.bg(c(theme::PANEL_HOVER)).text_color(c(theme::TEXT)))
-            .child(label)
-            .child(probe(id))
-            .on_click(cx.listener(move |a, _, w, cx| run(a, w, cx)))
-    };
-    let running = app.workspace().is_some_and(|ws| ralph::is_running(&ws.meta.name));
-    div()
-        .when(app.workspace().is_some(), |d| {
-            d.child(ui::nav_title("WORKSPACE"))
-                .child(
-                    entry("nav-ralph", "Ralph", |a, w, cx| open_for_workspace(a, "ralph", w, cx), cx)
-                        .when(running, |d| d.child(div().absolute().right_2().top_2().size_2().rounded_full().bg(c(theme::OK)))),
-                )
-                .child(entry("nav-usage", "AI usage", |a, w, cx| open_for_workspace(a, "usage", w, cx), cx))
-                .child(entry("nav-artifacts", "CI artifacts", |a, w, cx| open_for_workspace(a, "artifacts", w, cx), cx))
-        })
-        .child(ui::nav_title("ORBIT"))
-        .child(entry("nav-integrations", "Integrations", open_integrations, cx))
-        .child(entry("nav-settings", "Settings", |a, w, cx| open_settings(a, Section::Repos, w, cx), cx))
 }
 
 /// The pages' part of the self-test dump.

@@ -6,10 +6,6 @@ use gpui::{div, prelude::*, px, Div, SharedString, Stateful};
 
 pub use crate::review::ui::{button, row, Tone};
 
-pub fn nav_title(label: &'static str) -> Div {
-    div().px_3().pt_3().pb_1().text_xs().font_weight(gpui::FontWeight::SEMIBOLD).text_color(c(theme::TEXT_FAINT)).child(label)
-}
-
 /// A scrolling page body (`.nav-page`) with `.page-header` and a description.
 pub fn page(id: &'static str, title: impl Into<SharedString>, description: impl Into<SharedString>) -> Stateful<Div> {
     div()

@@ -3,7 +3,6 @@
 //! Groups are in `repos.rs`. Everything reads and writes `config.yaml`
 //! through orbit-core, so the Tauri app sees the same settings.
 use super::kit::{self, Kind};
-use super::themes;
 use super::ui;
 use super::{updates, Host, PageView};
 use crate::probe::probe;
@@ -47,7 +46,7 @@ const NAV: &[(&str, &[SectionDef])] = &[
         &[
             SectionDef {
                 id: Section::Repos,
-                icon: "book-marked",
+                icon: "repo",
                 slug: "repos",
                 title: "Repositories",
                 description: "The repositories Orbit manages and the folders it clones them into.",
@@ -55,7 +54,7 @@ const NAV: &[(&str, &[SectionDef])] = &[
             },
             SectionDef {
                 id: Section::Groups,
-                icon: "layers-2",
+                icon: "layers",
                 slug: "groups",
                 title: "Groups",
                 description: "Named sets of repositories you can spin up together as one workspace.",
@@ -68,7 +67,7 @@ const NAV: &[(&str, &[SectionDef])] = &[
         &[
             SectionDef {
                 id: Section::Ai,
-                icon: "sparkles",
+                icon: "spark",
                 slug: "ai",
                 title: "AI",
                 description: "The agent and model Orbit uses for sessions, commit messages and reviews.",
@@ -76,7 +75,7 @@ const NAV: &[(&str, &[SectionDef])] = &[
             },
             SectionDef {
                 id: Section::Languages,
-                icon: "code-xml",
+                icon: "code-view",
                 slug: "languages",
                 title: "Languages",
                 description: "Language servers that power go-to-definition, hovers and diagnostics in the editor.",
@@ -97,7 +96,7 @@ const NAV: &[(&str, &[SectionDef])] = &[
             },
             SectionDef {
                 id: Section::Health,
-                icon: "activity",
+                icon: "pulse",
                 slug: "health",
                 title: "Health",
                 description: "Tools Orbit relies on, and whether each one is installed.",
@@ -761,11 +760,13 @@ impl SettingsPage {
     }
 
     fn render_appearance(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let pref = themes::current();
-        let system = themes::system();
-        let mut cards: Vec<(String, &themes::ThemeInfo, String, String)> =
+        let pref = theme::pref();
+        // "System" follows the OS: Orbit Dark or Orbit Light.
+        let dark_os = !matches!(cx.window_appearance(), gpui::WindowAppearance::Light | gpui::WindowAppearance::VibrantLight);
+        let all = theme::list();
+        let system = all.iter().find(|t| t.id == if dark_os { "orbit-dark" } else { "orbit-light" }).unwrap_or(&all[0]);
+        let mut cards: Vec<(String, &theme::ThemeDef, String, String)> =
             vec![("system".into(), system, "System".into(), format!("Now {}", if system.dark { "dark" } else { "light" }))];
-        let all = themes::list();
         for t in all.iter().filter(|t| t.dark).chain(all.iter().filter(|t| !t.dark)) {
             cards.push((t.id.to_string(), t, t.label.to_string(), if t.dark { "Dark".into() } else { "Light".into() }));
         }
@@ -788,7 +789,7 @@ impl SettingsPage {
                 .cursor_pointer()
                 .when(on, |d| d.border_color(c(theme::ACCENT)).shadow(ring()))
                 .when(!on, |d| d.border_color(c(theme::BORDER)).hover(|s| s.border_color(c(theme::BORDER_STRONG))))
-                .child(theme_preview(&t.preview))
+                .child(theme_preview(t))
                 .child(
                     div()
                         .px(px(2.))
@@ -801,7 +802,7 @@ impl SettingsPage {
                 )
                 .child(probe(format!("theme:{id}")))
                 .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
-                    themes::set(&pid);
+                    theme::set(&pid, cx);
                     cx.notify();
                 }))
         }));
@@ -947,17 +948,18 @@ fn ring() -> Vec<gpui::BoxShadow> {
 }
 
 /// `ThemePreview`: a miniature of the app in the theme's colours.
-fn theme_preview(p: &themes::Preview) -> gpui::Div {
-    let bar = |color: u32, w: f32, opacity: f32| div().h(px(4.)).w(gpui::relative(w)).rounded(px(2.)).bg(gpui::rgb(color)).opacity(opacity);
-    let dot = |color: u32| div().size(px(8.)).rounded_full().bg(gpui::rgb(color));
+fn theme_preview(t: &theme::ThemeDef) -> gpui::Div {
+    let h = |tok: u32| t.hex(tok);
+    let bar = |tok: u32, w: f32, opacity: f32| div().h(px(4.)).w(gpui::relative(w)).rounded(px(2.)).bg(gpui::rgb(h(tok))).opacity(opacity);
+    let dot = |tok: u32| div().size(px(8.)).rounded_full().bg(gpui::rgb(h(tok)));
     div()
         .h(px(84.))
         .flex()
         .rounded(px(6.))
         .overflow_hidden()
         .border_1()
-        .border_color(gpui::rgb(p.border))
-        .bg(gpui::rgb(p.bg))
+        .border_color(gpui::rgb(h(theme::BORDER)))
+        .bg(gpui::rgb(h(theme::BG)))
         .child(
             div()
                 .w(gpui::relative(0.28))
@@ -967,11 +969,11 @@ fn theme_preview(p: &themes::Preview) -> gpui::Div {
                 .flex_col()
                 .gap(px(5.))
                 .border_r_1()
-                .border_color(gpui::rgb(p.border))
-                .bg(gpui::rgb(p.panel))
-                .child(bar(p.accent, 1., 1.))
-                .child(bar(p.text_faint, 1., 0.8))
-                .child(bar(p.text_faint, 1., 0.8)),
+                .border_color(gpui::rgb(h(theme::BORDER)))
+                .bg(gpui::rgb(h(theme::PANEL)))
+                .child(bar(theme::ACCENT, 1., 1.))
+                .child(bar(theme::TEXT_FAINT, 1., 0.8))
+                .child(bar(theme::TEXT_FAINT, 1., 0.8)),
         )
         .child(
             div()
@@ -981,8 +983,8 @@ fn theme_preview(p: &themes::Preview) -> gpui::Div {
                 .flex()
                 .flex_col()
                 .gap(px(5.))
-                .child(bar(p.text, 0.7, 1.))
-                .child(bar(p.text_dim, 0.5, 1.))
+                .child(bar(theme::TEXT, 0.7, 1.))
+                .child(bar(theme::TEXT_DIM, 0.5, 1.))
                 .child(
                     div()
                         .flex()
@@ -990,15 +992,15 @@ fn theme_preview(p: &themes::Preview) -> gpui::Div {
                         .p(px(5.))
                         .rounded(px(4.))
                         .border_1()
-                        .border_color(gpui::rgb(p.border))
-                        .bg(gpui::rgb(p.panel_raised))
-                        .child(dot(p.ok))
-                        .child(dot(p.warn))
-                        .child(dot(p.danger))
-                        .child(dot(p.purple)),
+                        .border_color(gpui::rgb(h(theme::BORDER)))
+                        .bg(gpui::rgb(h(theme::PANEL_RAISED)))
+                        .child(dot(theme::OK))
+                        .child(dot(theme::WARN))
+                        .child(dot(theme::DANGER))
+                        .child(dot(theme::PURPLE)),
                 )
                 .child(div().flex_1())
-                .child(div().w(gpui::relative(0.36)).h(px(9.)).rounded(px(3.)).bg(gpui::rgb(p.accent))),
+                .child(div().w(gpui::relative(0.36)).h(px(9.)).rounded(px(3.)).bg(gpui::rgb(h(theme::ACCENT)))),
         )
 }
 
@@ -1035,7 +1037,7 @@ impl PageView for SettingsPage {
     fn dump(&self, out: &mut String, cx: &App) {
         let d = def(self.section);
         let shown: Vec<&str> = self.matching(cx).iter().map(|s| s.slug).collect();
-        let _ = writeln!(out, "  section {} · nav {:?} · theme {}", d.slug, shown, themes::current());
+        let _ = writeln!(out, "  section {} · nav {:?} · theme {}", d.slug, shown, theme::pref());
         match &self.config {
             Load::Ready(cfg) => {
                 let _ = writeln!(

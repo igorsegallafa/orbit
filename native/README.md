@@ -96,7 +96,7 @@ render a `probe("name")` (tabs `tab:<ix>`, menu items `menu:<label>`, dialog but
 `dialog:<label>`, palette rows `palette:<title>` (files by name, Find matches `palette:<path>:<line>`),
 Search Everywhere tabs `search-tab:<Label>`, Find's `find-toggle:case|word|regex` and
 `find-repo:<repo>|All repos`, tree rows `tree:<name>`, breadcrumb folders `crumb:<ix>`, `tb-sidebar`, `tb-back`, `tb-forward`,
-`tb-workspace`, `tb-dock`, `new-tab`, `resize-sidebar`, `resize-dock`, `resize-panel`,
+`tb-inbox`, `tb-dock`, `new-tab`, `resize-sidebar`, `resize-dock`, `resize-panel`,
 `panel-close`, `toast-close:<id>`, `ws:<name>`) and are dispatched with `Window::dispatch_event`:
 `click:` `rclick:` `mclick:` `dblclick:` `drag:<probe>:<dx>,<dy>`; plus `key:<spec>`,
 `type:<text>`, `shift:<n>` (bare Shift taps as modifier events; `shift:2` is a double Shift), `mouse:back|forward`, `cmd:<command id>`, `open:<path>`, `preview:<path>`,
@@ -317,7 +317,9 @@ Caveats found:
 |---|---|
 | `src/main.rs` | app start, window (client-side decorations), each stage's `init`, state restore, LSP shutdown and state save on quit |
 | `src/app.rs` | root view state: workspaces, tabs and their logic (preview, batch closes, unsaved dialog, tab menu), back/forward, pane sizes, state snapshot/restore, the app's commands |
-| `src/shell.rs` | rendering: titlebar, sidebar, tab strip, main area and bottom panel, files dock, status bar, resizers, overlays |
+| `src/shell.rs` | rendering: titlebar, tab strip, main area and bottom panel, the dock (Files / Git), the usage bar, resizers, inbox and New Session popovers, overlays |
+| `src/sidebar.rs` | the left sidebar and the status indicator |
+| `src/orbit_icons.rs` | the icons of `Icons.tsx` (generated), drawn with `icons::orbit_icon` |
 | `src/commands.rs` | command registry and keymap |
 | `src/nav.rs` | back/forward history (`src/lib/navHistory.ts`) |
 | `src/state.rs` | saved state (`<config dir>/native-state.json`): workspace, tabs, active tab, cursors, pane sizes |
@@ -333,7 +335,7 @@ Caveats found:
 | `src/diff_view.rs` | diff tab over `git diff HEAD` (untracked files too), F7 navigation, and REVIEW.md notes inline in a workspace repo |
 | `src/review/` | the review tabs (`mod.rs`: tab, commands, sidebar entries, dump) · `changes.rs` changed files and notes · `prs.rs` PRs, status, checks, logs, creation · `send.rs` notes to a PR review · `notes.rs` REVIEW.md and note anchoring · `ui.rs` small widgets |
 | `src/terminal/` | terminal view over `orbit_core::pty`: VT parse, status tracking, scrollback replay (`mod.rs`), grid layout and paint (`grid.rs`), keys and mouse reports (`input.rs`) |
-| `src/sessions/` | sessions (`mod.rs`: keys, codenames, save/restore, inbox, recent, resume, actions), agent status heuristics and hooks (`status.rs`), the sidebar block (`panel.rs`) |
+| `src/sessions/` | sessions (`mod.rs`: keys, codenames, save/restore, inbox, recent, resume, actions), agent status heuristics and hooks (`status.rs`) |
 | `src/file_tree.rs` | virtualized tree with background folder loads, reveal, refresh after disk changes, name prompt and file operations (`orbit_core::files`) |
 | `src/file_ops.rs` | the tree's ties to the app: context menu, the workspace watcher (`orbit_core::watch`; tree refresh, editor reload), following the active file, breadcrumb reveal |
 | `src/workspace.rs` | workspace list from `orbit_core::workspace` |
@@ -343,7 +345,7 @@ Caveats found:
 | `src/git/` | the git flows shown over a page: `commit.rs`, `push.rs`, `rebase.rs`, `merge.rs`, the branch drift banner (`drift.rs`); shared modal pieces in `mod.rs` |
 | `src/pages/` | tool tabs (`TabKind::Tool`; `mod.rs`: `PageTab`, `PageView`, `Host`, commands, sidebar entries, dump) · `settings.rs` (sections, AI, Languages, Appearance, Health, Updates) · `repos.rs` (Repositories, Folders, Groups) · `integrations.rs` · `ralph.rs` · `usage.rs` · `artifacts.rs` · `updates.rs` (update check) · `crash.rs` (panic hook) · `ui.rs` |
 | `src/script.rs` | self-test mode and dumps |
-| `src/theme.rs`, `src/orbit-dark.json` | Orbit Dark colours and shell metrics (`src/App.css`) |
+| `src/theme.rs` | the seven themes of `src/lib/theme.ts` as colour tokens (`c(theme::PANEL)` resolves against the active theme), the gpui-component theme built from them, and the shell metrics (`src/App.css`) |
 | `vendor/gpui-pre-wgpu`, `vendor/PATCHES.md` | the wgpu renderer with the Vulkan-only patch, and how to re-apply it |
 | `packaging/linux/`, `scripts/package-linux.sh` | `.desktop` entry, `install.sh`, and the tarball / AppImage build |
 
@@ -831,6 +833,56 @@ output|shared|worktree|branch-only|auto-switch|clone-now|save|cancel`, `local-pa
 `ralph-iterations:<n|until-done>`, `ralph-push`, `ralph-start|pause|stop`, `usage:<model>`,
 `artifact:<repo>:<name>`. Inputs inside the pages fill through `click:<probe>` then `type:`.
 
+## Stage: shell parity (themes, sidebar, frame, dock)
+
+The frame now follows the Tauri app screen for screen (`src/App.tsx`, `src/App.css`, reference
+captures of the original at 1920×977 in Nord).
+
+- **Themes** (`src/theme.rs`): all seven of `src/lib/theme.ts`. Colours are tokens:
+  `c(theme::PANEL)` resolves against the active theme when drawn, so call sites stay
+  `c(theme::X)` and switch live. Tokens: the CSS variables (`BG`, `PANEL`, `PANEL_RAISED`,
+  `PANEL_HOVER`, `BORDER`, `BORDER_STRONG`, `TEXT`, `TEXT_DIM`, `TEXT_FAINT`, `ACCENT`,
+  `ACCENT_HOVER`, `ON_ACCENT`, `DANGER`, `OK`, `WARN`, `INFO`, `PURPLE`), the tints App.css derives
+  (`ACCENT_SOFT`, `DANGER_SOFT`, `NAV_ACTIVE` = info 40% over text, `OK_SOFT`, `INFO_SOFT`,
+  `ACCENT_STRONG_SOFT`, `TEXT_SOFT`), `SYN_*` syntax colours and `ANSI[16]`. A literal
+  `0xrrggbb` still works in `c()`. `theme::alpha(tok, a)`, `theme::hex(tok)`, `theme::mix`.
+  API: `theme::list()` (id, label, dark), `theme::current()`, `theme::pref()` (id or "system"),
+  `theme::set(name, cx)` (id, label or "system"; redraws every window and re-themes
+  gpui-component, its inputs, menus, scrollbars and editor highlighting). The choice is saved
+  in `native-state.json` (`theme`). With none saved, the Tauri app's `orbit.theme` is read
+  (read-only) from its WebKitGTK localStorage, else Nord. Palette: *Select Theme…*;
+  self-test: `--theme <id>`. Fonts: Noto Sans (system sans) and Noto Sans Mono (system monospace).
+- **Sidebar** (`src/sidebar.rs`, the only sidebar): brand; WORKSPACES with Dashboard, Code
+  Review and each workspace (accent bar when its page is open, chevron to fold its sessions,
+  saved as `ws_collapsed`; right click: Open workspace, New terminal, Open in editor, Open
+  folder) with its sessions (status indicator, unread dot, minimized ones italic; editors as
+  `repo/file`; right click: Open / Minimize / End session, or Open / Close) and RECENT
+  SESSIONS (click resumes, × forgets); SESSIONS "+" (the New Session menu: OPEN IN a scope,
+  then Terminal / Claude Code / Open Code / OMP) and folder scopes; REPOS with ↑/↓, dirty and
+  "not cloned" badges (briefs re-read every 30 s) opening the repo page; GENERAL; the
+  repos/groups footer. Dragged under 110 px it is the 64 px icon rail; the titlebar toggle hides it.
+- **Nav pages**: Dashboard, Code Review, a repo page, Settings and Integrations are the React
+  app's `navPage`: tabs kept off the strip (`Tab::is_nav`), one at a time; the app starts on
+  the Dashboard. The strip only shows sessions/views then files (`is_file` = editors), hides
+  when empty and on Settings.
+- **Minimized sessions**: an agent tab's × (and middle click, Close Other/All Tabs) takes it
+  off the strip; it keeps running and the sidebar lists it; showing it brings the tab back.
+- **Focus**: activating a tab selects its workspace (`focus_workspace`), which drives the
+  dock, the run widget and the bottom bar; nav pages have none.
+- **Titlebar**: Orbit, sidebar toggle, back/forward, `titlebar_items` (run widget), the inbox
+  bell (badge, popover with Mark all read / Clear) and the dock toggle.
+- **Bottom bar** (`footer.usage-bar`, only with a workspace in focus): model chips with
+  tokens, Claude 5h/Week limit bars, "N sessions · ws".
+- **Dock**: Files / Find / Git icons. Files: the repo select and the tree of that repo
+  (`FileTree::set_focus_root`), listing every entry as `list_files` does. Find opens Find in
+  Files. Git: the repo's changes (open a diff; *Review all*) and commits.
+- Self-test: `--window-size 1920x977`, `--theme`; probes `side-dashboard`, `review-prs`,
+  `ws:<name>`, `chevron:<name>`, `session:<name>`, `recent:<name>`, `recent-forget:<name>`,
+  `repo:<name>`, `folder:<label>`, `sessions-add`, `nsm:<row>`, `nav-settings`,
+  `nav-integrations`, `tb-inbox`, `inbox-read`, `inbox-clear`, `dock-files|find|git`,
+  `dock-repo`, `git-refresh`, `git-review-all`, `git-change:<name>`; `tab:<n>` counts strip
+  positions. The dump has a `--- shell:` line (theme, focus, dock, minimized).
+
 ## Stage: packaging
 
 ### GPU backend
@@ -1043,7 +1095,7 @@ Status of everything the React app does: **done**, **partial** (with what's miss
 - [ ] — Markdown rendering (`SafeMarkdown.tsx`, `MarkdownPreview.tsx`); gpui-component has a Markdown view
 
 ### Workspaces & sidebar
-- [ ] partial: workspace list from `config.yaml` / `.workspace.yaml`, click to select. No session entries or status indicators (`src/App.tsx`, `StatusIndicator.tsx`).
+- [ ] partial: workspace list from `config.yaml` / `.workspace.yaml`, with sessions, status indicators, recent sessions, repos (`src/App.tsx`, `StatusIndicator.tsx`). No variant (race) grouping beyond the sort, no sidebar width animation.
 - [x] done: Create workspace: blank (manual), from an existing branch, or from a Shortcut/Linear card (searched, pre-fills name and branch, saved as the workspace's card), groups, base branch menu, linked repos noted (`WorkspaceCreateModal.tsx`)
 - [ ] partial: Workspace detail page: delivery flow, repos with badges and pull, PRs with check aggregates, remove (`WorkspaceDetailPage.tsx`). No plan, race, artifacts, usage, investigate/fix checks with AI, review feedback.
 - [x] done: Add repositories (`AddReposModal.tsx`)
@@ -1059,12 +1111,12 @@ Status of everything the React app does: **done**, **partial** (with what's miss
 ### Repos / worktrees
 - [x] done: Settings → Repositories, folders, repo form (inline), GitHub repo picker, local clones, groups (`ReposSection.tsx`, `FoldersCard.tsx`, `RepoFormModal.tsx`, `GithubRepoModal.tsx`, `GroupsSection.tsx`). Per-OS build commands are kept, not edited.
 - [ ] partial: Repo page: branches (switch, create, delete), pull, push/publish, commit, stash, history (undo, revert), stashes, a paused operation, prune (`RepoPage.tsx`). No compare or cherry-pick.
-- [ ] partial: repo briefs on the dashboard (`src/lib/useRepoBriefs.ts`); no sidebar list or background fetch timer
+- [ ] partial: repo briefs on the dashboard and the sidebar, re-read every 30 s (`src/lib/useRepoBriefs.ts`); no background fetch timer
 
 ### Sessions / agents
 - [ ] partial: new session (shell, Claude Code, Open Code, OMP in the current scope) and codenames (`NewSessionMenu.tsx`, `src/lib/names.ts`). No "Open in" folder/repo picker, no rename.
 - [x] done: agent status from spinner lines and Claude hooks, in tab titles and the sidebar (`src/lib/agentStatus.ts`, backend `agent_hooks.rs`)
-- [ ] partial: resume claude/opencode sessions (Recent per scope, restart with `--resume`). No initial prompt injection (`TerminalPane.tsx`), no minimized agent tabs (`App.tsx`).
+- [ ] partial: resume claude/opencode sessions (Recent per scope, restart with `--resume`). No initial prompt injection (`TerminalPane.tsx`), minimized agent tabs as `App.tsx`.
 - [ ] — Live agent feed (`AgentFeed.tsx`)
 - [ ] partial: Ralph view: plan or repo PRD, stories, start (iterations, push) / pause / stop, run state, live feed, past runs (`RalphView.tsx`, `RalphRunModal.tsx`). PRD writing and editing (`RalphPrdModal.tsx`), run overrides of agent/model, the custom prompt are not ported.
 
@@ -1073,12 +1125,12 @@ Status of everything the React app does: **done**, **partial** (with what's miss
 - [x] done: selection (drag, word, line), copy (`Ctrl+Shift+C`, primary on select), paste (`Ctrl+Shift+V`, `Shift+Insert`, middle click)
 - [x] done: mouse reporting to TUIs (X10/normal and SGR; click, drag, motion, wheel)
 - [ ] — Kitty graphics (`src/lib/kittyGraphics.ts`)
-- [x] done: theme-driven ANSI colours (Orbit Dark only)
+- [x] done: theme-driven ANSI colours (every theme)
 
 ### File tree / right dock
 - [x] done: file tree with lazy background loads, `.gitignore`, symlinked repos, keyboard navigation (arrows, Home/End, Enter, F2, Delete), single click previews, double click or Enter keeps the tab; follows the active file; context menu: new file/folder, open, rename, copy path / relative path, reveal in file manager, open in terminal, delete to the Trash (`FileTreePanel.tsx`). Not ported: drag-and-drop move, "Add Files…" (import), dropping a path into a terminal. A rename moves open editors (unsaved text and cursor kept).
 - [x] done: auto-refresh on disk changes: open folders re-read (expanded ones stay expanded), unmodified editors reload; `build*/` and `.cache/` changes ignored (`src/lib/useFsChanges.ts`). No refresh on window focus yet.
-- [ ] — Files / Git / Search dock toolbar, Git panel (`GitPanel.tsx`)
+- [ ] partial: Files / Find / Git dock toolbar, repo select, Git panel with changes and commits (`GitPanel.tsx`); no commit review from the panel
 
 ### Tabs
 - [x] done: preview tabs (reuse the preview slot; editing or double click keeps it) (`src/lib/previewTabs.ts`)
@@ -1132,7 +1184,7 @@ Status of everything the React app does: **done**, **partial** (with what's miss
 ### Settings / themes
 - [x] done: Settings page with its filtered section list and every section: Repositories, Groups, AI, Languages, Appearance, Health, Updates (`SettingsPage.tsx`, `AiSection.tsx`, `AppearanceSection.tsx`, `HealthSection.tsx`, `UpdatesSection.tsx`). Appearance shows Orbit Dark only.
 - [x] done: update check at start, hourly and on demand, with a toast once per version (`src/lib/updater.ts`); no install yet (packaging)
-- [ ] partial: themes. Orbit Dark only, with the shell's metrics (titlebar, tabs, menus, modals, toasts, buttons) from App.css (tokens from `src/App.css` / `src/lib/theme.ts`, gpui-component theme JSON); the other six themes and the picker are not ported.
+- [ ] partial: themes. All seven of `src/lib/theme.ts` as live tokens (`theme::set`), saved, defaulting to the Tauri app's choice; the Appearance picker belongs to the settings page.
 
 ### Notifications
 - [x] done: toasts (success/error/info, auto-dismiss, at most four, ×) (`Toast.tsx`)

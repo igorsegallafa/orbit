@@ -4,34 +4,35 @@
 use crate::probe::probe;
 use crate::theme::{self, c};
 use gpui::{
-    div, prelude::*, px, rgba, svg, App, Div, Entity, Focusable, FontWeight, Hsla, Rgba, SharedString, Stateful, Svg, Window,
+    div, prelude::*, px, rgba, App, Div, Entity, Focusable, FontWeight, Hsla, Rgba, SharedString, Stateful, Svg, Window,
 };
 use gpui_component::input::{Input, InputState};
 
-/// A Lucide icon from gpui-kit-assets.
-pub fn icon(name: &str, size: f32, color: impl Into<Hsla>) -> Svg {
-    svg().path(format!("icons/{name}.svg")).size(px(size)).flex_none().text_color(color)
+/// One of `Icons.tsx`'s icons.
+pub fn icon(name: &'static str, size: f32, color: impl Into<Hsla>) -> Svg {
+    crate::icons::orbit_icon(name, size, color)
 }
 
-fn channels(hex: u32) -> [f32; 3] {
+fn channels(tok: u32) -> [f32; 3] {
+    let hex = theme::hex(tok);
     [((hex >> 16) & 0xff) as f32, ((hex >> 8) & 0xff) as f32, (hex & 0xff) as f32]
 }
 
-/// `color-mix(in srgb, a p, b)`.
+/// `color-mix(in srgb, a p, b)` of two tokens (or literal colours).
 pub fn mix(a: u32, b: u32, p: f32) -> Rgba {
     let (a, b) = (channels(a), channels(b));
     let ch = |i: usize| ((a[i] * p + b[i] * (1. - p)).round() as u32).min(255);
     rgba((ch(0) << 24) | (ch(1) << 16) | (ch(2) << 8) | 0xff)
 }
 
-/// `hex` at `alpha` (0–1).
-pub fn alpha(hex: u32, alpha: f32) -> Rgba {
-    rgba((hex << 8) | ((alpha * 255.).round() as u32).min(255))
+/// A token at `alpha` (0–1).
+pub fn alpha(tok: u32, alpha: f32) -> Rgba {
+    theme::alpha(tok, alpha)
 }
 
 /// Active nav text and `.mode-active`: `color-mix(info 40%, text)`.
 pub fn active_text() -> Rgba {
-    mix(theme::INFO, theme::TEXT, 0.4)
+    c(theme::NAV_ACTIVE)
 }
 
 // ---------- page frame ----------
@@ -164,7 +165,7 @@ pub fn mini(name: impl Into<SharedString>, label: impl Into<SharedString>, kind:
     sized_button(name, None, label, kind, 24., 11.5, 10.).rounded(px(5.))
 }
 
-fn sized_button(name: impl Into<SharedString>, icon_name: Option<&str>, label: impl Into<SharedString>, kind: Kind, h: f32, text: f32, pad: f32) -> Stateful<Div> {
+fn sized_button(name: impl Into<SharedString>, icon_name: Option<&'static str>, label: impl Into<SharedString>, kind: Kind, h: f32, text: f32, pad: f32) -> Stateful<Div> {
     let name: SharedString = name.into();
     let el = div()
         .id(name.clone())
@@ -204,12 +205,12 @@ fn sized_button(name: impl Into<SharedString>, icon_name: Option<&str>, label: i
 }
 
 /// A button with a leading 14px icon.
-pub fn icon_label_button(name: impl Into<SharedString>, icon_name: &str, label: impl Into<SharedString>, kind: Kind) -> Stateful<Div> {
+pub fn icon_label_button(name: impl Into<SharedString>, icon_name: &'static str, label: impl Into<SharedString>, kind: Kind) -> Stateful<Div> {
     sized_button(name, Some(icon_name), label, kind, 34., 13., 14.)
 }
 
 /// `.icon-button`: 28px, bordered.
-pub fn icon_button(name: impl Into<SharedString>, icon_name: &str) -> Stateful<Div> {
+pub fn icon_button(name: impl Into<SharedString>, icon_name: &'static str) -> Stateful<Div> {
     let name: SharedString = name.into();
     div()
         .id(name.clone())
@@ -439,7 +440,7 @@ pub fn nav_section(label: &str) -> Div {
 }
 
 /// `.nav-item`: 32px, icon slot 18px, 13px/500; active is accent-soft.
-pub fn nav_item(name: impl Into<SharedString>, icon_name: &str, label: impl Into<SharedString>, active: bool) -> Stateful<Div> {
+pub fn nav_item(name: impl Into<SharedString>, icon_name: &'static str, label: impl Into<SharedString>, active: bool) -> Stateful<Div> {
     let name: SharedString = name.into();
     let color = if active { active_text() } else { c(theme::TEXT_DIM) };
     div()
@@ -468,6 +469,5 @@ mod tests {
     #[test]
     fn mixes_like_css() {
         assert_eq!(super::mix(0xffffff, 0x000000, 0.4), gpui::rgba(0x666666ff));
-        assert_eq!(super::alpha(0x88c0d0, 0.15), gpui::rgba(0x88c0d026));
     }
 }

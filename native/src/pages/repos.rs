@@ -463,7 +463,7 @@ impl SettingsPage {
                 t.repos.local = Some(input(w, cx, "/path/to/an/existing/checkout", ""));
                 cx.notify();
             })))
-            .child(kit::icon_label_button("repo-add-github", "git-branch", "Add from GitHub", Kind::Primary).on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.open_github(false, w, cx))));
+            .child(kit::icon_label_button("repo-add-github", "git", "Add from GitHub", Kind::Primary).on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.open_github(false, w, cx))));
         out = out.child(kit::section_header("Repositories", Some(cfg.services.len()), Some(actions)));
         if let Some(form) = &self.repos.form {
             out = out.child(self.render_form(form, window, cx));
@@ -493,7 +493,7 @@ impl SettingsPage {
                     .p(px(32.))
                     .items_center()
                     .gap(px(8.))
-                    .child(div().size(px(40.)).rounded(px(10.)).bg(c(theme::BG)).flex().items_center().justify_center().child(kit::icon("git-branch", 20., c(theme::TEXT_DIM))))
+                    .child(div().size(px(40.)).rounded(px(10.)).bg(c(theme::BG)).flex().items_center().justify_center().child(kit::icon("git", 20., c(theme::TEXT_DIM))))
                     .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(c(theme::TEXT)).child("No repositories yet"))
                     .child(kit::hint("Add the repositories your workspaces will span. Orbit clones them once and creates worktrees per workspace."))
                     .child(kit::button("repo-empty-github", "Add from GitHub", Kind::Primary).on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.open_github(false, w, cx)))),
@@ -550,7 +550,7 @@ impl SettingsPage {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .child(kit::icon("git-branch", 15., c(theme::TEXT_DIM))),
+                        .child(kit::icon("git", 15., c(theme::TEXT_DIM))),
                 )
                 .child(
                     div()
@@ -679,7 +679,7 @@ impl SettingsPage {
                 .border_b_1()
                 .border_color(c(theme::BORDER))
                 .child(kit::field("github-filter", &g.filter, window, cx))
-                .child(kit::icon_button("github-refresh", "refresh-cw").on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.open_github(true, w, cx))))
+                .child(kit::icon_button("github-refresh", "refresh").on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.open_github(true, w, cx))))
                 .child(kit::button("github-close", "Close", Kind::Secondary).on_click(cx.listener(|t, _: &ClickEvent, _, cx| {
                     t.repos.github = None;
                     cx.notify();

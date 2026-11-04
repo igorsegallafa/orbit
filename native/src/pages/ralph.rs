@@ -41,12 +41,6 @@ fn events() -> Events {
     })
 }
 
-/// Whether a run of this workspace is in progress (for the sidebar).
-pub fn is_running(workspace: &str) -> bool {
-    let prefix = format!("{workspace}/");
-    ralph::running().unwrap_or_default().iter().any(|k| k.starts_with(&prefix))
-}
-
 pub struct RalphPage {
     host: Host,
     ws: Workspace,
@@ -555,7 +549,7 @@ impl RalphPage {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(kit::icon("sparkles", 16., c(theme::ACCENT))),
+                    .child(kit::icon("spark", 16., c(theme::ACCENT))),
             )
             .child(
                 div()
@@ -725,7 +719,7 @@ impl RalphPage {
             let open = self.expanded.as_deref() == Some(s.id.as_str());
             let repo = s.extra.get("repo").and_then(|r| r.as_str()).filter(|r| !r.is_empty()).map(str::to_string);
             let icon = if now {
-                kit::icon("loader-circle", 12., c(theme::ACCENT))
+                kit::icon("spinner", 12., c(theme::ACCENT))
             } else if s.passes {
                 kit::icon("check", 12., c(theme::OK))
             } else {
@@ -928,7 +922,7 @@ impl RalphPage {
             .p(px(28.))
             .gap(px(12.))
             .items_center()
-            .child(div().size(px(44.)).rounded(px(11.)).bg(theme::accent_soft()).flex().items_center().justify_center().child(kit::icon("sparkles", 22., c(theme::ACCENT))))
+            .child(div().size(px(44.)).rounded(px(11.)).bg(theme::accent_soft()).flex().items_center().justify_center().child(kit::icon("spark", 22., c(theme::ACCENT))))
             .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).text_color(c(theme::TEXT)).child(title))
             .child(div().text_center().text_size(px(13.)).line_height(px(20.)).text_color(c(theme::TEXT_DIM)).child(text))
             .child(div().w_full().flex().flex_col().gap(px(8.)).children(steps.iter().enumerate().map(|(i, (h, d))| {

@@ -4,12 +4,12 @@
 use gpui::{div, prelude::*, px, svg, AnyElement, AssetSource, FontWeight, Result, SharedString};
 use std::borrow::Cow;
 
-/// The whole Lucide catalog of gpui-kit-assets plus the file-type SVGs under `filetypes/`.
-pub struct Assets(gpui_kit_assets::AllAssets);
+/// gpui-kit-assets plus the file-type SVGs under `filetypes/`.
+pub struct Assets(gpui_kit_assets::Assets);
 
 impl Assets {
     pub fn new() -> Self {
-        Self(gpui_kit_assets::AllAssets::new(""))
+        Self(gpui_kit_assets::Assets::new(""))
     }
 }
 
@@ -18,14 +18,27 @@ impl AssetSource for Assets {
         if let Some(name) = path.strip_prefix("filetypes/").and_then(|p| p.strip_suffix(".svg")) {
             return Ok(glyph(name).map(|body| Cow::Owned(svg_doc(body).into_bytes())));
         }
+        if let Some(name) = path.strip_prefix("orbit/").and_then(|p| p.strip_suffix(".svg")) {
+            return Ok(orbit_icons::ICONS.iter().find(|(n, _)| *n == name).map(|(_, doc)| Cow::Borrowed(doc.as_bytes())));
+        }
         self.0.load(path)
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         let mut all = self.0.list(path)?;
         all.extend(GLYPHS.iter().map(|(n, _)| SharedString::from(format!("filetypes/{n}.svg"))).filter(|p| p.starts_with(path)));
+        all.extend(orbit_icons::ICONS.iter().map(|(n, _)| SharedString::from(format!("orbit/{n}.svg"))).filter(|p| p.starts_with(path)));
         Ok(all)
     }
+}
+
+#[path = "orbit_icons.rs"]
+mod orbit_icons;
+
+/// An icon of `src/components/Icons.tsx` by its kebab-case name (`satellite`,
+/// `home`, `git`, `settings`, `plug`, `repo`, `bell`, `panel-left`, `chevron-right`…).
+pub fn orbit_icon(name: &'static str, size: f32, color: impl Into<gpui::Hsla>) -> gpui::Svg {
+    svg().path(format!("orbit/{name}.svg")).size(px(size)).flex_none().text_color(color)
 }
 
 fn svg_doc(body: &str) -> String {
@@ -63,6 +76,10 @@ const GLYPHS: &[(&str, &str)] = &[
     // Tab icons from Icons.tsx (DocIcon, TerminalIcon, DiffIcon).
     ("doc", r#"<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7z"/><path d="M14 2v5h6"/>"#),
     ("terminal", r#"<path d="m5 8 4 4-4 4"/><path d="M13 16h6"/>"#),
+    // "↺" of a recent session (Lucide rotate-ccw).
+    ("rotate-ccw", r#"<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/>"#),
+    // The status indicator's arc: an 11px ring's coloured top border (`.status-work`).
+    ("arc-top", r#"<path d="M5.07 5.07A9.8 9.8 0 0 1 18.93 5.07" stroke-width="4.36" stroke-linecap="butt"/>"#),
     ("diff", r#"<path d="M12 3v18" stroke-dasharray="2 2"/><path d="M5 8h6M8 5v6"/><path d="M19 16h-6"/>"#),
     // Build/Run/Debug (Lucide: hammer, play, bug, square, loader-circle, pause, redo-dot, arrow-down-to-dot, arrow-up-from-dot).
     ("hammer", r#"<path d="m15 12-9.373 9.373a1 1 0 0 1-3.001-3L12 9"/><path d="m18 15 4-4"/><path d="m21.5 11.5-1.914-1.914A2 2 0 0 1 19 8.172v-.344a2 2 0 0 0-.586-1.414l-1.657-1.657A6 6 0 0 0 12.516 3H9l1.243 1.243A6 6 0 0 1 12 8.485V10l2 2h1.172a2 2 0 0 1 1.414.586L18.5 14.5"/>"#),
