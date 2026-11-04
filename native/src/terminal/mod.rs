@@ -401,10 +401,13 @@ impl TerminalView {
         let Some(text) = self.selection_text().filter(|t| !t.is_empty()) else { return };
         if !CLIPBOARD_DISABLED.load(Ordering::Relaxed) {
             let item = ClipboardItem::new_string(text.clone());
-            if primary {
-                cx.write_to_primary(item);
-            } else {
-                cx.write_to_clipboard(item);
+            match primary {
+                // The primary selection exists on Linux only.
+                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                true => cx.write_to_primary(item),
+                #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+                true => {}
+                false => cx.write_to_clipboard(item),
             }
         }
         self.last_copied = Some(text);
@@ -481,6 +484,7 @@ impl TerminalView {
                 self.selecting = true;
                 cx.notify();
             }
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             MouseButton::Middle => {
                 if let Some(text) = cx.read_from_primary().and_then(|c| c.text()) {
                     self.paste(&text);
