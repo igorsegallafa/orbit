@@ -113,6 +113,45 @@ pub fn bind_keys(cx: &mut App) {
     ]);
 }
 
+/// Reads Settings → Languages' diagnostics filter at start (Settings updates it later).
+pub fn load_diagnostic_filters(cx: &mut App) {
+    let status = cx.background_spawn(async { orbit_core::lsp::status() });
+    cx.spawn(async move |cx| {
+        if let Ok(status) = status.await {
+            cx.update(|cx| set_diagnostic_filters(&status.languages, cx));
+        }
+    })
+    .detach();
+}
+
+/// Per language (`ServerDef::language`): errors only, and the codes to hide.
+#[derive(Default)]
+struct DiagnosticFilters(HashMap<String, (bool, Vec<String>)>);
+
+impl Global for DiagnosticFilters {}
+
+/// Takes Settings → Languages' filters and re-applies them to every open editor.
+pub fn set_diagnostic_filters(languages: &[orbit_core::lsp::LanguageStatus], cx: &mut App) {
+    let filters = languages.iter().map(|l| (l.id.clone(), (l.errors_only, l.hidden_diagnostics.clone()))).collect();
+    cx.set_global(DiagnosticFilters(filters));
+    for editor in open_editors(cx) {
+        editor.update(cx, |e, cx| e.show_diagnostics(cx));
+    }
+}
+
+/// The React editor's rule: no severity counts as an error; codes compare as text.
+fn diagnostic_shown(filter: &(bool, Vec<String>), d: &lsp_types::Diagnostic) -> bool {
+    let (errors_only, hidden) = filter;
+    if *errors_only && d.severity.is_some_and(|s| s != lsp_types::DiagnosticSeverity::ERROR) {
+        return false;
+    }
+    match &d.code {
+        Some(lsp_types::NumberOrString::Number(n)) => !hidden.contains(&n.to_string()),
+        Some(lsp_types::NumberOrString::String(code)) => !hidden.contains(code),
+        None => true,
+    }
+}
+
 pub enum EditorEvent {
     DirtyChanged,
     /// A location (definition, reference, symbol) in another file.
@@ -530,7 +569,9 @@ impl EditorTab {
     }
 
     fn show_diagnostics(&mut self, cx: &mut Context<Self>) {
-        let diagnostics: Vec<_> = self.lsp_diagnostics.iter().chain(&self.build_diagnostics).cloned().collect();
+        let filter = self.language.lsp.and_then(|(language, _)| cx.try_global::<DiagnosticFilters>()?.0.get(language).cloned());
+        let lsp = self.lsp_diagnostics.iter().filter(|d| filter.as_ref().is_none_or(|f| diagnostic_shown(f, d)));
+        let diagnostics: Vec<_> = lsp.chain(&self.build_diagnostics).cloned().collect();
         self.diagnostics = diagnostics.clone();
         self.diagnostics.sort_by_key(|d| (d.range.start.line, d.range.start.character));
         self.state.update(cx, |s, cx| {
@@ -1603,6 +1644,23 @@ impl Render for EditorTab {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn filters_diagnostics_as_the_settings_say() {
+        let d = |severity: Option<u64>, code: Value| -> lsp_types::Diagnostic {
+            serde_json::from_value(json!({ "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 1 } },
+                "severity": severity, "code": code, "message": "m" }))
+            .unwrap()
+        };
+        let errors_only = (true, vec![]);
+        assert!(diagnostic_shown(&errors_only, &d(Some(1), Value::Null)));
+        assert!(diagnostic_shown(&errors_only, &d(None, Value::Null)));
+        assert!(!diagnostic_shown(&errors_only, &d(Some(2), Value::Null)));
+        let hidden = (false, vec!["unused-includes".to_string(), "6133".to_string()]);
+        assert!(!diagnostic_shown(&hidden, &d(Some(2), json!("unused-includes"))));
+        assert!(!diagnostic_shown(&hidden, &d(Some(1), json!(6133))));
+        assert!(diagnostic_shown(&hidden, &d(Some(2), json!("other"))));
+    }
 
     #[test]
     fn detects_indentation() {

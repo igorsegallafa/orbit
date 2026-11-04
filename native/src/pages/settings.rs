@@ -349,6 +349,9 @@ impl SettingsPage {
         cx.spawn(async move |this, cx| {
             let r = cx.background_spawn(async { orbit_core::lsp::status() }).await;
             let _ = this.update(cx, |t: &mut Self, cx| {
+                if let Ok(status) = &r {
+                    crate::editor::set_diagnostic_filters(&status.languages, cx);
+                }
                 t.languages = r.map_or_else(Load::Failed, Load::Ready);
                 cx.notify();
             });

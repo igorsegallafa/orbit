@@ -55,6 +55,7 @@ fn main() {
         app::init(cx);
         file_tree::bind_keys(cx);
         editor::bind_keys(cx);
+        editor::load_diagnostic_filters(cx);
         search::init(cx);
         file_ops::init(cx);
         review::init(cx);
