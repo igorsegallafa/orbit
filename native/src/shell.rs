@@ -1490,14 +1490,20 @@ impl Render for OrbitApp {
             )
             .when(focus && !on_settings, |d| d.child(self.render_status(cx)))
             .children(self.render_drag_layer(cx))
-            .children(self.render_toasts(cx))
-            .children(self.render_palette(cx))
-            .children(self.render_inbox(cx))
-            .children(self.render_new_session_menu(window, cx))
-            .children(self.render_ws_switcher(cx))
-            .children(self.render_menu(window, cx))
-            .children(self.render_dialog(cx))
+            .children(over(self.render_toasts(cx)))
+            .children(over(self.render_palette(cx)))
+            .children(over(self.render_inbox(cx)))
+            .children(over(self.render_new_session_menu(window, cx)))
+            .children(over(self.render_ws_switcher(cx)))
+            .children(over(self.render_menu(window, cx)))
+            .children(over(self.render_dialog(cx)))
     }
+}
+
+/// A shell overlay, painted over a page's modal (which the page draws deferred,
+/// over the whole window) and laid out in place.
+fn over(el: Option<impl IntoElement + 'static>) -> Option<gpui::Deferred> {
+    el.map(|e| gpui::deferred(e).with_priority(crate::git::SHELL_OVERLAY_PRIORITY))
 }
 
 /// "· terminal" in the title tells Toshy (macOS-style keys) to use its terminal

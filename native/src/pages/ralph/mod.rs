@@ -831,7 +831,21 @@ fn col_head(label: &str) -> gpui::Div {
 
 impl Render for RalphPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut view = div().relative().size_full().flex().flex_col().gap(px(14.)).px(px(28.)).pt(px(22.)).pb(px(18.)).overflow_hidden();
+        let mut view = div()
+            .relative()
+            .size_full()
+            .flex()
+            .flex_col()
+            .gap(px(14.))
+            .px(px(28.))
+            .pt(px(22.))
+            .pb(px(18.))
+            .overflow_hidden()
+            .on_key_down(cx.listener(|t, ev: &gpui::KeyDownEvent, _, cx| {
+                if ev.keystroke.key == "escape" && t.escape_modal(cx) {
+                    cx.stop_propagation();
+                }
+            }));
         let st = match &self.state {
             Load::Ready(s) => s,
             Load::Failed(e) => return view.child(self.render_header(None, cx)).child(kit::error_box(e.clone())).into_any_element(),
@@ -876,7 +890,7 @@ impl Render for RalphPage {
             Some(Modal::Prd(_)) => Some(self.render_prd_form(cx)),
             None => None,
         };
-        view.when_some(modal, |d, m| d.child(crate::git::scrim(m))).into_any_element()
+        view.when_some(modal, |d, m| d.child(crate::git::scrim(m, window))).into_any_element()
     }
 }
 

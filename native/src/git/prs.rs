@@ -292,7 +292,7 @@ impl PageTab {
     }
 
     /// Closes, asking first when titles or descriptions would be lost.
-    fn prs_request_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn prs_request_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(f) = self.prs_flow() else { return };
         if f.creating {
             return;

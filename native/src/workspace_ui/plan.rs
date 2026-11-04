@@ -259,6 +259,13 @@ impl PageTab {
         );
     }
 
+    /// Esc: closes the Plan modal unless an agent runs in it.
+    pub(super) fn plan_escape(&mut self, cx: &mut Context<Self>) {
+        if self.plan_form().is_some_and(|f| !f.running()) {
+            self.close_modal(cx);
+        }
+    }
+
     /// Close, or Stop while an agent runs.
     fn plan_close(&mut self, cx: &mut Context<Self>) {
         let Some(f) = self.plan_form() else { return };

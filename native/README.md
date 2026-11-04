@@ -363,7 +363,7 @@ Caveats found:
 | `src/workspace.rs` | workspace list from `orbit_core::workspace` |
 | `src/run/` | Build/Run: the store and commands (`mod.rs`: configurations, build, run terminal, problems as diagnostics), titlebar widget (`widget.rs`), bottom panel (`panel.rs`), compiler message parser (`problems.rs`), saved selection and breakpoints (`saved.rs`), self-test steps (`script.rs`) |
 | `src/debug/` | the DAP session (`mod.rs`: launch sequence, stops, frames, variables, console, breakpoints), the DAP client over `orbit_core::dap` (`client.rs`), editor breakpoints and paused line (`gutter.rs`), the Debug tab (`view.rs`) |
-| `src/workspace_ui/` | page tabs (`mod.rs`: `PageTab`, its in-tab modal, commands, dump) · `dashboard.rs` · `workspace_page.rs` (header tools, delivery flow, repos, PRs) · `plan.rs` (Plan · progress, Plan modal) · `race.rs` · `repo_page.rs` (a repo's base clone) · `forms.rs` (new workspace, add repositories) · `kit.rs` (buttons, badges, checkbox, modal shell) · `icons.rs` (Icons.tsx) |
+| `src/workspace_ui/` | page tabs (`mod.rs`: `PageTab`, its modal, commands, dump) · `dashboard.rs` · `workspace_page.rs` (header tools, delivery flow, repos, PRs) · `plan.rs` (Plan · progress, Plan modal) · `race.rs` · `repo_page.rs` (a repo's base clone) · `forms.rs` (new workspace, add repositories) · `kit.rs` (buttons, badges, checkbox, modal shell) · `icons.rs` (Icons.tsx) |
 | `src/git/` | the git flows shown over a page: `commit.rs`, `push.rs`, `rebase.rs`, `merge.rs`, the branch drift banner (`drift.rs`); shared modal pieces in `mod.rs` |
 | `src/pages/` | tool tabs (`TabKind::Tool`; `mod.rs`: `PageTab`, `PageView`, `Host`, commands, sidebar entries, dump) · `settings.rs` (sections, AI, Languages, Appearance, Health, Updates) · `repos.rs` (Repositories, Folders, Groups) · `integrations.rs` · `ralph.rs` · `usage.rs` · `artifacts.rs` · `updates.rs` (update check) · `crash.rs` (panic hook) · `ui.rs` |
 | `src/script.rs` | self-test mode and dumps |
@@ -843,7 +843,9 @@ tiny CMake project reached through a symlinked workspace repo:
 ## Stage: git and workspace flows
 
 A new tab kind, `TabKind::Page` (`src/workspace_ui/`), holds three pages; forms and git flows open
-as a modal inside the page tab (an occluding scrim), so switching tabs keeps them.
+as a modal of the page tab: `git::scrim` draws it deferred over the whole window (an occluding scrim
+that dims the sidebar and titlebar too, as `.modal-overlay` did), under the shell's overlays. It
+hides with its tab and comes back with it, as the React tab bodies did; Esc closes it like Cancel.
 
 - **Dashboard** (`DashboardPage.tsx`): a card per workspace (branch, repos coloured by state with
   `↑n`, "Up to date" or "n with changes · n to push · n behind", tracker card id), onboarding when

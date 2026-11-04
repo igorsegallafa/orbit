@@ -149,6 +149,18 @@ impl PageTab {
         cx.notify();
     }
 
+    /// Esc: closes the open modal as its Cancel button does. False when none is open.
+    fn escape_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        match &self.modal {
+            None => return false,
+            Some(Modal::Flow(Flow::Prs(_))) => self.prs_request_close(window, cx),
+            Some(Modal::Flow(_)) => self.cancel_flow(cx),
+            Some(Modal::Plan(_)) => self.plan_escape(cx),
+            Some(_) => self.close_modal(cx),
+        }
+        true
+    }
+
     pub fn flow_mut(&mut self) -> Option<&mut Flow> {
         match &mut self.modal {
             Some(Modal::Flow(f)) => Some(f),
@@ -197,6 +209,11 @@ impl Render for PageTab {
         };
         div()
             .track_focus(&self.focus)
+            .on_key_down(cx.listener(|t, ev: &gpui::KeyDownEvent, window, cx| {
+                if ev.keystroke.key == "escape" && t.escape_modal(window, cx) {
+                    cx.stop_propagation();
+                }
+            }))
             .relative()
             .size_full()
             .flex()
@@ -207,7 +224,7 @@ impl Render for PageTab {
             .line_height(gpui::relative(1.36))
             .text_color(c(theme::TEXT))
             .child(body)
-            .when_some(modal, |d, m| d.child(git::scrim(m)))
+            .when_some(modal, |d, m| d.child(git::scrim(m, window)))
     }
 }
 

@@ -1,8 +1,8 @@
 //! Git flows over a workspace (or a repository's clone, scope `@repo`):
 //! commit (`CommitModal.tsx`), push (`PushModal.tsx`), rebase
 //! (`RebaseModal.tsx`), squash and merge (`MergeModal.tsx`), and the branch
-//! drift banner (`BranchDriftBanner.tsx`). Shown as modals inside a page tab
-//! (`crate::workspace_ui`), which they reload once something changed.
+//! drift banner (`BranchDriftBanner.tsx`). Shown as modals of a page tab
+//! (`crate::workspace_ui`) over the whole window, which they reload once something changed.
 pub mod commit;
 pub mod diff_pane;
 pub mod drift;
@@ -16,7 +16,7 @@ use crate::review::ui::Tone;
 use crate::workspace_ui::kit::{self, Kind};
 use crate::theme::{self, c};
 use crate::workspace_ui::PageTab;
-use gpui::{actions, div, prelude::*, px, AnyElement, App, ClickEvent, Context, Div, KeyBinding, Rgba, SharedString, Stateful};
+use gpui::{actions, anchored, deferred, div, point, prelude::*, px, AnyElement, App, ClickEvent, Context, Div, KeyBinding, Rgba, SharedString, Stateful, Window};
 
 actions!(orbit_git, [SubmitCommit]);
 
@@ -87,12 +87,22 @@ impl PageTab {
     }
 }
 
-/// The dimmed backdrop with the modal card centered on it.
-pub fn scrim(card: AnyElement) -> AnyElement {
+/// Paint order of a page's modal: over the page's own deferred popovers, under
+/// the shell's overlays and gpui-component's popups (`POPUP_PRIORITY`).
+pub const MODAL_PRIORITY: usize = 10;
+/// Paint order of the shell's overlays (search, menus, dialogs, toasts).
+pub const SHELL_OVERLAY_PRIORITY: usize = 50;
+
+/// The dimmed backdrop over the whole window (`.modal-overlay` is `position:
+/// fixed`) with the modal card centered on it. The page tab renders it, so it
+/// keeps the tab's focus and actions, and hides with the tab.
+pub fn scrim(card: AnyElement, window: &Window) -> AnyElement {
     use crate::motion;
-    // Occluded: clicks never reach the page under it.
-    let scrim = div().occlude().absolute().top_0().left_0().size_full().bg(theme::scrim()).flex().items_center().justify_center();
-    motion::overlay_in(scrim.child(motion::modal_in(div().flex().max_h_full().child(card), "modal-in")), "modal-overlay-in")
+    // Occluded: clicks never reach the window under it.
+    let vp = window.viewport_size();
+    let scrim = div().occlude().w(vp.width).h(vp.height).bg(theme::scrim()).flex().items_center().justify_center();
+    let scrim = motion::overlay_in(scrim.child(motion::modal_in(div().flex().max_h_full().child(card), "modal-in")), "modal-overlay-in");
+    deferred(anchored().position(point(px(0.), px(0.))).child(scrim)).with_priority(MODAL_PRIORITY).into_any_element()
 }
 
 /// A modal card (`.modal`): title, hint, body and footer buttons.

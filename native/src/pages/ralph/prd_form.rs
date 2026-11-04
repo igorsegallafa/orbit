@@ -200,6 +200,20 @@ impl RalphPage {
         );
     }
 
+    /// Esc: closes the open modal unless the agent is working in it.
+    pub(super) fn escape_modal(&mut self, cx: &mut Context<Self>) -> bool {
+        let busy = match &self.modal {
+            None => return false,
+            Some(Modal::Prd(f)) => f.loading || f.phase == Phase::Writing,
+            Some(Modal::Run(_)) => false,
+        };
+        if !busy {
+            self.modal = None;
+            cx.notify();
+        }
+        true
+    }
+
     fn prd_cancel_generate(&mut self, cx: &mut Context<Self>) {
         let _ = ralph::cancel_generate(self.scope.clone(), self.repo.clone());
         cx.notify();
