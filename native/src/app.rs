@@ -1090,6 +1090,7 @@ impl OrbitApp {
             active: None,
             layout: self.layout.clone(),
             theme: Some(crate::theme::pref()),
+            notifications: (!crate::notifications::enabled()).then_some(false),
             ws_collapsed: self.ws_collapsed.iter().cloned().collect(),
         }
     }

@@ -357,6 +357,7 @@ Caveats found:
 | `src/review/` | the review tabs (`mod.rs`: tab, commands, sidebar entries, dump) · `changes.rs` changed files and notes · `prs.rs` PRs, status, checks, logs, creation · `send.rs` notes to a PR review · `notes.rs` REVIEW.md and note anchoring · `ui.rs` small widgets |
 | `src/terminal/` | terminal view over `orbit_core::pty`: VT parse, status tracking, scrollback replay (`mod.rs`), grid layout and paint (`grid.rs`), keys and mouse reports (`input.rs`), kitty graphics (`graphics.rs`, `diacritics.rs`) |
 | `src/sessions/` | sessions (`mod.rs`: keys, codenames, save/restore, inbox, recent, resume, actions), agent status heuristics and hooks (`status.rs`) |
+| `src/notifications.rs` | desktop notifications: suppression, coalescing, delivery, clicks |
 | `src/file_tree.rs` | virtualized tree with background folder loads, reveal, refresh after disk changes, name prompt and file operations (`orbit_core::files`) |
 | `src/file_ops.rs` | the tree's ties to the app: context menu, the workspace watcher (`orbit_core::watch`; tree refresh, editor reload), following the active file, breadcrumb reveal |
 | `src/workspace.rs` | workspace list from `orbit_core::workspace` |
@@ -480,7 +481,17 @@ the program ended) and `pty-error` events for a failed start, as before.
   GPUI channel (waiting for permission, working, done). Shown in the tab title and the sidebar dot.
   Agents without hooks get "done" after 10 s of activity ending in silence.
 - Inbox: "finished" and "needs your attention" items, unread unless the session's tab is active in
-  a focused window; seeing the tab settles them. No OS notifications yet.
+  a focused window; seeing the tab settles them.
+- Desktop notifications (`src/notifications.rs`) for the same items and a Ralph run ending, as the
+  React app's `notifyOs`: none while the window is focused on that item's tab; Settings →
+  Notifications turns them off (saved as `notifications` in the state file). Items within 0.8 s go
+  out as one ("2 updates in Orbit"), and a newer one for the same item replaces the old. A click
+  raises the window on the item's tab. Linux: `notify-rust` over `org.freedesktop.Notifications`
+  (app name Orbit, the app icon, `desktop-entry` `orbit-native`, the `default` action); macOS and
+  Windows: GPUI's `show_system_notification` (`UNUserNotificationCenter`, needs an app bundle;
+  toasts under the AUMID `com.nsx001220.orbit.native`). Self-tests record them in the dump
+  (`--- notifications`) without showing them unless `ORBIT_SELFTEST_NOTIFY=1`; the step
+  `notify-click` clicks the newest through the real click handler.
 - Closing an agent tab ends it: claude (its `--session-id`) and opencode (looked up with
   `opencode session list`) go to *Recent* for the scope; clicking one (or `ResumeLastSession`)
   reopens it with `--resume <id>` / `--session <id>`. Tabs don't minimize as in React (that needs a

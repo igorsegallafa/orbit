@@ -44,6 +44,8 @@ memchr = "2"
 # `cargo run --release --features capture` + `ORBIT_CAPTURE=shot.png` saves each frame
 # (vendor/PATCHES.md); for looking at the UI without a screenshot tool.
 [target.'cfg(target_os = "linux")'.dependencies]
+# Desktop notifications over D-Bus (already in the lock via gpui's Linux platform).
+notify-rust = "4"
 gpui-pre-wgpu = { version = "=0.3.11", optional = true, features = ["orbit-capture"] }
 
 [features]
