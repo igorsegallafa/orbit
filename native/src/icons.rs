@@ -18,6 +18,9 @@ impl AssetSource for Assets {
         if let Some(name) = path.strip_prefix("filetypes/").and_then(|p| p.strip_suffix(".svg")) {
             return Ok(glyph(name).map(|body| Cow::Owned(svg_doc(body).into_bytes())));
         }
+        if let Some(doc) = path.strip_prefix("wsui/").and_then(|p| p.strip_suffix(".svg")).and_then(crate::workspace_ui::icons::load) {
+            return Ok(Some(Cow::Owned(doc.into_bytes())));
+        }
         self.0.load(path)
     }
 

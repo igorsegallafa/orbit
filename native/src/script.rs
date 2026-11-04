@@ -57,6 +57,8 @@ pub struct Script {
     pub state: Option<PathBuf>,
     /// Shell steps run last (`steps.rs`): `--do "rclick:tab:0;click:menu:Close"`.
     pub shell_steps: Vec<String>,
+    /// `--window-size 1920x977`: the window's logical size.
+    pub window_size: Option<(f32, f32)>,
 }
 
 fn cell(spec: &str) -> Option<(usize, usize)> {
@@ -106,6 +108,12 @@ impl Script {
                 "--exit-after" => s.exit_after = args.next().and_then(|v| v.parse().ok()),
                 "--dump" => s.dump = args.next().map(PathBuf::from),
                 "--state" => s.state = args.next().map(PathBuf::from),
+                "--window-size" => {
+                    s.window_size = args.next().and_then(|v| {
+                        let (w, h) = v.split_once('x')?;
+                        Some((w.parse().ok()?, h.parse().ok()?))
+                    })
+                }
                 "--do" => s.shell_steps.extend(args.next().unwrap_or_default().split(';').map(|x| x.trim().to_string()).filter(|x| !x.is_empty())),
                 _ => eprintln!("unknown argument {a}"),
             }
