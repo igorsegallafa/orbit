@@ -69,6 +69,8 @@ pub struct RunConfigs {
     selected: Option<usize>,
     form: Form,
     error: Option<SharedString>,
+    /// What the last Apply saved, until something changes again.
+    saved: Option<SharedString>,
     focus: FocusHandle,
     /// Each env name input's last length: a jump of more than one character is a paste.
     key_lens: std::collections::HashMap<gpui::EntityId, usize>,
@@ -145,22 +147,40 @@ impl RunConfigs {
         };
         let focus = cx.focus_handle();
         focus.focus(window, cx);
-        let mut this = Self { app, workspace, repos, items, removed: vec![], selected: None, form, error: None, focus, key_lens: Default::default(), _subs: vec![] };
-        // The list shows the name as it is typed.
-        let name = this.form.name.clone();
-        this._subs.push(cx.subscribe_in(&name, window, |t: &mut Self, _, ev: &InputEvent, _, cx| {
-            if matches!(ev, InputEvent::Change) {
-                if let Some(ix) = t.selected {
-                    t.items[ix].config.name = text(&t.form.name, cx);
-                    cx.notify();
-                }
-            }
-        }));
+        let mut this = Self {
+            app,
+            workspace,
+            repos,
+            items,
+            removed: vec![],
+            selected: None,
+            form,
+            error: None,
+            saved: None,
+            focus,
+            key_lens: Default::default(),
+            _subs: vec![],
+        };
+        // The list shows the name as it is typed, and every edit updates the unsaved marks and Apply.
+        let f = &this.form;
+        for i in [f.name.clone(), f.build.clone(), f.program.clone(), f.args.clone(), f.cwd.clone()] {
+            this.watch(&i, cx);
+        }
         this.select(selected, window, cx);
         this
     }
 
     // ---------- the form ----------
+
+    /// An edit in `input` moves the form into the configuration (its unsaved mark, Apply).
+    fn watch(&mut self, input: &Entity<InputState>, cx: &mut Context<Self>) {
+        self._subs.push(cx.subscribe(input, |t: &mut Self, _, ev: &InputEvent, cx| {
+            if matches!(ev, InputEvent::Change) {
+                t.commit(cx);
+                cx.notify();
+            }
+        }));
+    }
 
     /// Moves the inputs' text into the selected configuration.
     fn commit(&mut self, cx: &App) {
@@ -213,6 +233,8 @@ impl RunConfigs {
                 t.split_pasted(input.clone(), window, cx);
             }
         }));
+        self.watch(&k, cx);
+        self.watch(&v, cx);
         let row = EnvRow { key: k, value: v };
         match at {
             Some(at) => self.form.env.insert(at.min(self.form.env.len()), row),
@@ -318,36 +340,67 @@ impl RunConfigs {
 
     // ---------- saving ----------
 
-    fn validate(&self) -> Result<(), String> {
-        for (ix, i) in self.items.iter().enumerate() {
-            if i.config.name.trim().is_empty() {
-                return Err("A configuration needs a name".into());
-            }
-            if self.items.iter().skip(ix + 1).any(|o| o.repo == i.repo && o.config.name == i.config.name) {
-                return Err(format!("Two configurations are named '{}'", i.config.name));
-            }
-        }
-        Ok(())
+    /// Something to save: an edited, new or removed configuration.
+    fn has_changes(&self, cx: &App) -> bool {
+        !self.removed.is_empty() || (0..self.items.len()).any(|ix| self.unsaved(ix, cx))
     }
 
-    /// Writes what changed; true when everything was saved.
-    fn apply(&mut self, cx: &mut Context<Self>) -> bool {
+    /// Item `ix` differs from its file, or its form has a row the
+    /// configuration can't hold yet (a value without a name).
+    fn unsaved(&self, ix: usize, cx: &App) -> bool {
+        self.items[ix].dirty() || (self.selected == Some(ix) && env_problem(&self.env_rows(cx)).is_some())
+    }
+
+    fn env_rows(&self, cx: &App) -> Vec<(String, String)> {
+        self.form.env.iter().map(|r| (text(&r.key, cx), r.value.read(cx).value().to_string())).collect()
+    }
+
+    /// What can't be saved, and the configuration it is in.
+    fn validate(&self, cx: &App) -> Result<(), (Option<usize>, String)> {
+        for (ix, i) in self.items.iter().enumerate() {
+            if i.config.name.trim().is_empty() {
+                return Err((Some(ix), "A configuration needs a name".into()));
+            }
+            if self.items.iter().skip(ix + 1).any(|o| o.repo == i.repo && o.config.name == i.config.name) {
+                return Err((Some(ix), format!("Two configurations are named '{}'", i.config.name)));
+            }
+        }
+        // The form's rows: an empty name would be dropped silently.
+        env_problem(&self.env_rows(cx)).map_or(Ok(()), |e| Err((self.selected, e)))
+    }
+
+    /// Writes what changed; true when everything was saved. A failure keeps
+    /// the edits (and the unsaved marks) and says why in the footer.
+    fn apply(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         self.commit(cx);
-        if let Err(e) = self.validate() {
+        self.error = None;
+        self.saved = None;
+        if let Err((at, e)) = self.validate(cx) {
+            if at.is_some() && at != self.selected {
+                self.select(at, window, cx);
+            }
             self.error = Some(e.into());
             cx.notify();
             return false;
         }
         let mut renamed: Option<(String, String, String)> = None;
+        let mut done: Vec<(String, &'static str)> = vec![];
+        let mut removed = 0;
         for (repo, name) in std::mem::take(&mut self.removed) {
-            if let Err(e) = orbit_core::run::remove_config(&self.repos[repo].root, &name) {
-                self.error = Some(e.into());
+            match orbit_core::run::remove_config(&self.repos[repo].root, &name) {
+                Ok(()) => removed += 1,
+                Err(e) => {
+                    self.error = Some(format!("Removing '{name}': {e}").into());
+                    self.removed.push((repo, name));
+                }
             }
         }
         for item in self.items.iter_mut().filter(|i| i.dirty()) {
             let root = &self.repos[item.repo].root;
+            let file = if item.shared { ".orbit/run.json" } else { ".orbit/run.local.json" };
             match orbit_core::run::save_config(root, &item.config, item.shared, item.saved_as.as_deref()) {
                 Ok(()) => {
+                    done.push((item.config.name.clone(), file));
                     if let Some(old) = item.saved_as.as_ref().filter(|n| **n != item.config.name) {
                         renamed = Some((self.repos[item.repo].name.clone(), old.clone(), item.config.name.clone()));
                     } else if item.origin == Origin::Discovered {
@@ -357,10 +410,16 @@ impl RunConfigs {
                     item.origin = if item.shared { Origin::Project } else { Origin::Local };
                     item.original = Some((item.config.clone(), item.shared));
                 }
-                Err(e) => self.error = Some(e.into()),
+                Err(e) => self.error = Some(format!("Saving '{}' to {file}: {e}", item.config.name).into()),
             }
         }
         let ok = self.error.is_none();
+        if let Some(msg) = saved_message(&done, removed) {
+            if ok {
+                let _ = self.app.update(cx, |a, cx| a.toast(crate::toast::ToastKind::Success, msg.clone(), None, cx));
+            }
+            self.saved = Some(msg.into());
+        }
         store(cx).update(cx, |s, cx| s.configs_saved(renamed, cx));
         cx.notify();
         ok
@@ -381,7 +440,11 @@ impl RunConfigs {
         let names: Vec<String> = self
             .items
             .iter()
-            .map(|i| format!("{}{} [{:?}{}]", if self.repos.len() > 1 { format!("{}/", self.repos[i.repo].name) } else { String::new() }, i.config.name, i.origin, if i.dirty() { ", changed" } else { "" }))
+            .enumerate()
+            .map(|(ix, i)| {
+                let repo = if self.repos.len() > 1 { format!("{}/", self.repos[i.repo].name) } else { String::new() };
+                format!("{repo}{} [{:?}{}]", i.config.name, i.origin, if self.unsaved(ix, cx) { ", changed" } else { "" })
+            })
             .collect();
         let _ = writeln!(out, "--- run configurations dialog ({}): {names:?}", self.workspace);
         if let Some(ix) = self.selected {
@@ -404,7 +467,56 @@ impl RunConfigs {
         if let Some(e) = &self.error {
             let _ = writeln!(out, "  error: {e}");
         }
+        if let Some(m) = &self.saved {
+            let _ = writeln!(out, "  saved: {m}");
+        }
+        let _ = writeln!(out, "  apply enabled {}", self.has_changes(cx));
         out
+    }
+}
+
+/// A problem with environment rows (name, value): a value without a name, a
+/// name a shell can't set, or the same name twice.
+fn env_problem(rows: &[(String, String)]) -> Option<String> {
+    for (n, (k, v)) in rows.iter().enumerate() {
+        if k.is_empty() {
+            if !v.trim().is_empty() {
+                return Some(format!("Environment variable {} has a value but no name", n + 1));
+            }
+            continue;
+        }
+        if k.contains(['=', ' ', '\t']) || k.starts_with(|c: char| c.is_ascii_digit()) {
+            return Some(format!("'{k}' is not a valid environment variable name"));
+        }
+        if rows[..n].iter().any(|(o, _)| o == k) {
+            return Some(format!("The environment variable {k} is set twice"));
+        }
+    }
+    None
+}
+
+/// The footer's (and the toast's) line after a save.
+fn saved_message(done: &[(String, &'static str)], removed: usize) -> Option<String> {
+    let removed_part = match removed {
+        0 => None,
+        1 => Some("removed 1 configuration".to_string()),
+        n => Some(format!("removed {n} configurations")),
+    };
+    let saved_part = match done {
+        [] => None,
+        [(name, file)] => Some(format!("Saved '{name}' to {file}")),
+        _ => {
+            let mut files: Vec<&str> = done.iter().map(|(_, f)| *f).collect();
+            files.sort_unstable();
+            files.dedup();
+            Some(format!("Saved {} configurations to {}", done.len(), files.join(" and ")))
+        }
+    };
+    match (saved_part, removed_part) {
+        (Some(s), Some(r)) => Some(format!("{s}; {r}")),
+        (Some(s), None) => Some(s),
+        (None, Some(r)) => Some(format!("{}{}", r[..1].to_uppercase(), &r[1..])),
+        (None, None) => None,
     }
 }
 
@@ -486,6 +598,7 @@ impl RunConfigs {
                 for ix in members {
                     let item = &self.items[ix];
                     let selected = self.selected == Some(ix);
+                    let unsaved = self.unsaved(ix, cx);
                     let name = item.config.name.clone();
                     rows.push(
                         div()
@@ -501,8 +614,8 @@ impl RunConfigs {
                             .cursor_pointer()
                             .when(selected, |d| d.bg(c(theme::ACCENT_SOFT)).text_color(c(theme::TEXT)))
                             .when(!selected, |d| d.hover(|s| s.bg(c(theme::PANEL_RAISED))))
-                            .child(div().flex_1().min_w_0().truncate().child(if name.is_empty() { "(unnamed)".to_string() } else { name.clone() }))
-                            .when(item.dirty() && item.original.is_some(), |d| d.child(div().text_size(px(10.)).text_color(c(theme::ACCENT)).child("●")))
+                            .child(div().flex_1().min_w_0().truncate().when(unsaved, |d| d.italic()).child(if name.is_empty() { "(unnamed)".to_string() } else { name.clone() }))
+                            .when(unsaved, |d| d.child(div().text_size(px(10.)).text_color(c(theme::ACCENT)).child("●")))
                             .child(probe(format!("rc-item:{name}")))
                             .on_mouse_down(
                                 MouseButton::Left,
@@ -675,6 +788,41 @@ impl Render for RunConfigs {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let vp = window.viewport_size();
         let height = (vp.height - px(80.)).min(px(620.));
+        let changes = self.has_changes(cx);
+        if changes {
+            self.saved = None;
+        }
+        let footer_status = match (&self.error, &self.saved) {
+            (Some(e), _) => div()
+                .id("rc-status")
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .text_size(px(12.5))
+                .text_color(c(theme::DANGER))
+                .child(crate::workspace_ui::icons::icon("x", 13., c(theme::DANGER)))
+                .child(div().min_w_0().truncate().child(e.clone())),
+            (None, Some(m)) => div()
+                .id("rc-status")
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .text_size(px(12.5))
+                .text_color(c(theme::OK))
+                .child(crate::workspace_ui::icons::icon("check", 13., c(theme::OK)))
+                .child(div().min_w_0().truncate().child(m.clone())),
+            (None, None) => div()
+                .id("rc-status")
+                .flex_1()
+                .min_w_0()
+                .text_size(px(12.5))
+                .text_color(c(theme::TEXT_FAINT))
+                .when(changes, |d| d.child("Unsaved changes")),
+        };
         kit::modal("run-configs", 900.)
             .h(height)
             .track_focus(&self.focus)
@@ -691,13 +839,15 @@ impl Render for RunConfigs {
             .child(div().flex_1().min_h_0().flex().child(self.render_list(cx)).child(self.render_form(window, cx)))
             .child(
                 kit::modal_footer()
-                    .children(self.error.clone().map(|e| div().flex_1().min_w_0().truncate().text_size(px(12.5)).text_color(c(theme::DANGER)).child(e)))
+                    .child(footer_status)
                     .child(kit::button("rc-cancel", "Cancel", Kind::Secondary, kit::NORMAL).on_click(cx.listener(|t, _: &ClickEvent, _, cx| t.close(cx))))
-                    .child(kit::button("rc-apply", "Apply", Kind::Secondary, kit::NORMAL).on_click(cx.listener(|t, _: &ClickEvent, _, cx| {
-                        t.apply(cx);
+                    .child(kit::disabled(kit::button("rc-apply", "Apply", Kind::Secondary, kit::NORMAL), !changes).on_click(cx.listener(move |t, _: &ClickEvent, window, cx| {
+                        if changes {
+                            t.apply(window, cx);
+                        }
                     })))
-                    .child(kit::button("rc-ok", "OK", Kind::Primary, kit::NORMAL).on_click(cx.listener(|t, _: &ClickEvent, _, cx| {
-                        if t.apply(cx) {
+                    .child(kit::button("rc-ok", "OK", Kind::Primary, kit::NORMAL).on_click(cx.listener(|t, _: &ClickEvent, window, cx| {
+                        if t.apply(window, cx) {
                             t.close(cx);
                         }
                     }))),
@@ -715,5 +865,26 @@ mod tests {
         assert_eq!(args, ["--map", "Ricarten Town", "-v", "x"]);
         assert_eq!(join_args(&args), "--map \"Ricarten Town\" -v x");
         assert!(split_args("   ").is_empty());
+    }
+
+    #[test]
+    fn env_rows_that_cannot_be_saved() {
+        let row = |k: &str, v: &str| (k.to_string(), v.to_string());
+        assert_eq!(env_problem(&[row("A", "1"), row("", "")]), None);
+        assert!(env_problem(&[row("", "orphan")]).unwrap().contains("no name"));
+        assert!(env_problem(&[row("A B", "1")]).unwrap().contains("not a valid"));
+        assert!(env_problem(&[row("A=B", "1")]).unwrap().contains("not a valid"));
+        assert!(env_problem(&[row("1X", "1")]).unwrap().contains("not a valid"));
+        assert!(env_problem(&[row("A", "1"), row("A", "2")]).unwrap().contains("twice"));
+    }
+
+    #[test]
+    fn the_saved_line_names_the_files() {
+        let one = [("game".to_string(), ".orbit/run.local.json")];
+        assert_eq!(saved_message(&one, 0).unwrap(), "Saved 'game' to .orbit/run.local.json");
+        let two = [("a".to_string(), ".orbit/run.json"), ("b".to_string(), ".orbit/run.local.json")];
+        assert_eq!(saved_message(&two, 1).unwrap(), "Saved 2 configurations to .orbit/run.json and .orbit/run.local.json; removed 1 configuration");
+        assert_eq!(saved_message(&[], 2).unwrap(), "Removed 2 configurations");
+        assert_eq!(saved_message(&[], 0), None);
     }
 }
