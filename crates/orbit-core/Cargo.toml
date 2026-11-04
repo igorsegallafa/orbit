@@ -1,0 +1,21 @@
+[package]
+name = "orbit-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "Orbit's backend logic, shared by the Tauri app and the native app"
+# A member of src-tauri's workspace (shared Cargo.lock and target dir).
+workspace = "../../src-tauri"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+shell-words = "1"
+notify = "8"
+ignore = "0.4"
+trash = "5.2.9"
+
+[target."cfg(windows)".dependencies]
+winreg = "0.55"

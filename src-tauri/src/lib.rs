@@ -1,19 +1,13 @@
 mod commands;
+use orbit_core::{config, git, github, health, integrations, links, proc, usage, workspace};
 mod agent;
 mod agent_hooks;
 mod artifacts;
 mod build;
-mod config;
 mod dap;
 mod files;
-mod git;
-mod github;
-mod health;
-mod integrations;
-mod links;
 mod lsp;
 mod notes;
-mod proc;
 mod pty;
 mod ralph;
 mod repo;
@@ -21,9 +15,20 @@ mod run;
 mod review;
 mod search;
 mod term_image;
-mod usage;
 mod watch;
-mod workspace;
+
+/// The webview as an event sink for orbit-core.
+pub(crate) fn events(app: tauri::AppHandle) -> orbit_core::events::Events {
+    use tauri::Emitter;
+    orbit_core::events::Events::new(move |event: &str, payload: serde_json::Value| {
+        let _ = app.emit(event, payload);
+    })
+}
+
+/// Runs blocking work (fs, git, processes) off the thread that drives the webview.
+pub(crate) async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(f).await.map_err(|e| format!("background task failed: {e}"))?
+}
 
 /// `Orbit --orbit-statusline <file>`: status line helper for the Claude
 /// sessions Orbit launches (see agent_hooks).

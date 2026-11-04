@@ -85,7 +85,7 @@ pub fn start(app: &AppHandle, adapter: &Adapter, cwd: &str) -> Result<u32, Strin
     sessions().lock().unwrap().insert(id, Session { child, stdin });
     let app = app.clone();
     std::thread::spawn(move || {
-        crate::lsp::read_frames(stdout, |message| {
+        orbit_core::lsp::read_frames(stdout, |message| {
             let _ = app.emit("dap-message", DapMessage { id, message });
         });
         let gone = sessions().lock().unwrap().remove(&id);
@@ -97,7 +97,7 @@ pub fn start(app: &AppHandle, adapter: &Adapter, cwd: &str) -> Result<u32, Strin
 
 pub fn send(id: u32, message: &str) -> Result<(), String> {
     let stdin = sessions().lock().unwrap().get(&id).map(|s| s.stdin.clone()).ok_or("the debugger is not running")?;
-    crate::lsp::write_frame(&stdin, message)
+    orbit_core::lsp::write_frame(&stdin, message)
 }
 
 /// Kills the adapter (and with it the program it debugs).

@@ -8,6 +8,7 @@ version = "0.1.0"
 dependencies = [
  "ignore",
  "notify",
+ "orbit-core",
  "portable-pty",
  "serde",
  "serde_json",
@@ -2737,6 +2738,20 @@ name = "option-ext"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
+
+[[package]]
+name = "orbit-core"
+version = "0.1.0"
+dependencies = [
+ "ignore",
+ "notify",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "shell-words",
+ "trash",
+ "winreg 0.55.0",
+]
 
 [[package]]
 name = "ordered-stream"

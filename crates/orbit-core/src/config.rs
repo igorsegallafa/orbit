@@ -266,7 +266,7 @@ impl Config {
     }
 }
 
-pub(crate) fn config_dir() -> Result<PathBuf, String> {
+pub fn config_dir() -> Result<PathBuf, String> {
     if let Some(dir) = std::env::var_os("ORBIT_CONFIG_DIR") {
         return Ok(PathBuf::from(dir));
     }
@@ -283,7 +283,7 @@ pub(crate) fn config_dir() -> Result<PathBuf, String> {
 
 /// User home. `$HOME` is usually unset on Windows outside Git Bash, so this
 /// goes through `std::env::home_dir` (HOME, then USERPROFILE / profile API).
-pub(crate) fn home_dir() -> Result<PathBuf, String> {
+pub fn home_dir() -> Result<PathBuf, String> {
     std::env::home_dir().ok_or_else(|| "could not resolve the home directory".to_string())
 }
 

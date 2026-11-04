@@ -244,14 +244,14 @@ fn repo_root(workspace: &str, repo: &str) -> Result<PathBuf, String> {
     if !root.is_dir() {
         return Err(format!("'{repo}' folder not found"));
     }
-    Ok(crate::lsp::real_path(&root))
+    Ok(orbit_core::lsp::real_path(&root))
 }
 
 pub fn setup(workspace: &str, repo: &str, preset: Option<&str>) -> Result<RunSetup, String> {
     let root = repo_root(workspace, repo)?;
     let linked_root = crate::workspace::repo_path(workspace, repo)?.to_string_lossy().to_string();
     let configs = read_configs(&root)?;
-    let presets = if configs.iter().any(|c| c.kind == "cmake") { crate::lsp::cmake_presets(&root) } else { vec![] };
+    let presets = if configs.iter().any(|c| c.kind == "cmake") { orbit_core::lsp::cmake_presets(&root) } else { vec![] };
     let defs = preset_defs(&root);
     Ok(RunSetup {
         root: root.to_string_lossy().to_string(),
@@ -281,9 +281,9 @@ pub struct BuildExit {
 /// `cmake <args>`, inside the Visual Studio environment on Windows.
 fn cmake(args: &[String]) -> Command {
     #[cfg(windows)]
-    if let Some(vcvars) = crate::lsp::find_vcvars() {
+    if let Some(vcvars) = orbit_core::lsp::find_vcvars() {
         let script = std::env::temp_dir().join(format!("orbit-run-{}.cmd", std::process::id()));
-        if std::fs::write(&script, crate::lsp::vcvars_script(&vcvars.to_string_lossy(), args)).is_ok() {
+        if std::fs::write(&script, orbit_core::lsp::vcvars_script(&vcvars.to_string_lossy(), args)).is_ok() {
             let mut c = crate::proc::cmd("cmd");
             c.args(["/d", "/c"]).arg(script);
             return c;
@@ -319,7 +319,7 @@ pub fn build(app: &AppHandle, workspace: &str, repo: &str, name: &str, preset: O
         .into_iter()
         .find(|c| c.name == name)
         .ok_or_else(|| format!("no run configuration '{name}' in {repo}/.orbit/run.json"))?;
-    let presets = if config.kind == "cmake" { crate::lsp::cmake_presets(&root) } else { vec![] };
+    let presets = if config.kind == "cmake" { orbit_core::lsp::cmake_presets(&root) } else { vec![] };
     let r = resolve(&root, &config, preset, &presets, &preset_defs(&root));
     let emit = |stream: &str, line: String| {
         let _ = app.emit("run-output", OutputLine { key, stream, line });

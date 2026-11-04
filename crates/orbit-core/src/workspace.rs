@@ -959,11 +959,11 @@ pub fn ensure_on_branch(workspace: &str, repo: &str) -> Result<(), String> {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+pub mod tests {
     use super::*;
 
     /// Tests that point ORBIT_* env vars at a temp root must not overlap.
-    pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    pub static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn git(dir: &Path, args: &[&str]) {
         let mut full = vec!["-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main"];
