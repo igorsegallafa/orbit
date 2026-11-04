@@ -569,7 +569,8 @@ impl PageTab {
         let p = &f.picker;
         let note = |text: String| div().text_xs().text_color(c(theme::TEXT_FAINT)).child(text).into_any_element();
         let rows = match &p.cards {
-            None => vec![note("Loading cards…".into())],
+            // `WorkspaceCreateModal`'s three skeleton rows.
+            None => [0.7, 0.55, 0.62].into_iter().map(|w| crate::motion::skeleton_line(44., w, 12.).into_any_element()).collect(),
             Some(cards) if cards.is_empty() => vec![note(format!("No cards found. Connect {} in Integrations or try another search.", f.source.key()))],
             Some(cards) => cards
                 .iter()

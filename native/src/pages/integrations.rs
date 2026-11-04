@@ -193,7 +193,7 @@ impl Render for IntegrationsPage {
                     .child(if on { "Connected" } else { "Not connected" })
             };
             let status = match &row.status {
-                None => kit::skeleton(px(90.), 18.).rounded_full().into_any_element(),
+                None => kit::skeleton(px(90.), 18.).pill().into_any_element(),
                 Some(s) => badge(s.connected).into_any_element(),
             };
             let mut card = kit::card().mb(px(14.)).px(px(20.)).py(px(16.)).child(
@@ -283,7 +283,7 @@ impl Render for IntegrationsPage {
             }
             page = page.child(card);
         }
-        page
+        crate::motion::page_in(page, "integrations-in")
     }
 }
 

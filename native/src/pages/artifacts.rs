@@ -147,6 +147,10 @@ impl Render for ArtifactsPage {
                                 .child(div().flex_1().min_w_0().flex().flex_col().child(div().text_sm().text_color(c(theme::TEXT)).child(a.name.clone())).child(
                                     ui::faint(format!("{} · {} · {} · {}", a.workflow, size(a.size_bytes), a.created_at, a.head_sha.chars().take(7).collect::<String>())),
                                 ))
+                                // `.spinner` beside "Downloading…".
+                                .when(state == Some(false), |d| {
+                                    d.child(crate::workspace_ui::kit::spinner(SharedString::from(format!("artifact-spin:{}:{}", s.repo, a.name)), 14., c(theme::ACCENT)))
+                                })
                                 .child(
                                     ui::button(
                                         SharedString::from(format!("artifact:{}:{}", s.repo, a.name)),
@@ -168,7 +172,7 @@ impl Render for ArtifactsPage {
                     page.child(card)
                 }
                 Load::Failed(e) => page.child(ui::error(e.clone())),
-                _ => page.child(ui::faint("Loading…")),
+                _ => page.child(ui::card().child(crate::motion::skeleton_table(3, 3))),
             };
         }
         page

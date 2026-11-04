@@ -850,13 +850,7 @@ impl SettingsPage {
         let mut out = kit::section().child(head);
         let Some(checks) = checks else {
             // `SkeletonTable rows={6} cols={3}`.
-            let bar = || kit::skeleton(gpui::relative(1.), 8.).flex_1();
-            let row = || div().flex().gap(px(24.)).child(bar()).child(bar()).child(bar());
-            let table = kit::card()
-                .p(px(20.))
-                .gap(px(16.))
-                .child(row().pb(px(10.)).border_b_1().border_color(c(theme::BORDER)))
-                .children((0..6).map(|_| row()));
+            let table = kit::card().child(crate::motion::skeleton_table(6, 3));
             return out.child(table).into_any_element();
         };
         const GROUPS: &[(&str, &str, &str)] = &[
@@ -1021,7 +1015,10 @@ impl Render for SettingsPage {
             .flex()
             .bg(c(theme::BG))
             .child(self.render_nav(window, cx))
-            .child(div().flex_1().min_w_0().h_full().child(kit::page("settings-body", kit::column(d.title, d.description).child(body))))
+            .child(div().flex_1().min_w_0().h_full().child(
+                // `.page` keyed by the section: page-in on each switch.
+                crate::motion::page_in(kit::page("settings-body", kit::column(d.title, d.description).child(body)), gpui::ElementId::Name(format!("settings-in:{}", d.slug).into())),
+            ))
     }
 }
 

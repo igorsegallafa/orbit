@@ -105,7 +105,7 @@ impl Render for UsagePage {
         let usage = match &self.usage {
             Load::Ready(u) => u,
             Load::Failed(e) => return page.child(ui::error(e.clone())),
-            _ => return page.child(ui::faint("Loading…")),
+            _ => return page.child(ui::card().child(crate::motion::skeleton_table(4, 4))),
         };
         if usage.by_model.is_empty() {
             return page.child(ui::muted("No AI usage in this workspace yet."));

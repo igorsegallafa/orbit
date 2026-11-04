@@ -610,6 +610,8 @@ impl ReviewTab {
                 .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(c(theme::TEXT)).child("No local changes"))
                 .child("Edits made by you or an agent show up here as they happen.")
                 .into_any_element()
+        } else if loading && entries.is_empty() {
+            super::pr_review::table_loading("chg-diff-spin", "Loading diff…")
         } else {
             self.render_diff(cx).into_any_element()
         };
