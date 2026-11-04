@@ -344,3 +344,13 @@ pub fn icon_button(name: impl Into<SharedString>, icon: IconName, size: f32) -> 
         .child(Icon::new(icon).size(px(size)).text_color(c(theme::TEXT_DIM)))
         .child(probe(name.to_string()))
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn counts_change_blocks() {
+        let patch = "--- a/x\n+++ b/x\n@@ -1,6 +1,6 @@\n a\n-b\n+B\n c\n d\n-e\n+E\n+F\n";
+        assert_eq!(super::change_blocks(patch), 2);
+        assert_eq!(super::change_blocks("--- a/x\n+++ b/x\n"), 0);
+    }
+}
