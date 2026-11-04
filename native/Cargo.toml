@@ -43,3 +43,7 @@ codegen-units = 16
 
 [profile.dev]
 debug = 0
+
+# Vulkan-only renderer on Linux (GL fallback); see vendor/PATCHES.md.
+[patch.crates-io]
+gpui-pre-wgpu = { path = "vendor/gpui-pre-wgpu" }
