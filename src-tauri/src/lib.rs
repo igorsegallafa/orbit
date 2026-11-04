@@ -18,6 +18,7 @@ mod ralph;
 mod repo;
 mod review;
 mod search;
+mod term_image;
 mod usage;
 mod watch;
 mod workspace;
@@ -213,10 +214,12 @@ pub fn run() {
             pty::pty_spawn,
             pty::pty_write,
             pty::pty_resize,
+            pty::pty_flow,
             pty::pty_kill,
             search::search_workspace,
             pty::pty_scrollback,
             pty::pty_forget,
+            term_image::pty_read_image,
             pty::claude_session_exists,
             pty::opencode_session_id,
             artifacts::branch_artifacts,

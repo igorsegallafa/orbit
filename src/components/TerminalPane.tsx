@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { AgentStatus, AgentStatusTracker, HookState } from "../lib/agentStatus";
+import { KittyGraphics } from "../lib/kittyGraphics";
 import { StatusIndicator } from "./StatusIndicator";
 import { isMac } from "./WindowControls";
 import { currentTheme, onThemeChange, terminalTheme } from "../lib/theme";
@@ -74,6 +76,31 @@ export function sendToTerminal(sessionId: string, text: string): boolean {
 const WAITING_TYPES = new Set(["permission_prompt", "elicitation_dialog", "elicitation_url_dialog", "agent_needs_input"]);
 /** Agents without hooks: a stretch of activity this long ending in silence counts as "done". */
 const FALLBACK_DONE_MS = 10_000;
+const STATUS_EVERY_MS = 250;
+/** The spinner verb is near the end of a chunk. */
+const STATUS_TAIL_BYTES = 2048;
+/** Output queued in xterm.js past which the PTY is paused, and where it resumes. */
+const FLOW_HIGH = 1024 * 1024;
+const FLOW_LOW = 256 * 1024;
+
+function pixelSize(term: Terminal) {
+  const screen = term.element?.querySelector(".xterm-screen");
+  const dpr = window.devicePixelRatio || 1;
+  return {
+    pixelWidth: Math.round((screen?.clientWidth ?? 0) * dpr),
+    pixelHeight: Math.round((screen?.clientHeight ?? 0) * dpr),
+  };
+}
+
+function loadWebgl(term: Terminal) {
+  try {
+    const webgl = new WebglAddon();
+    webgl.onContextLoss(() => webgl.dispose());
+    term.loadAddon(webgl);
+  } catch {
+    // No WebGL2: the DOM renderer stays.
+  }
+}
 
 export function TerminalPane({ tab, onError, onStatusChange, onSignal, active }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
@@ -145,14 +172,21 @@ export function TerminalPane({ tab, onError, onStatusChange, onSignal, active }:
       theme: terminalTheme(currentTheme()),
       // Full key reports (modifiers on Enter, etc.) once the program or ConPTY asks for them.
       vtExtensions: { win32InputMode: true, kittyKeyboard: true },
-    });
-    const offTheme = onThemeChange((t) => {
-      term.options.theme = terminalTheme(t);
+      windowOptions: { getCellSizePixels: true, getWinSizePixels: true },
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(hostRef.current);
+    loadWebgl(term);
     termRef.current = term;
+    const graphics = new KittyGraphics(term, {
+      reply: injectText,
+      readFile: (path, offset, size, temp) => invoke<ArrayBuffer>("pty_read_image", { path, offset, size, temp }),
+    });
+    const offTheme = onThemeChange((t) => {
+      term.options.theme = terminalTheme(t);
+      graphics.schedule();
+    });
     fit.fit();
     requestAnimationFrame(() => fit.fit());
     term.focus();
@@ -197,11 +231,49 @@ export function TerminalPane({ tab, onError, onStatusChange, onSignal, active }:
       }
       return {};
     };
+    // An empty message means the program ended.
+    let statusTimer = 0;
+    let queued = 0;
+    let paused = false;
+    const setFlow = (pause: boolean) => {
+      paused = pause;
+      if (ptyIdRef.current !== null) invoke("pty_flow", { id: ptyIdRef.current, paused: pause }).catch(() => null);
+    };
+    const output = new Channel<ArrayBuffer>((buf) => {
+      if (buf.byteLength === 0) {
+        trackerRef.current.markExited();
+        publish();
+        term.write("\r\n\x1b[90m[process exited]\x1b[0m\r\n");
+        return;
+      }
+      const bytes = new Uint8Array(buf);
+      queued += bytes.length;
+      term.write(bytes, () => {
+        queued -= bytes.length;
+        if (paused && queued < FLOW_LOW) setFlow(false);
+      });
+      if (!paused && queued > FLOW_HIGH) setFlow(true);
+      trackerRef.current.feed(new TextDecoder().decode(bytes.subarray(Math.max(0, bytes.length - STATUS_TAIL_BYTES))));
+      statusTimer ||= window.setTimeout(() => {
+        statusTimer = 0;
+        publish();
+      }, STATUS_EVERY_MS);
+    });
     launch()
       .then(({ args, initialInput }) =>
         disposed
           ? null
-          : invoke<number>("pty_spawn", { workspace: tab.workspace, repo: tab.repo ?? null, cmd: tab.cmd, args, cols: term.cols, rows: term.rows, key: tab.id }).then((id) => ({ id, initialInput })),
+          : invoke<number>("pty_spawn", {
+              workspace: tab.workspace,
+              repo: tab.repo ?? null,
+              cmd: tab.cmd,
+              args,
+              cols: term.cols,
+              rows: term.rows,
+              ...pixelSize(term),
+              key: tab.id,
+              onOutput: output,
+            }).then((id) => ({ id, initialInput })),
       )
       .then((spawned) => {
         if (!spawned) return;
@@ -268,21 +340,6 @@ export function TerminalPane({ tab, onError, onStatusChange, onSignal, active }:
       if (state === "waiting") onSignalRef.current?.({ kind: "waiting", message: ev.message });
     });
 
-    const offOutput = listen<{ id: number; data: number[] }>("pty-output", (event) => {
-      if (event.payload.id !== ptyIdRef.current) return;
-      const bytes = new Uint8Array(event.payload.data);
-      term.write(bytes);
-      trackerRef.current.feed(new TextDecoder().decode(bytes));
-      publish();
-    });
-    const offExit = listen<number>("pty-exit", (event) => {
-      if (event.payload === ptyIdRef.current) {
-        trackerRef.current.markExited();
-        publish();
-        term.write("\r\n\x1b[90m[process exited]\x1b[0m\r\n");
-      }
-    });
-
     // Re-evaluate "idle" when output stops arriving
     const statusPoll = window.setInterval(publish, 1500);
 
@@ -293,6 +350,7 @@ export function TerminalPane({ tab, onError, onStatusChange, onSignal, active }:
           id: ptyIdRef.current,
           cols: term.cols,
           rows: term.rows,
+          ...pixelSize(term),
         }).catch(() => null);
       }
     };
@@ -304,10 +362,10 @@ export function TerminalPane({ tab, onError, onStatusChange, onSignal, active }:
       if (ptyIdRef.current !== null) {
         invoke("pty_kill", { id: ptyIdRef.current }).catch(() => null);
       }
-      offOutput.then((f) => f());
-      offExit.then((f) => f());
       offHook.then((f) => f());
       window.clearInterval(statusPoll);
+      window.clearTimeout(statusTimer);
+      graphics.dispose();
       resizeObserver.disconnect();
       offTheme();
       term.dispose();

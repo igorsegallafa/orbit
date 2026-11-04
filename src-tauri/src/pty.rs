@@ -1,17 +1,41 @@
 // Real terminal sessions backed by portable-pty. Agents (claude/opencode)
 // and shells run inside the workspace folder; output streams to the frontend
-// via Tauri events, input flows back through the `pty_write` command.
+// through a per-session channel, input flows back through `pty_write`.
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
-use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
-use std::sync::Mutex;
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
+use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter};
 
 struct Session {
     writer: Box<dyn Write + Send>,
     child: Box<dyn Child + Send + Sync>,
     master: Box<dyn MasterPty + Send>,
+    flow: Arc<Flow>,
+}
+
+/// Paused while the pane has more output queued than it can draw.
+#[derive(Default)]
+struct Flow {
+    paused: Mutex<bool>,
+    resumed: Condvar,
+}
+
+impl Flow {
+    fn set(&self, paused: bool) {
+        *self.paused.lock().unwrap() = paused;
+        self.resumed.notify_all();
+    }
+
+    fn wait(&self) {
+        let mut paused = self.paused.lock().unwrap();
+        while *paused {
+            paused = self.resumed.wait(paused).unwrap();
+        }
+    }
 }
 
 static SESSIONS: Mutex<Option<HashMap<u32, Session>>> = Mutex::new(None);
@@ -20,11 +44,32 @@ fn sessions() -> &'static Mutex<Option<HashMap<u32, Session>>> {
     &SESSIONS
 }
 
-#[derive(Serialize, Clone)]
-struct PtyOutput<'a> {
-    id: u32,
-    data: &'a [u8],
-}
+/// A burst within this interval goes to the webview as one message.
+const OUTPUT_INTERVAL: Duration = Duration::from_millis(8);
+const OUTPUT_MAX: usize = 256 * 1024;
+
+/// Set by the terminal Orbit was started from; programs would mistake Orbit for it.
+const OUTER_TERMINAL_ENV: &[&str] = &[
+    "TERM_PROGRAM",
+    "TERM_PROGRAM_VERSION",
+    "LC_TERMINAL",
+    "LC_TERMINAL_VERSION",
+    "VTE_VERSION",
+    "KITTY_WINDOW_ID",
+    "KITTY_PID",
+    "KITTY_PUBLIC_KEY",
+    "KITTY_INSTALLATION_DIR",
+    "WEZTERM_PANE",
+    "WEZTERM_EXECUTABLE",
+    "WEZTERM_UNIX_SOCKET",
+    "KONSOLE_VERSION",
+    "KONSOLE_DBUS_SESSION",
+    "WT_SESSION",
+    "WT_PROFILE_ID",
+    "ITERM_SESSION_ID",
+    "WINDOWID",
+];
+const OUTER_TERMINAL_PREFIXES: &[&str] = &["GHOSTTY_"];
 
 fn next_id() -> u32 {
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -42,7 +87,10 @@ pub async fn pty_spawn(
     args: Option<Vec<String>>,
     cols: u16,
     rows: u16,
+    pixel_width: Option<u16>,
+    pixel_height: Option<u16>,
     key: Option<String>,
+    on_output: Channel<InvokeResponseBody>,
 ) -> Result<u32, String> {
     let id = next_id();
     let app_for_reader = app.clone();
@@ -64,8 +112,8 @@ pub async fn pty_spawn(
         let size = PtySize {
             rows: rows.max(4),
             cols: cols.max(20),
-            pixel_width: 0,
-            pixel_height: 0,
+            pixel_width: pixel_width.unwrap_or(0),
+            pixel_height: pixel_height.unwrap_or(0),
         };
         let pair = match pty_system.openpty(size) {
             Ok(p) => p,
@@ -94,7 +142,18 @@ pub async fn pty_spawn(
             }
         }
         cmd_builder.cwd(&cwd);
+        for (k, _) in std::env::vars_os() {
+            let k = k.to_string_lossy();
+            if OUTER_TERMINAL_ENV.contains(&k.as_ref()) || OUTER_TERMINAL_PREFIXES.iter().any(|p| k.starts_with(p)) {
+                cmd_builder.env_remove(k.as_ref());
+            }
+        }
         cmd_builder.env("TERM", "xterm-256color");
+        cmd_builder.env("COLORTERM", "truecolor");
+        cmd_builder.env("TERM_PROGRAM", "Orbit");
+        cmd_builder.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
+        // Claude Code only detects kitty graphics support in kitty and Ghostty.
+        cmd_builder.env("CLAUDE_CODE_FORCE_TERMINAL_IMAGES", "1");
         for k in crate::proc::CLAUDE_SESSION_ENV {
             cmd_builder.env_remove(k);
         }
@@ -130,41 +189,70 @@ pub async fn pty_spawn(
             }
         };
         let master = pair.master;
+        let flow = Arc::new(Flow::default());
 
         {
             let mut guard = sessions().lock().unwrap();
             guard
                 .get_or_insert_with(HashMap::new)
-                .insert(id, Session { writer, child, master });
+                .insert(id, Session { writer, child, master, flow: flow.clone() });
         }
 
         let scrollback = key.as_deref().map(Scrollback::start);
-        let mut buf = [0u8; 8192];
-        loop {
-            match reader.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    let _ = app_for_reader.emit(
-                        "pty-output",
-                        PtyOutput { id, data: &buf[..n] },
-                    );
-                    if let Some(sb) = &scrollback {
-                        if let Ok(mut sb) = sb.lock() {
-                            sb.push(&buf[..n]);
-                        }
-                    }
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || {
+            let mut buf = vec![0u8; 64 * 1024];
+            loop {
+                flow.wait();
+                let Ok(n) = reader.read(&mut buf) else { break };
+                if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
+                    break;
                 }
-                Err(_) => break,
+            }
+        });
+        let mut last_send = Instant::now().checked_sub(OUTPUT_INTERVAL).unwrap_or_else(Instant::now);
+        while let Ok(first) = rx.recv() {
+            let mut out = first;
+            let open = drain_burst(&rx, &mut out, last_send + OUTPUT_INTERVAL);
+            if let Some(sb) = &scrollback {
+                if let Ok(mut sb) = sb.lock() {
+                    sb.push(&out);
+                }
+            }
+            let _ = on_output.send(InvokeResponseBody::Raw(out));
+            last_send = Instant::now();
+            if !open {
+                break;
             }
         }
         if let Some(Ok(mut sb)) = scrollback.as_ref().map(|s| s.lock()) {
             sb.flush();
         }
-        let _ = app_for_reader.emit("pty-exit", id);
+        // An empty message after the last output tells the pane it ended.
+        let _ = on_output.send(InvokeResponseBody::Raw(Vec::new()));
         sessions().lock().unwrap().as_mut().and_then(|m| m.remove(&id));
     });
 
     Ok(id)
+}
+
+/// False once the reader has ended.
+fn drain_burst(rx: &mpsc::Receiver<Vec<u8>>, out: &mut Vec<u8>, until: Instant) -> bool {
+    while out.len() < OUTPUT_MAX {
+        let next = match until.checked_duration_since(Instant::now()) {
+            Some(left) if !left.is_zero() => rx.recv_timeout(left),
+            _ => rx.try_recv().map_err(|e| match e {
+                mpsc::TryRecvError::Empty => RecvTimeoutError::Timeout,
+                mpsc::TryRecvError::Disconnected => RecvTimeoutError::Disconnected,
+            }),
+        };
+        match next {
+            Ok(more) => out.extend_from_slice(&more),
+            Err(RecvTimeoutError::Timeout) => return true,
+            Err(RecvTimeoutError::Disconnected) => return false,
+        }
+    }
+    true
 }
 
 const SCROLLBACK_MAX: usize = 256 * 1024;
@@ -174,7 +262,7 @@ const SCROLLBACK_MAX: usize = 256 * 1024;
 /// history accumulates across restarts.
 struct Scrollback {
     path: Option<std::path::PathBuf>,
-    data: Vec<u8>,
+    data: VecDeque<u8>,
     dirty: bool,
 }
 
@@ -192,7 +280,7 @@ impl Scrollback {
     /// trigger a write.
     fn start(key: &str) -> std::sync::Arc<Mutex<Self>> {
         let path = scrollback_path(key);
-        let data = path.as_ref().and_then(|p| std::fs::read(p).ok()).unwrap_or_default();
+        let data = path.as_ref().and_then(|p| std::fs::read(p).ok()).unwrap_or_default().into();
         let sb = std::sync::Arc::new(Mutex::new(Scrollback { path, data, dirty: false }));
         let weak = std::sync::Arc::downgrade(&sb);
         std::thread::spawn(move || loop {
@@ -206,11 +294,10 @@ impl Scrollback {
     }
 
     fn push(&mut self, bytes: &[u8]) {
-        self.data.extend_from_slice(bytes);
-        if self.data.len() > SCROLLBACK_MAX {
-            let cut = self.data.len() - SCROLLBACK_MAX;
-            self.data.drain(..cut);
-        }
+        let bytes = &bytes[bytes.len().saturating_sub(SCROLLBACK_MAX)..];
+        let cut = (self.data.len() + bytes.len()).saturating_sub(SCROLLBACK_MAX);
+        self.data.drain(..cut);
+        self.data.extend(bytes);
         self.dirty = true;
     }
 
@@ -222,7 +309,7 @@ impl Scrollback {
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let _ = std::fs::write(path, &self.data);
+        let _ = std::fs::write(path, self.data.make_contiguous());
         self.dirty = false;
     }
 }
@@ -338,8 +425,17 @@ pub fn pty_write(id: u32, data: String) -> Result<(), String> {
     Ok(())
 }
 
+/// The pane's draw queue is full (`true`) or has drained (`false`).
 #[tauri::command]
-pub fn pty_resize(id: u32, cols: u16, rows: u16) -> Result<(), String> {
+pub fn pty_flow(id: u32, paused: bool) {
+    let flow = sessions().lock().unwrap().as_ref().and_then(|m| m.get(&id)).map(|s| s.flow.clone());
+    if let Some(flow) = flow {
+        flow.set(paused);
+    }
+}
+
+#[tauri::command]
+pub fn pty_resize(id: u32, cols: u16, rows: u16, pixel_width: Option<u16>, pixel_height: Option<u16>) -> Result<(), String> {
     let guard = sessions().lock().unwrap();
     let Some(sess) = guard.as_ref().and_then(|m| m.get(&id)) else {
         return Err(format!("pty session {id} not found"));
@@ -348,8 +444,8 @@ pub fn pty_resize(id: u32, cols: u16, rows: u16) -> Result<(), String> {
         .resize(PtySize {
             rows,
             cols,
-            pixel_width: 0,
-            pixel_height: 0,
+            pixel_width: pixel_width.unwrap_or(0),
+            pixel_height: pixel_height.unwrap_or(0),
         })
         .map_err(|e| e.to_string())
 }
@@ -360,11 +456,13 @@ mod tests {
 
     #[test]
     fn scrollback_keeps_the_tail_and_rejects_unsafe_keys() {
-        let mut sb = Scrollback { path: None, data: vec![], dirty: false };
+        let mut sb = Scrollback { path: None, data: VecDeque::new(), dirty: false };
         sb.push(&vec![b'a'; SCROLLBACK_MAX]);
         sb.push(b"END");
         assert_eq!(sb.data.len(), SCROLLBACK_MAX);
-        assert!(sb.data.ends_with(b"END"));
+        assert!(sb.data.make_contiguous().ends_with(b"END"));
+        sb.push(&vec![b'b'; SCROLLBACK_MAX + 10]);
+        assert_eq!(sb.data.len(), SCROLLBACK_MAX);
         assert!(scrollback_path("../../etc").is_none());
         assert!(scrollback_path("").is_none());
     }
@@ -379,6 +477,8 @@ pub fn pty_kill(id: u32) -> Result<(), String> {
         .and_then(|m| m.remove(&id))
         .map(|mut s| {
             let _ = s.child.kill();
+            // A paused reader would never see the end of the PTY.
+            s.flow.set(false);
             s
         })
         .is_some();
