@@ -49,6 +49,9 @@ pub struct FileTree {
     auto_expand_below: Option<usize>,
     /// Bumped when the roots change, so loads for old roots are dropped.
     generation: u64,
+    /// When the current burst of loads started, and how long the last one took.
+    loads_started: Option<std::time::Instant>,
+    pub last_load_time: Option<std::time::Duration>,
 }
 
 impl EventEmitter<FileTreeEvent> for FileTree {}
@@ -94,6 +97,8 @@ impl FileTree {
             pending: 0,
             auto_expand_below: None,
             generation: 0,
+            loads_started: None,
+            last_load_time: None,
         }
     }
 
@@ -141,6 +146,9 @@ impl FileTree {
         }
         entry.expanded = true;
         entry.loading = true;
+        if self.pending == 0 {
+            self.loads_started = Some(std::time::Instant::now());
+        }
         self.pending += 1;
         let path = entry.path.clone();
         let generation = self.generation;
@@ -191,6 +199,7 @@ impl FileTree {
             }
         }
         if self.pending == 0 {
+            self.last_load_time = self.loads_started.take().map(|t| t.elapsed());
             self.auto_expand_below = None;
             cx.emit(FileTreeEvent::Settled);
         }

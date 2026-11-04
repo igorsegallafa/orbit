@@ -24,8 +24,10 @@ pub struct Script {
     pub expand: usize,
     pub terminals: usize,
     pub cmd: Option<String>,
-    /// File to open, relative to the workspace folder (or absolute).
-    pub open: Option<PathBuf>,
+    /// Files to open in order, relative to the workspace folder (or absolute).
+    pub open: Vec<PathBuf>,
+    /// Open them as preview tabs (a single click in the tree).
+    pub preview: bool,
     /// 1-based `line:column` for the cursor after opening.
     pub cursor: Option<(u32, u32)>,
     /// Seconds to wait for the editor's language server (and first diagnostics).
@@ -59,7 +61,8 @@ impl Script {
                 "--expand" => s.expand = args.next().and_then(|v| v.parse().ok()).unwrap_or(0),
                 "--terminals" => s.terminals = args.next().and_then(|v| v.parse().ok()).unwrap_or(0),
                 "--cmd" => s.cmd = args.next(),
-                "--open" => s.open = args.next().map(PathBuf::from),
+                "--open" => s.open.extend(args.next().map(PathBuf::from)),
+                "--preview" => s.preview = true,
                 "--cursor" => {
                     s.cursor = args.next().and_then(|v| {
                         let (l, c) = v.split_once(':')?;
@@ -244,21 +247,23 @@ pub async fn run(script: Script, window: WindowHandle<Root>, app: Entity<OrbitAp
     sleep(cx, 500).await;
 
     if script.expand > 0 {
-        let took = wait_until(cx, 60, |cx| app.read_with(cx, |a, cx| a.tree.read(cx).is_settled())).await;
-        let rows = app.read_with(cx, |a, cx| a.tree.read(cx).row_count());
-        let _ = writeln!(log, "tree: expanded {} levels in the background, {rows} rows, settled after {:?}", script.expand, took);
+        wait_until(cx, 60, |cx| app.read_with(cx, |a, cx| a.tree.read(cx).is_settled())).await;
+        let (rows, took) = app.read_with(cx, |a, cx| (a.tree.read(cx).row_count(), a.tree.read(cx).last_load_time));
+        let _ = writeln!(log, "tree: expanded {} levels in the background, {rows} rows in {took:?}", script.expand);
     }
 
-    if let Some(rel) = &script.open {
+    let mut opened = None;
+    for rel in &script.open {
         let path = app.read_with(cx, |a, _| a.workspace().map_or(rel.clone(), |w| w.dir.join(rel)));
-        let opened = any_window
-            .update(cx, |_, window, cx| app.update(cx, |a, cx| a.open_file(path.clone(), false, window, cx)))
+        opened = any_window
+            .update(cx, |_, window, cx| app.update(cx, |a, cx| a.open_file(path.clone(), script.preview, window, cx)))
             .ok()
             .flatten();
-        let Some(editor) = opened else {
+        if opened.is_none() {
             let _ = writeln!(log, "open {}: failed", path.display());
-            return finish(script, &app, log, started, cx).await;
-        };
+        }
+    }
+    if let Some(editor) = opened {
         if script.wait_lsp > 0 {
             let attached = wait_until(cx, script.wait_lsp, |cx| editor.read_with(cx, |e, _| e.lsp_attached())).await;
             let _ = writeln!(log, "lsp attached after {attached:?}");

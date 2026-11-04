@@ -62,7 +62,7 @@ fn main() {
             }
         })
         .detach();
-        if script.is_active() || !script.keys.is_empty() || script.open.is_some() {
+        if script.is_active() || !script.keys.is_empty() || !script.open.is_empty() {
             cx.spawn(async move |cx| script::run(script, window, app_entity, cx).await).detach();
         }
     });
