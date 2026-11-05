@@ -212,6 +212,15 @@ pub fn open(app: &mut OrbitApp, page: Page, window: &mut Window, cx: &mut Contex
     focus_next_frame(handle, window);
 }
 
+/// Selects workspace `name`, then opens its review page.
+pub fn open_for(app: &mut OrbitApp, name: &str, page: Page, window: &mut Window, cx: &mut Context<OrbitApp>) {
+    let Some(ix) = app.workspaces.iter().position(|ws| ws.meta.name == name) else { return };
+    if app.selected != Some(ix) {
+        app.select_workspace(ix, cx);
+    }
+    open(app, page, window, cx);
+}
+
 /// Opens a commit's review tab (the dock's commit list calls this).
 pub fn open_commit(app: &mut OrbitApp, repo: &str, commit: orbit_core::git::CommitEntry, window: &mut Window, cx: &mut Context<OrbitApp>) {
     let Some(ws) = app.workspace().cloned() else { return };

@@ -4,8 +4,6 @@
 use super::ui;
 use super::{notes as rnotes, Load, ReviewTab};
 use crate::lsp::file_language;
-use crate::overlay::MenuItem;
-use crate::sessions;
 use crate::theme::{self, c};
 use gpui::{
     div, prelude::*, px, App, ClickEvent, Context, ElementId, Entity, FontWeight, KeyDownEvent, MouseButton, MouseDownEvent,
@@ -200,7 +198,7 @@ impl ReviewTab {
     }
 
     pub fn open_notes(&self) -> Vec<&Note> {
-        self.notes.iter().flat_map(|f| f.notes.iter()).filter(|n| !n.done).collect()
+        rnotes::open(self.notes.as_ref())
     }
 
     fn shown_notes(&self) -> Vec<Note> {
@@ -365,32 +363,7 @@ impl ReviewTab {
     /// "Fix N notes with agent": the workspace's agent sessions, or a new one.
     fn fix_menu(&self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let Some(file) = &self.notes else { return };
-        let prompt = rnotes::prompt(std::path::Path::new(&file.file));
-        let count = self.open_notes().len();
-        let ws = self.workspace.clone();
-        let agents: Vec<(String, String)> = sessions::store(cx)
-            .read(cx)
-            .sessions()
-            .filter(|(m, v)| m.workspace == ws && m.cmd.is_some() && v.is_some())
-            .map(|(m, _)| (m.id.clone(), m.session_name.clone()))
-            .collect();
-        let mut items: Vec<MenuItem> = agents
-            .into_iter()
-            .map(|(id, name)| {
-                let prompt = prompt.clone();
-                MenuItem::new(format!("Send to {name}"), move |a, _, cx| {
-                    let Some(view) = sessions::store(cx).read(cx).view(&id) else { return };
-                    view.read(cx).send(prompt.as_bytes());
-                    view.read(cx).send(b"\r");
-                    let s = if count == 1 { "" } else { "s" };
-                    a.toast(crate::toast::ToastKind::Success, format!("Sent {count} note{s} to {name}"), None, cx);
-                })
-            })
-            .collect();
-        items.push(MenuItem::new("New agent session", move |a, w, cx| {
-            let bin = orbit_core::config::Config::load().map(|c| c.ai.agent_bin()).unwrap_or_else(|_| "claude".into());
-            sessions::new_session(a, Some(&bin), Some(prompt.clone()), w, cx);
-        }));
+        let items = rnotes::fix_menu(&self.workspace, Path::new(&file.file), self.open_notes().len(), cx);
         let at = ev.position;
         self.with_app(window, cx, |a, w, cx| a.open_menu(at, items, w, cx));
     }

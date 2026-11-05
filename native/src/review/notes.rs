@@ -1,5 +1,8 @@
 //! Review notes (REVIEW.md, the Tauri app's format through `orbit_core::notes`)
 //! and where a note's code is now (`anchorNote` in `src/lib/notes.ts`).
+use crate::overlay::MenuItem;
+use crate::sessions;
+use gpui::App;
 use orbit_core::notes::{self, Note, NotesFile};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -90,9 +93,40 @@ pub fn snippet(text: &str, start: u32, end: u32) -> String {
 /// Prompt that has an agent work through the open notes (`notesPrompt`).
 pub fn prompt(file: &Path) -> String {
     format!(
-        "Read the review notes in {} and address every open item (\"- [ ]\"): each one points at a file and lines (relative to that file's folder), says what to change, and shows the code it was left on. Tick each item (\"- [x]\") in that file as you finish it. Commit nothing unless asked.",
+        "Read the review notes in {} and address every open item (\"- [ ]\"): each one points at a file and lines (relative to that file's folder), says what to change, and shows the code it was left on. Skip ticked items (\"- [x]\"): they were done in an earlier round. Tick each item (\"- [x]\") in that file as you finish it. Commit nothing unless asked.",
         file.display()
     )
+}
+
+pub fn open(file: Option<&NotesFile>) -> Vec<&Note> {
+    file.iter().flat_map(|f| &f.notes).filter(|n| !n.done).collect()
+}
+
+/// "Fix N notes with agent": sends the prompt to one of workspace `ws`'s
+/// agent sessions, or starts a new one with it.
+pub fn fix_menu(ws: &str, file: &Path, count: usize, cx: &App) -> Vec<MenuItem> {
+    let prompt = prompt(file);
+    let mut items: Vec<MenuItem> = sessions::store(cx)
+        .read(cx)
+        .sessions()
+        .filter(|(m, v)| m.workspace == ws && m.cmd.is_some() && v.is_some())
+        .map(|(m, _)| {
+            let (id, name, prompt) = (m.id.clone(), m.session_name.clone(), prompt.clone());
+            MenuItem::new(format!("Send to {name}"), move |a, _, cx| {
+                let Some(view) = sessions::store(cx).read(cx).view(&id) else { return };
+                view.read(cx).send(prompt.as_bytes());
+                view.read(cx).send(b"\r");
+                let s = if count == 1 { "" } else { "s" };
+                a.toast(crate::toast::ToastKind::Success, format!("Sent {count} note{s} to {name}"), None, cx);
+            })
+        })
+        .collect();
+    let ws = ws.to_string();
+    items.push(MenuItem::new("New agent session", move |a, w, cx| {
+        let bin = orbit_core::config::Config::load().map(|c| c.ai.agent_bin()).unwrap_or_else(|_| "claude".into());
+        sessions::new_session_in(a, ws.clone(), Some(&bin), Some(prompt.clone()), w, cx);
+    }));
+    items
 }
 
 #[cfg(test)]

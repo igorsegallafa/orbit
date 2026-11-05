@@ -2,7 +2,10 @@
 //! files on the left; the overview or a file's diff with its review threads
 //! on the right. Comments go out at once or wait in a pending review that is
 //! submitted with a verdict. An agent can address the open threads in the
-//! workspace that has the PR checked out (`AddressReview.tsx`).
+//! workspace that has the PR checked out (`AddressReview.tsx`). With the
+//! branch checked out, the workspace's REVIEW.md notes show inline too.
+mod local_notes;
+
 use super::pr_ui::{self, lucide, tint, Tone};
 use super::Load;
 use crate::app::OrbitApp;
@@ -22,6 +25,7 @@ use gpui_component::text::TextView;
 use gpui_component::ActiveTheme;
 use orbit_core::agent::ThreadReply;
 use orbit_core::github::{PrDetail, PullRequest};
+use orbit_core::notes::NotesFile;
 use orbit_core::review::{DraftComment, ReviewData, ReviewThread};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -50,6 +54,9 @@ struct Saved {
     viewed: Vec<String>,
     #[serde(default)]
     drafts: Vec<Draft>,
+    /// REVIEW.md notes turned into drafts here, so none goes twice.
+    #[serde(default)]
+    sent: Vec<String>,
 }
 
 fn store_path() -> Option<PathBuf> {
@@ -65,7 +72,7 @@ fn load_saved(key: &str) -> Saved {
 fn save(key: &str, saved: &Saved) {
     let Some(p) = store_path() else { return };
     let mut all: HashMap<String, Saved> = std::fs::read_to_string(&p).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
-    if saved.viewed.is_empty() && saved.drafts.is_empty() {
+    if saved.viewed.is_empty() && saved.drafts.is_empty() && saved.sent.is_empty() {
         all.remove(key);
     } else {
         all.insert(key.to_string(), saved.clone());
@@ -120,6 +127,9 @@ enum ComposerKind {
     /// One of the viewer's posted comments, by REST id.
     Edit(u64),
     EditDraft(String),
+    /// A REVIEW.md note, by id.
+    EditNote(String),
+    ReplyNote(String),
 }
 
 struct Composer {
@@ -216,6 +226,14 @@ pub struct PrReviewPage {
     address: Option<Address>,
     /// Replies the agent drafted, by thread id.
     suggestions: HashMap<String, ThreadReply>,
+    /// The workspace's REVIEW.md, while it has the branch checked out.
+    notes: Option<NotesFile>,
+    notes_stamp: Option<std::time::SystemTime>,
+    show_done: bool,
+    /// The shown file at the PR's head, where notes are anchored.
+    head_text: String,
+    sending_notes: bool,
+    _poll: Task<()>,
 }
 
 fn side_of(s: &str) -> DiffSide {
@@ -257,6 +275,18 @@ impl PrReviewPage {
             workspace: None,
             address: None,
             suggestions: HashMap::new(),
+            notes: None,
+            notes_stamp: None,
+            show_done: false,
+            head_text: String::new(),
+            sending_notes: false,
+            // Follows REVIEW.md: an agent ticking a note shows up here.
+            _poll: cx.spawn(async move |this, cx| loop {
+                cx.background_executor().timer(std::time::Duration::from_secs(2)).await;
+                if this.update(cx, |p, cx| p.poll_notes(cx)).is_err() {
+                    break;
+                }
+            }),
         };
         page.load(window, cx);
         page
@@ -295,6 +325,7 @@ impl PrReviewPage {
                     p.host.error("Couldn't load the pull request", e.clone(), cx);
                 }
                 p.workspace = ws;
+                p.reload_notes(cx);
                 p.detail = d.map_or_else(Load::Failed, Load::Ready);
                 cx.notify();
             });
@@ -343,15 +374,16 @@ impl PrReviewPage {
                 .background_spawn(async move {
                     let d = orbit_core::github::pr_file_diff(&or, &head, &base, &p2)?;
                     let count = |t: &str| t.lines().count() as u64;
-                    Ok::<_, String>(((count(&d.original), count(&d.modified)), patch_of(&p2, &d.original, &d.modified)?))
+                    Ok::<_, String>(((count(&d.original), count(&d.modified)), patch_of(&p2, &d.original, &d.modified)?, d.modified))
                 })
                 .await;
             let _ = this.update(cx, |page, cx| {
                 if page.selected != Sel::File(path.clone()) {
                     return;
                 }
-                let patch = patch.map(|(lines, p)| {
+                let patch = patch.map(|(lines, p, head)| {
                     page.lines = lines;
+                    page.head_text = head;
                     p
                 });
                 let language = crate::lsp::file_language(Path::new(&path)).highlight;
@@ -413,7 +445,10 @@ impl PrReviewPage {
     fn open_composer(&mut self, kind: ComposerKind, initial: &str, window: &mut Window, cx: &mut Context<Self>) {
         let placeholder = match kind {
             ComposerKind::Reply(_) => "Reply…",
+            ComposerKind::ReplyNote(_) => "Reply (appended to the note)",
+            ComposerKind::New { side, .. } if self.can_note(side) => "What should change here? (a note in REVIEW.md, or a GitHub comment)",
             ComposerKind::New { .. } => "Leave a comment",
+            ComposerKind::EditNote(_) => "Edit note",
             _ => "Edit comment",
         };
         let initial = initial.to_string();
@@ -436,7 +471,10 @@ impl PrReviewPage {
 
     fn submit_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.composer.as_ref().map(|c| c.kind.clone()) {
+            Some(ComposerKind::New { side, .. }) if self.can_note(side) => self.add_note(cx),
             Some(ComposerKind::New { .. }) => self.add_draft(cx),
+            Some(ComposerKind::EditNote(id)) => self.edit_note(&id, false, cx),
+            Some(ComposerKind::ReplyNote(id)) => self.edit_note(&id, true, cx),
             Some(ComposerKind::Reply(_)) => self.comment_now(window, cx),
             Some(ComposerKind::Edit(id)) => self.edit_comment(id, window, cx),
             Some(ComposerKind::EditDraft(id)) => {
@@ -857,7 +895,7 @@ impl PrReviewPage {
                     .when(!on_overview, |d| d.text_color(c(theme::TEXT_DIM)).hover(|s| s.bg(c(theme::PANEL_RAISED)).text_color(c(theme::TEXT))))
                     .child(lucide("file-text", 13., c(if on_overview { theme::TEXT } else { theme::TEXT_DIM })))
                     .child(div().flex_1().child("Overview"))
-                    .when(reviews > 0, |d| d.child(count_pill(reviews, false)))
+                    .when(reviews > 0, |d| d.child(count_pill(reviews, theme::INFO)))
                     .child(probe("pr-overview"))
                     .on_click(cx.listener(|p, _, window, cx| p.select(Sel::Overview, window, cx))),
             )
@@ -929,6 +967,7 @@ impl PrReviewPage {
             };
             let open = self.threads_of(&f.path).iter().filter(|t| !t.is_resolved).count();
             let drafts = self.saved.drafts.iter().filter(|d| d.path == f.path).count();
+            let notes = self.open_notes_of(&f.path);
             let (p1, p2) = (f.path.clone(), f.path.clone());
             files = files.child(
                 div()
@@ -971,15 +1010,16 @@ impl PrReviewPage {
                                     .child(div().flex_none().text_color(c(if viewed { theme::TEXT_FAINT } else { theme::TEXT })).child(name))
                                     .when_some(dir, |d, dir| d.child(div().ml(px(6.)).min_w_0().truncate().text_size(px(11.)).text_color(c(theme::TEXT_FAINT)).child(dir))),
                             )
-                            .when(open > 0, |d| d.child(count_pill(open, false)))
-                            .when(drafts > 0, |d| d.child(count_pill(drafts, true)))
+                            .when(open > 0, |d| d.child(count_pill(open, theme::INFO)))
+                            .when(drafts > 0, |d| d.child(count_pill(drafts, theme::WARN)))
+                            .when(notes > 0, |d| d.child(count_pill(notes, theme::PURPLE)))
                             .child(pr_ui::stats(f.additions, f.deletions, 10.5))
                             .on_click(cx.listener(move |p, _, window, cx| p.select(Sel::File(p2.clone()), window, cx))),
                     )
                     .child(probe(format!("pr-file:{i}"))),
             );
         }
-        side.child(header).child(files)
+        side.child(header).children(self.render_notes_side(cx)).child(files)
     }
 
     // ---------- right side ----------
@@ -1102,6 +1142,7 @@ impl PrReviewPage {
                 },
             ));
         }
+        actions = actions.children(self.fix_button(cx));
         actions = actions.child(
             div()
                 .relative()
@@ -1431,6 +1472,13 @@ impl PrReviewPage {
                 ranges.push((side_of(&d.side), s, d.line));
             }
         }
+        let (notes, lost): (Vec<_>, Vec<_>) = self.file_notes(path).into_iter().partition(|(_, at)| !at.lost);
+        for (_, at) in &notes {
+            lines.push((DiffSide::Modified, at.end as u64));
+            if at.end > at.start {
+                ranges.push((DiffSide::Modified, at.start as u64, at.end as u64));
+            }
+        }
         if let Some(ComposerKind::New { side, start, end }) = self.composer.as_ref().map(|c| &c.kind) {
             lines.push((*side, *end));
             ranges.push((*side, *start, *end));
@@ -1525,6 +1573,7 @@ impl PrReviewPage {
                         .children(off.iter().map(|t| div().flex_none().child(self.render_thread(t, Some(off_location(t)), cx)))),
                 )
             })
+            .when(!lost.is_empty(), |d| d.child(self.render_lost_notes(&lost, cx)))
             .child(
                 div()
                     .flex_1()
@@ -1544,6 +1593,11 @@ impl PrReviewPage {
             self.threads_of(&path).into_iter().filter(|t| t.side == side && t.line == Some(line)).cloned().collect();
         let drafts: Vec<Draft> = self.saved.drafts.iter().filter(|d| d.path == path && d.side == side && d.line == line).cloned().collect();
         let composer_here = matches!(self.composer.as_ref().map(|c| &c.kind), Some(ComposerKind::New { side: s, end, .. }) if side_name(*s) == side && *end == line);
+        let notes: Vec<_> = if side == "RIGHT" {
+            self.file_notes(&path).into_iter().filter(|(_, at)| !at.lost && at.end as u64 == line).collect()
+        } else {
+            vec![]
+        };
         div()
             .mx(px(12.))
             .my(px(6.))
@@ -1554,6 +1608,7 @@ impl PrReviewPage {
             .font_family(theme::UI_FONT)
             .children(threads.iter().map(|t| self.render_thread(t, None, cx)))
             .children(drafts.iter().map(|d| self.render_draft(d, cx)))
+            .children(notes.into_iter().map(|(n, at)| self.render_note(n, at, cx)))
             .when(composer_here, |d| d.child(self.render_composer(cx)))
             .into_any_element()
     }
@@ -1852,13 +1907,15 @@ impl PrReviewPage {
     fn render_composer(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(composer) = &self.composer else { return div().into_any_element() };
         let new = matches!(composer.kind, ComposerKind::New { .. });
+        let note = matches!(composer.kind, ComposerKind::New { side, .. } if self.can_note(side));
         let label = match composer.kind {
             ComposerKind::New { start, end, .. } if start < end => format!("Comment on lines {start}–{end}"),
             ComposerKind::New { end, .. } => format!("Comment on line {end}"),
             _ => String::new(),
         };
         let primary = match composer.kind {
-            ComposerKind::Reply(_) => ("pr-composer-reply", "Reply"),
+            ComposerKind::Reply(_) | ComposerKind::ReplyNote(_) => ("pr-composer-reply", "Reply"),
+            ComposerKind::New { .. } if note => ("pr-composer-note", "Add note"),
             ComposerKind::New { .. } if self.saved.drafts.is_empty() => ("pr-composer-add", "Start a review"),
             ComposerKind::New { .. } => ("pr-composer-add", "Add review comment"),
             _ => ("pr-composer-save", "Save"),
@@ -1883,7 +1940,11 @@ impl PrReviewPage {
                     .flex()
                     .items_center()
                     .gap(px(6.))
-                    .child(div().mr_auto().text_size(px(11.)).text_color(c(theme::TEXT_FAINT)).child("Markdown · Ctrl+Enter"))
+                    .child(div().mr_auto().text_size(px(11.)).text_color(c(theme::TEXT_FAINT)).child(if new && self.workspace.is_none() {
+                        "Check out the branch as a workspace for local notes"
+                    } else {
+                        "Markdown · Ctrl+Enter"
+                    }))
                     .child(pr_ui::btn_mini("pr-composer-cancel", "Cancel").on_click(cx.listener(|p, _, _, cx| p.cancel_composer(cx))))
                     .when(new, |d| {
                         d.child(
@@ -1895,6 +1956,9 @@ impl PrReviewPage {
                                     }
                                 })),
                         )
+                    })
+                    .when(note, |d| {
+                        d.child(pr_ui::btn_mini("pr-composer-draft", "Add to GitHub review").on_click(cx.listener(|p, _, _, cx| p.add_draft(cx))))
                     })
                     .child(
                         pr_ui::button(primary.0, if busy && !new { "Sending…" } else { primary.1 }, true, 24.)
@@ -1946,13 +2010,13 @@ fn avatar(name: &str) -> gpui::Div {
 }
 
 /// `.rv-file-count`.
-fn count_pill(n: usize, draft: bool) -> gpui::Div {
+fn count_pill(n: usize, color: u32) -> gpui::Div {
     div()
         .min_w(px(16.))
         .px(px(5.))
         .rounded_full()
-        .bg(if draft { tint(theme::WARN, 0.18) } else { theme::accent_soft() })
-        .text_color(c(if draft { theme::WARN } else { theme::INFO }))
+        .bg(tint(color, 0.18))
+        .text_color(c(color))
         .text_size(px(10.5))
         .font_weight(FontWeight::BOLD)
         .flex()
@@ -2115,6 +2179,14 @@ impl PageView for PrReviewPage {
         }
         for (id, s) in &self.suggestions {
             let _ = writeln!(out, "    suggestion {id} {}: {:?}", s.status, s.reply);
+        }
+        if let Some(f) = &self.notes {
+            let _ = writeln!(out, "    notes {} ({} open, show done {}, sent {:?})", f.file, super::notes::open(Some(f)).len(), self.show_done, self.saved.sent);
+            if let Sel::File(path) = &self.selected {
+                for (n, at) in self.file_notes(path) {
+                    let _ = writeln!(out, "    note {}-{}{}{}{} {:?}", at.start, at.end, if n.done { " done" } else { "" }, if at.moved { " moved" } else { "" }, if at.lost { " lost" } else { "" }, n.body);
+                }
+            }
         }
     }
 

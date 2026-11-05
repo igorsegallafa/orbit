@@ -41,6 +41,8 @@ pub struct WsPage {
     /// The check being re-run.
     pub rerunning: Option<String>,
     pub scroll: ScrollHandle,
+    /// Open REVIEW.md notes, for the Review Changes button.
+    pub open_notes: usize,
     /// The plan checklist, which scrolls inside the page.
     pub plan_scroll: ScrollHandle,
 }
@@ -63,6 +65,7 @@ impl WsPage {
             expanded: None,
             rerunning: None,
             scroll: ScrollHandle::new(),
+            open_notes: 0,
             plan_scroll: ScrollHandle::new(),
         }
     }
@@ -203,9 +206,10 @@ impl PageTab {
                         (prs.join().unwrap_or_else(|_| Err(failed())), checks.join().unwrap_or_else(|_| Err(failed())))
                     })
                 });
-                (meta, workspace::status(&name), remote)
+                let notes = crate::review::notes::list(&name).map_or(0, |f| crate::review::notes::open(Some(&f)).len());
+                (meta, workspace::status(&name), remote, notes)
             },
-            move |t, (meta, status, remote), window, cx| {
+            move |t, (meta, status, remote, notes), window, cx| {
                 let Some(p) = t.ws_page() else { return };
                 p.refreshing = false;
                 let stale = std::mem::take(&mut p.stale);
@@ -217,6 +221,7 @@ impl PageTab {
                     Err(e) => p.error = Some(e),
                 }
                 p.statuses = status.map_or_else(Load::Failed, Load::Ready);
+                p.open_notes = notes;
                 if let Some((prs, checks)) = remote {
                     p.prs = prs.map_or_else(Load::Failed, Load::Ready);
                     p.checks = checks.map_or_else(Load::Failed, Load::Ready);
@@ -424,14 +429,11 @@ impl PageTab {
 
     fn open_review(&mut self, page: crate::review::Page, window: &mut Window, cx: &mut Context<Self>) {
         let Some(name) = self.ws_name() else { return };
-        self.with_app(window, cx, move |a, w, cx| {
-            if let Some(ix) = a.workspaces.iter().position(|ws| ws.meta.name == name) {
-                if a.selected != Some(ix) {
-                    a.select_workspace(ix, cx);
-                }
-                crate::review::open(a, page, w, cx);
-            }
-        });
+        self.with_app(window, cx, move |a, w, cx| crate::review::open_for(a, &name, page, w, cx));
+    }
+
+    fn open_review_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_review(crate::review::Page::Changes, window, cx);
     }
     /// The repo row's click (`onOpenEditor`): the dock shows that repo.
     fn browse_repo(&mut self, repo: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -630,6 +632,21 @@ fn header(p: &WsPage, d: &Derived, cx: &mut Context<PageTab>) -> impl IntoElemen
         if d.open > 0 { "Review the feature's PRs: diffs, threads and verdict, one tab" } else { "No open pull request: create them first" },
     )
     .on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.open_code_review(w, cx)));
+    let review_label = if p.open_notes > 0 { format!("Review Changes · {}", p.open_notes) } else { "Review Changes".into() };
+    let has_review = !d.dirty.is_empty() || p.open_notes > 0;
+    let review_changes = kit::hint(
+        kit::disabled(kit::button_icon("ws-review-changes", Some(("commit", 14.)), review_label, Kind::Secondary, kit::TOOL), !has_review),
+        if has_review {
+            format!("Review uncommitted changes with notes for an agent ({})", plural(p.open_notes, "open note"))
+        } else {
+            "No uncommitted changes or open notes".into()
+        },
+    )
+    .on_click(cx.listener(move |t, _: &ClickEvent, w, cx| {
+        if has_review {
+            t.open_review_changes(w, cx)
+        }
+    }));
     let refresh = if p.refreshing {
         kit::hint(
             div()
@@ -672,6 +689,7 @@ fn header(p: &WsPage, d: &Derived, cx: &mut Context<PageTab>) -> impl IntoElemen
                 .flex()
                 .items_center()
                 .gap(px(6.))
+                .child(review_changes)
                 .child(code_review)
                 .child(tool(
                     "ws-plan",
@@ -771,7 +789,7 @@ fn flow_steps(p: &WsPage, d: &Derived, cx: &mut Context<PageTab>) -> impl IntoEl
                 format!("{} with uncommitted changes", plural(d.dirty.len(), "repo"))
             },
             action: (!d.dirty.is_empty()).then_some(("Commit", (|t: &mut PageTab, w: &mut Window, cx: &mut Context<PageTab>| t.start_commit(w, cx)) as Act, false)),
-            extra: None,
+            extra: (!d.dirty.is_empty() || p.open_notes > 0).then_some(("Review", (|t: &mut PageTab, w: &mut Window, cx: &mut Context<PageTab>| t.open_review_changes(w, cx)) as Act)),
         },
         Step {
             id: "flow-push",
