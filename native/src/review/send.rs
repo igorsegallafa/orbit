@@ -41,7 +41,7 @@ pub fn problem(in_pr: bool, head: Option<&str>, at: rnotes::Anchor, c: Option<&C
 }
 
 /// Checks every open note of a PR'd repo against its PR (network: gh).
-fn plan(ws: &str, refs: &[PrRef], notes: &[Note]) -> Vec<Candidate> {
+pub(super) fn plan(ws: &str, refs: &[PrRef], notes: &[Note]) -> Vec<Candidate> {
     let mut out = vec![];
     for pr in refs {
         let mine: Vec<&Note> = notes.iter().filter(|n| n.repo == pr.repo && !n.done).collect();
@@ -90,6 +90,17 @@ fn plan(ws: &str, refs: &[PrRef], notes: &[Note]) -> Vec<Candidate> {
     out
 }
 
+/// The review comment a note becomes, on the pushed head's lines.
+pub fn comment(c: &Candidate) -> DraftComment {
+    DraftComment {
+        path: c.note.path.clone(),
+        side: "RIGHT".into(),
+        line: c.end as u64,
+        start_line: (c.start < c.end).then_some(c.start as u64),
+        body: c.note.body.clone(),
+    }
+}
+
 /// Posts the ready candidates, one review per PR; returns the posted note ids.
 fn post(cands: &[Candidate]) -> (Vec<String>, Vec<String>) {
     let (mut sent, mut errors) = (vec![], vec![]);
@@ -97,16 +108,7 @@ fn post(cands: &[Candidate]) -> (Vec<String>, Vec<String>) {
     prs.dedup_by(|a, b| a.repo == b.repo && a.number == b.number);
     for pr in prs {
         let mine: Vec<&Candidate> = cands.iter().filter(|c| c.problem.is_none() && c.pr.repo == pr.repo && c.pr.number == pr.number).collect();
-        let comments: Vec<DraftComment> = mine
-            .iter()
-            .map(|c| DraftComment {
-                path: c.note.path.clone(),
-                side: "RIGHT".into(),
-                line: c.end as u64,
-                start_line: (c.start < c.end).then_some(c.start as u64),
-                body: c.note.body.clone(),
-            })
-            .collect();
+        let comments: Vec<DraftComment> = mine.iter().map(|c| comment(c)).collect();
         match review::submit_review(&mine[0].owner_repo, pr.number, &mine[0].head_sha, "COMMENT", "", &comments) {
             Ok(()) => sent.extend(mine.iter().map(|c| c.note.id.clone())),
             Err(e) => errors.push(format!("{} #{}: {e}", pr.repo, pr.number)),
