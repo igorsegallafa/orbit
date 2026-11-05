@@ -96,6 +96,8 @@ pub struct Build {
     pub elapsed: Option<Duration>,
     /// Where relative paths in compiler messages start (the build folder).
     base_dir: Option<String>,
+    /// rustc's last long-format header, waiting for its "-->" location line.
+    rust_header: Option<String>,
     root: PathBuf,
     linked_root: PathBuf,
 }
@@ -742,6 +744,7 @@ impl RunStore {
             started: Instant::now(),
             elapsed: None,
             base_dir,
+            rust_header: None,
             root,
             linked_root,
         });
@@ -779,7 +782,14 @@ impl RunStore {
             let text = problems::strip_ansi(&raw);
             let mut problem = None;
             if stream != Stream::Info {
-                if let Some(p) = problems::parse(&raw, b.base_dir.as_deref()) {
+                let base = b.base_dir.as_deref();
+                let found = problems::parse(&raw, base).or_else(|| b.rust_header.as_deref().and_then(|h| problems::parse_rust_long(h, &raw, base)));
+                if found.is_some() {
+                    b.rust_header = None;
+                } else if problems::is_rust_header(&raw) {
+                    b.rust_header = Some(raw.clone());
+                }
+                if let Some(p) = found {
                     let k = p.key();
                     let ix = match b.keys.get(&k) {
                         Some(ix) => *ix,

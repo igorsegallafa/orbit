@@ -154,6 +154,11 @@ pub fn set_diagnostic_filters(languages: &[orbit_core::lsp::LanguageStatus], cx:
     }
 }
 
+/// The (repo, server language) pairs open tabs use: their servers stay up.
+pub fn servers_in_use(cx: &mut App) -> Vec<crate::lsp::ServerKey> {
+    open_editors(cx).iter().filter_map(|e| e.read(cx).server_key().map(|(k, l)| (k.clone(), l))).collect()
+}
+
 /// The React editor's rule: no severity counts as an error; codes compare as text.
 fn diagnostic_shown(filter: &(bool, Vec<String>), d: &lsp_types::Diagnostic) -> bool {
     let (errors_only, hidden) = filter;
@@ -258,6 +263,8 @@ pub struct EditorTab {
     /// The code actions the picker lists, in its item order.
     code_actions: Vec<lsp_types::CodeAction>,
     cpp: Option<CppBanner>,
+    /// The "server not installed" banner was closed.
+    missing_dismissed: bool,
     /// `.md` files: the preview and which side is shown.
     markdown: Option<markdown::Preview>,
     _subscriptions: Vec<Subscription>,
@@ -439,6 +446,7 @@ impl EditorTab {
             signature: None,
             code_actions: vec![],
             cpp: None,
+            missing_dismissed: false,
             markdown,
             _subscriptions: subscriptions,
             _attach: Task::ready(()),
@@ -1496,6 +1504,37 @@ impl EditorTab {
         )
     }
 
+    /// The language's server isn't installed: the install command, and Retry once it is.
+    fn render_missing_banner(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let LspState::Missing(e) = &self.lsp_state else { return None };
+        if self.missing_dismissed || !e.starts_with("no language server") {
+            return None;
+        }
+        use crate::workspace_ui::kit;
+        Some(
+            div()
+                .relative()
+                .flex_none()
+                .px(px(14.))
+                .py(px(8.))
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .text_size(px(12.))
+                .bg(theme::hsla(theme::WARN).opacity(0.07))
+                .border_b_1()
+                .border_color(c(theme::BORDER))
+                .text_color(c(theme::TEXT_DIM))
+                .child(div().flex_1().min_w_0().child(e.clone()))
+                .child(crate::probe::probe("lsp-missing"))
+                .child(kit::button("lsp-retry", "Retry", kit::Kind::Secondary, kit::NORMAL).on_click(cx.listener(|this, _, _, cx| this.restart(cx))))
+                .child(kit::icon_button("lsp-missing-dismiss", "x", 22., 12., false).on_click(cx.listener(|this, _, _, cx| {
+                    this.missing_dismissed = true;
+                    cx.notify();
+                }))),
+        )
+    }
+
     fn render_status(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let (errors, warnings) = self.problem_counts();
         let state = self.state.read(cx);
@@ -1755,6 +1794,7 @@ impl Render for EditorTab {
                     .children(self.render_markdown_toggle(cx)),
             )
             .children(self.render_cpp_banner(cx))
+            .children(self.render_missing_banner(cx))
             .children(preview)
             .child(
                 div()

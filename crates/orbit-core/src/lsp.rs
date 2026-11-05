@@ -92,15 +92,26 @@ pub fn language(id: &str) -> Option<&'static LanguageDef> {
     LANGUAGES.iter().find(|l| l.id == id)
 }
 
+/// rust-analyzer on PATH, else the rustup component (distro rustup packages
+/// put no proxy on PATH for it), else ~/.cargo/bin.
+fn locate_rust_analyzer() -> Option<String> {
+    // rustup's PATH proxy fails until the component is installed ("Unknown binary").
+    let works = |bin: &str| crate::proc::run(bin, &["--version"], None).is_ok();
+    if crate::proc::exists("rust-analyzer") && works("rust-analyzer") {
+        return Some("rust-analyzer".into());
+    }
+    let rustup = crate::proc::run("rustup", &["which", "rust-analyzer"], None).ok().map(|p| PathBuf::from(p.trim()));
+    let cargo_bin = std::env::home_dir().map(|h| h.join(".cargo/bin").join(format!("rust-analyzer{}", std::env::consts::EXE_SUFFIX)));
+    [rustup, cargo_bin].into_iter().flatten().map(|p| p.to_string_lossy().to_string()).find(|p| Path::new(p).is_file() && works(p))
+}
+
 /// Where a server binary is: on PATH, or (clangd on Windows) where the LLVM
 /// installer or Visual Studio's "C++ Clang tools" put it without touching PATH.
 fn locate(bin: &str) -> Option<String> {
+    if bin == "rust-analyzer" {
+        return locate_rust_analyzer();
+    }
     if crate::proc::exists(bin) {
-        // rustup puts a rust-analyzer proxy on PATH that only works once the
-        // component is installed ("Unknown binary 'rust-analyzer.exe'").
-        if bin == "rust-analyzer" && crate::proc::exists("rustup") && crate::proc::run("rustup", &["which", "rust-analyzer"], None).is_err() {
-            return None;
-        }
         return Some(bin.to_string());
     }
     if cfg!(windows) && bin == "clangd" {

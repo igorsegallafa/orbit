@@ -1,8 +1,9 @@
 // Run configurations (Rider/CLion style): what a repo builds and runs, read
 // from `<repo>/.orbit/run.json` (shared, in git) and `.orbit/run.local.json`
 // (one person's, gitignored), plus one per executable target CMake reports
-// (`cmake_api`), as Rider lists them. CMake configs resolve their build
-// folder from the repo's CMake presets; builds stream `run-output` events.
+// (`cmake_api`) or Cargo bin/example (`cargo`), as Rider lists them. CMake
+// configs resolve their build folder from the repo's CMake presets; builds
+// stream `run-output` events.
 use crate::agent::runner::{self, Line};
 use crate::cmake_api::{self, CmakeTarget};
 use serde::{Deserialize, Serialize};
@@ -24,8 +25,8 @@ const LOCAL_FILE: &str = "run.local.json";
 #[serde(rename_all = "camelCase", default)]
 pub struct RunConfig {
     pub name: String,
-    /// "cmake" (build a target with a CMake preset), "command", or
-    /// "compound" (launches `configs`).
+    /// "cmake" (build a target with a CMake preset), "cargo" (a bin or
+    /// example), "command", or "compound" (launches `configs`).
     pub kind: String,
     /// CMake preset; empty or "${auto}" picks one (see `pick_preset`).
     pub preset: String,
@@ -87,7 +88,7 @@ pub enum Origin {
     Project,
     /// Only in `run.local.json`.
     Local,
-    /// A CMake executable target nobody saved a configuration for.
+    /// A CMake executable or Cargo bin nobody saved a configuration for.
     Discovered,
 }
 
@@ -170,18 +171,23 @@ fn merge(shared: Vec<Value>, local: Vec<Value>) -> Vec<(RunConfig, Origin)> {
 /// configuration names or builds.
 fn with_discovered(mut saved: Vec<(RunConfig, Origin)>, targets: &[CmakeTarget]) -> Vec<(RunConfig, Origin)> {
     let taken = |t: &CmakeTarget, saved: &[(RunConfig, Origin)]| {
-        saved.iter().any(|(c, _)| c.name == t.name || (c.kind == "cmake" && c.target == t.name))
+        saved.iter().any(|(c, _)| c.name == t.name || (c.kind == kind_of(t) && c.target == t.name))
     };
     let found: Vec<_> = targets
         .iter()
         .filter(|t| t.runnable() && !taken(t, &saved))
         .map(|t| {
-            let c = RunConfig { name: t.name.clone(), kind: "cmake".into(), preset: "${auto}".into(), target: t.name.clone(), ..Default::default() };
+            let preset = if t.package.is_some() { String::new() } else { "${auto}".into() };
+            let c = RunConfig { name: t.name.clone(), kind: kind_of(t).into(), preset, target: t.name.clone(), ..Default::default() };
             (c, Origin::Discovered)
         })
         .collect();
     saved.extend(found);
     saved
+}
+
+fn kind_of(t: &CmakeTarget) -> &'static str {
+    if t.package.is_some() { "cargo" } else { "cmake" }
 }
 
 fn read_file(root: &Path, name: &str) -> Result<Vec<Value>, String> {
@@ -326,10 +332,11 @@ fn artifact_cwd(t: &CmakeTarget) -> Option<String> {
 }
 
 /// What an empty program and cwd mean for this configuration: the
-/// target's artifact and its folder, when it builds an executable.
+/// target's artifact and its folder (Cargo: the repo, as `cargo run`), when
+/// it builds an executable.
 pub fn defaults(c: &RunConfig, targets: &[CmakeTarget]) -> (Option<String>, Option<String>) {
-    let t = targets.iter().find(|t| c.kind == "cmake" && !c.target.is_empty() && t.name == c.target && t.runnable());
-    (t.and_then(artifact_program), t.and_then(artifact_cwd))
+    let t = targets.iter().find(|t| c.kind == kind_of(t) && !c.target.is_empty() && t.name == c.target && t.runnable());
+    (t.and_then(artifact_program), t.filter(|t| t.package.is_none()).and_then(artifact_cwd))
 }
 
 struct Ctx<'a> {
@@ -338,6 +345,17 @@ struct Ctx<'a> {
     presets: &'a [String],
     defs: &'a HashMap<String, Value>,
     targets: &'a [CmakeTarget],
+    /// The Cargo workspace root, when the repo has one.
+    cargo_root: Option<&'a Path>,
+}
+
+/// A cargo config's target, or a bin of that name when discovery no longer lists it.
+fn cargo_target(c: &RunConfig, targets: &[CmakeTarget]) -> CmakeTarget {
+    targets
+        .iter()
+        .find(|t| t.package.is_some() && t.name == c.target)
+        .cloned()
+        .unwrap_or_else(|| CmakeTarget { name: c.target.clone(), kind: "bin".into(), ..Default::default() })
 }
 
 fn resolve(x: &Ctx, c: &RunConfig, origin: Origin) -> ResolvedRun {
@@ -352,7 +370,8 @@ fn resolve(x: &Ctx, c: &RunConfig, origin: Origin) -> ResolvedRun {
     } else {
         auto_preset(root, x.presets, x.defs)
     };
-    let build_dir = preset.as_deref().and_then(|p| binary_dir(root, x.defs, p));
+    // Cargo's "build folder" is where its messages' relative paths start.
+    let build_dir = if c.kind == "cargo" { x.cargo_root.map(Path::to_path_buf) } else { preset.as_deref().and_then(|p| binary_dir(root, x.defs, p)) };
     let root_s = root.to_string_lossy().to_string();
     let dir_s = build_dir.as_ref().map(|d| d.to_string_lossy().to_string()).unwrap_or_default();
     let preset_s = preset.clone().unwrap_or_default();
@@ -360,6 +379,8 @@ fn resolve(x: &Ctx, c: &RunConfig, origin: Origin) -> ResolvedRun {
     let build_label = if cmake {
         let target = if c.target.is_empty() { String::new() } else { format!(" --target {}", c.target) };
         format!("cmake --build {dir_s}{target}")
+    } else if c.kind == "cargo" {
+        format!("cargo {}", crate::cargo::build_args(Some(&cargo_target(c, x.targets))).join(" "))
     } else {
         expand(&c.build, &vars)
     };
@@ -419,6 +440,7 @@ struct Loaded {
     preset: Option<String>,
     build_dir: Option<PathBuf>,
     targets: Vec<CmakeTarget>,
+    cargo_root: Option<PathBuf>,
 }
 
 fn load(root: &Path, chosen: Option<&str>) -> Result<Loaded, String> {
@@ -438,8 +460,11 @@ fn load(root: &Path, chosen: Option<&str>) -> Result<Loaded, String> {
             let _ = c.status();
         }
     }
-    let targets =build_dir.as_deref().map(|dir| cmake_api::targets(dir, || reconfigure(root, dir))).unwrap_or_default();
-    Ok(Loaded { configs: with_discovered(saved, &targets), presets, defs, preset, build_dir, targets })
+    let mut targets = build_dir.as_deref().map(|dir| cmake_api::targets(dir, || reconfigure(root, dir))).unwrap_or_default();
+    let (cargo_root, cargo_targets) = crate::cargo::targets(root).unzip();
+    targets.extend(cargo_targets.into_iter().flatten());
+    let build_dir = build_dir.or_else(|| cargo_root.clone());
+    Ok(Loaded { configs: with_discovered(saved, &targets), presets, defs, preset, build_dir, targets, cargo_root })
 }
 
 /// Configures an already configured build folder again, so CMake answers
@@ -454,7 +479,7 @@ pub fn setup(workspace: &str, repo: &str, preset: Option<&str>) -> Result<RunSet
     let root = repo_root(workspace, repo)?;
     let linked_root = crate::workspace::repo_path(workspace, repo)?.to_string_lossy().to_string();
     let l = load(&root, preset)?;
-    let x = Ctx { root: &root, chosen: preset, presets: &l.presets, defs: &l.defs, targets: &l.targets };
+    let x = Ctx { root: &root, chosen: preset, presets: &l.presets, defs: &l.defs, targets: &l.targets, cargo_root: l.cargo_root.as_deref() };
     Ok(RunSetup {
         root: root.to_string_lossy().to_string(),
         linked_root,
@@ -675,7 +700,7 @@ pub enum BuildWhat<'a> {
 pub fn build(app: &Events, workspace: &str, repo: &str, what: BuildWhat, preset: Option<&str>, key: &str) -> Result<BuildExit, String> {
     let root = repo_root(workspace, repo)?;
     let l = load(&root, preset)?;
-    let x = Ctx { root: &root, chosen: preset, presets: &l.presets, defs: &l.defs, targets: &l.targets };
+    let x = Ctx { root: &root, chosen: preset, presets: &l.presets, defs: &l.defs, targets: &l.targets, cargo_root: l.cargo_root.as_deref() };
     // Build All is the repo's preset with no target: a configuration's shape.
     let (kind, target, r) = match what {
         BuildWhat::Config(name) => {
@@ -685,6 +710,10 @@ pub fn build(app: &Events, workspace: &str, repo: &str, what: BuildWhat, preset:
                 .find(|(c, _)| c.name == name)
                 .ok_or_else(|| format!("no run configuration '{name}' in {repo}"))?;
             (config.kind.clone(), config.target.clone(), resolve(&x, config, *origin))
+        }
+        BuildWhat::All if l.presets.is_empty() && l.cargo_root.is_some() => {
+            let all = RunConfig { name: "all".into(), kind: "cargo".into(), ..Default::default() };
+            ("cargo".to_string(), String::new(), resolve(&x, &all, Origin::Discovered))
         }
         BuildWhat::All => {
             if l.presets.is_empty() {
@@ -714,6 +743,14 @@ pub fn build(app: &Events, workspace: &str, repo: &str, what: BuildWhat, preset:
             args.extend(["--target".to_string(), target.clone()]);
         }
         steps.push((r.build_label.clone(), cmake(&args)));
+    } else if kind == "cargo" {
+        let args = match what {
+            BuildWhat::All => crate::cargo::build_args(None),
+            BuildWhat::Config(_) => crate::cargo::build_args(Some(&cargo_target(&r.raw, &l.targets))),
+        };
+        let mut c = crate::proc::cmd("cargo");
+        c.args(&args);
+        steps.push((format!("cargo {}", args.join(" ")), c));
     } else if !r.build_label.trim().is_empty() {
         steps.push((r.build_label.clone(), shell(&r.build_label)));
     }
@@ -751,7 +788,7 @@ mod tests {
     }
 
     fn target(name: &str, kind: &str, artifact: Option<&str>) -> CmakeTarget {
-        CmakeTarget { name: name.into(), kind: kind.into(), artifact: artifact.map(str::to_string) }
+        CmakeTarget { name: name.into(), kind: kind.into(), artifact: artifact.map(str::to_string), ..Default::default() }
     }
 
     #[test]
@@ -790,7 +827,7 @@ mod tests {
         let defs: HashMap<String, Value> =
             [("p".to_string(), json!({"name": "p", "binaryDir": "${sourceDir}/build/${presetName}"}))].into_iter().collect();
         let presets = ["p".to_string()];
-        let x = Ctx { root, chosen: None, presets: &presets, defs: &defs, targets: &targets };
+        let x = Ctx { root, chosen: None, presets: &presets, defs: &defs, targets: &targets, cargo_root: None };
         let r: Vec<_> = list.iter().map(|(c, o)| resolve(&x, c, *o)).collect();
         // A saved config without a program gets the target's artifact and keeps its own cwd.
         assert_eq!(r[0].program.as_deref(), Some("/src/engine/build/p/src/game/game"));
@@ -802,6 +839,30 @@ mod tests {
         // A command config doesn't take a target's defaults: no program, the repo as cwd.
         assert_eq!((r[2].program.as_deref(), r[2].cwd.as_str()), (None, "/src/engine"));
         assert!(r.iter().all(|r| r.build_before_launch));
+    }
+
+    #[test]
+    fn cargo_bins_become_cargo_configs() {
+        let bin = CmakeTarget {
+            name: "dataserver".into(),
+            kind: "bin".into(),
+            artifact: Some("/src/ds/target/debug/dataserver".into()),
+            package: Some("dataserver".into()),
+            features: vec![],
+        };
+        let saved = merge(vec![json!({"name": "seeds", "kind": "cargo", "target": "seeds"})], vec![]);
+        let list = with_discovered(saved, std::slice::from_ref(&bin));
+        assert_eq!(names(&list), [("seeds", Origin::Project), ("dataserver", Origin::Discovered)]);
+        let root = Path::new("/src/ds");
+        let x = Ctx { root, chosen: None, presets: &[], defs: &HashMap::new(), targets: std::slice::from_ref(&bin), cargo_root: Some(root) };
+        let r = resolve(&x, &list[1].0, Origin::Discovered);
+        assert_eq!((r.kind.as_str(), r.preset.as_deref()), ("cargo", None));
+        assert_eq!(r.program.as_deref(), Some("/src/ds/target/debug/dataserver"));
+        assert_eq!(r.cwd, "/src/ds");
+        assert_eq!(r.build_dir.as_deref(), Some("/src/ds"));
+        assert_eq!(r.build_label, "cargo build -p dataserver --bin dataserver --message-format=short");
+        // A saved target discovery no longer lists still builds by name.
+        assert_eq!(resolve(&x, &list[0].0, Origin::Project).build_label, "cargo build --bin seeds --message-format=short");
     }
 
     #[test]
@@ -843,7 +904,7 @@ mod tests {
             ..Default::default()
         };
         let presets = ["p".to_string()];
-        let x = Ctx { root, chosen: None, presets: &presets, defs: &defs, targets: &[] };
+        let x = Ctx { root, chosen: None, presets: &presets, defs: &defs, targets: &[], cargo_root: None };
         let r = resolve(&x, &c, Origin::Project);
         assert_eq!(r.preset.as_deref(), Some("p"));
         assert_eq!(r.program, Some(format!("/src/engine/build/p/src/game/game{EXE}")));
