@@ -30,6 +30,7 @@ pub enum PanelView {
     Run,
     Problems,
     Debug,
+    Tests,
 }
 
 pub struct Panel {
@@ -43,7 +44,11 @@ pub struct Panel {
 
 impl Panel {
     pub fn new(app: WeakEntity<OrbitApp>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let subs = vec![cx.observe(&store(cx), |_, _, cx| cx.notify()), cx.observe(&debug::store(cx), |_, _, cx| cx.notify())];
+        let subs = vec![
+            cx.observe(&store(cx), |_, _, cx| cx.notify()),
+            cx.observe(&debug::store(cx), |_, _, cx| cx.notify()),
+            cx.observe(&super::testing::store(cx), |_, _, cx| cx.notify()),
+        ];
         Self {
             debug: cx.new(|cx| DebugView::new(app.clone(), window, cx)),
             app,
@@ -98,6 +103,16 @@ impl Panel {
         };
         let run_color = if store(cx).read(cx).is_running() { theme::INFO } else { theme::TEXT_FAINT };
         let debug_color = debug_color(debug_status);
+        let tests_color = {
+            let t = super::testing::store(cx).read(cx);
+            if t.is_running() {
+                theme::INFO
+            } else if t.has_failed() {
+                theme::DANGER
+            } else {
+                theme::TEXT_FAINT
+            }
+        };
         let count = |n: usize, color: u32| {
             (n > 0).then(|| div().px_1().rounded(px(8.)).text_xs().bg(c(color)).text_color(c(theme::BG)).child(n.to_string()))
         };
@@ -122,6 +137,7 @@ impl Panel {
             .child(self.tab("panel-build", PanelView::Build, view == PanelView::Build, div().flex().items_center().gap_1p5().child(dot("panel-dot-build", build_color)).child("Build").into_any_element(), cx))
             .child(self.tab("panel-run", PanelView::Run, view == PanelView::Run, div().flex().items_center().gap_1p5().child(dot("panel-dot-run", run_color)).child(run_label).into_any_element(), cx))
             .child(self.tab("panel-debug", PanelView::Debug, view == PanelView::Debug, div().flex().items_center().gap_1p5().child(dot("panel-dot-debug", debug_color)).child("Debug").into_any_element(), cx))
+            .child(self.tab("panel-tests", PanelView::Tests, view == PanelView::Tests, div().flex().items_center().gap_1p5().child(dot("panel-dot-tests", tests_color)).child("Tests").into_any_element(), cx))
             .child(self.tab(
                 "panel-problems",
                 PanelView::Problems,
@@ -358,6 +374,7 @@ impl Render for Panel {
                 None => Self::empty("Nothing running · Shift+F10 builds and runs the selected configuration"),
             },
             PanelView::Debug => self.debug.clone().into_any_element(),
+            PanelView::Tests => super::testing::store(cx).into_any_element(),
         };
         div()
             .size_full()

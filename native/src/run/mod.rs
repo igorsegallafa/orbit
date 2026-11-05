@@ -8,6 +8,7 @@ pub mod configs;
 pub mod problems;
 pub mod saved;
 pub mod script;
+pub mod testing;
 mod panel;
 mod widget;
 
@@ -290,6 +291,7 @@ pub fn init(cx: &mut App) {
     });
     cx.set_global(GlobalRun(entity));
     debug::init(cx);
+    testing::init(cx);
 
     let ready = |_: &OrbitApp, cx: &App| store(cx).read(cx).config().is_some_and(|c| !c.raw.is_compound()) && !building(cx);
     // Run and Debug don't wait for a build to end: theirs queues behind it.
@@ -366,6 +368,33 @@ pub fn init(cx: &mut App) {
         Command::new("run.showProblems", "Show Build Problems").run(|a, _, cx| {
             a.layout.panel_open = true;
             store(cx).update(cx, |s, cx| s.set_view(PanelView::Problems, cx));
+        }),
+        Command::new("tests.show", "Show Tests").run(|a, _, cx| {
+            a.layout.panel_open = true;
+            store(cx).update(cx, |s, cx| s.set_view(PanelView::Tests, cx));
+        }),
+        Command::new("tests.runAll", "Run All Tests").when(|a, cx| a.workspace().is_some() && !testing::store(cx).read(cx).is_running()).run(|a, _, cx| {
+            a.layout.panel_open = true;
+            store(cx).update(cx, |s, cx| s.set_view(PanelView::Tests, cx));
+            testing::store(cx).update(cx, |t, cx| t.run_all(cx));
+        }),
+        Command::new("tests.rerunFailed", "Rerun Failed Tests")
+            .when(|_, cx| {
+                let t = testing::store(cx).read(cx);
+                !t.is_running() && t.has_failed()
+            })
+            .run(|a, _, cx| {
+                a.layout.panel_open = true;
+                store(cx).update(cx, |s, cx| s.set_view(PanelView::Tests, cx));
+                testing::store(cx).update(cx, |t, cx| t.rerun_failed(cx));
+            }),
+        Command::new("tests.stop", "Stop Tests").when(|_, cx| testing::store(cx).read(cx).is_running()).run(|_, _, cx| {
+            testing::store(cx).update(cx, |t, cx| t.stop(cx));
+        }),
+        Command::new("tests.refresh", "Refresh Tests").when(|a, _| a.workspace().is_some()).run(|a, _, cx| {
+            a.layout.panel_open = true;
+            store(cx).update(cx, |s, cx| s.set_view(PanelView::Tests, cx));
+            testing::store(cx).update(cx, |t, cx| t.refresh(cx));
         }),
     ] {
         commands::register(cx, command);
@@ -1009,6 +1038,7 @@ pub fn dump(cx: &App) -> String {
         out.push_str(&p.read(cx).dump(cx));
     }
     out.push_str(&debug::gutter::dump(cx));
+    out.push_str(&testing::store(cx).read(cx).dump(cx));
     out
 }
 
