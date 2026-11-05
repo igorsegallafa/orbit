@@ -462,7 +462,10 @@ pub fn open_configurations(window: &mut Window, cx: &mut App) {
 /// Edit Configurations over the window, while open (the shell draws it).
 pub fn render_dialog(window: &Window, cx: &App) -> Option<AnyElement> {
     let dialog = store(cx).read(cx).dialog.clone()?;
-    Some(crate::git::scrim(dialog.into_any_element(), window))
+    let close = dialog.downgrade();
+    Some(crate::git::scrim(dialog.into_any_element(), window, move |_, _, cx| {
+        let _ = close.update(cx, |d, cx| d.close(cx));
+    }))
 }
 
 /// The bottom panel (`BottomPanel.tsx`), in the shell's slot.

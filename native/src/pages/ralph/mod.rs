@@ -890,7 +890,7 @@ impl Render for RalphPage {
             Some(Modal::Prd(_)) => Some(self.render_prd_form(cx)),
             None => None,
         };
-        view.when_some(modal, |d, m| d.child(crate::git::scrim(m, window))).into_any_element()
+        view.when_some(modal, |d, m| d.child(crate::git::scrim(m, window, cx.listener(|t, _, _, cx| { t.escape_modal(cx); })))).into_any_element()
     }
 }
 

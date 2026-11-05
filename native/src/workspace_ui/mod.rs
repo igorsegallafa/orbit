@@ -224,7 +224,7 @@ impl Render for PageTab {
             .line_height(gpui::relative(1.36))
             .text_color(c(theme::TEXT))
             .child(body)
-            .when_some(modal, |d, m| d.child(git::scrim(m, window)))
+            .when_some(modal, |d, m| d.child(git::scrim(m, window, cx.listener(|t, _, w, cx| { t.escape_modal(w, cx); }))))
     }
 }
 

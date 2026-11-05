@@ -388,6 +388,40 @@ impl PageTab {
         });
     }
 
+    /// The open PRs in Orbit's own review, as Code Review → a feature → Code Review does;
+    /// with none open, the create modal.
+    fn open_code_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(p) = self.ws_page() else { return };
+        let Some(m) = &p.meta else { return };
+        let list = if let Load::Ready(list) = &p.prs { list.as_slice() } else { &[] };
+        let prs: Vec<_> = list
+            .iter()
+            .filter(|pr| pr.state == "OPEN")
+            .filter_map(|pr| {
+                // https://github.com/<owner>/<repo>/pull/<n>
+                let path = pr.url.split("github.com/").nth(1)?;
+                let owner_repo = path.split("/pull/").next()?.to_string();
+                Some(orbit_core::github::PullRequest {
+                    repo: pr.repo.clone(),
+                    owner_repo,
+                    number: pr.number,
+                    title: pr.title.clone(),
+                    branch: m.branch.clone(),
+                    base: m.base.clone(),
+                    author: pr.author.clone(),
+                    is_draft: pr.is_draft,
+                    url: pr.url.clone(),
+                    updated_at: pr.updated_at.clone(),
+                    status: None,
+                })
+            })
+            .collect();
+        if prs.is_empty() {
+            return self.start_create_prs(window, cx);
+        }
+        self.with_app(window, cx, move |a, w, cx| crate::review::open_prs_review(a, prs, w, cx));
+    }
+
     fn open_review(&mut self, page: crate::review::Page, window: &mut Window, cx: &mut Context<Self>) {
         let Some(name) = self.ws_name() else { return };
         self.with_app(window, cx, move |a, w, cx| {
@@ -536,7 +570,6 @@ fn header(p: &WsPage, d: &Derived, cx: &mut Context<PageTab>) -> impl IntoElemen
     let meta = p.meta.as_ref();
     let card = meta.and_then(|m| m.card.clone());
     let is_variant = meta.is_some_and(|m| m.variant_of.is_some());
-    let has_prs = d.open > 0 || d.merged > 0;
     let plan = p.plan_exists == Some(true);
     let tool = |id: &'static str, icon_spec: (&'static str, f32), label: &'static str, tip: String, f: fn(&mut PageTab, &mut Window, &mut Context<PageTab>), cx: &mut Context<PageTab>| {
         kit::hint(kit::button_icon(id, Some(icon_spec), label, Kind::Secondary, kit::TOOL), tip).on_click(cx.listener(move |t, _: &ClickEvent, w, cx| f(t, w, cx)))
@@ -593,10 +626,10 @@ fn header(p: &WsPage, d: &Derived, cx: &mut Context<PageTab>) -> impl IntoElemen
             )
         });
     let code_review = kit::hint(
-        kit::disabled(kit::button_icon("ws-code-review", Some(("diff", 14.)), "Code Review", Kind::Secondary, kit::TOOL), !has_prs),
-        if has_prs { "Review the feature's PRs: diffs, threads and verdict, one tab" } else { "No pull requests yet" },
+        kit::button_icon("ws-code-review", Some(("diff", 14.)), "Code Review", Kind::Secondary, kit::TOOL),
+        if d.open > 0 { "Review the feature's PRs: diffs, threads and verdict, one tab" } else { "No open pull request: create them first" },
     )
-    .when(has_prs, |b| b.on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.open_review(crate::review::Page::PullRequests, w, cx))));
+    .on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.open_code_review(w, cx)));
     let refresh = if p.refreshing {
         kit::hint(
             div()

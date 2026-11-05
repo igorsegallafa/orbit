@@ -458,7 +458,7 @@ impl RunConfigs {
         ok
     }
 
-    fn close(&mut self, cx: &mut Context<Self>) {
+    pub fn close(&mut self, cx: &mut Context<Self>) {
         store(cx).update(cx, |s, cx| {
             s.dialog = None;
             cx.notify();
