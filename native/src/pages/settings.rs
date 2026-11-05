@@ -889,16 +889,18 @@ impl SettingsPage {
                 let (label, hint) = match g {
                     inhibit::Gnome::Allowed => ("Allowed", "GNOME lets Orbit's terminals take these keys."),
                     inhibit::Gnome::Denied => ("Denied", "GNOME keeps these keys and won't ask again. Ask again resets the answer; then restart Orbit and focus a terminal to get GNOME's prompt."),
-                    _ => ("Not asked yet", "GNOME asks the first time a terminal takes focus. After Ask again, restart Orbit first: GNOME remembers its last answer for an open window."),
+                    _ => ("Not asked yet", "Click into a terminal tab: GNOME shows an Allow / Deny dialog (closing it counts as Deny). If Orbit was open when the answer was reset, restart it first."),
                 };
                 kit::setting(
                     format!("GNOME permission: {label}"),
                     kit::hint(hint),
-                    kit::disabled(kit::button("keys-ask-again", "Ask again", Kind::Secondary), g != inhibit::Gnome::Denied).on_click(cx.listener(|t, _: &ClickEvent, w, cx| {
-                        t.gnome = None;
-                        ui::bg(cx, || { inhibit::gnome_forget(); inhibit::gnome_status() }, |t: &mut Self, g, _, _| t.gnome = Some(g), w);
-                        cx.notify();
-                    })),
+                    div().when(g == inhibit::Gnome::Denied, |d| {
+                        d.child(kit::button("keys-ask-again", "Ask again", Kind::Secondary).on_click(cx.listener(|t, _: &ClickEvent, w, cx| {
+                            t.gnome = None;
+                            ui::bg(cx, || { inhibit::gnome_forget(); inhibit::gnome_status() }, |t: &mut Self, g, _, _| t.gnome = Some(g), w);
+                            cx.notify();
+                        })))
+                    }),
                 )
             })),
             ))
