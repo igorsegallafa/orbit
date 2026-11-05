@@ -547,8 +547,10 @@ impl RunStore {
         let Some(setup) = self.setup(&t.repo) else { return vec![] };
         match setup.configs.iter().find(|c| c.name == t.name) {
             Some(c) if c.raw.is_compound() => {
-                let (parts, _) = orbit_core::run::compound_parts(&c.raw, setup.configs.iter().map(|c| &c.raw));
-                parts.into_iter().map(|name| RunTarget { name, ..t.clone() }).collect()
+                let all = self.setups.iter().flat_map(|(r, s)| s.configs.iter().map(move |c| (r.as_str(), &c.raw)));
+                let (parts, _) = orbit_core::run::compound_parts(&c.raw, &t.repo, all);
+                // Another repo's configuration builds with that repo's own preset.
+                parts.into_iter().map(|(repo, name)| RunTarget { preset: t.preset.clone().filter(|_| repo == t.repo), repo, name, ..t.clone() }).collect()
             }
             Some(_) => vec![t.clone()],
             None => vec![],

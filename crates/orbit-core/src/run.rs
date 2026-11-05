@@ -52,7 +52,8 @@ pub struct RunConfig {
     /// instance instead of restarting the running one.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub allow_multiple: bool,
-    /// kind "compound": the repo's configurations it launches, in order.
+    /// kind "compound": the configurations it launches, in order: a name in
+    /// this repo, or "<repo>/<name>" in another repo of the workspace.
     pub configs: Vec<String>,
 }
 
@@ -62,16 +63,27 @@ impl RunConfig {
     }
 }
 
-/// A compound's configurations that can launch, in order, and what is wrong
-/// with the others: an unknown name, itself, or another compound (they don't nest).
-pub fn compound_parts<'a>(compound: &RunConfig, configs: impl IntoIterator<Item = &'a RunConfig> + Clone) -> (Vec<String>, Vec<String>) {
+/// How a compound in `own` lists `name` of `repo`.
+pub fn part_ref(own: &str, repo: &str, name: &str) -> String {
+    if own == repo { name.to_string() } else { format!("{repo}/{name}") }
+}
+
+/// A compound's configurations that can launch, as (repo, name) in order, and
+/// what is wrong with the others: an unknown name, itself, or another compound
+/// (they don't nest). `configs` are every repo's, as (repo, configuration).
+pub fn compound_parts<'a>(compound: &RunConfig, own: &str, configs: impl IntoIterator<Item = (&'a str, &'a RunConfig)> + Clone) -> (Vec<(String, String)>, Vec<String>) {
     let (mut parts, mut problems) = (vec![], vec![]);
-    for name in &compound.configs {
-        match configs.clone().into_iter().find(|c| &c.name == name) {
-            _ if *name == compound.name => problems.push(format!("'{name}' can't include itself")),
-            None => problems.push(format!("'{}' lists '{name}', which is not a configuration", compound.name)),
-            Some(c) if c.is_compound() => problems.push(format!("'{name}' is a compound: compounds don't nest")),
-            Some(_) => parts.push(name.clone()),
+    for entry in &compound.configs {
+        // "<repo>/<name>" only when that repo is in the workspace: names may hold a '/'.
+        let (repo, name) = entry
+            .split_once('/')
+            .filter(|(r, _)| configs.clone().into_iter().any(|(cr, _)| cr == *r))
+            .unwrap_or((own, entry.as_str()));
+        match configs.clone().into_iter().find(|(r, c)| *r == repo && c.name == name) {
+            _ if repo == own && name == compound.name => problems.push(format!("'{name}' can't include itself")),
+            None => problems.push(format!("'{}' lists '{entry}', which is not a configuration", compound.name)),
+            Some((_, c)) if c.is_compound() => problems.push(format!("'{entry}' is a compound: compounds don't nest")),
+            Some(_) => parts.push((repo.to_string(), name.to_string())),
         }
     }
     if compound.configs.is_empty() {
@@ -994,14 +1006,26 @@ mod tests {
             ..Default::default()
         };
         let all = [c("gameserver", "cmake", &[]), c("game", "cmake", &[]), c("both", "compound", &["game", "gameserver"]), c("other", "compound", &[])];
-        assert_eq!(compound_parts(&all[2], &all), (vec!["game".to_string(), "gameserver".to_string()], vec![]));
+        let ds = [c("server", "cargo", &[]), c("a/b", "cargo", &[])];
+        let every = all.iter().map(|c| ("aether", c)).chain(ds.iter().map(|c| ("dataserver", c)));
+        let pair = |r: &str, n: &str| (r.to_string(), n.to_string());
+        assert_eq!(compound_parts(&all[2], "aether", every.clone()), (vec![pair("aether", "game"), pair("aether", "gameserver")], vec![]));
 
         let bad = c("bad", "compound", &["game", "nope", "bad", "both"]);
-        let (parts, problems) = compound_parts(&bad, &all);
-        assert_eq!(parts, ["game"]);
+        let (parts, problems) = compound_parts(&bad, "aether", every.clone());
+        assert_eq!(parts, [pair("aether", "game")]);
         assert_eq!(problems.len(), 3, "{problems:?}");
         assert!(problems[0].contains("'nope'") && problems[1].contains("itself") && problems[2].contains("don't nest"));
-        assert_eq!(compound_parts(&all[3], &all).1.len(), 1);
+        assert_eq!(compound_parts(&all[3], "aether", every.clone()).1.len(), 1);
+
+        // Another repo's configurations, by "<repo>/<name>"; a '/' in a name of this repo still works.
+        let mixed = c("stack", "compound", &["dataserver/server", "game", "dataserver/nope"]);
+        let (parts, problems) = compound_parts(&mixed, "aether", every.clone());
+        assert_eq!(parts, [pair("dataserver", "server"), pair("aether", "game")]);
+        assert!(problems[0].contains("'dataserver/nope'"));
+        assert_eq!(compound_parts(&c("x", "compound", &["a/b"]), "dataserver", every.clone()).0, [pair("dataserver", "a/b")]);
+        assert_eq!(part_ref("aether", "dataserver", "server"), "dataserver/server");
+        assert_eq!(part_ref("aether", "aether", "game"), "game");
 
         let parsed: RunConfig = serde_json::from_value(json!({ "name": "both", "kind": "compound", "configs": ["game", "gameserver"] })).unwrap();
         assert_eq!(parsed, all[2]);
