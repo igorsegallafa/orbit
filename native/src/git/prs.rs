@@ -436,7 +436,7 @@ impl PageTab {
                     .when(!off, |b| b.on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.prs_draft_all(w, cx))))
             });
 
-        let mut list = div().id("prs-list").flex_none().w(px(330.)).h_full().overflow_y_scroll().p(px(8.)).bg(c(theme::BG)).border_r_1().border_color(c(theme::BORDER)).flex().flex_col().gap(px(2.));
+        let mut list = div().id("prs-list").flex_none().w(px(330.)).h_full().overflow_y_scroll().p(px(8.)).bg(c(theme::BG)).border_r_1().border_color(c(theme::BORDER)).flex().flex_col().gap(px(6.));
         if f.rows.is_none() && f.error.is_none() {
             // No repos known yet: three unnamed rows, as React.
             let names: Vec<String> = if f.placeholder.is_empty() { vec![String::new(); 3] } else { f.placeholder.clone() };

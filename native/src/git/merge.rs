@@ -5,7 +5,7 @@ use super::{card, cancel_button, footer, status_row, Flow, Mark};
 use crate::review::ui::Tone;
 use crate::toast::ToastKind;
 use crate::workspace_ui::{plural, spawn, PageTab};
-use gpui::{div, prelude::*, ClickEvent, Context, Window};
+use gpui::{div, prelude::*, px, ClickEvent, Context, Window};
 use std::fmt::Write as _;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -94,7 +94,7 @@ impl PageTab {
     }
 
     pub(super) fn render_merge(&self, f: &MergeFlow, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut list = div().flex().flex_col();
+        let mut list = div().flex().flex_col().gap(px(6.));
         for (p, s) in &f.prs {
             let (mark, detail) = match s {
                 MergeState::Idle => (Mark::Pending, p.title.clone()),

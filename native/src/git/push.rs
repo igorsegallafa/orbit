@@ -7,7 +7,7 @@ use super::{card, cancel_button, footer, status_row, Flow, Mark};
 use crate::review::ui::Tone;
 use crate::toast::ToastKind;
 use crate::workspace_ui::{plural, spawn, PageTab};
-use gpui::{div, prelude::*, ClickEvent, Context, Window};
+use gpui::{div, prelude::*, px, ClickEvent, Context, Window};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
@@ -167,7 +167,7 @@ impl PageTab {
     }
 
     pub(super) fn render_push(&self, f: &PushFlow, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut list = div().flex().flex_col();
+        let mut list = div().flex().flex_col().gap(px(6.));
         for r in &f.rows {
             let mark = match r.status {
                 PushStatus::Idle => Mark::Pending,
