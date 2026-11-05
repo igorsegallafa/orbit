@@ -569,6 +569,15 @@ impl TerminalView {
         self.last_copied = Some(text);
     }
 
+    /// Pastes the clipboard's text; with an image only, sends ^V, which is how
+    /// Claude Code and omp learn to read the clipboard themselves.
+    fn paste_clipboard(&mut self, cx: &mut Context<Self>) {
+        match cx.read_from_clipboard().and_then(|c| c.text()) {
+            Some(text) => self.paste_text(&text),
+            None => self.write(b"\x16"),
+        }
+    }
+
     fn on_key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let ks = &ev.keystroke;
         let m = ks.modifiers;
@@ -599,14 +608,19 @@ impl TerminalView {
             cx.stop_propagation();
             return;
         }
+        // macOS: Cmd+C copies the selection and Cmd+V pastes, as in Terminal.app.
+        if cfg!(target_os = "macos") && m.platform && !m.control && !m.alt && !m.shift && (ks.key == "c" || ks.key == "v") {
+            if ks.key == "c" {
+                self.copy(false, cx);
+            } else {
+                self.paste_clipboard(cx);
+            }
+            cx.stop_propagation();
+            return;
+        }
         // Ctrl+V pastes like Ctrl+Shift+V (Cmd+V under Toshy arrives as Ctrl+V).
         if m.control && ks.key == "v" && !m.alt || m.shift && ks.key == "insert" {
-            match cx.read_from_clipboard().and_then(|c| c.text()) {
-                Some(text) => self.paste_text(&text),
-                // An image only: ^V is how Claude Code (and others) learn to read
-                // the clipboard themselves.
-                None => self.write(b"\x16"),
-            }
+            self.paste_clipboard(cx);
             cx.stop_propagation();
             return;
         }
