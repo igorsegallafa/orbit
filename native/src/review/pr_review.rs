@@ -15,8 +15,8 @@ use crate::probe::probe;
 use crate::theme::{self, c};
 use crate::toast::ToastKind;
 use gpui::{
-    div, prelude::*, px, AnyElement, App, Context, ElementId, Entity, FontWeight, KeyDownEvent, MouseButton, SharedString, Subscription,
-    Task, Window,
+    div, prelude::*, px, AnyElement, App, Context, CursorStyle, DragMoveEvent, ElementId, Empty, Entity, FontWeight, KeyDownEvent, MouseButton,
+    ScrollHandle, SharedString, Subscription, Task, Window,
 };
 use gpui_component::diff::{Diff, DiffAnnotation, DiffDecoration, DiffFile, DiffLinePosition, DiffLineRange, DiffMode, DiffSide, DiffState};
 use gpui_component::highlighter::SyntaxHighlighter;
@@ -34,6 +34,16 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 const SIDE_W: f32 = 260.;
+/// The side column's width range when dragged.
+const SIDE_MIN: f32 = 180.;
+const SIDE_MAX: f32 = 640.;
+
+/// The side column's last dragged width, for the next review tab (0: `SIDE_W`).
+static SIDE_WIDTH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Dragging the side column's edge.
+#[derive(Clone, Copy)]
+struct SideDrag;
 
 /// A pending comment, kept until the review is submitted.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -234,6 +244,8 @@ pub struct PrReviewPage {
     head_text: String,
     sending_notes: bool,
     _poll: Task<()>,
+    side_w: f32,
+    side_scroll: ScrollHandle,
 }
 
 fn side_of(s: &str) -> DiffSide {
@@ -287,6 +299,11 @@ impl PrReviewPage {
                     break;
                 }
             }),
+            side_w: match f32::from_bits(SIDE_WIDTH.load(std::sync::atomic::Ordering::Relaxed)) {
+                w if w > 0. => w,
+                _ => SIDE_W,
+            },
+            side_scroll: ScrollHandle::new(),
         };
         page.load(window, cx);
         page
@@ -734,18 +751,35 @@ impl PrReviewPage {
 
     // ---------- left side ----------
 
+    /// The side column: scrolled list, its scrollbar, and a draggable right edge.
     fn render_side(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut side = div()
-            .id("pr-side")
-            .w(px(SIDE_W))
+        div()
+            .relative()
+            .w(px(self.side_w))
             .flex_none()
             .h_full()
-            .overflow_y_scroll()
-            .flex()
-            .flex_col()
             .bg(c(theme::PANEL))
             .border_r_1()
-            .border_color(c(theme::BORDER));
+            .border_color(c(theme::BORDER))
+            .child(self.render_side_list(cx))
+            .child(crate::scrollbar::vertical("pr-side", &self.side_scroll))
+            .child(
+                div()
+                    .id("pr-side-resize")
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .right(px(-3.))
+                    .w(px(6.))
+                    .cursor(CursorStyle::ResizeLeftRight)
+                    .hover(|s| s.bg(c(theme::ACCENT)))
+                    .child(probe("pr-side-resize"))
+                    .on_drag(SideDrag, |_, _, _, cx| cx.new(|_| Empty)),
+            )
+    }
+
+    fn render_side_list(&self, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+        let mut side = div().id("pr-side").size_full().overflow_y_scroll().track_scroll(&self.side_scroll).flex().flex_col();
         if self.prs.len() > 1 {
             side = side.child(
                 div()
@@ -2062,6 +2096,11 @@ impl Render for PrReviewPage {
                     }
                 }),
             )
+            .on_drag_move(cx.listener(|p, ev: &DragMoveEvent<SideDrag>, _, cx| {
+                p.side_w = f32::from(ev.event.position.x - ev.bounds.left()).clamp(SIDE_MIN, SIDE_MAX);
+                SIDE_WIDTH.store(p.side_w.to_bits(), std::sync::atomic::Ordering::Relaxed);
+                cx.notify();
+            }))
             .child(self.render_side(cx))
             .child(
                 div()
