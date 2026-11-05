@@ -153,17 +153,13 @@ impl PageTab {
     }
 
     /// The pull requests page, which creates PRs for the repos without one.
+    /// Opens the create modal in place, as the workspace page's "Create pull requests" does.
     fn push_to_prs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(scope) = self.push_flow().map(|f| f.scope.clone()) else { return };
-        self.close_modal(cx);
-        self.with_app(window, cx, move |a, w, cx| {
-            if let Some(ix) = a.workspaces.iter().position(|ws| ws.meta.name == scope) {
-                if a.selected != Some(ix) {
-                    a.select_workspace(ix, cx);
-                }
-                crate::review::open(a, crate::review::Page::PullRequests, w, cx);
-            }
-        });
+        let meta = self.app.upgrade().and_then(|a| a.read(cx).workspaces.iter().find(|ws| ws.meta.name == scope).map(|ws| ws.meta.clone()));
+        let Some(m) = meta else { return self.close_modal(cx) };
+        let title = m.card.as_ref().map(|c| c.title.clone());
+        self.open_create_prs(m.name, m.base, title, m.repos, window, cx);
     }
 
     pub(super) fn render_push(&self, f: &PushFlow, cx: &mut Context<Self>) -> impl IntoElement {
