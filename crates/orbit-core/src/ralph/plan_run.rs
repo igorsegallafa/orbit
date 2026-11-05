@@ -652,7 +652,7 @@ mod tests {
         #[test]
         fn a_finished_agent_that_stays_alive_is_recovered() {
             let cfg = RunConfig { idle_timeout_min: 10.0, ..quick() };
-            let mut c = case("grace", cfg, &format!("{COMMIT_T1}\n{RESULT_DONE}\nsleep infinity &\nwait"));
+            let mut c = case("grace", cfg, &format!("{COMMIT_T1}\n{RESULT_DONE}\nsleep 1200 &\nwait"));
             let start = Instant::now();
             assert_eq!(c.env.run_iteration(1), Iteration::Recovered);
             // Exit grace (1 s) plus the SIGTERM round trip, not the 10 min idle.
@@ -668,7 +668,7 @@ mod tests {
 
         #[test]
         fn a_task_stuck_without_its_commit_stalls_and_counts_toward_stall_after() {
-            let agent = "echo wip > wip.txt\nprintf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"Still building\"}'\nsleep infinity &\nwait";
+            let agent = "echo wip > wip.txt\nprintf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"Still building\"}'\nsleep 1200 &\nwait";
             let mut c = case("stuck", quick(), agent);
             let limits = Limits { max_iterations: 5, stall_after: 2, ..Default::default() };
             let s = supervisor::supervise(&limits, &mut c.env);

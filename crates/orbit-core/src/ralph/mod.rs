@@ -1000,7 +1000,7 @@ mod tests {
         #[test]
         fn a_hung_prd_iteration_with_its_commit_ticks_prd_json() {
             let cfg = RunConfig { idle_timeout_min: 10.0, ..quick() };
-            let (root, mut env) = prd_env("prd-grace", cfg, &format!("{COMMIT_US1}\n{RESULT_DONE}\nsleep infinity &\nwait"));
+            let (root, mut env) = prd_env("prd-grace", cfg, &format!("{COMMIT_US1}\n{RESULT_DONE}\nsleep 1200 &\nwait"));
             assert_eq!(env.run_iteration(1), Iteration::Recovered);
             assert!(env.story_passed("US-001"));
             assert_eq!(git(&root.join("remote.git"), &["rev-parse", "feat/x"]), git(&env.dir, &["rev-parse", "HEAD"]));
@@ -1010,7 +1010,7 @@ mod tests {
         #[test]
         fn stopping_a_hung_iteration_keeps_its_committed_story() {
             let cfg = RunConfig { idle_timeout_min: 10.0, exit_grace_sec: 0, ..quick() };
-            let (root, mut env) = prd_env("prd-stop", cfg, &format!("{COMMIT_US1}\n{RESULT_DONE}\nsleep infinity &\nwait"));
+            let (root, mut env) = prd_env("prd-stop", cfg, &format!("{COMMIT_US1}\n{RESULT_DONE}\nsleep 1200 &\nwait"));
             let pid = root.join("pid");
             std::thread::spawn(move || {
                 while !pid.exists() {
