@@ -460,7 +460,15 @@ impl Render for RunWidget {
             .when(presets > 0 && config.kind == "cmake", |d| {
                 d.child(self.select("run-preset", Open::Preset, config.preset.clone().unwrap_or_else(|| "preset".into()), true, cx))
             })
-            .when(!compound, |d| d.child(self.build_split(building, format!("Build (Ctrl+F9)\n{}\nRight click: Build All", config.build_label).into(), cx)))
+            .child(self.build_split(
+                building,
+                match &program {
+                    Some(parts) if compound => format!("Build (Ctrl+F9), without running\n{parts}, in order\nRight click: Build All"),
+                    _ => format!("Build (Ctrl+F9)\n{}\nRight click: Build All", config.build_label),
+                }
+                .into(),
+                cx,
+            ))
             .child(button(
                 "run-run",
                 "play-fill",
