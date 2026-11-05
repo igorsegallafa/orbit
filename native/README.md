@@ -120,7 +120,9 @@ views `build-output` and `dbg-console` (drag in them selects, `<probe>@x,y` pick
 `var:<name>`; `run-build-menu` (the build chevron), `run-build-split`, and in Edit Configurations
 `rc-item:<name>`, `rc-input:name|program|args|cwd|build|env-key:<n>|env-value:<n>`, `rc-target`,
 `rc-add|dup|remove`, `rc-env-add`, `rc-env-remove:<n>`, `rc-shared`, `rc-build-first`,
-`rc-cancel|apply|ok`, `rc-status` (the footer's saved or error line). `move:<probe>` hovers a probe, `paste:<text>` inserts text in one go as a
+`rc-cancel|apply|ok`, `rc-status` (the footer's saved or error line); with several builds (a
+compound's) the Build tab's list rows are `build-item:<configuration>` and the dump adds
+`builds ["<repo>/<name> <status> <secs>", …], Some(<together>) together` before the shown build's `build <status>` line. `move:<probe>` hovers a probe, `paste:<text>` inserts text in one go as a
 paste does, and `\;` puts a `;` inside a `--do` step. The git and workspace pages' probes are listed in *Stage: git and workspace flows*.
 
 ## Commands and keymap (the extension point)
@@ -846,6 +848,9 @@ not run (it needs GitHub).
   .orbit/run.local.json") and in a toast; a failure (an empty or duplicate name, an environment row
   with a value but no name, an invalid or repeated variable name, a write error) shows in the footer,
   selects the configuration it is in and keeps every edit; OK closes only when the save worked.
+  A compound has its own Environment variables: Run and Debug give them to every configuration it
+  launches (`run::merge_env`), and a configuration's own variable of the same name wins. Builds
+  take neither's environment.
 - **The program's environment** (`orbit_core::pty::child_env`, one function for sessions, Run and
   Debug): Orbit's own environment, without its AppImage launcher's variables (`proc::host_env`:
   `APPIMAGE`, `APPDIR`, the mount's `LD_LIBRARY_PATH`/`PATH` entries), the terminal Orbit was started
@@ -866,7 +871,9 @@ not run (it needs GitHub).
   variant.
 - **Bottom panel** (`layout.panel_height`, resizable from an 8 px handle on its top edge, saved):
   Build output, Run (the program on `orbit_core::pty` with the configuration's cwd, args and env),
-  Problems (grouped by file, errors first), Debug. A build opens it; a failed build with problems
+  Problems (grouped by file, errors first, every build's), Debug. A compound's Build, Run or Debug
+  builds its configurations one after another, in order; the Build tab then lists them beside the
+  output (status, errors, time) and a click shows one's output (`build-item:<name>`). A build opens it; a failed build with problems
   switches to Problems. Build output and the Debug Console are log views (`src/logview.rs`): ANSI
   SGR colours (16 from the theme, 256, truecolor, bold, dim, italic, underline, inverse; `ansi.rs`
   drops every other escape and control code), lines wrap at the panel's width, the view follows the
