@@ -269,7 +269,8 @@ impl OrbitApp {
         let inbox_on = self.chrome.inbox_open;
         TitleBar::new()
             .h(px(size::TITLEBAR))
-            .pl(px(10.))
+            // macOS: leave TitleBar's 80px for the traffic lights.
+            .pl(px(if cfg!(target_os = "macos") { 80. } else { 10. }))
             .bg(c(theme::BG))
             .border_color(c(theme::BORDER))
             .child(
