@@ -235,6 +235,47 @@ Other numbers:
 | Tree, background loads | 3 levels 44 ms, 4 levels 81 ms, 5 levels (37,347 rows) 5.6 s without blocking the UI |
 | Editor open (`Game.cpp`) | < 1 ms to read; highlighting is incremental tree-sitter |
 
+### Memory
+
+Orbit was OOM-killed with clangd near 4 GB. The app itself stays at 60–150 MB; what Orbit starts is
+the cost. PSS + SwapPss of each process, sampled every 10 s, `ORBIT_CONFIG_DIR` on a copy of the
+config, i7-12650H (16 threads), aether-engine (1,845 unity translation units):
+
+| Scenario | Before | After |
+|---|---:|---:|
+| clangd, empty index, first 120 s (peak, 2 runs) | 5,767 / 5,830 MB | 2,568 / 3,474 MB |
+| Same repo open in two workspaces (warm index), after 2.5 min in one | 2 × clangd, 2,620 MB | 1 × clangd, 1,400 MB |
+| clangd still alive after a normal quit while indexing | yes (one lived ~30 s; 2 of 2 in the two-workspace run) | none |
+| clangd, no background index (for scale) | | 1,235 MB |
+
+- **clangd flags** (`orbit_core::lsp::clangd_memory_flags`): `-j=<cores/4, 2–4>` and
+  `--pch-storage=disk`, appended unless the command (Settings → Languages override included) sets
+  them. Each background-index worker holds a whole translation unit and clangd starts one per core;
+  with 4 it indexed 60–100 % as many files in the first 2 minutes (3,524–5,931 index shards vs
+  5,884–6,463) at under half the memory. `-j=2` peaked at 1,687 MB. The background index stays on
+  (navigation needs it); it lives on disk next to the compilation database and loads in seconds.
+- **Servers follow the workspace shown**: `LspRegistry::stop_idle` counts only the tabs of the
+  workspace on screen, so a repo shared by two workspaces (or two worktrees) holds one clangd, not
+  two, once `IDLE_GRACE` (2 min) has passed. Showing a tab whose server was stopped starts it again
+  (`EditorTab::wake_server`); a crashed server still shows "stopped · Restart".
+- **Servers die with Orbit**: quitting kills them (asked to exit, clangd first finishes the files it
+  is indexing), and on Linux they get `PR_SET_PDEATHSIG` so a crash or `SIGKILL` of Orbit takes
+  them too.
+- **Debugger**: checked, nothing to fix. Stop, session end, relaunch (an ended session of the same
+  configuration is dropped), quit, `SIGTERM` and `SIGKILL` of Orbit all leave no gdb or debuggee
+  (a forking test program: parent and child both gone within 2 s; gdb exits on its stdin's EOF and
+  the inferior goes with it).
+- **Capped already** (unchanged): terminal history 10,000 lines (alacritty's default; 4 terminals
+  full of 180-column colour lines cost ~25–35 MB each), PTY replay 256 KB, kitty images 320 MB per
+  terminal, build output 5,000 lines, debug console 3,000, language server stderr 400 lines, Ralph
+  feed and events, files opened up to 8 MB.
+- **Not Orbit's**: each restored agent session runs its CLI at start (Claude Code ~250 MB plus its
+  MCP servers); gdb on `game` loads its debug info (`libGraphicsEngineVk.so` is 322 MB).
+
+To reproduce: `native/scripts/measure.sh 30 --workspace <ws> --open <repo>/<file>.cpp --wait-lsp 30`
+gives one reading; a server override in a scratch config with `--compile-commands-dir=<a copy of
+compile_commands.json>` starts clangd on an empty index.
+
 ## Verified in stage 1
 
 Every item was checked by a self-test run and its dump.
