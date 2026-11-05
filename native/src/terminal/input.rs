@@ -18,6 +18,8 @@ pub fn key_to_bytes(ks: &Keystroke, app_cursor: bool) -> Option<Vec<u8>> {
         if modcode > 1 { format!("\x1b[{n};{modcode}~") } else { format!("\x1b[{n}~") }.into_bytes()
     };
     let bytes = match ks.key.as_str() {
+        // ESC+CR is how Claude Code and other line editors read a newline.
+        "enter" if m.shift || m.alt => b"\x1b\r".to_vec(),
         "enter" => b"\r".to_vec(),
         "backspace" if m.control => vec![0x08],
         "backspace" => vec![0x7f],
@@ -124,6 +126,14 @@ pub fn mouse_report(mode: TermMode, event: MouseReport, col: usize, row: usize, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shift_or_alt_enter_sends_esc_cr() {
+        let ks = |k: &'static str| Keystroke::parse(k).unwrap();
+        assert_eq!(key_to_bytes(&ks("enter"), false).unwrap(), b"\r");
+        assert_eq!(key_to_bytes(&ks("shift-enter"), false).unwrap(), b"\x1b\r");
+        assert_eq!(key_to_bytes(&ks("alt-enter"), false).unwrap(), b"\x1b\r");
+    }
 
     #[test]
     fn sgr_reports_press_release_and_wheel() {
