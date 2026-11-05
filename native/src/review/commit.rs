@@ -18,6 +18,7 @@ pub struct CommitView {
     pub diff: Entity<DiffState>,
     pub sel: crate::diff_select::Handle,
     changes: usize,
+    shape: Vec<crate::marker_track::FileShape>,
     change_ix: Option<usize>,
     pub error: Option<String>,
 }
@@ -27,7 +28,7 @@ impl CommitView {
         // The whole file, as Monaco's diff editor shows it.
         let diff = highlighted_state(vec![], DiffMode::Unified, cx);
         diff.update(cx, |s, cx| s.set_context_lines(None, cx));
-        Self { repo, repo_dir, commit, files: Load::Loading, selected: None, diff, sel: crate::diff_select::new(), changes: 0, change_ix: None, error: None }
+        Self { repo, repo_dir, commit, files: Load::Loading, selected: None, diff, sel: crate::diff_select::new(), changes: 0, shape: vec![], change_ix: None, error: None }
     }
 }
 
@@ -68,6 +69,7 @@ impl ReviewTab {
                         let language = file_language(Path::new(&path)).highlight;
                         let files: Vec<DiffFile> = DiffFile::parse(&patch).unwrap_or_default().into_iter().map(|f| f.with_language(language)).collect();
                         v.changes = ui::change_blocks(&patch);
+                        v.shape = crate::marker_track::shapes(&patch);
                         v.change_ix = None;
                         v.error = None;
                         v.diff.update(cx, |s, cx| s.set_files(files, cx));
@@ -177,6 +179,7 @@ impl ReviewTab {
                 .min_h_0()
                 .relative()
                 .child(crate::diff_select::attach(Diff::new(&v.diff).size_full().header_visible(false), &v.sel, &v.diff, &[], None, cx))
+                .child(crate::marker_track::diff(&v.shape, &v.diff, false, cx))
                 .child(crate::probe::probe("commit-diff"))
                 .into_any_element(),
         };

@@ -4,6 +4,7 @@
 //! formatting and rename. Plus go to line, problem navigation, the
 //! breadcrumb and status bar, clangd's missing compile database banner, and
 //! the Markdown preview.
+mod changes;
 pub mod markdown;
 mod picker;
 mod provider;
@@ -267,6 +268,7 @@ pub struct EditorTab {
     missing_dismissed: bool,
     /// `.md` files: the preview and which side is shown.
     markdown: Option<markdown::Preview>,
+    marks: changes::Marks,
     _subscriptions: Vec<Subscription>,
     _attach: Task<()>,
     _poll: Task<()>,
@@ -411,12 +413,14 @@ impl EditorTab {
             // the line above, and the hover popover lands on top of it. Monaco
             // puts the message in the hover instead (`ProblemHover`), so its
             // popover is closed as soon as it opens, before it is drawn.
-            cx.observe(&state, |_, state, cx| {
+            cx.observe(&state, |this, state, cx| {
                 if state.read(cx).diagnostic_popover().is_some() {
                     state.update(cx, |s, cx| s.clear_diagnostic_popover(cx));
                 }
+                this.update_find_marks(cx);
             }),
         ];
+        let marks = Self::create_marks(&state, cx);
         let mut this = Self {
             path,
             title: title.into(),
@@ -448,6 +452,7 @@ impl EditorTab {
             cpp: None,
             missing_dismissed: false,
             markdown,
+            marks,
             _subscriptions: subscriptions,
             _attach: Task::ready(()),
             _poll: Task::ready(()),
@@ -456,6 +461,7 @@ impl EditorTab {
             _cpp_task: Task::ready(()),
         };
         this.connect(cx);
+        this.reload_git_bases(cx);
         this
     }
 
@@ -555,6 +561,7 @@ impl EditorTab {
         }
         self.message = None;
         self.schedule_markdown(cx);
+        self.schedule_marks(cx);
         cx.notify();
     }
 
@@ -634,6 +641,7 @@ impl EditorTab {
             }
             cx.notify();
         });
+        self.show_problem_marks(cx);
         cx.notify();
     }
 
