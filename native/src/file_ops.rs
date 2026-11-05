@@ -153,6 +153,11 @@ fn on_fs_change(app: &mut OrbitApp, change: FsChange, window: &mut Window, cx: &
         set.into_iter().collect()
     });
     app.tree.update(cx, |t, cx| t.refresh(dirs.as_deref(), cx));
+    // The workspace page's flow (changes to commit, commits to push) follows edits and commits.
+    let page_key = crate::workspace_ui::page_key(&crate::workspace_ui::PageId::Workspace(change.workspace.clone()));
+    if let Some(TabKind::Page(page)) = app.tab_index(&page_key, cx).map(|ix| &app.tabs[ix].kind) {
+        page.clone().update(cx, |p, cx| p.reload(false, window, cx));
+    }
     let changed: HashSet<&PathBuf> = paths.iter().collect();
     let editors: Vec<_> = app
         .tabs

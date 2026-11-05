@@ -235,7 +235,7 @@ pub enum PageId {
     Repo(String),
 }
 
-fn page_key(id: &PageId) -> String {
+pub fn page_key(id: &PageId) -> String {
     match id {
         PageId::Dashboard => "page:dashboard".into(),
         PageId::Workspace(n) => format!("page:ws:{n}"),
