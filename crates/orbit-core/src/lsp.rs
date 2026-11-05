@@ -365,6 +365,22 @@ pub fn write_frame(stdin: &Mutex<ChildStdin>, message: &str) -> Result<(), Strin
     w.flush().map_err(|e| e.to_string())
 }
 
+/// Caps clangd's memory unless the command sets the flag itself: each
+/// background-index worker holds a whole translation unit and clangd starts
+/// one per core (indexing aether-engine: 5.8 GB on 16 cores, 2.1–3.5 GB with
+/// 4); preambles go to disk instead of the heap.
+fn clangd_memory_flags(args: &mut Vec<String>) {
+    let jobs = std::thread::available_parallelism().map_or(2, |n| n.get() / 4).clamp(2, 4);
+    for (flag, value) in [("-j", jobs.to_string()), ("--pch-storage", "disk".into())] {
+        // clangd takes `-j=4`, `-j 4` and `--j=4` alike.
+        let name = flag.trim_start_matches('-');
+        let set = args.iter().map(|a| a.trim_start_matches('-')).any(|a| a == name || a.starts_with(&format!("{name}=")));
+        if !set {
+            args.push(format!("{flag}={value}"));
+        }
+    }
+}
+
 /// Starts the server for `language_id` in the repo's folder (worktree, or the
 /// clone for a "@repo" scope). `on_message` gets the server's id and each raw
 /// JSON-RPC message from it; `on_exit` its exit code and last stderr lines.
@@ -390,6 +406,9 @@ pub fn start(
     // databases list real paths, so the server works in the real folder and
     // the client maps paths between the two.
     let real_root = real_path(&root);
+    if lang.id == "cpp" {
+        clangd_memory_flags(&mut args);
+    }
     if lang.id == "cpp" && !args.iter().any(|a| a.starts_with("--compile-commands-dir")) {
         // clangd finds <root> and <root>/build itself; deeper preset dirs need a pointer.
         if let Some(dir) = find_compile_commands(&real_root).and_then(|p| p.parent().map(Path::to_path_buf)) {
@@ -409,7 +428,20 @@ pub fn start(
         kill(id);
     }
 
-    let mut child = crate::proc::cmd(&bin)
+    let mut command = crate::proc::cmd(&bin);
+    // Killed with Orbit even when it crashes or is killed: clangd, on its
+    // stdin's EOF, first finishes the files it is indexing (~30 s, GBs).
+    // The signal follows the spawning thread: callers run on GPUI's
+    // background pool, which lives as long as the app.
+    #[cfg(target_os = "linux")]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        command.pre_exec(|| {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+            Ok(())
+        });
+    }
+    let mut child = command
         .args(&args)
         .current_dir(&real_root)
         .stdin(Stdio::piped())
@@ -687,6 +719,16 @@ mod tests {
         assert_eq!(resolve(cpp, Some(&custom)), Some(("C:/tools/clangd.exe".into(), vec!["--log=error".into()])));
         let off = LanguageServerSetting { command: Some("clangd".into()), disabled: true, ..Default::default() };
         assert_eq!(resolve(cpp, Some(&off)), None);
+    }
+
+    #[test]
+    fn clangd_memory_flags_keep_the_users() {
+        let mut args = vec!["--background-index".to_string()];
+        clangd_memory_flags(&mut args);
+        assert!(args[1].starts_with("-j=") && args[2] == "--pch-storage=disk", "{args:?}");
+        let mut own = vec!["--j=12".to_string(), "--pch-storage=memory".to_string()];
+        clangd_memory_flags(&mut own);
+        assert_eq!(own, ["--j=12", "--pch-storage=memory"]);
     }
 
     #[test]

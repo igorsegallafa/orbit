@@ -18,9 +18,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// A server with no tab of its language open in its repo for this long is
-/// stopped (clangd and rust-analyzer hold a gigabyte or more); opening one
-/// starts it again.
+/// A server with no tab of its language open in its repo, in the workspace
+/// shown, for this long is stopped (clangd and rust-analyzer hold gigabytes);
+/// showing such a tab starts it again.
 pub const IDLE_GRACE: Duration = Duration::from_secs(120);
 
 pub fn idle(in_use: bool, last_used: Instant, now: Instant) -> bool {
@@ -163,10 +163,10 @@ impl LspRegistry {
         }
     }
 
+    /// Kills every server (Orbit is quitting): asked to exit, clangd first
+    /// finishes the files it is indexing and outlived the app by ~30 s.
     pub fn shutdown_all(&mut self) {
-        for server in self.running() {
-            server.shutdown();
-        }
+        orbit_core::lsp::shutdown_all();
         self.0.borrow_mut().servers.clear();
     }
 }
