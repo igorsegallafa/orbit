@@ -2,6 +2,7 @@
 use alacritty_terminal::term::TermMode;
 use gpui::{Keystroke, Modifiers, MouseButton};
 
+/// None for plain text, which reaches the terminal through its input handler.
 pub fn key_to_bytes(ks: &Keystroke, app_cursor: bool) -> Option<Vec<u8>> {
     let m = ks.modifiers;
     let modcode = 1 + m.shift as u8 + 2 * m.alt as u8 + 4 * m.control as u8;
@@ -48,6 +49,7 @@ pub fn key_to_bytes(ks: &Keystroke, app_cursor: bool) -> Option<Vec<u8>> {
         "f10" => tilde(21),
         "f11" => tilde(23),
         "f12" => tilde(24),
+        "space" if m.control => vec![0],
         key if m.control && !m.platform => {
             let ch = key.chars().next()?;
             let code = match ch {
@@ -64,17 +66,13 @@ pub fn key_to_bytes(ks: &Keystroke, app_cursor: bool) -> Option<Vec<u8>> {
             v.push(code);
             v
         }
-        "space" => {
-            let mut v = if m.alt { vec![0x1b] } else { vec![] };
-            v.push(b' ');
+        "space" if m.alt => b"\x1b ".to_vec(),
+        _ if m.alt => {
+            let mut v = vec![0x1b];
+            v.extend_from_slice(ks.key_char.as_ref()?.as_bytes());
             v
         }
-        _ => {
-            let text = ks.key_char.as_ref()?;
-            let mut v = if m.alt { vec![0x1b] } else { vec![] };
-            v.extend_from_slice(text.as_bytes());
-            v
-        }
+        _ => return None,
     };
     Some(bytes)
 }
@@ -133,6 +131,24 @@ mod tests {
         assert_eq!(key_to_bytes(&ks("enter"), false).unwrap(), b"\r");
         assert_eq!(key_to_bytes(&ks("shift-enter"), false).unwrap(), b"\x1b\r");
         assert_eq!(key_to_bytes(&ks("alt-enter"), false).unwrap(), b"\x1b\r");
+    }
+
+    #[test]
+    fn text_is_left_to_the_input_handler() {
+        let ks = |k: &'static str| Keystroke::parse(k).unwrap().with_simulated_ime();
+        assert_eq!(key_to_bytes(&ks("a"), false), None);
+        assert_eq!(key_to_bytes(&ks("shift-a"), false), None);
+        assert_eq!(key_to_bytes(&ks("space"), false), None);
+        let composed = Keystroke { key: "eacute".into(), key_char: Some("é".into()), ..Default::default() };
+        assert_eq!(key_to_bytes(&composed, false), None);
+        // A dead key alone types nothing.
+        assert_eq!(key_to_bytes(&Keystroke { key: "dead_acute".into(), ..Default::default() }, false), None);
+        let alt_a = Keystroke { key_char: Some("a".into()), ..Keystroke::parse("alt-a").unwrap() };
+        assert_eq!(key_to_bytes(&alt_a, false).unwrap(), b"\x1ba");
+        assert_eq!(key_to_bytes(&ks("alt-space"), false).unwrap(), b"\x1b ");
+        assert_eq!(key_to_bytes(&ks("ctrl-c"), false).unwrap(), b"\x03");
+        assert_eq!(key_to_bytes(&ks("ctrl-space"), false).unwrap(), b"\x00");
+        assert_eq!(key_to_bytes(&ks("left"), true).unwrap(), b"\x1bOD");
     }
 
     #[test]

@@ -11,7 +11,8 @@ use alacritty_terminal::{
     vte::ansi::{Color, CursorShape, NamedColor, Rgb},
 };
 use gpui::{
-    font, point, px, size, Bounds, FontStyle, FontWeight, Hsla, Pixels, RenderImage, ShapedLine, SharedString, TextRun, Window,
+    fill, font, point, px, size, App, Bounds, FontStyle, FontWeight, Hsla, Pixels, RenderImage, ShapedLine, SharedString, TextAlign,
+    TextRun, UnderlineStyle, Window,
 };
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -22,6 +23,8 @@ use std::sync::{
 pub static FRAMES: AtomicU64 = AtomicU64::new(0);
 pub static FRAME_US_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub static FRAME_US_MAX: AtomicU64 = AtomicU64::new(0);
+
+const FONT_SIZE: f32 = 13.;
 
 pub fn record_frame(us: u64) {
     FRAMES.fetch_add(1, Ordering::Relaxed);
@@ -127,7 +130,7 @@ type Run = Option<(i32, usize, String, (Hsla, bool, bool))>;
 
 pub fn layout(shared: &Shared, bounds: Bounds<Pixels>, window: &mut Window) -> Frame {
     let base_font = font(theme::MONO_FONT);
-    let font_size = px(13.);
+    let font_size = px(FONT_SIZE);
     let line_height = px(LINE_HEIGHT);
     let text_system = window.text_system().clone();
     let font_id = text_system.resolve_font(&base_font);
@@ -292,4 +295,16 @@ pub fn layout(shared: &Shared, bounds: Bounds<Pixels>, window: &mut Window) -> F
         }
     }
     Frame { rects, lines, cursor, line_height, images }
+}
+
+/// An input method's uncommitted text over the cursor's cell, underlined.
+pub fn paint_marked(shared: &Shared, text: &str, window: &mut Window, cx: &mut App) {
+    let Some(caret) = shared.caret() else { return };
+    let color = hsla(theme::TEXT);
+    let text: SharedString = text.to_string().into();
+    let underline = Some(UnderlineStyle { thickness: px(1.), color: Some(color), wavy: false });
+    let run = TextRun { len: text.len(), font: font(theme::MONO_FONT), color, background_color: None, underline, strikethrough: None };
+    let line = window.text_system().shape_line(text, px(FONT_SIZE), &[run], None);
+    window.paint_quad(fill(Bounds::new(caret.origin, size(line.width.max(caret.size.width), caret.size.height)), hsla(theme::BG)));
+    let _ = line.paint(caret.origin, caret.size.height, TextAlign::Left, None, window, cx);
 }
