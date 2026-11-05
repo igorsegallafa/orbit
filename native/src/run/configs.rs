@@ -1,6 +1,6 @@
 //! Edit Configurations (Rider's Run/Debug Configurations, minimal): every
 //! configuration of the workspace's repos on the left (saved and discovered
-//! CMake executables), the selected one's name, target, executable,
+//! CMake executables and Cargo bins), the selected one's name, target, executable,
 //! arguments, working directory, environment, where it is stored and
 //! whether it builds first on the right. OK / Apply write `.orbit/run.json`
 //! ("Store as project file") or `.orbit/run.local.json` through
@@ -289,11 +289,11 @@ impl RunConfigs {
         i.config.is_compound().then(|| orbit_core::run::compound_parts(&i.config, repo).1.into_iter().next()).flatten()
     }
 
-    fn set_target(&mut self, target: String, window: &mut Window, cx: &mut Context<Self>) {
+    fn set_target(&mut self, target: String, kind: &'static str, window: &mut Window, cx: &mut Context<Self>) {
         self.commit(cx);
         let Some(ix) = self.selected else { return };
         self.items[ix].config.target = target;
-        self.items[ix].config.kind = "cmake".into();
+        self.items[ix].config.kind = kind.into();
         // Reload the form: the placeholders follow the target.
         self.selected = None;
         self.select(Some(ix), window, cx);
@@ -302,17 +302,19 @@ impl RunConfigs {
     fn open_targets(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let Some(ix) = self.selected else { return };
         let repo = &self.repos[self.items[ix].repo];
-        let mut targets: Vec<&CmakeTarget> = repo.targets.iter().collect();
+        let cargo = self.items[ix].config.kind == "cargo";
+        let mut targets: Vec<&CmakeTarget> = repo.targets.iter().filter(|t| t.package.is_some() == cargo).collect();
         targets.sort_by_key(|t| if t.runnable() { 0 } else if t.kind == "UTILITY" { 2 } else { 1 });
         let this = cx.entity().downgrade();
         let items: Vec<MenuItem> = targets
             .into_iter()
             .map(|t| {
                 let (name, this) = (t.name.clone(), this.clone());
-                let label = if t.runnable() { t.name.clone() } else { format!("{} · {}", t.name, kind_label(&t.kind)) };
+                let label = if t.runnable() && t.kind != "example" { t.name.clone() } else { format!("{} · {}", t.name, kind_label(&t.kind)) };
+                let kind = if cargo { "cargo" } else { "cmake" };
                 MenuItem::new(label, move |_, window, cx| {
                     let name = name.clone();
-                    let _ = this.update(cx, |t, cx| t.set_target(name, window, cx));
+                    let _ = this.update(cx, |t, cx| t.set_target(name, kind, window, cx));
                 })
             })
             .collect();
@@ -556,7 +558,8 @@ fn saved_message(done: &[(String, &'static str)], removed: usize) -> Option<Stri
 
 fn kind_label(kind: &str) -> &'static str {
     match kind {
-        "EXECUTABLE" => "executable",
+        "EXECUTABLE" | "bin" => "executable",
+        "example" => "example",
         "STATIC_LIBRARY" => "static library",
         "SHARED_LIBRARY" => "shared library",
         "MODULE_LIBRARY" => "module",
@@ -613,7 +616,8 @@ impl RunConfigs {
             if multi {
                 rows.push(div().px(px(8.)).pt(px(8.)).pb(px(2.)).text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).child(repo.name.clone()).into_any_element());
             }
-            for (group, label) in [(Origin::Project, "Project"), (Origin::Local, "Local"), (Origin::Discovered, "CMake targets")] {
+            let discovered = if repo.targets.iter().any(|t| t.package.is_none()) { "CMake targets" } else { "Cargo targets" };
+            for (group, label) in [(Origin::Project, "Project"), (Origin::Local, "Local"), (Origin::Discovered, discovered)] {
                 let members: Vec<usize> = (0..self.items.len()).filter(|&i| self.items[i].repo == r && self.items[i].origin == group).collect();
                 if members.is_empty() {
                     continue;
@@ -700,11 +704,14 @@ impl RunConfigs {
         let item = &self.items[ix];
         let repo = &self.repos[item.repo];
         let target_label = if item.config.target.is_empty() { "None".to_string() } else { item.config.target.clone() };
-        let target_kind = repo.targets.iter().find(|t| t.name == item.config.target).map(|t| kind_label(&t.kind));
-        let has_targets = !repo.targets.is_empty();
+        let cargo = item.config.kind == "cargo";
+        let target_kind = repo.targets.iter().find(|t| t.name == item.config.target && t.package.is_some() == cargo).map(|t| kind_label(&t.kind));
+        let has_targets = repo.targets.iter().any(|t| t.package.is_some() == cargo);
+        let has_cargo = cargo || repo.targets.iter().any(|t| t.package.is_some());
         let command = item.config.kind == "command";
         let compound = item.config.is_compound();
-        let kinds = div().flex().gap(px(6.)).children([("cmake", "CMake target"), ("command", "Command"), ("compound", "Compound")].into_iter().enumerate().map(|(n, (kind, label))| {
+        let kinds = [("cmake", "CMake target"), ("cargo", "Cargo target"), ("command", "Command"), ("compound", "Compound")].into_iter().filter(|(k, _)| has_cargo || *k != "cargo");
+        let kinds = div().flex().gap(px(6.)).children(kinds.enumerate().map(|(n, (kind, label))| {
             let on = item.config.kind == kind;
             div()
                 .id(("rc-kind", n))
@@ -762,7 +769,7 @@ impl RunConfigs {
                     .flex()
                     .gap(px(8.))
                     .child(target_label)
-                    .children(target_kind.filter(|k| *k != "executable").map(|k| div().text_color(c(theme::WARN)).child(format!("{k} · builds, does not run")))),
+                    .children(target_kind.filter(|k| !matches!(*k, "executable" | "example")).map(|k| div().text_color(c(theme::WARN)).child(format!("{k} · builds, does not run")))),
             )
             .child(crate::workspace_ui::icons::icon("chevron-down", 12., c(theme::TEXT_FAINT)))
             .child(probe("rc-target"))

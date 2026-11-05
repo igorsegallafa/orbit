@@ -6,7 +6,7 @@ use super::{card, cancel_button, footer, status_row, Flow, Mark};
 use crate::review::ui::Tone;
 use crate::toast::ToastKind;
 use crate::workspace_ui::{plural, spawn, PageTab};
-use gpui::{div, prelude::*, ClickEvent, Context, Window};
+use gpui::{div, prelude::*, px, ClickEvent, Context, Window};
 use orbit_core::git::{self, RebaseStatus};
 use orbit_core::prs::{worktree_of, worktree_on_branch};
 use std::fmt::Write as _;
@@ -154,7 +154,7 @@ impl PageTab {
     }
 
     pub(super) fn render_rebase(&self, f: &RebaseFlow, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut list = div().flex().flex_col();
+        let mut list = div().flex().flex_col().gap(px(6.));
         for (repo, s) in &f.rows {
             let (mark, detail) = if !f.started {
                 (Mark::Pending, format!("onto origin/{}", f.base))

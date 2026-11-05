@@ -69,6 +69,18 @@ pub fn button_icon_tinted(
     size: Size,
     tint: Option<gpui::Rgba>,
 ) -> Stateful<Div> {
+    let fg = colors(kind).2;
+    button_lead(id, icon_spec.map(|(name, sz)| icon(name, sz, tint.unwrap_or(fg)).into_any_element()), label, kind, size)
+}
+
+/// `button` with a `.spinner` before the label while `busy`.
+pub fn button_busy(id: impl Into<SharedString>, label: impl Into<SharedString>, kind: Kind, size: Size, busy: bool) -> Stateful<Div> {
+    let id: SharedString = id.into();
+    let spin = busy.then(|| spinner(ElementId::Name(format!("{id}-spin").into()), size.1, colors(kind).2).into_any_element());
+    button_lead(id, spin, label, kind, size)
+}
+
+fn button_lead(id: impl Into<SharedString>, lead: Option<gpui::AnyElement>, label: impl Into<SharedString>, kind: Kind, size: Size) -> Stateful<Div> {
     let id: SharedString = id.into();
     let (bg, hover, fg) = colors(kind);
     let Size(h, font, pad, radius) = size;
@@ -92,7 +104,7 @@ pub fn button_icon_tinted(
         .whitespace_nowrap()
         .cursor_pointer()
         .hover(move |s| s.bg(hover))
-        .when_some(icon_spec, |d, (name, sz)| d.child(icon(name, sz, tint.unwrap_or(fg))))
+        .children(lead)
         .child(label.into())
         .child(probe(id.to_string()))
 }

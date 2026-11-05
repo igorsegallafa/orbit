@@ -151,6 +151,7 @@ pub struct SettingsPage {
     drafts: HashMap<String, Entity<InputState>>,
     logs: HashMap<u32, Vec<String>>,
     health: Load<Vec<Check>>,
+    gnome: Option<crate::terminal::inhibit::Gnome>,
     _poll: Task<()>,
     _subs: Vec<Subscription>,
 }
@@ -191,6 +192,7 @@ impl SettingsPage {
             drafts: HashMap::new(),
             logs: HashMap::new(),
             health: Load::Idle,
+            gnome: None,
             _poll: poll,
             _subs: vec![sub, cx.observe_global::<updates::Updater>(|_, cx| cx.notify())],
         };
@@ -208,6 +210,7 @@ impl SettingsPage {
                 self.load_languages(cx);
             }
             Section::Health if !matches!(self.health, Load::Ready(_)) => self.load_health(window, cx),
+            Section::Keyboard => self.load_gnome(window, cx),
             Section::Ai if matches!(self.models, Load::Idle) => self.load_models(window, cx),
             _ => {}
         }
@@ -418,6 +421,10 @@ impl SettingsPage {
 
     // ---------- health ----------
 
+    fn load_gnome(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        ui::bg(cx, crate::terminal::inhibit::gnome_status, |t: &mut Self, g, _, _| t.gnome = Some(g), window);
+    }
+
     fn load_health(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.health = Load::Loading;
         ui::bg(cx, orbit_core::health::run, |t: &mut Self, list, _, _| t.health = Load::Ready(list), window);
@@ -539,7 +546,7 @@ impl SettingsPage {
         if let Some(Load::Failed(e)) = &self.test {
             connection = connection.child(kit::error_box(e.clone()));
         }
-        let test_btn = kit::disabled(kit::button("ai-test", if testing { "Testing…" } else { "Test agent" }, Kind::Secondary), testing)
+        let test_btn = kit::disabled(kit::button_busy("ai-test", if testing { "Testing…" } else { "Test agent" }, Kind::Secondary, testing), testing)
             .on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.test_agent(w, cx)));
         let mut rows = vec![
             kit::setting("Agent", kit::hint("The CLI Orbit runs for plans, commit messages, PR drafts, CI investigation and Ralph."), agent_seg),
@@ -868,16 +875,35 @@ impl SettingsPage {
         use crate::terminal::inhibit;
         let on = inhibit::enabled();
         kit::section()
-            .child(kit::rows([
-                kit::setting(
+            .child(kit::rows(
+                [kit::setting(
                     "Terminal keys over GNOME shortcuts",
                     kit::hint("While a terminal has focus, GNOME's Super shortcuts (Super+V, Super+A, Super+S…) go to the terminal; under Toshy those are Ctrl+V, Ctrl+A, Ctrl+S. Alt+Tab still switches windows. GNOME asks once to allow it; GNOME Settings → Apps → Orbit changes the answer. Wayland only: on X11 GNOME's grabs cannot be lifted by an app."),
                     kit::check("keys-inhibit", if on { "On" } else { "Off" }, on).on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
                         inhibit::set_enabled(!inhibit::enabled(), cx);
                         cx.notify();
                     })),
-                ),
-            ]))
+                )]
+            .into_iter()
+            .chain(self.gnome.filter(|g| *g != inhibit::Gnome::Unknown).map(|g| {
+                let (label, hint) = match g {
+                    inhibit::Gnome::Allowed => ("Allowed", "GNOME lets Orbit's terminals take these keys."),
+                    inhibit::Gnome::Denied => ("Denied", "GNOME keeps these keys and won't ask again. Ask again resets the answer; then restart Orbit and focus a terminal to get GNOME's prompt."),
+                    _ => ("Not asked yet", "Click into a terminal tab: GNOME shows an Allow / Deny dialog (closing it counts as Deny). If Orbit was open when the answer was reset, restart it first."),
+                };
+                kit::setting(
+                    format!("GNOME permission: {label}"),
+                    kit::hint(hint),
+                    div().when(g == inhibit::Gnome::Denied, |d| {
+                        d.child(kit::button("keys-ask-again", "Ask again", Kind::Secondary).on_click(cx.listener(|t, _: &ClickEvent, w, cx| {
+                            t.gnome = None;
+                            ui::bg(cx, || { inhibit::gnome_forget(); inhibit::gnome_status() }, |t: &mut Self, g, _, _| t.gnome = Some(g), w);
+                            cx.notify();
+                        })))
+                    }),
+                )
+            })),
+            ))
             .into_any_element()
     }
 
@@ -957,9 +983,9 @@ impl SettingsPage {
         let action = match &st.status {
             updates::Status::Available(_) if installable => kit::button("updates-install", "Install update", Kind::Primary).on_click(|_, _, cx| updates::install(cx)),
             updates::Status::Available(_) => kit::button("updates-open", "Open release page", Kind::Primary).on_click(|_, _, cx| cx.open_url(updates::RELEASES_URL)),
-            updates::Status::Downloading { .. } => kit::disabled(kit::button("updates-install", "Installing…", Kind::Primary), true),
+            updates::Status::Downloading { .. } => kit::disabled(kit::button_busy("updates-install", "Installing…", Kind::Primary, true), true),
             updates::Status::Ready(_) => kit::button("updates-restart", "Restart to update", Kind::Primary).on_click(|_, _, cx| updates::restart(cx)),
-            _ => kit::disabled(kit::button("updates-check", if busy { "Checking…" } else { "Check for updates" }, Kind::Secondary), busy)
+            _ => kit::disabled(kit::button_busy("updates-check", if busy { "Checking…" } else { "Check for updates" }, Kind::Secondary, busy), busy)
                 .on_click(|_, _, cx| updates::check(true, cx)),
         };
         let mut text = div().flex().flex_col().gap(px(4.)).child(kit::hint(st.describe()));

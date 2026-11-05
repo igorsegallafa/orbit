@@ -11,6 +11,69 @@ use std::cell::RefCell;
 use std::fmt::Write as _;
 use std::time::Duration;
 
+/// GNOME's stored answer to its "allow shortcut inhibition" prompt for Orbit.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Gnome {
+    Allowed,
+    Denied,
+    /// No answer stored: GNOME will ask.
+    NotAsked,
+    /// Not GNOME, or its permission store could not be read.
+    Unknown,
+}
+
+const STORE: [&str; 4] = [
+    "--dest",
+    "org.freedesktop.impl.portal.PermissionStore",
+    "--object-path",
+    "/org/freedesktop/impl/portal/PermissionStore",
+];
+
+fn gdbus(method: &str, extra: &[&str]) -> Option<String> {
+    let method = format!("org.freedesktop.impl.portal.PermissionStore.{method}");
+    let mut args = vec!["call", "--session"];
+    args.extend(STORE);
+    args.extend(["--method", &method, "gnome", "shortcuts-inhibitor"]);
+    args.extend(extra);
+    let out = std::process::Command::new("gdbus").args(&args).output().ok()?;
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// `({'orbit.desktop': ['DENIED'], 'x.desktop': ['GRANTED']}, <byte 0x00>)` → Orbit's entries.
+fn orbit_entries(out: &str) -> Vec<(String, bool)> {
+    let Some(map) = out.split_once('{').and_then(|(_, r)| r.split_once('}')).map(|(m, _)| m) else { return vec![] };
+    map.split("], ")
+        .filter_map(|e| {
+            let mut q = e.split('\'');
+            let app = q.nth(1)?.to_string();
+            app.to_ascii_lowercase().contains("orbit").then(|| (app, e.contains("GRANTED")))
+        })
+        .collect()
+}
+
+/// Blocking (spawns gdbus): call off the UI thread.
+pub fn gnome_status() -> Gnome {
+    if !default_on() {
+        return Gnome::Unknown;
+    }
+    match gdbus("Lookup", &[]) {
+        // No table yet (nothing ever asked) is an error with empty stdout.
+        None => Gnome::Unknown,
+        Some(out) => match orbit_entries(&out).first() {
+            None => Gnome::NotAsked,
+            Some((_, true)) => Gnome::Allowed,
+            Some(_) => Gnome::Denied,
+        },
+    }
+}
+
+/// Forgets GNOME's answer so it asks again the next time a terminal takes focus. Blocking.
+pub fn gnome_forget() {
+    for (app, _) in gdbus("Lookup", &[]).map(|o| orbit_entries(&o)).unwrap_or_default() {
+        let _ = gdbus("DeletePermission", &[&app]);
+    }
+}
+
 thread_local! {
     static STATE: RefCell<Inhibit> = RefCell::new(Inhibit::default());
 }
@@ -310,4 +373,19 @@ mod wl {
 
     wayland_client::delegate_noop!(Events: ignore WlSeat);
     wayland_client::delegate_noop!(Events: Manager);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::orbit_entries;
+
+    #[test]
+    fn reads_orbits_answer_from_the_permission_store() {
+        let out = "({'orbit.desktop': ['DENIED'], 'org.gnome.Terminal.desktop': ['GRANTED']}, <byte 0x00>)\n";
+        assert_eq!(orbit_entries(out), [("orbit.desktop".to_string(), false)]);
+        let out = "({'com.nsx001220.orbit.desktop': ['GRANTED']}, <byte 0x00>)";
+        assert_eq!(orbit_entries(out), [("com.nsx001220.orbit.desktop".to_string(), true)]);
+        assert!(orbit_entries("({}, <byte 0x00>)").is_empty());
+        assert!(orbit_entries("").is_empty());
+    }
 }

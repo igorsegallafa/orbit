@@ -16,6 +16,16 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+/// A server with no tab of its language open in its repo for this long is
+/// stopped (clangd and rust-analyzer hold a gigabyte or more); opening one
+/// starts it again.
+pub const IDLE_GRACE: Duration = Duration::from_secs(120);
+
+pub fn idle(in_use: bool, last_used: Instant, now: Instant) -> bool {
+    !in_use && now.saturating_duration_since(last_used) >= IDLE_GRACE
+}
 
 /// What a file is, for highlighting and for picking a server.
 pub struct FileLanguage {
@@ -60,8 +70,16 @@ pub struct RepoKey {
     pub repo: String,
 }
 
+pub type ServerKey = (RepoKey, &'static str);
+
+struct Entry {
+    server: ServerFuture,
+    /// When a tab last used it (see `stop_idle`).
+    last_used: Instant,
+}
+
 struct Registry {
-    servers: HashMap<(RepoKey, &'static str), ServerFuture>,
+    servers: HashMap<ServerKey, Entry>,
     notifications: mpsc::UnboundedSender<Notification>,
 }
 
@@ -78,7 +96,7 @@ impl LspRegistry {
     /// Stops the server so the next `server` call starts a new one.
     pub fn restart(&self, repo: &RepoKey, language: &'static str) {
         let old = self.0.borrow_mut().servers.remove(&(repo.clone(), language));
-        if let Some(server) = old.and_then(|f| f.peek().and_then(|r| r.as_ref().ok()).cloned()) {
+        if let Some(server) = old.and_then(|e| e.server.peek().and_then(|r| r.as_ref().ok()).cloned()) {
             server.shutdown();
         }
     }
@@ -88,10 +106,11 @@ impl LspRegistry {
     pub fn server(&self, repo: &RepoKey, language: &'static str, cx: &mut App) -> ServerFuture {
         let key = (repo.clone(), language);
         let mut this = self.0.borrow_mut();
-        if let Some(existing) = this.servers.get(&key) {
-            let dead = existing.peek().is_some_and(|s| s.as_ref().map_or(true, |s| s.has_exited()));
+        if let Some(existing) = this.servers.get_mut(&key) {
+            let dead = existing.server.peek().is_some_and(|s| s.as_ref().map_or(true, |s| s.has_exited()));
             if !dead {
-                return existing.clone();
+                existing.last_used = Instant::now();
+                return existing.server.clone();
             }
         }
         let tx = this.notifications.clone();
@@ -115,12 +134,33 @@ impl LspRegistry {
             }
         });
         let shared = task.shared();
-        this.servers.insert(key, shared.clone());
+        this.servers.insert(key, Entry { server: shared.clone(), last_used: Instant::now() });
         shared
     }
 
     pub fn running(&self) -> Vec<Arc<LspServer>> {
-        self.0.borrow().servers.values().filter_map(|f| f.peek().and_then(|r| r.as_ref().ok()).cloned()).collect()
+        self.0.borrow().servers.values().filter_map(|e| e.server.peek().and_then(|r| r.as_ref().ok()).cloned()).collect()
+    }
+
+    /// Stops the servers no tab has used (`in_use`) for `IDLE_GRACE`; one
+    /// still starting is left for the next call.
+    pub fn stop_idle(&self, in_use: &[ServerKey], now: Instant) {
+        let mut this = self.0.borrow_mut();
+        let mut stop = vec![];
+        for (key, e) in this.servers.iter_mut() {
+            let used = in_use.contains(key);
+            if used {
+                e.last_used = now;
+            } else if idle(used, e.last_used, now) && e.server.peek().is_some() {
+                stop.push(key.clone());
+            }
+        }
+        for key in stop {
+            if let Some(Ok(server)) = this.servers.remove(&key).and_then(|e| e.server.peek().cloned()) {
+                eprintln!("lsp: stopping idle {} ({})", server.command, key.0.repo);
+                server.shutdown();
+            }
+        }
     }
 
     pub fn shutdown_all(&mut self) {
@@ -128,5 +168,20 @@ impl LspRegistry {
             server.shutdown();
         }
         self.0.borrow_mut().servers.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn servers_stop_only_after_the_grace_unused() {
+        let t0 = Instant::now();
+        assert!(!idle(false, t0, t0 + IDLE_GRACE - Duration::from_secs(1)));
+        assert!(idle(false, t0, t0 + IDLE_GRACE));
+        assert!(!idle(true, t0, t0 + IDLE_GRACE * 10));
+        // A clock that reads earlier than last use never stops it.
+        assert!(!idle(false, t0 + IDLE_GRACE, t0));
     }
 }

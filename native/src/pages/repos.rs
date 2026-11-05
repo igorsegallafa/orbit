@@ -509,7 +509,15 @@ impl SettingsPage {
                 Some(CloneState::Cloned) => {
                     div().flex().items_center().gap(px(7.)).text_size(px(12.)).text_color(c(theme::TEXT_DIM)).child(super::settings::repo_dot()).child("Cloned").into_any_element()
                 }
-                Some(CloneState::Cloning) => div().text_size(px(12.)).text_color(c(theme::TEXT_DIM)).child("Cloning…").into_any_element(),
+                Some(CloneState::Cloning) => div()
+                    .flex()
+                    .items_center()
+                    .gap(px(7.))
+                    .text_size(px(12.))
+                    .text_color(c(theme::TEXT_DIM))
+                    .child(crate::workspace_ui::kit::spinner(SharedString::from(format!("repo-clone-spin:{}", s.name)), 12., c(theme::ACCENT)))
+                    .child("Cloning…")
+                    .into_any_element(),
                 Some(CloneState::Missing) => kit::icon_label_button(format!("repo:{}:clone", s.name), "download", "Clone", Kind::Secondary)
                     .h(px(30.))
                     .text_size(px(12.5))
@@ -716,7 +724,15 @@ impl SettingsPage {
                 card.child(body)
             }
             Load::Failed(e) => card.child(div().p(px(14.)).child(kit::error_box(e.clone()))),
-            _ => card.child(div().p(px(14.)).child(kit::hint("Loading your GitHub repositories…"))),
+            _ => card.child(
+                div()
+                    .p(px(14.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(crate::workspace_ui::kit::spinner("gh-repos-spin", 13., c(theme::ACCENT)))
+                    .child(kit::hint("Loading your GitHub repositories…")),
+            ),
         };
         card.into_any_element()
     }

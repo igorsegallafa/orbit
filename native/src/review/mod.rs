@@ -91,8 +91,6 @@ pub struct ReviewTab {
     pub status: Load<Vec<WsPrStatus>>,
     pub checks: Load<Vec<WsCheck>>,
     pub log: Option<(String, Load<String>)>,
-    pub create: Vec<prs::CreateRow>,
-    pub creating: bool,
     pub sending: bool,
     _poll: Task<()>,
 }
@@ -128,8 +126,6 @@ impl ReviewTab {
             status: Load::Idle,
             checks: Load::Idle,
             log: None,
-            create: vec![],
-            creating: false,
             sending: false,
             _poll: poll,
         };
@@ -419,9 +415,6 @@ impl ReviewTab {
                     for ch in &w.checks {
                         let _ = writeln!(out, "      {} {} {}", ch.bucket, ch.name, ch.link);
                     }
-                }
-                for row in &self.create {
-                    let _ = writeln!(out, "  create {} include {} title {:?}", row.repo, row.include, row.title.read(cx).value());
                 }
                 if let Some((title, log)) = &self.log {
                     let text = match log {

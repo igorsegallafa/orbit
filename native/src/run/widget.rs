@@ -1,7 +1,7 @@
 //! Rider-style run widget for the title bar (`RunWidget.tsx`): pick a run
 //! configuration and CMake preset, then Build (or Build All), Run, Debug or
 //! Stop. The configuration list groups the saved configurations before the
-//! discovered CMake targets, filters as you type once it is long, and ends
+//! discovered CMake and Cargo targets, filters as you type once it is long, and ends
 //! with Edit Configurations….
 use super::{store, RunTarget};
 use crate::app::OrbitApp;
@@ -68,7 +68,8 @@ impl RunWidget {
                 let filter = self.filter.to_lowercase();
                 let mut rows = Vec::new();
                 for (repo, setup) in &s.setups {
-                    for (group, title) in [(Origin::Project, "Project"), (Origin::Local, "Local"), (Origin::Discovered, "CMake targets")] {
+                    let discovered = if setup.targets.iter().any(|t| t.package.is_none()) { "CMake targets" } else { "Cargo targets" };
+                    for (group, title) in [(Origin::Project, "Project"), (Origin::Local, "Local"), (Origin::Discovered, discovered)] {
                         let members: Vec<_> = setup
                             .configs
                             .iter()
@@ -325,7 +326,10 @@ impl RunWidget {
             .items_center()
             .justify_center()
             .when(enabled, |d| d.cursor_pointer().hover(|s| s.bg(c(theme::PANEL_HOVER))))
-            .child(crate::icons::ui_icon(if building { "spinner" } else { "hammer" }, 14., c(theme::TEXT_DIM)))
+            .map(|d| match building {
+                true => d.child(crate::workspace_ui::kit::spinner("run-build-spin", 14., c(theme::TEXT_DIM))),
+                false => d.child(crate::icons::ui_icon("hammer", 14., c(theme::TEXT_DIM))),
+            })
             .child(probe("run-build"))
             .tooltip(move |window, cx| Tooltip::new(hint.clone()).build(window, cx))
             .on_mouse_down(

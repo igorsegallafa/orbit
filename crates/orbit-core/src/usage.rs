@@ -20,6 +20,8 @@ pub struct ModelUsage {
 
 #[derive(Serialize, Clone, Debug, Default)]
 pub struct SessionDetail {
+    /// The agent's session id: Claude Code's conversation uuid, OpenCode's session id.
+    pub id: String,
     pub title: String,
     pub model: String,
     pub input_tokens: u64,
@@ -221,13 +223,15 @@ fn opencode_usage(ws_dir: &std::path::Path, repos: &[String]) -> Raw {
         let cost = row.get("cost").and_then(|c| c.as_f64()).unwrap_or(0.0);
         let last_active = row.get("time_updated").and_then(|t| t.as_i64()).unwrap_or(0) / 1000;
 
-        if let Some(id) = row.get("id").and_then(|i| i.as_str()) {
+        let id = row.get("id").and_then(|i| i.as_str()).unwrap_or_default().to_string();
+        if !id.is_empty() {
             raw.sessions.insert(format!("oc:{id}"));
         }
         add_session(
             &mut raw,
             &model,
             SessionDetail {
+                id,
                 title,
                 model: model.clone(),
                 input_tokens: inp,
@@ -268,15 +272,8 @@ fn claude_usage(ws_dir: &std::path::Path, repos: &[String]) -> Raw {
             };
 
             // Aggregate this jsonl file into one session detail.
-            let mut det = SessionDetail {
-                title: f
-                    .path()
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_default(),
-                model: String::new(),
-                ..Default::default()
-            };
+            let id = f.path().file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+            let mut det = SessionDetail { title: id.clone(), id, ..Default::default() };
             for line in content.lines() {
                 let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
                     continue;

@@ -142,12 +142,17 @@ pub fn footer() -> Div {
 
 /// A flow's button: footer actions (`*-submit`) at control height, the rest mini.
 pub fn btn(id: impl Into<SharedString>, label: impl Into<SharedString>, tone: Tone) -> Stateful<Div> {
+    btn_busy(id, label, tone, false)
+}
+
+/// `btn` with a spinner before the label while `busy`.
+pub fn btn_busy(id: impl Into<SharedString>, label: impl Into<SharedString>, tone: Tone, busy: bool) -> Stateful<Div> {
     let id: SharedString = id.into();
     let size = if id.ends_with("-submit") || id.as_ref() == "push-create-prs" { kit::NORMAL } else { kit::MINI };
     match tone {
-        Tone::Primary => kit::button(id, label, Kind::Primary, size),
-        Tone::Plain => kit::button(id, label, Kind::Secondary, size),
-        Tone::Danger => kit::button(id, label, Kind::Secondary, size).text_color(c(theme::DANGER)),
+        Tone::Primary => kit::button_busy(id, label, Kind::Primary, size, busy),
+        Tone::Plain => kit::button_busy(id, label, Kind::Secondary, size, busy),
+        Tone::Danger => kit::button_busy(id, label, Kind::Secondary, size, busy).text_color(c(theme::DANGER)),
     }
 }
 
@@ -174,8 +179,8 @@ pub enum Mark {
 impl Mark {
     fn glyph(self) -> (&'static str, Rgba) {
         match self {
-            Mark::Pending => ("○", c(theme::TEXT_FAINT)),
-            Mark::Working => ("◌", c(theme::ACCENT)),
+            Mark::Pending => ("", c(theme::TEXT_FAINT)),
+            Mark::Working => ("", c(theme::ACCENT)),
             Mark::Ok => ("✓", c(theme::OK)),
             Mark::Warn => ("!", c(theme::WARN)),
             Mark::Error => ("✕", c(theme::DANGER)),
@@ -186,6 +191,11 @@ impl Mark {
 /// One repo's line in a flow: mark, name, detail, then actions.
 pub fn status_row(mark: Mark, repo: impl Into<SharedString>, detail: impl Into<SharedString>) -> Div {
     let (g, color) = mark.glyph();
+    let repo: SharedString = repo.into();
+    let glyph = match mark {
+        Mark::Working => kit::spinner(gpui::ElementId::Name(format!("flow-spin:{repo}").into()), 20., color).into_any_element(),
+        _ => g.into_any_element(),
+    };
     div()
         .flex()
         .items_center()
@@ -202,7 +212,7 @@ pub fn status_row(mark: Mark, repo: impl Into<SharedString>, detail: impl Into<S
                 .flex_none()
                 .size(px(20.))
                 .rounded_full()
-                .border_1()
+                .when(mark != Mark::Working, |d| d.border_1())
                 .when(mark == Mark::Pending, |d| d.border_dashed())
                 .border_color(if mark == Mark::Pending { c(theme::TEXT_FAINT) } else { color })
                 .flex()
@@ -210,9 +220,9 @@ pub fn status_row(mark: Mark, repo: impl Into<SharedString>, detail: impl Into<S
                 .justify_center()
                 .text_size(px(11.))
                 .text_color(color)
-                .child(if mark == Mark::Pending { "" } else { g }),
+                .child(glyph),
         )
-        .child(div().flex_none().font_family(theme::MONO_FONT).font_weight(gpui::FontWeight::BOLD).child(repo.into()))
+        .child(div().flex_none().font_family(theme::MONO_FONT).font_weight(gpui::FontWeight::BOLD).child(repo))
         .child(
             div()
                 .flex_1()
