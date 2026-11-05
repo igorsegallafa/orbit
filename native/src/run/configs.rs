@@ -285,8 +285,8 @@ impl RunConfigs {
 
     fn compound_problem(&self, ix: usize) -> Option<String> {
         let i = &self.items[ix];
-        let repo = self.items.iter().filter(|o| o.repo == i.repo).map(|o| &o.config);
-        i.config.is_compound().then(|| orbit_core::run::compound_parts(&i.config, repo).1.into_iter().next()).flatten()
+        let all = self.items.iter().map(|o| (self.repos[o.repo].name.as_str(), &o.config));
+        i.config.is_compound().then(|| orbit_core::run::compound_parts(&i.config, &self.repos[i.repo].name, all).1.into_iter().next()).flatten()
     }
 
     fn set_target(&mut self, target: String, kind: &'static str, window: &mut Window, cx: &mut Context<Self>) {
@@ -731,10 +731,17 @@ impl RunConfigs {
                 .child(probe(format!("rc-kind:{kind}")))
                 .on_click(cx.listener(move |t, _: &ClickEvent, window, cx| t.set_kind(kind, window, cx)))
         }));
-        let parts: Vec<String> = self.items.iter().filter(|o| o.repo == item.repo && !o.config.is_compound() && !o.config.name.is_empty()).map(|o| o.config.name.clone()).collect();
-        let checklist = div().flex().flex_col().gap(px(6.)).children(parts.into_iter().enumerate().map(|(n, name)| {
+        // This repo's configurations first, then the other repos' (a compound can mix them).
+        let mut parts: Vec<&Item> = self.items.iter().filter(|o| !o.config.is_compound() && !o.config.name.is_empty()).collect();
+        parts.sort_by_key(|o| o.repo != item.repo);
+        let several = self.repos.len() > 1;
+        let checklist = div().flex().flex_col().gap(px(6.)).children(parts.into_iter().enumerate().map(|(n, o)| {
+            let other = &self.repos[o.repo].name;
+            let name = orbit_core::run::part_ref(&repo.name, other, &o.config.name);
             let order = item.config.configs.iter().position(|c| *c == name);
             let toggle = name.clone();
+            let label = o.config.name.clone();
+            let from = several.then(|| div().text_size(px(11.)).text_color(c(theme::TEXT_FAINT)).child(other.clone()));
             div()
                 .id(("rc-part", n))
                 .relative()
@@ -744,7 +751,8 @@ impl RunConfigs {
                 .cursor_pointer()
                 .text_size(px(13.))
                 .child(kit::check(order.is_some(), false))
-                .child(name.clone())
+                .child(label)
+                .children(from)
                 .children(order.map(|o| div().text_size(px(11.)).text_color(c(theme::TEXT_FAINT)).child(format!("#{}", o + 1))))
                 .child(probe(format!("rc-part:{name}")))
                 .on_click(cx.listener(move |t, _: &ClickEvent, _, cx| t.toggle_part(toggle.clone(), cx)))
