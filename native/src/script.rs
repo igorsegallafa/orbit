@@ -282,6 +282,7 @@ pub fn dump(app: &OrbitApp, log: &str, cx: &gpui::App) -> String {
             let _ = writeln!(out, "line {line}: {}", text.slice_line((line - 1) as usize).to_string().trim_end());
             let _ = writeln!(out, "selection: {:?}", state.selected_text().to_string());
             let _ = writeln!(out, "status: {}", e.status_text(cx));
+            let _ = writeln!(out, "change marks: {}", e.marks_text());
             let _ = writeln!(out, "breadcrumb: {}", e.display_path.replace('/', " › "));
             if let Some(m) = &e.message {
                 let _ = writeln!(out, "message: {m}");

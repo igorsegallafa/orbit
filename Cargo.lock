@@ -4521,6 +4521,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "similar",
  "url",
  "wayland-backend",
  "wayland-client",
