@@ -85,7 +85,9 @@ Sessions and free-form steps run after the fixed ones (`;`-separated):
 
 `wait:<text>[@secs]` waits for text in the active terminal, `status:<status>` for a session in that
 status, `action:<name>` dispatches any registered GPUI action by name, `type:`/`keys:` go through
-GPUI's keystroke dispatch, `dump` writes the sessions, inbox and recent list into the log. Waits
+GPUI's keystroke dispatch, `mark:<text>`/`commit:<text>` call the terminal's input handler as an
+input method does (a dead key's accent, then the composed letter), `term-drag:<col,row>:<col,row>`
+drags over terminal cells (`term-drag:shift+0,1:7,1` holds Shift for the press), `dump` writes the sessions, inbox and recent list into the log. Waits
 also record how late the UI thread ran its timers ("ui timer lag"), which is how a blocked UI shows.
 App commands (closing a tab…) are not GPUI actions by name: run them with `--do "cmd:<id>"`.
 The dump always ends with the sessions, inbox and recent list.
@@ -625,6 +627,30 @@ released it, `mods:` made a new one (active again); opening Settings released it
 made a new one (active); a clean exit. In the real GNOME 51 session the global is advertised and
 the request reaches GNOME Shell, which prompted once; with the stored answer `DENIED` later runs
 get no prompt and no `active` event.
+
+### Text input and copy
+
+Typed text reaches the terminal the way it reaches an editor: through GPUI's input handler
+(`EntityInputHandler`, as Zed's terminal does), so dead keys and input methods compose. Before,
+the terminal had no input handler: GPUI then turns `text-input-v3` off and drops any multi-byte
+commit an input method still sends, and its own xkb compose fallback reads only `LC_CTYPE` (unset
+in a GNOME session that sets `LANG`), so it uses the `C` table (`´` + `c` gives `ć`, not `ç`). Now
+the input method composes (IBus on GNOME, as for Ghostty) and its commit is written to the PTY as
+UTF-8. `key_to_bytes` keeps the keys that are not text (arrows, Ctrl and Alt combinations). An
+uncommitted accent is drawn underlined at the cursor.
+
+Copy: `Ctrl+Shift+C`, and `Ctrl+C` while something is selected (Cmd+C under Toshy, whose GUI keymap
+Orbit gets); it drops the selection, so the next `Ctrl+C` interrupts. A finished drag also goes to
+the primary selection. Programs that redraw over a selection (Claude Code's live region) erase it,
+but its text stays copyable until the next key or click. With mouse reporting on, Shift+drag
+selects, and keeps selecting if Shift is let go. OSC 52 writes (`\e]52;c;<base64>`, how Claude Code
+copies) go to the clipboard (`p`/`s`: the primary selection).
+
+Verified: unit tests in `terminal/input.rs`; self-tests typing `café ação ç` and `mark:´`,
+`commit:é`, `mark:~`, `commit:ã` into bash (grid shows `XéãY`), OSC 52 stores recorded in the dump,
+a drag under SGR mouse mode reported to the program and a Shift+drag selecting, `Ctrl+Shift+C` after
+the program erased the selected line, `Ctrl+C` copying then interrupting. Not verified with real
+keys: dead keys through IBus need a person at the keyboard (`wtype`/`ydotool` are not installed).
 
 ## Files and search stage
 

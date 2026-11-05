@@ -23,14 +23,14 @@ use alacritty_terminal::{
     index::{Column, Line, Point as GridPoint, Side},
     selection::{Selection, SelectionType},
     sync::FairMutex,
-    term::{cell::Flags, Config, Term, TermMode},
+    term::{cell::Flags, ClipboardType, Config, Term, TermMode},
     vte::ansi::{CursorShape, Processor, Rgb},
 };
 use futures::{channel::mpsc, StreamExt};
 use gpui::{
-    canvas, div, fill, outline, point, prelude::*, px, size, App, Bounds, ClipboardItem, Context, FocusHandle,
-    EventEmitter, Focusable, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    ScrollEvent, SharedString, Subscription, Task, Window,
+    canvas, div, fill, outline, point, prelude::*, px, size, App, Bounds, ClipboardItem, Context, ElementInputHandler,
+    EntityInputHandler, EventEmitter, FocusHandle, Focusable, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, ScrollEvent, SharedString, Subscription, Task, UTF16Selection, Window,
 };
 use gpui_component::scroll::ScrollbarHandle;
 use grid::Geometry;
@@ -38,6 +38,7 @@ use input::{key_to_bytes, mouse_report, MouseReport};
 use orbit_core::pty;
 use std::{
     cell::Cell,
+    ops::Range,
     rc::Rc,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -71,12 +72,13 @@ impl Dimensions for GridSize {
 }
 
 /// Answers the terminal's queries (device attributes, colors, size) and
-/// records the title it sets.
+/// records the title and the clipboard writes (OSC 52) it asks for.
 #[derive(Clone)]
 struct Listener {
     pty_id: u32,
     title: Arc<Mutex<Option<String>>>,
     window_size: Arc<Mutex<WindowSize>>,
+    clipboard: Arc<Mutex<Vec<(ClipboardType, String)>>>,
 }
 
 fn rgb_of(hex: u32) -> Rgb {
@@ -94,6 +96,10 @@ impl EventListener for Listener {
             }
             TermEvent::ResetTitle => {
                 *self.title.lock().unwrap() = None;
+                return;
+            }
+            TermEvent::ClipboardStore(ty, text) => {
+                self.clipboard.lock().unwrap().push((ty, text));
                 return;
             }
             TermEvent::TextAreaSizeRequest(f) => f(*self.window_size.lock().unwrap()),
@@ -122,6 +128,15 @@ impl Shared {
     /// Cell size in pixels, for pictures placed without a size.
     fn cell_px(&self) -> (f32, f32) {
         self.geometry.lock().unwrap().map_or((8., LINE_HEIGHT), |g| (f32::from(g.cell_w), f32::from(g.line_h)))
+    }
+
+    /// The cursor's cell in window coordinates, hidden or not: where input method text goes.
+    fn caret(&self) -> Option<Bounds<Pixels>> {
+        let g = (*self.geometry.lock().unwrap())?;
+        let term = self.term.lock();
+        let p = term.grid().cursor.point;
+        let row = p.line.0 + term.grid().display_offset() as i32;
+        Some(Bounds::new(g.origin + point(g.cell_w * p.column.0 as f32, g.line_h * row as f32), size(g.cell_w, g.line_h)))
     }
 
     /// Output through the kitty graphics filter; `reply` answers its queries.
@@ -225,6 +240,12 @@ pub struct TerminalView {
     last_motion_cell: Option<(usize, usize)>,
     /// The last text copied (self-test dumps).
     pub last_copied: Option<String>,
+    /// The finished selection's text, still copyable after the program redraws over it.
+    selected: Option<String>,
+    /// Clipboard writes the program asked for (OSC 52), from the output thread.
+    clipboard: Arc<Mutex<Vec<(ClipboardType, String)>>>,
+    /// An input method's uncommitted text (a dead key's accent), shown at the cursor.
+    marked: Option<String>,
     _pump: Task<()>,
     _status_poll: Task<()>,
     _free_images: Subscription,
@@ -275,7 +296,8 @@ impl TerminalView {
             cell_width: 8,
             cell_height: LINE_HEIGHT as u16,
         }));
-        let listener = Listener { pty_id, title: title.clone(), window_size: window_size.clone() };
+        let clipboard = Arc::new(Mutex::new(Vec::new()));
+        let listener = Listener { pty_id, title: title.clone(), window_size: window_size.clone(), clipboard: clipboard.clone() };
         let term = Term::new(Config::default(), &size, listener);
         let shared = Arc::new(Shared {
             term: FairMutex::new(term),
@@ -371,6 +393,9 @@ impl TerminalView {
             selecting: false,
             last_motion_cell: None,
             last_copied: None,
+            selected: None,
+            clipboard,
+            marked: None,
             _pump: pump,
             _status_poll: status_poll,
             _free_images: free_images,
@@ -386,6 +411,10 @@ impl TerminalView {
     }
 
     fn refresh_status(&mut self, cx: &mut Context<Self>) {
+        let stores = std::mem::take(&mut *self.clipboard.lock().unwrap());
+        for (ty, text) in stores {
+            self.store(text, ty == ClipboardType::Selection, cx);
+        }
         cx.notify();
         self.publish_status(cx);
     }
@@ -509,7 +538,7 @@ impl TerminalView {
         self.send(bytes);
     }
 
-    fn paste(&self, text: &str) {
+    fn paste_text(&self, text: &str) {
         let bracketed = self.shared.term.lock().mode().contains(TermMode::BRACKETED_PASTE);
         if bracketed {
             self.write(format!("\x1b[200~{}\x1b[201~", text.replace('\x1b', "")).as_bytes());
@@ -518,8 +547,14 @@ impl TerminalView {
         }
     }
 
-    fn copy(&mut self, primary: bool, cx: &mut Context<Self>) {
-        let Some(text) = self.selection_text().filter(|t| !t.is_empty()) else { return };
+    /// False when nothing is selected.
+    fn copy(&mut self, primary: bool, cx: &mut Context<Self>) -> bool {
+        let Some(text) = self.selection_text().filter(|t| !t.is_empty()).or_else(|| self.selected.clone()) else { return false };
+        self.store(text, primary, cx);
+        true
+    }
+
+    fn store(&mut self, text: String, primary: bool, cx: &mut Context<Self>) {
         if !CLIPBOARD_DISABLED.load(Ordering::Relaxed) {
             let item = ClipboardItem::new_string(text.clone());
             match primary {
@@ -549,6 +584,14 @@ impl TerminalView {
             cx.stop_propagation();
             return;
         }
+        // Cmd+C under Toshy arrives as Ctrl+C: with a selection it copies and drops it, so the next one interrupts.
+        if cfg!(target_os = "linux") && m.control && !m.alt && ks.key == "c" && self.copy(false, cx) {
+            self.shared.term.lock().selection = None;
+            self.selected = None;
+            cx.notify();
+            cx.stop_propagation();
+            return;
+        }
         // Linux with macOS-style remapping (Toshy, Kinto): outside terminals the
         // physical Ctrl key arrives as Super, so Super+letter means Ctrl+letter.
         if cfg!(target_os = "linux") && m.platform && !m.control && !m.alt && ks.key.len() == 1 && ks.key.as_bytes()[0].is_ascii_alphabetic() {
@@ -559,7 +602,7 @@ impl TerminalView {
         // Ctrl+V pastes like Ctrl+Shift+V (Cmd+V under Toshy arrives as Ctrl+V).
         if m.control && ks.key == "v" && !m.alt || m.shift && ks.key == "insert" {
             match cx.read_from_clipboard().and_then(|c| c.text()) {
-                Some(text) => self.paste(&text),
+                Some(text) => self.paste_text(&text),
                 // An image only: ^V is how Claude Code (and others) learn to read
                 // the clipboard themselves.
                 None => self.write(b"\x16"),
@@ -576,14 +619,20 @@ impl TerminalView {
         }
         let app_cursor = self.shared.term.lock().mode().contains(TermMode::APP_CURSOR);
         if let Some(bytes) = key_to_bytes(ks, app_cursor) {
-            {
-                let mut term = self.shared.term.lock();
-                term.scroll_display(Scroll::Bottom);
-                term.selection = None;
-            }
-            self.write(&bytes);
+            self.type_bytes(&bytes);
             cx.stop_propagation();
         }
+    }
+
+    /// Input from the keyboard: back to the bottom, the selection dropped.
+    fn type_bytes(&mut self, bytes: &[u8]) {
+        {
+            let mut term = self.shared.term.lock();
+            term.scroll_display(Scroll::Bottom);
+            term.selection = None;
+        }
+        self.selected = None;
+        self.write(bytes);
     }
 
     /// The application's mouse mode, unless Shift asks for selection instead.
@@ -620,13 +669,14 @@ impl TerminalView {
                 let side = if right_half { Side::Right } else { Side::Left };
                 let point = self.grid_point(col, row);
                 self.shared.term.lock().selection = Some(Selection::new(ty, point, side));
+                self.selected = None;
                 self.selecting = true;
                 cx.notify();
             }
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             MouseButton::Middle => {
                 if let Some(text) = cx.read_from_primary().and_then(|c| c.text()) {
-                    self.paste(&text);
+                    self.paste_text(&text);
                 }
             }
             _ => {}
@@ -635,15 +685,7 @@ impl TerminalView {
 
     fn on_mouse_move(&mut self, ev: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         let Some((col, row, right_half)) = self.cell_at(ev.position) else { return };
-        if let Some(mode) = self.reporting(ev.modifiers.shift) {
-            if self.last_motion_cell.replace((col, row)) == Some((col, row)) {
-                return;
-            }
-            if let Some(bytes) = mouse_report(mode, MouseReport::Motion(ev.pressed_button), col, row, ev.modifiers) {
-                self.write(&bytes);
-            }
-            return;
-        }
+        // A Shift+drag selection keeps selecting once Shift is let go.
         if self.selecting && ev.pressed_button == Some(MouseButton::Left) {
             let side = if right_half { Side::Right } else { Side::Left };
             let point = self.grid_point(col, row);
@@ -651,11 +693,20 @@ impl TerminalView {
                 sel.update(point, side);
             }
             cx.notify();
+            return;
+        }
+        if let Some(mode) = self.reporting(ev.modifiers.shift) {
+            if self.last_motion_cell.replace((col, row)) == Some((col, row)) {
+                return;
+            }
+            if let Some(bytes) = mouse_report(mode, MouseReport::Motion(ev.pressed_button), col, row, ev.modifiers) {
+                self.write(&bytes);
+            }
         }
     }
 
     fn on_mouse_up(&mut self, ev: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(mode) = self.reporting(ev.modifiers.shift) {
+        if let Some(mode) = self.reporting(ev.modifiers.shift).filter(|_| !self.selecting) {
             if let Some((col, row, _)) = self.cell_at(ev.position) {
                 if let Some(bytes) = mouse_report(mode, MouseReport::Release(ev.button), col, row, ev.modifiers) {
                     self.write(&bytes);
@@ -670,6 +721,7 @@ impl TerminalView {
             if empty {
                 self.shared.term.lock().selection = None;
             } else {
+                self.selected = self.selection_text();
                 // X11/Wayland convention: a finished selection goes to the primary clipboard.
                 self.copy(true, cx);
             }
@@ -716,11 +768,55 @@ impl TerminalView {
     }
 }
 
+/// Typed text and dead-key or input method compositions, as in Zed's terminal.
+impl EntityInputHandler for TerminalView {
+    fn text_for_range(&mut self, _: Range<usize>, _: &mut Option<Range<usize>>, _: &mut Window, _: &mut Context<Self>) -> Option<String> {
+        None
+    }
+
+    fn selected_text_range(&mut self, _: bool, _: &mut Window, _: &mut Context<Self>) -> Option<UTF16Selection> {
+        // Full-screen programs get no text field, so macOS repeats held keys instead of offering accents.
+        let alt_screen = self.shared.term.lock().mode().contains(TermMode::ALT_SCREEN);
+        (!alt_screen).then_some(UTF16Selection { range: 0..0, reversed: false })
+    }
+
+    fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<Range<usize>> {
+        self.marked.as_ref().map(|m| 0..m.encode_utf16().count())
+    }
+
+    fn unmark_text(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        self.marked = None;
+        cx.notify();
+    }
+
+    fn replace_text_in_range(&mut self, _: Option<Range<usize>>, text: &str, _: &mut Window, cx: &mut Context<Self>) {
+        self.marked = None;
+        if !text.is_empty() {
+            self.type_bytes(text.as_bytes());
+        }
+        cx.notify();
+    }
+
+    fn replace_and_mark_text_in_range(&mut self, _: Option<Range<usize>>, text: &str, _: Option<Range<usize>>, _: &mut Window, cx: &mut Context<Self>) {
+        self.marked = (!text.is_empty()).then(|| text.to_string());
+        cx.notify();
+    }
+
+    fn bounds_for_range(&mut self, _: Range<usize>, _: Bounds<Pixels>, _: &mut Window, _: &mut Context<Self>) -> Option<Bounds<Pixels>> {
+        self.shared.caret()
+    }
+
+    fn character_index_for_point(&mut self, _: gpui::Point<Pixels>, _: &mut Window, _: &mut Context<Self>) -> Option<usize> {
+        None
+    }
+}
+
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let shared = self.shared.clone();
         let focused = self.focus.is_focused(window);
         let viewport = self.scrollbar.bounds.clone();
+        let (focus, view, marked, painted) = (self.focus.clone(), cx.entity(), self.marked.clone(), self.shared.clone());
         div()
             .id("terminal")
             .track_focus(&self.focus)
@@ -774,7 +870,11 @@ impl Render for TerminalView {
                             for (origin, line) in &frame.lines {
                                 let _ = line.paint(*origin, frame.line_height, gpui::TextAlign::Left, None, window, cx);
                             }
+                            if let Some(text) = &marked {
+                                grid::paint_marked(&painted, text, window, cx);
+                            }
                         });
+                        window.handle_input(&focus, ElementInputHandler::new(bounds, view), cx);
                         grid::record_frame(started.elapsed().as_micros() as u64);
                     },
                 )
