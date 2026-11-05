@@ -97,6 +97,7 @@ struct Inhibit {
 enum Wl {
     #[default]
     Untried,
+    #[cfg(target_os = "linux")]
     Unavailable(String),
     /// Never dropped: at exit GPUI's display may already be gone, and freeing our
     /// queue and proxies on it would crash.
@@ -208,6 +209,7 @@ pub fn status() -> String {
         let mut out = format!("enabled {}, default {}", s.enabled.unwrap_or_else(default_on), default_on());
         let _ = match &s.wl {
             Wl::Untried => write!(out, ", not connected"),
+            #[cfg(target_os = "linux")]
             Wl::Unavailable(why) => write!(out, ", unavailable: {why}"),
             #[cfg(target_os = "linux")]
             Wl::Ready(c) => write!(out, ", {}", c.describe()),

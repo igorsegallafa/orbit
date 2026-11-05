@@ -338,6 +338,9 @@ mod tests {
         let (out_tx, out_rx) = channel::<FsChange>();
         let weak = Arc::downgrade(&watcher);
         std::thread::spawn(move || batch_loop(move |c| { let _ = out_tx.send(c); }, "ws".into(), roots, None, rx, weak));
+        // FSEvents (macOS) also reports the setup above, from just before the watch started.
+        std::thread::sleep(Duration::from_millis(400));
+        let _ = out_rx.try_iter().count();
 
         std::fs::write(dir.join("src/a.rs"), "x").unwrap();
         std::fs::write(dir.join("target/junk"), "x").unwrap();

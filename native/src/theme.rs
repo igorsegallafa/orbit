@@ -77,9 +77,16 @@ pub const ANSI: [u32; 16] = {
 };
 
 /// The UI font (`body { font-family }` resolves to the system sans on Linux).
+#[cfg(not(target_os = "macos"))]
 pub const UI_FONT: &str = "Noto Sans";
+/// macOS has no Noto: GPUI's name for the system font (SF Pro).
+#[cfg(target_os = "macos")]
+pub const UI_FONT: &str = ".SystemUIFont";
 /// `--mono` and the terminal's `ui-monospace, …, monospace`: the system monospace.
+#[cfg(not(target_os = "macos"))]
 pub const MONO_FONT: &str = "Noto Sans Mono";
+#[cfg(target_os = "macos")]
+pub const MONO_FONT: &str = "Menlo";
 
 /// Shell metrics from App.css, in px.
 pub mod size {

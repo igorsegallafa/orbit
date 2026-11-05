@@ -109,7 +109,8 @@ pub fn list_accessible_repos(force_refresh: bool) -> Result<Vec<GithubRepo>, Str
 // ---------- Code Review: PRs across the user's configured repos ----------
 
 /// Parses "owner/repo" out of a Service.repo URL
-/// (git@github.com:owner/repo.git or https://github.com/owner/repo.git).
+/// (git@github.com:owner/repo.git, https://github.com/owner/repo.git, or
+/// ssh://git@github.com/owner/repo.git, which a `url.<ssh>.insteadOf` rewrite gives).
 pub fn parse_owner_repo(url: &str) -> Result<String, String> {
     let no_git = url.trim().trim_end_matches(".git");
     if let Some(rest) = no_git.strip_prefix("git@github.com:") {
@@ -118,6 +119,7 @@ pub fn parse_owner_repo(url: &str) -> Result<String, String> {
     if let Some(rest) = no_git
         .strip_prefix("https://github.com/")
         .or_else(|| no_git.strip_prefix("http://github.com/"))
+        .or_else(|| no_git.strip_prefix("ssh://git@github.com/"))
     {
         return Ok(rest.trim_end_matches('/').to_string());
     }
@@ -987,6 +989,7 @@ mod tests {
             parse_owner_repo("https://github.com/igorsegallafa/orbit.git").unwrap(),
             "igorsegallafa/orbit"
         );
+        assert_eq!(parse_owner_repo("ssh://git@github.com/o/web.git").unwrap(), "o/web");
         assert!(parse_owner_repo("not a url").is_err());
     }
 
