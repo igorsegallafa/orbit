@@ -17,7 +17,7 @@ use gpui::{
     MouseDownEvent, SharedString, Stateful, Transformation, Window,
 };
 use gpui_component::tooltip::Tooltip;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use crate::motion::{self, TweenExt};
 
 /// Recent sessions listed per scope (`RECENT_SHOWN`).
@@ -159,9 +159,8 @@ pub fn status_indicator(id: impl Into<SharedString>, status: Status) -> AnyEleme
 }
 
 impl OrbitApp {
-    /// The sidebar's session rows of `scope`: its terminals, and (for a
-    /// workspace) the editors of files inside it, in tab order.
-    fn session_rows(&self, scope: &str, ws_dir: Option<&Path>, cx: &App) -> Vec<SessionRow> {
+    /// The sidebar's session rows of `scope`: its terminals, in tab order.
+    fn session_rows(&self, scope: &str, cx: &App) -> Vec<SessionRow> {
         let store = sessions::store(cx).read(cx);
         let active = self.active;
         self.tabs
@@ -186,24 +185,6 @@ impl OrbitApp {
                                 unread: store.unread(&v.meta.id),
                                 tooltip: if minimized { format!("{name} — minimized, still running").into() } else { name },
                             }
-                        })
-                    }
-                    TabKind::Editor(e) => {
-                        let path = &e.read(cx).path;
-                        let dir = ws_dir?;
-                        let rel = path.strip_prefix(dir).ok()?;
-                        let repo = rel.components().next()?.as_os_str().to_string_lossy().to_string();
-                        let file = path.file_name()?.to_string_lossy().to_string();
-                        Some(SessionRow {
-                            tab_key: key,
-                            session: None,
-                            label: format!("{repo}/{file}").into(),
-                            status: None,
-                            agent: false,
-                            minimized: false,
-                            active: active == Some(ix),
-                            unread: None,
-                            tooltip: rel.to_string_lossy().to_string().into(),
                         })
                     }
                     _ => None,
@@ -509,7 +490,7 @@ impl OrbitApp {
         list.into_iter()
             .map(|ws| {
                 let name = ws.meta.name.clone();
-                let rows = self.session_rows(&name, Some(&ws.dir), cx);
+                let rows = self.session_rows(&name, cx);
                 let recent = self.recent_rows(&name, cx);
                 let page_key = format!("page:ws:{name}");
                 let active = self.is_active_key(|k| k == page_key, cx);
@@ -643,7 +624,7 @@ impl OrbitApp {
         scopes
             .into_iter()
             .map(|scope| {
-                let rows = self.session_rows(&scope, None, cx);
+                let rows = self.session_rows(&scope, cx);
                 let recent = self.recent_rows(&scope, cx);
                 let unread = rows.iter().find_map(|r| r.unread);
                 let path = scope.trim_start_matches("dir:").to_string();
@@ -677,7 +658,7 @@ impl OrbitApp {
             .into_iter()
             .map(|name| {
                 let scope = format!("@{name}");
-                let rows = self.session_rows(&scope, None, cx);
+                let rows = self.session_rows(&scope, cx);
                 let recent = self.recent_rows(&scope, cx);
                 let unread = rows.iter().find_map(|r| r.unread);
                 let key = format!("page:repo:{name}");
