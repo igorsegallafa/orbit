@@ -1,0 +1,114 @@
+{
+ "packages": [
+  {
+   "name": "dataserver",
+   "version": "0.1.0",
+   "id": "path+file:///src/dataserver#0.1.0",
+   "targets": [
+    {
+     "kind": [
+      "lib"
+     ],
+     "crate_types": [
+      "lib"
+     ],
+     "name": "dataserver",
+     "src_path": "/src/dataserver/src/lib.rs"
+    },
+    {
+     "kind": [
+      "bin"
+     ],
+     "crate_types": [
+      "bin"
+     ],
+     "name": "dataserver",
+     "src_path": "/src/dataserver/src/main.rs",
+     "required-features": [
+      "server"
+     ]
+    },
+    {
+     "kind": [
+      "bin"
+     ],
+     "crate_types": [
+      "bin"
+     ],
+     "name": "migrate",
+     "src_path": "/src/dataserver/src/tasks/migrate.rs"
+    },
+    {
+     "kind": [
+      "bin"
+     ],
+     "crate_types": [
+      "bin"
+     ],
+     "name": "seeds",
+     "src_path": "/src/dataserver/src/tasks/seeds.rs"
+    },
+    {
+     "kind": [
+      "bin"
+     ],
+     "crate_types": [
+      "bin"
+     ],
+     "name": "truncate",
+     "src_path": "/src/dataserver/src/tasks/truncate.rs"
+    },
+    {
+     "kind": [
+      "test"
+     ],
+     "crate_types": [
+      "bin"
+     ],
+     "name": "account_integration",
+     "src_path": "/src/dataserver/tests/account_integration.rs"
+    },
+    {
+     "kind": [
+      "custom-build"
+     ],
+     "crate_types": [
+      "bin"
+     ],
+     "name": "build-script-build",
+     "src_path": "/src/dataserver/build.rs"
+    },
+    {
+     "name": "dump",
+     "kind": [
+      "example"
+     ],
+     "crate_types": [
+      "bin"
+     ],
+     "required-features": [
+      "tools"
+     ],
+     "src_path": "/src/dataserver/examples/dump.rs"
+    }
+   ],
+   "features": {
+    "default": [
+     "server"
+    ],
+    "server": [],
+    "tools": []
+   },
+   "manifest_path": "/src/dataserver/Cargo.toml"
+  }
+ ],
+ "workspace_members": [
+  "path+file:///src/dataserver#0.1.0"
+ ],
+ "workspace_default_members": [
+  "path+file:///src/dataserver#0.1.0"
+ ],
+ "target_directory": "/src/dataserver/target",
+ "version": 1,
+ "workspace_root": "/src/dataserver"
+}

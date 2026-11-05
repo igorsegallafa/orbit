@@ -11,22 +11,26 @@ use std::time::SystemTime;
 
 const QUERY: &str = r#"{ "requests": [ { "kind": "codemodel", "version": 2 } ] }"#;
 
-/// One target of the build, for Run (executables) and Build (all of them).
-#[derive(Serialize, Debug, Clone, PartialEq)]
+/// One target of the build, for Run (executables) and Build (all of them);
+/// Cargo's bins and examples too (`cargo.rs`).
+#[derive(Serialize, Debug, Clone, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct CmakeTarget {
     pub name: String,
     /// EXECUTABLE, STATIC_LIBRARY, SHARED_LIBRARY, MODULE_LIBRARY,
-    /// OBJECT_LIBRARY, INTERFACE_LIBRARY or UTILITY.
+    /// OBJECT_LIBRARY, INTERFACE_LIBRARY or UTILITY; Cargo: "bin" or "example".
     pub kind: String,
     /// The first artifact, relative to the build folder ('/'-separated) when
     /// it is under it.
     pub artifact: Option<String>,
+    /// Cargo: the package, and the required features it has to turn on.
+    pub package: Option<String>,
+    pub features: Vec<String>,
 }
 
 impl CmakeTarget {
     pub fn runnable(&self) -> bool {
-        self.kind == "EXECUTABLE" && self.artifact.is_some()
+        matches!(self.kind.as_str(), "EXECUTABLE" | "bin" | "example") && self.artifact.is_some()
     }
 
     /// The artifact's folder (Rider's default working directory).
@@ -116,7 +120,7 @@ pub fn parse_reply(index: &Value, read: impl Fn(&str) -> Option<Value>) -> Optio
                 Ok(rel) => rel.to_string_lossy().replace('\\', "/"),
                 Err(_) => a,
             });
-        out.push(CmakeTarget { name: name.to_string(), kind: kind.to_string(), artifact });
+        out.push(CmakeTarget { name: name.to_string(), kind: kind.to_string(), artifact, ..Default::default() });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
     Some(out)

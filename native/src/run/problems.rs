@@ -1,6 +1,8 @@
 //! Compiler and linker messages in build output (`src/lib/problems.ts`):
-//! GCC/Clang ("file:line:col: error: msg"), MSVC ("file(line,col): error
-//! C2065: msg") and GNU ld ("undefined reference to …").
+//! GCC/Clang ("file:line:col: error: msg"), rustc's short format
+//! ("file:line:col: error[E0425]: msg") and long one ("error[E0425]: msg",
+//! then "  --> file:line:col"), MSVC ("file(line,col): error C2065: msg")
+//! and GNU ld ("undefined reference to …").
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -19,7 +21,7 @@ pub struct Problem {
     pub column: u32,
     pub severity: Severity,
     pub message: String,
-    /// e.g. "C2065", "-Wunused-variable".
+    /// e.g. "C2065", "-Wunused-variable", "E0425".
     pub code: Option<String>,
 }
 
@@ -35,7 +37,9 @@ fn re(s: &str) -> Regex {
 }
 
 static ANSI: LazyLock<Regex> = LazyLock::new(|| re(r"\x1b\[[0-9;]*m"));
-static GCC: LazyLock<Regex> = LazyLock::new(|| re(r"^(.*?):(\d+)(?::(\d+))?:\s+(fatal error|error|warning):\s+(.*)$"));
+static GCC: LazyLock<Regex> = LazyLock::new(|| re(r"^(.*?):(\d+)(?::(\d+))?:\s+(fatal error|error|warning)(?:\[(\w+)\])?:\s+(.*)$"));
+static RUST_HEADER: LazyLock<Regex> = LazyLock::new(|| re(r"^(error|warning)(?:\[(\w+)\])?:\s+(.*)$"));
+static RUST_ARROW: LazyLock<Regex> = LazyLock::new(|| re(r"^\s*--> (.*?):(\d+):(\d+)$"));
 static MSVC: LazyLock<Regex> =
     LazyLock::new(|| re(r"^\s*(.*?)\((\d+)(?:,(\d+))?\)\s*:\s+(fatal error|error|warning)\s+([A-Z]+\d+)\s*:\s+(.*)$"));
 static LD: LazyLock<Regex> =
@@ -90,14 +94,14 @@ pub fn parse(raw: &str, base_dir: Option<&str>) -> Option<Problem> {
         });
     }
     if let Some(m) = GCC.captures(&line).filter(|m| !INCLUDED.is_match(&m[1])) {
-        let text = &m[5];
+        let text = &m[6];
         let flag = FLAG.captures(text);
         return Some(Problem {
             file: Some(absolute(&m[1], base_dir)),
             line: num(m.get(2)),
             column: num(m.get(3)),
             severity: severity(&m[4]),
-            code: flag.as_ref().map(|f| f[1].to_string()),
+            code: m.get(5).map(|c| c.as_str().to_string()).or_else(|| flag.as_ref().map(|f| f[1].to_string())),
             message: match &flag {
                 Some(f) => text[..f.get(0).map_or(text.len(), |g| g.start())].to_string(),
                 None => text.to_string(),
@@ -121,6 +125,26 @@ pub fn parse(raw: &str, base_dir: Option<&str>) -> Option<Problem> {
         severity: Severity::Error,
         code: None,
         message: m[1].trim().to_string(),
+    })
+}
+
+/// rustc's long format: a header line without a location ("error[E0425]: msg").
+pub fn is_rust_header(raw: &str) -> bool {
+    RUST_HEADER.is_match(&strip_ansi(raw))
+}
+
+/// The problem a long-format `header` reports, once its "  --> file:line:col" line `raw` comes.
+pub fn parse_rust_long(header: &str, raw: &str, base_dir: Option<&str>) -> Option<Problem> {
+    let (header, raw) = (strip_ansi(header), strip_ansi(raw));
+    let (h, at) = (RUST_HEADER.captures(&header)?, RUST_ARROW.captures(&raw)?);
+    let num = |m: Option<regex::Match>| m.and_then(|m| m.as_str().parse().ok()).unwrap_or(1);
+    Some(Problem {
+        file: Some(absolute(&at[1], base_dir)),
+        line: num(at.get(2)),
+        column: num(at.get(3)),
+        severity: severity(&h[1]),
+        code: h.get(2).map(|c| c.as_str().to_string()),
+        message: h[3].trim().to_string(),
     })
 }
 
@@ -152,6 +176,25 @@ mod tests {
         assert_eq!(w.message, "unused variable 'x'");
         let f = parse("x.cpp:3: fatal error: y.h: No such file or directory", None).unwrap();
         assert_eq!((f.line, f.column, f.severity), (3, 1, Severity::Error));
+    }
+
+    #[test]
+    fn reads_rustc_short_and_long_messages() {
+        let short = parse("src/main.rs:10:5: error[E0425]: cannot find value `y` in this scope", Some("/src/ds")).unwrap();
+        assert_eq!(short.file.as_deref(), Some("/src/ds/src/main.rs"));
+        assert_eq!((short.line, short.column, short.severity), (10, 5, Severity::Error));
+        assert_eq!((short.code.as_deref(), short.message.as_str()), (Some("E0425"), "cannot find value `y` in this scope"));
+        let w = parse("src/lib.rs:3:9: warning: unused variable: `x`", Some("/src/ds")).unwrap();
+        assert_eq!((w.severity, w.code), (Severity::Warning, None));
+        // Cargo's summaries have no location.
+        assert_eq!(parse("error: could not compile `dataserver` (bin \"dataserver\") due to 1 previous error", None), None);
+        assert_eq!(parse("warning: `dataserver` (lib) generated 2 warnings", None), None);
+
+        let header = "\x1b[1m\x1b[91merror[E0425]\x1b[0m: cannot find value `y` in this scope";
+        assert!(is_rust_header(header) && !is_rust_header("   |"));
+        let long = parse_rust_long(header, "  --> src/main.rs:10:5", Some("/src/ds")).unwrap();
+        assert_eq!(long, Problem { file: Some("/src/ds/src/main.rs".into()), ..short });
+        assert_eq!(parse_rust_long(header, "   |", None), None);
     }
 
     #[test]
