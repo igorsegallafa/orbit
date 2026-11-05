@@ -22,6 +22,8 @@ pub struct Saved {
     pub selection: HashMap<String, RunTarget>,
     /// Breakpoint lines (1-based) by the file's workspace path.
     pub breakpoints: BTreeMap<PathBuf, Vec<u32>>,
+    /// Configurations pinned to the top of the widget's list, as `<repo>/<name>`, in the user's order.
+    pub pinned: Vec<String>,
 }
 
 /// A self-test keeps the user's file untouched unless ORBIT_CONFIG_DIR points elsewhere.

@@ -25,7 +25,8 @@ const FILTER_FROM: usize = 10;
 
 enum Row {
     Header(String),
-    Option { label: String, selected: bool, next: RunTarget },
+    /// `pin`: a configuration's `<repo>/<name>` and its place among the pinned ones.
+    Option { label: String, selected: bool, next: RunTarget, pin: Option<(String, Option<usize>)> },
     Command { label: String, hint: Option<String>, command: &'static str },
 }
 
@@ -33,6 +34,8 @@ pub struct RunWidget {
     app: WeakEntity<OrbitApp>,
     open: Option<Open>,
     filter: String,
+    /// `Saved::pinned`, kept here so the list doesn't read the file each frame.
+    pinned: Vec<String>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -47,11 +50,31 @@ impl RunWidget {
                 store(cx).update(cx, |s, cx| s.sync_workspace(ws, cx));
             }));
         }
-        Self { app, open: None, filter: String::new(), focus: cx.focus_handle(), _subscriptions: subs }
+        Self { app, open: None, filter: String::new(), pinned: super::saved::load().pinned, focus: cx.focus_handle(), _subscriptions: subs }
     }
 
     fn run(&self, id: &'static str, window: &mut Window, cx: &mut Context<Self>) {
         let _ = self.app.update(cx, |a, cx| commands::run(id, a, window, cx));
+    }
+
+    /// Pins or unpins `key`, or moves a pinned one by `step` (-1 up, 1 down).
+    fn pin(&mut self, key: String, step: i32, cx: &mut Context<Self>) {
+        match self.pinned.iter().position(|k| *k == key) {
+            Some(at) if step != 0 => {
+                let to = at as i32 + step;
+                if to < 0 || to as usize >= self.pinned.len() {
+                    return;
+                }
+                self.pinned.swap(at, to as usize);
+            }
+            Some(at) => {
+                self.pinned.remove(at);
+            }
+            None => self.pinned.push(key),
+        }
+        let pinned = self.pinned.clone();
+        super::saved::update(|s| s.pinned = pinned);
+        cx.notify();
     }
 
     fn config_count(cx: &Context<Self>) -> usize {
@@ -67,28 +90,46 @@ impl RunWidget {
                 let multi = s.setups.len() > 1;
                 let filter = self.filter.to_lowercase();
                 let mut rows = Vec::new();
+                let option = |repo: &String, name: &String| {
+                    let key = format!("{repo}/{name}");
+                    let at = self.pinned.iter().position(|k| *k == key);
+                    let next = RunTarget {
+                        workspace: target.workspace.clone(),
+                        preset: if *repo == target.repo { target.preset.clone() } else { None },
+                        repo: repo.clone(),
+                        name: name.clone(),
+                    };
+                    let selected = *repo == target.repo && *name == target.name;
+                    let label = if multi && at.is_some() { key.clone() } else { name.clone() };
+                    Row::Option { label, selected, next, pin: Some((key, at)) }
+                };
+                let shown = |name: &str| filter.is_empty() || name.to_lowercase().contains(&filter);
+                let pinned: Vec<Row> = self
+                    .pinned
+                    .iter()
+                    .filter_map(|key| {
+                        // A pin of a configuration no longer there (renamed, other workspace) is skipped.
+                        let (repo, c) = s.setups.iter().flat_map(|(r, setup)| setup.configs.iter().map(move |c| (r, c))).find(|(r, c)| *key == format!("{r}/{}", c.name))?;
+                        shown(&c.name).then(|| option(repo, &c.name))
+                    })
+                    .collect();
+                if !pinned.is_empty() {
+                    rows.push(Row::Header("Pinned".into()));
+                    rows.extend(pinned);
+                }
                 for (repo, setup) in &s.setups {
                     let discovered = if setup.targets.iter().any(|t| t.package.is_none()) { "CMake targets" } else { "Cargo targets" };
                     for (group, title) in [(Origin::Project, "Project"), (Origin::Local, "Local"), (Origin::Discovered, discovered)] {
                         let members: Vec<_> = setup
                             .configs
                             .iter()
-                            .filter(|c| c.origin == group && (filter.is_empty() || c.name.to_lowercase().contains(&filter)))
+                            .filter(|c| c.origin == group && shown(&c.name) && !self.pinned.contains(&format!("{repo}/{}", c.name)))
                             .collect();
                         if members.is_empty() {
                             continue;
                         }
                         rows.push(Row::Header(if multi { format!("{repo} · {title}") } else { title.to_string() }));
-                        for c in members {
-                            let current = *repo == target.repo && c.name == target.name;
-                            let next = RunTarget {
-                                workspace: target.workspace.clone(),
-                                preset: if *repo == target.repo { target.preset.clone() } else { None },
-                                repo: repo.clone(),
-                                name: c.name.clone(),
-                            };
-                            rows.push(Row::Option { label: c.name.clone(), selected: current, next });
-                        }
+                        rows.extend(members.into_iter().map(|c| option(repo, &c.name)));
                     }
                 }
                 let mine = s.members(&target);
@@ -105,7 +146,7 @@ impl RunWidget {
                         setup
                             .presets
                             .iter()
-                            .map(|p| Row::Option { label: p.clone(), selected: Some(p) == current.as_ref(), next: RunTarget { preset: Some(p.clone()), ..target.clone() } })
+                            .map(|p| Row::Option { label: p.clone(), selected: Some(p) == current.as_ref(), next: RunTarget { preset: Some(p.clone()), ..target.clone() }, pin: None })
                             .collect()
                     })
                     .unwrap_or_default()
@@ -163,23 +204,58 @@ impl RunWidget {
                 .text_color(c(theme::TEXT_FAINT))
                 .child(title.to_uppercase())
                 .into_any_element(),
-            Row::Option { label, selected, next } => item(("run-option", ix))
-                .text_color(if selected { theme::hsla(theme::INFO).blend(theme::hsla(theme::TEXT).opacity(0.6)) } else { theme::hsla(theme::TEXT) })
-                .when(selected, |d| d.bg(c(theme::PANEL)))
-                .hover(|s| s.bg(c(theme::PANEL)))
-                .child(div().flex_1().truncate().child(label.clone()))
-                .when(selected, |d| d.child(div().text_size(px(11.)).text_color(c(theme::ACCENT)).child("✓")))
-                .child(probe(format!("menu:{label}")))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.close(cx);
-                        let next = next.clone();
-                        store(cx).update(cx, |s, cx| s.choose(next, cx));
-                    }),
-                )
-                .into_any_element(),
+            Row::Option { label, selected, next, pin } => {
+                // Hover shows the pin (and, when pinned, the move buttons); a pinned row keeps its pin lit.
+                let tool = |id: &'static str, icon: &'static str, tip: &'static str, lit: bool, key: String, step: i32| {
+                    div()
+                        .id((id, ix))
+                        .relative()
+                        .p(px(3.))
+                        .rounded(px(4.))
+                        .opacity(if lit { 1. } else { 0. })
+                        .group_hover("run-option", |s| s.opacity(1.))
+                        .hover(|s| s.bg(c(theme::BORDER_STRONG)))
+                        .child(crate::review::ui::lucide(icon, 12., c(if lit { theme::ACCENT } else { theme::TEXT_DIM })))
+                        .child(probe(format!("{id}:{label}")))
+                        .tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(tip).build(w, cx))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.pin(key.clone(), step, cx);
+                            }),
+                        )
+                };
+                let tools = pin.map(|(key, at)| {
+                    let n = self.pinned.len();
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(1.))
+                        .when(at.is_some_and(|a| a > 0), |d| d.child(tool("run-pin-up", "arrow-up", "Move up", false, key.clone(), -1)))
+                        .when(at.is_some_and(|a| a + 1 < n), |d| d.child(tool("run-pin-down", "arrow-down", "Move down", false, key.clone(), 1)))
+                        .child(if at.is_some() { tool("run-unpin", "pin-off", "Unpin", true, key, 0) } else { tool("run-pin", "pin", "Pin to the top", false, key, 0) })
+                });
+                item(("run-option", ix))
+                    .group("run-option")
+                    .text_color(if selected { theme::hsla(theme::INFO).blend(theme::hsla(theme::TEXT).opacity(0.6)) } else { theme::hsla(theme::TEXT) })
+                    .when(selected, |d| d.bg(c(theme::PANEL)))
+                    .hover(|s| s.bg(c(theme::PANEL)))
+                    .child(div().flex_1().truncate().child(label.clone()))
+                    .when(selected, |d| d.child(div().text_size(px(11.)).text_color(c(theme::ACCENT)).child("✓")))
+                    .children(tools)
+                    .child(probe(format!("menu:{label}")))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.close(cx);
+                            let next = next.clone();
+                            store(cx).update(cx, |s, cx| s.choose(next, cx));
+                        }),
+                    )
+                    .into_any_element()
+            }
             Row::Command { label, hint, command } => div()
                 .when(which == Open::Config, |d| d.mt(px(4.)).pt(px(4.)).border_t_1().border_color(c(theme::BORDER)))
                 .child(

@@ -119,7 +119,7 @@ editor's breakpoint strip at that line); its probes are `run-config`, `run-prese
 `dbg-resume|pause|over|into|out|stop`, `dbg-eval` (the console input), `frame:<ix>`, `thread:<id>`,
 `dbg-tab-output|console` (the Debug tab's main area), `dbg-split-side|frames` (its splitters), the log
 views `build-output` and `dbg-console` (drag in them selects, `<probe>@x,y` picks the start),
-`var:<name>`; `run-build-menu` (the build chevron), `run-build-split`, and in Edit Configurations
+`var:<name>`; `run-build-menu` (the build chevron), `run-build-split`, the configuration list's `run-pin:<name>`, `run-unpin:<name>`, `run-pin-up:<name>` and `run-pin-down:<name>` (pins live in `native-run.json`), and in Edit Configurations
 `rc-item:<name>`, `rc-input:name|program|args|cwd|build|env-key:<n>|env-value:<n>`, `rc-target`,
 `rc-add|dup|remove`, `rc-env-add`, `rc-env-remove:<n>`, `rc-shared`, `rc-build-first`,
 `rc-cancel|apply|ok`, `rc-status` (the footer's saved or error line); with several builds (a

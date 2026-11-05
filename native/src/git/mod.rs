@@ -96,12 +96,13 @@ pub const SHELL_OVERLAY_PRIORITY: usize = 50;
 /// The dimmed backdrop over the whole window (`.modal-overlay` is `position:
 /// fixed`) with the modal card centered on it. The page tab renders it, so it
 /// keeps the tab's focus and actions, and hides with the tab.
-pub fn scrim(card: AnyElement, window: &Window) -> AnyElement {
+/// `on_outside`: a click on the scrim, outside the card; callers close the modal as Esc does.
+pub fn scrim(card: AnyElement, window: &Window, on_outside: impl Fn(&gpui::MouseDownEvent, &mut Window, &mut App) + 'static) -> AnyElement {
     use crate::motion;
-    // Occluded: clicks never reach the window under it.
+    // Occluded: clicks never reach the window under it, nor the scrim through the card.
     let vp = window.viewport_size();
-    let scrim = div().occlude().w(vp.width).h(vp.height).bg(theme::scrim()).flex().items_center().justify_center();
-    let scrim = motion::overlay_in(scrim.child(motion::modal_in(div().flex().max_h_full().child(card), "modal-in")), "modal-overlay-in");
+    let scrim = div().id("modal-scrim").occlude().w(vp.width).h(vp.height).bg(theme::scrim()).flex().items_center().justify_center().on_mouse_down(gpui::MouseButton::Left, on_outside);
+    let scrim = motion::overlay_in(scrim.child(motion::modal_in(div().occlude().flex().max_h_full().child(card), "modal-in")), "modal-overlay-in");
     deferred(anchored().position(point(px(0.), px(0.))).child(scrim)).with_priority(MODAL_PRIORITY).into_any_element()
 }
 
