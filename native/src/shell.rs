@@ -1522,6 +1522,8 @@ impl Render for OrbitApp {
         let sidebar_anim = self.pane_animating(0);
         let show_sidebar = (!self.layout.sidebar_hidden || sidebar_anim) && !on_settings;
         let show_strip = !on_settings && !self.strip_tabs(cx).is_empty();
+        // Collapsed to its tab strip unless open; pages (workspace home, dashboard…) have none.
+        let show_panel = self.active_tab().is_some_and(|t| !matches!(t.kind, TabKind::Page(_) | TabKind::Tool(_)));
         let main = div()
             .flex_1()
             .min_w_0()
@@ -1531,13 +1533,13 @@ impl Render for OrbitApp {
             .when(show_strip, |d| d.child(self.render_tabs(cx)))
             .child(div().flex_1().min_h_0().bg(c(theme::BG)).child(self.render_content()))
             // The handle after the panel, so it stays on top of the panel's tabs it overlaps.
-            .when(self.layout.panel_open, |d| {
+            .when(show_panel, |d| {
                 d.child(
                     div()
                         .relative()
                         .flex_none()
                         .child(self.render_panel(cx))
-                        .child(div().absolute().top_0().left_0().right_0().child(resizer(Pane::Panel, false, cx))),
+                        .when(self.layout.panel_open, |d| d.child(div().absolute().top_0().left_0().right_0().child(resizer(Pane::Panel, false, cx)))),
                 )
             });
         let sidebar_lit = self.layout.sidebar_width <= SIDEBAR.min + 1.;

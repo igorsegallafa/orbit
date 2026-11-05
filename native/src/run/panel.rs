@@ -74,7 +74,18 @@ impl Panel {
             .hover(|s| s.text_color(c(theme::TEXT)))
             .child(label)
             .child(probe(id))
-            .on_click(cx.listener(move |_, _, _, cx| store(cx).update(cx, |s, cx| s.set_view(view, cx))))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if active && this.is_open(cx) {
+                    let _ = this.app.update(cx, |a, cx| a.toggle_panel(cx));
+                } else {
+                    store(cx).update(cx, |s, cx| s.reveal(view, cx));
+                }
+            }))
+    }
+
+    /// Expanded; collapsed it is only the tab strip.
+    fn is_open(&self, cx: &App) -> bool {
+        self.app.upgrade().is_some_and(|a| a.read(cx).layout.panel_open)
     }
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -161,21 +172,21 @@ impl Panel {
                         .on_click(cx.listener(move |_, _, _, cx| store(cx).update(cx, |s, cx| s.close_run(id, cx)))),
                 )
             })
-            .child(
+            .child({
+                let open = self.is_open(cx);
                 div()
                     .id("panel-close")
                     .relative()
-                    .px_1()
+                    .p_1()
                     .rounded(px(4.))
                     .cursor_pointer()
-                    .text_color(c(theme::TEXT_FAINT))
-                    .hover(|s| s.bg(c(theme::BORDER_STRONG)).text_color(c(theme::TEXT)))
-                    .child("×")
+                    .hover(|s| s.bg(c(theme::BORDER_STRONG)))
+                    .child(crate::review::ui::lucide(if open { "chevron-down" } else { "chevron-up" }, 14., c(theme::TEXT_FAINT)))
                     .child(probe("panel-close"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         let _ = this.app.update(cx, |a, cx| a.toggle_panel(cx));
-                    })),
-            )
+                    }))
+            })
     }
 
     /// The Run or Debug tab's instances, when there is more than one.
@@ -432,6 +443,9 @@ impl Panel {
 impl Render for Panel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let view = store(cx).read(cx).view;
+        if !self.is_open(cx) {
+            return div().bg(c(theme::PANEL)).border_t_1().border_color(c(theme::BORDER)).child(self.render_header(cx));
+        }
         let body = match view {
             PanelView::Build => self.render_output(cx),
             PanelView::Problems => self.render_problems(cx),

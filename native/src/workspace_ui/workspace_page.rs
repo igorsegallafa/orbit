@@ -28,6 +28,8 @@ pub struct WsPage {
     pub prs: Load<Vec<WsPrStatus>>,
     pub checks: Load<Vec<WsCheck>>,
     pub refreshing: bool,
+    /// A change came in while refreshing: read again once it ends.
+    pub stale: bool,
     pub pulling: Option<String>,
     pub drift: Drift,
     pub error: Option<String>,
@@ -52,6 +54,7 @@ impl WsPage {
             prs: Load::Idle,
             checks: Load::Idle,
             refreshing: false,
+            stale: false,
             pulling: None,
             drift: Drift::default(),
             error: None,
@@ -177,6 +180,7 @@ impl PageTab {
     pub fn load_workspace(&mut self, fetch: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(p) = self.ws_page() else { return };
         if p.refreshing {
+            p.stale = true;
             return;
         }
         p.refreshing = true;
@@ -204,6 +208,7 @@ impl PageTab {
             move |t, (meta, status, remote), window, cx| {
                 let Some(p) = t.ws_page() else { return };
                 p.refreshing = false;
+                let stale = std::mem::take(&mut p.stale);
                 match meta {
                     Ok(m) => {
                         p.meta = Some(m);
@@ -227,6 +232,8 @@ impl PageTab {
                         p.checks = Load::Loading;
                     }
                     t.load_workspace(true, window, cx);
+                } else if stale {
+                    t.load_workspace(false, window, cx);
                 }
             },
         );

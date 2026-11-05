@@ -467,9 +467,10 @@ pub fn render_dialog(window: &Window, cx: &App) -> Option<AnyElement> {
 
 /// The bottom panel (`BottomPanel.tsx`), in the shell's slot.
 pub fn render_panel(app: &OrbitApp, cx: &App) -> AnyElement {
+    use gpui::prelude::FluentBuilder as _;
     let body = store(cx).read(cx).panel.clone();
     gpui::div()
-        .h(gpui::px(app.layout.panel_height))
+        .when(app.layout.panel_open, |d| d.h(gpui::px(app.layout.panel_height)))
         .flex_none()
         .flex()
         .flex_col()
