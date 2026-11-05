@@ -2126,7 +2126,12 @@ impl PageView for PrReviewPage {
 /// Opens (or shows) the review tab of a group of PRs.
 pub fn open(app: &mut OrbitApp, _host: Host, prs: Vec<PullRequest>, window: &mut Window, cx: &mut Context<OrbitApp>) {
     let Some(first) = prs.first() else { return };
-    let key = format!("page:pr-review:{}#{}", first.owner_repo, first.number);
+    // A workspace with these PRs' branch keeps the tab in its scope (`page:<kind>:<workspace>`).
+    let ws = app.workspaces.iter().find(|w| !first.branch.is_empty() && w.meta.branch == first.branch && w.meta.repos.contains(&first.repo));
+    let key = match ws {
+        Some(w) => format!("page:pr-review:{}", w.meta.name),
+        None => format!("page:pr-review:{}#{}", first.owner_repo, first.number),
+    };
     crate::pages::open(app, key, move |h, w, cx| PrReviewPage::new(h, prs, w, cx), window, cx);
 }
 
