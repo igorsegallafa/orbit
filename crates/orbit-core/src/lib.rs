@@ -27,6 +27,7 @@ pub mod review;
 pub mod run;
 pub mod search;
 pub mod settings;
+pub mod testing;
 pub mod usage;
 pub mod updates;
 pub mod watch;

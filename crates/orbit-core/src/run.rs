@@ -281,6 +281,13 @@ fn auto_preset(root: &Path, presets: &[String], defs: &HashMap<String, Value>) -
     pick_preset(presets, |p| binary_dir(root, defs, p).is_some_and(|d| d.join("CMakeCache.txt").is_file()))
 }
 
+/// The build folder of the chosen (or `${auto}`) preset, else a configured `build/`.
+pub fn cmake_build_dir(root: &Path, preset: Option<&str>) -> Option<PathBuf> {
+    let defs = preset_defs(root);
+    let preset = preset.filter(|p| !p.is_empty()).map(str::to_string).or_else(|| auto_preset(root, &crate::lsp::cmake_presets(root), &defs));
+    preset.and_then(|p| binary_dir(root, &defs, &p)).or_else(|| Some(root.join("build")).filter(|d| d.join("CMakeCache.txt").is_file()))
+}
+
 // ---------- resolving ----------
 
 fn expand(s: &str, vars: &[(&str, &str)]) -> String {

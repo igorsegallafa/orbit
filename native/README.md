@@ -124,7 +124,10 @@ views `build-output` and `dbg-console` (drag in them selects, `<probe>@x,y` pick
 `rc-add|dup|remove`, `rc-env-add`, `rc-env-remove:<n>`, `rc-shared`, `rc-build-first`,
 `rc-cancel|apply|ok`, `rc-status` (the footer's saved or error line); with several builds (a
 compound's) the Build tab's list rows are `build-item:<configuration>` and the dump adds
-`builds ["<repo>/<name> <status> <secs>", …], Some(<together>) together` before the shown build's `build <status>` line. `move:<probe>` hovers a probe, `paste:<text>` inserts text in one go as a
+`builds ["<repo>/<name> <status> <secs>", …], Some(<together>) together` before the shown build's `build <status>` line; the Tests tab's (`panel-tests`)
+`tests-run-all`, `tests-run-selected`, `tests-rerun-failed`, `tests-stop`, `tests-refresh`, its tree
+rows `test:<repo>/<runner>`, `test:<suite>`, `test:<suite>/<test>` (double click folds a group or
+opens a test's source) and the output log `tests-output`. `move:<probe>` hovers a probe, `paste:<text>` inserts text in one go as a
 paste does, and `\;` puts a `;` inside a `--do` step. The git and workspace pages' probes are listed in *Stage: git and workspace flows*.
 
 ## Commands and keymap (the extension point)
@@ -962,6 +965,26 @@ not run (it needs GitHub).
   `<log id>-thumb` / `<log id>-track` (`build-output`, `dbg-console`), present while the bar has
   something to show; the terminal dump has a `scroll:` line (display offset, scrollback, alternate
   screen) and a log view's its top line and pixel offset.
+- **Tests** (`src/run/testing.rs` on `orbit_core::testing`), a lean IntelliJ test runner in the
+  bottom panel: each repo's runners, found by their files — cargo (`Cargo.toml`), CTest (a
+  `CMakeLists.txt` whose build folder, the run widget's preset's or `${auto}`'s or a configured
+  `build/`, has a `CTestTestfile.cmake`), vitest and jest (in `package.json`'s dependencies) — in a
+  tree of runner → suite (a Rust module, a gtest suite, a JS file) → test, with pass/fail/skip marks
+  and counts. Listing: `cargo test --workspace -- --list --format terse`, `ctest
+  --show-only=json-v1` (its `DEF_SOURCE_LINE` is the test's source), `vitest list --json=<file>`;
+  jest lists nothing, its tests appear once run. Running: `cargo test --workspace --no-fail-fast --
+  --show-output [--exact names…]`, `ctest -V -j<cpus> [-R '^(names)$']`, `vitest run` / `jest`
+  with a JSON report file (`[files…] -t <titles>` for a selection; only the asked tests take
+  results, since a filtered file reports the rest skipped); JS tools through `pnpm exec`, `yarn`
+  or `npx` by the lockfile. Output streams into the run's log, parsed as it comes (libtest's
+  `test x ... ok` and `---- x stdout ----` blocks, CTest's `N: ` prefixed lines and `Test #N:`
+  verdicts); selecting a test shows its output and failure, a runner or suite the whole log.
+  Commands: `tests.show` (Show Tests), `tests.runAll` (Run All Tests; lists first when needed),
+  `tests.rerunFailed` (Rerun Failed Tests), `tests.stop` (Stop Tests: kills the process group),
+  `tests.refresh` (Refresh Tests); the toolbar adds Run Selected. Runners run one after another,
+  one run at a time; tests are listed when the tab is first shown or the workspace changes. CTest
+  runs what was last built (no build first); only the repo root is searched (no monorepo packages).
+  The self-test dump has a `--- tests:` block.
 - **Problems**: `problems.rs` is `problems.ts` with its tests. Problems under the repo's real root
   are mapped to the workspace path and set on open editors as diagnostics with source `build`,
   next to clangd's (`EditorTab::set_build_diagnostics`), so they count in the status bar and `F8`.
