@@ -1175,6 +1175,13 @@ impl EditorTab {
         self.restart(cx);
     }
 
+    /// Shown again after `LspRegistry::stop_idle` stopped its server: starts it again.
+    pub fn wake_server(&mut self, cx: &mut Context<Self>) {
+        if self.doc.as_ref().is_some_and(|d| d.server.borrow().as_ref().is_some_and(|s| s.was_stopped())) {
+            self.connect(cx);
+        }
+    }
+
     /// Restarts this file's server and reconnects every editor that used it.
     fn restart(&mut self, cx: &mut Context<Self>) {
         let Some((key, language)) = self.server_key().map(|(k, l)| (k.clone(), l)) else { return };

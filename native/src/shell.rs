@@ -213,7 +213,13 @@ fn tokens(n: u64) -> String {
 pub fn start_polls(window: &mut Window, cx: &mut Context<OrbitApp>) {
     cx.spawn_in(window, async move |this, cx| loop {
         cx.background_executor().timer(Duration::from_secs(15)).await;
-        let stopped = this.update(cx, |a, cx| a.lsp.stop_idle(&crate::editor::servers_in_use(cx), Instant::now()));
+        let stopped = this.update(cx, |a, cx| {
+            // Tabs of other workspaces keep no server: the same repo in two
+            // workspaces, or two worktrees, would each hold a clangd.
+            let shown = a.scope();
+            let in_use: Vec<_> = crate::editor::servers_in_use(cx).into_iter().filter(|(k, _)| Some(&k.workspace) == shown.as_ref()).collect();
+            a.lsp.stop_idle(&in_use, Instant::now())
+        });
         if stopped.is_err() {
             break;
         }
