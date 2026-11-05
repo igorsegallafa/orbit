@@ -26,7 +26,7 @@ use orbit_core::events::Events;
 use orbit_core::run::ResolvedRun;
 use problems::{Problem, Severity};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -201,14 +201,15 @@ pub fn restarts(live: usize, allow_multiple: bool) -> bool {
     live > 0 && !allow_multiple
 }
 
-/// Runs or debugs `target` beside whatever else runs; its live instances are
-/// stopped first unless it allows multiple, its finished one of that kind makes room.
-pub fn launch(target: RunTarget, debug: bool, cx: &mut App) {
+/// Runs or debugs `target` beside whatever else runs, with `env` under its own; its live
+/// instances are stopped first unless it allows multiple, its finished one of that kind makes room.
+pub fn launch(target: RunTarget, debug: bool, env: &BTreeMap<String, String>, cx: &mut App) {
     let runs = store(cx);
-    let Some(launch) = runs.read(cx).resolve(&target) else { return };
+    let Some(mut launch) = runs.read(cx).resolve(&target) else { return };
     if launch.config.program.is_none() {
         return;
     }
+    launch.config.env = orbit_core::run::merge_env(env, &launch.config.env);
     let mut live: Vec<String> = runs.read(cx).runs.iter().filter(|r| !r.exited && same(&r.target, &target)).map(|r| r.name.clone()).collect();
     for s in &debug::store(cx).read(cx).sessions {
         let s = s.read(cx);
@@ -236,6 +237,17 @@ pub fn launch(target: RunTarget, debug: bool, cx: &mut App) {
         debug::store(cx).update(cx, |d, cx| d.start(name, launch, built, cx));
     } else {
         runs.update(cx, |s, cx| s.run_after(name, launch, built, cx));
+    }
+}
+
+/// Run or Debug of the selected configuration: a compound launches each of its
+/// configurations with its environment under theirs.
+fn launch_selected(debug: bool, cx: &mut App) {
+    let s = store(cx).read(cx);
+    let Some(target) = s.target.clone() else { return };
+    let env = s.config().filter(|c| c.raw.is_compound()).map(|c| c.env.clone()).unwrap_or_default();
+    for t in s.members(&target) {
+        launch(t, debug, &env, cx);
     }
 }
 
@@ -301,10 +313,6 @@ pub fn init(cx: &mut App) {
             }
         }
     };
-    let selected = |cx: &App| {
-        let s = store(cx).read(cx);
-        s.target.as_ref().map(|t| s.members(t)).unwrap_or_default()
-    };
     for command in [
         Command::new("run.build", "Build").keys(["ctrl-f9"]).when(ready).run(|a, _, cx| {
             a.layout.panel_open = true;
@@ -327,17 +335,13 @@ pub fn init(cx: &mut App) {
                 open_configurations(window, cx);
                 cx.notify();
             }),
-        Command::new("run.run", "Run").keys(["shift-f10"]).when(launchable).run(move |a, _, cx| {
+        Command::new("run.run", "Run").keys(["shift-f10"]).when(launchable).run(|a, _, cx| {
             a.layout.panel_open = true;
-            for t in selected(cx) {
-                launch(t, false, cx);
-            }
+            launch_selected(false, cx);
         }),
-        Command::new("run.debug", "Debug").keys(["shift-f9"]).when(launchable).run(move |a, _, cx| {
+        Command::new("run.debug", "Debug").keys(["shift-f9"]).when(launchable).run(|a, _, cx| {
             a.layout.panel_open = true;
-            for t in selected(cx) {
-                launch(t, true, cx);
-            }
+            launch_selected(true, cx);
         }),
         Command::new("run.stop", "Stop").keys(["ctrl-f2"]).when(|_, cx| building(cx) || live(cx)).run(|_, _, cx| stop(cx)),
         Command::new("run.stopAll", "Stop All").when(|_, cx| building(cx) || live(cx)).run(|_, _, cx| {
