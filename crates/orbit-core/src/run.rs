@@ -92,6 +92,11 @@ pub fn compound_parts<'a>(compound: &RunConfig, own: &str, configs: impl IntoIte
     (parts, problems)
 }
 
+/// A compound's environment under one of its configurations': the configuration's own keys win.
+pub fn merge_env(compound: &BTreeMap<String, String>, own: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    compound.iter().chain(own).map(|(k, v)| (k.clone(), v.clone())).collect()
+}
+
 /// Where a configuration comes from.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -274,6 +279,13 @@ fn pick_preset(presets: &[String], configured: impl Fn(&str) -> bool) -> Option<
 
 fn auto_preset(root: &Path, presets: &[String], defs: &HashMap<String, Value>) -> Option<String> {
     pick_preset(presets, |p| binary_dir(root, defs, p).is_some_and(|d| d.join("CMakeCache.txt").is_file()))
+}
+
+/// The build folder of the chosen (or `${auto}`) preset, else a configured `build/`.
+pub fn cmake_build_dir(root: &Path, preset: Option<&str>) -> Option<PathBuf> {
+    let defs = preset_defs(root);
+    let preset = preset.filter(|p| !p.is_empty()).map(str::to_string).or_else(|| auto_preset(root, &crate::lsp::cmake_presets(root), &defs));
+    preset.and_then(|p| binary_dir(root, &defs, &p)).or_else(|| Some(root.join("build")).filter(|d| d.join("CMakeCache.txt").is_file()))
 }
 
 // ---------- resolving ----------
@@ -794,6 +806,15 @@ pub fn cancel(key: &str) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_configurations_env_overrides_its_compounds() {
+        let env = |pairs: &[(&str, &str)]| pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<BTreeMap<_, _>>();
+        let compound = env(&[("LOG", "debug"), ("PORT", "80")]);
+        assert_eq!(merge_env(&compound, &env(&[("PORT", "8080"), ("X", "1")])), env(&[("LOG", "debug"), ("PORT", "8080"), ("X", "1")]));
+        assert_eq!(merge_env(&compound, &BTreeMap::new()), compound);
+        assert_eq!(merge_env(&BTreeMap::new(), &compound), compound);
+    }
 
     fn names(list: &[(RunConfig, Origin)]) -> Vec<(&str, Origin)> {
         list.iter().map(|(c, o)| (c.name.as_str(), *o)).collect()

@@ -19,5 +19,9 @@ portable-pty = "0.9"
 minisign-verify = "0.2"
 base64 = "0.22"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# prctl(PR_SET_PDEATHSIG) for language servers (already in the lock).
+libc = "0.2"
+
 [target."cfg(windows)".dependencies]
 winreg = "0.55"

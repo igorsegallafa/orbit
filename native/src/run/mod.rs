@@ -8,6 +8,7 @@ pub mod configs;
 pub mod problems;
 pub mod saved;
 pub mod script;
+pub mod testing;
 mod panel;
 mod widget;
 
@@ -26,7 +27,7 @@ use orbit_core::events::Events;
 use orbit_core::run::ResolvedRun;
 use problems::{Problem, Severity};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -83,6 +84,8 @@ pub struct BuildProblem {
 
 pub struct Build {
     pub key: String,
+    /// Builds of one Build, Run or Debug (a compound's several) share it.
+    group: u64,
     pub target: RunTarget,
     /// Build All: every target of the repo's build folder.
     pub all: bool,
@@ -139,7 +142,13 @@ pub struct RunStore {
     pub setups: Vec<(String, Setup)>,
     pub target: Option<RunTarget>,
     pub loading: bool,
-    pub build: Option<Build>,
+    /// The last Build, Run or Debug's builds (a compound's, one per configuration).
+    pub builds: Vec<Build>,
+    /// The build the Build tab shows (None: the last).
+    pub shown_build: Option<String>,
+    next_group: u64,
+    /// Queued builds' tickets, in turn order.
+    build_queue: Vec<u64>,
     pub runs: Vec<RunProc>,
     /// The run the Run tab shows (None: the last).
     pub shown_run: Option<EntityId>,
@@ -165,6 +174,10 @@ fn building(cx: &App) -> bool {
 
 fn has_program(cx: &App) -> bool {
     store(cx).read(cx).config().is_some_and(|c| c.program.is_some() || c.raw.is_compound())
+}
+
+fn has_compound(cx: &App) -> bool {
+    store(cx).read(cx).config().is_some_and(|c| c.raw.is_compound())
 }
 
 fn active_status(cx: &App) -> Option<DebugStatus> {
@@ -201,14 +214,15 @@ pub fn restarts(live: usize, allow_multiple: bool) -> bool {
     live > 0 && !allow_multiple
 }
 
-/// Runs or debugs `target` beside whatever else runs; its live instances are
-/// stopped first unless it allows multiple, its finished one of that kind makes room.
-pub fn launch(target: RunTarget, debug: bool, cx: &mut App) {
+/// Runs or debugs `target` beside whatever else runs, with `env` under its own; its live
+/// instances are stopped first unless it allows multiple, its finished one of that kind makes room.
+pub fn launch(target: RunTarget, debug: bool, env: &BTreeMap<String, String>, group: u64, cx: &mut App) {
     let runs = store(cx);
-    let Some(launch) = runs.read(cx).resolve(&target) else { return };
+    let Some(mut launch) = runs.read(cx).resolve(&target) else { return };
     if launch.config.program.is_none() {
         return;
     }
+    launch.config.env = orbit_core::run::merge_env(env, &launch.config.env);
     let mut live: Vec<String> = runs.read(cx).runs.iter().filter(|r| !r.exited && same(&r.target, &target)).map(|r| r.name.clone()).collect();
     for s in &debug::store(cx).read(cx).sessions {
         let s = s.read(cx);
@@ -231,11 +245,23 @@ pub fn launch(target: RunTarget, debug: bool, cx: &mut App) {
             s.target.as_ref().is_some_and(|t| same(t, &target)) && if s.is_live() { restart } else { debug }
         })
     });
-    let built = runs.update(cx, |s, cx| s.prepare_launch(&launch, cx));
+    let built = runs.update(cx, |s, cx| s.prepare_launch(&launch, group, cx));
     if debug {
         debug::store(cx).update(cx, |d, cx| d.start(name, launch, built, cx));
     } else {
         runs.update(cx, |s, cx| s.run_after(name, launch, built, cx));
+    }
+}
+
+/// Run or Debug of the selected configuration: a compound launches each of its
+/// configurations with its environment under theirs, their builds listed together.
+fn launch_selected(debug: bool, cx: &mut App) {
+    let group = store(cx).update(cx, |s, _| s.new_group());
+    let s = store(cx).read(cx);
+    let Some(target) = s.target.clone() else { return };
+    let env = s.config().filter(|c| c.raw.is_compound()).map(|c| c.env.clone()).unwrap_or_default();
+    for t in s.members(&target) {
+        launch(t, debug, &env, group, cx);
     }
 }
 
@@ -279,7 +305,10 @@ pub fn init(cx: &mut App) {
         setups: vec![],
         target: None,
         loading: false,
-        build: None,
+        builds: vec![],
+        shown_build: None,
+        next_group: 0,
+        build_queue: vec![],
         runs: vec![],
         shown_run: None,
         view: PanelView::Build,
@@ -290,8 +319,9 @@ pub fn init(cx: &mut App) {
     });
     cx.set_global(GlobalRun(entity));
     debug::init(cx);
+    testing::init(cx);
 
-    let ready = |_: &OrbitApp, cx: &App| store(cx).read(cx).config().is_some_and(|c| !c.raw.is_compound()) && !building(cx);
+    let ready = |_: &OrbitApp, cx: &App| store(cx).read(cx).config().is_some() && !building(cx);
     // Run and Debug don't wait for a build to end: theirs queues behind it.
     let launchable = |_: &OrbitApp, cx: &App| has_program(cx);
     let with_debug = |f: fn(&mut debug::Session, &mut Context<debug::Session>)| {
@@ -300,10 +330,6 @@ pub fn init(cx: &mut App) {
                 s.update(cx, f);
             }
         }
-    };
-    let selected = |cx: &App| {
-        let s = store(cx).read(cx);
-        s.target.as_ref().map(|t| s.members(t)).unwrap_or_default()
     };
     for command in [
         Command::new("run.build", "Build").keys(["ctrl-f9"]).when(ready).run(|a, _, cx| {
@@ -314,7 +340,7 @@ pub fn init(cx: &mut App) {
         }),
         Command::new("run.buildAll", "Build All")
             .keys(["ctrl-shift-f9"])
-            .when(move |a, cx| ready(a, cx) && store(cx).read(cx).can_build_all())
+            .when(move |a, cx| ready(a, cx) && !has_compound(cx) && store(cx).read(cx).can_build_all())
             .run(|a, _, cx| {
                 a.layout.panel_open = true;
                 store(cx).update(cx, |s, cx| {
@@ -327,17 +353,13 @@ pub fn init(cx: &mut App) {
                 open_configurations(window, cx);
                 cx.notify();
             }),
-        Command::new("run.run", "Run").keys(["shift-f10"]).when(launchable).run(move |a, _, cx| {
+        Command::new("run.run", "Run").keys(["shift-f10"]).when(launchable).run(|a, _, cx| {
             a.layout.panel_open = true;
-            for t in selected(cx) {
-                launch(t, false, cx);
-            }
+            launch_selected(false, cx);
         }),
-        Command::new("run.debug", "Debug").keys(["shift-f9"]).when(launchable).run(move |a, _, cx| {
+        Command::new("run.debug", "Debug").keys(["shift-f9"]).when(launchable).run(|a, _, cx| {
             a.layout.panel_open = true;
-            for t in selected(cx) {
-                launch(t, true, cx);
-            }
+            launch_selected(true, cx);
         }),
         Command::new("run.stop", "Stop").keys(["ctrl-f2"]).when(|_, cx| building(cx) || live(cx)).run(|_, _, cx| stop(cx)),
         Command::new("run.stopAll", "Stop All").when(|_, cx| building(cx) || live(cx)).run(|_, _, cx| {
@@ -366,6 +388,33 @@ pub fn init(cx: &mut App) {
         Command::new("run.showProblems", "Show Build Problems").run(|a, _, cx| {
             a.layout.panel_open = true;
             store(cx).update(cx, |s, cx| s.set_view(PanelView::Problems, cx));
+        }),
+        Command::new("tests.show", "Show Tests").run(|a, _, cx| {
+            a.layout.panel_open = true;
+            store(cx).update(cx, |s, cx| s.set_view(PanelView::Tests, cx));
+        }),
+        Command::new("tests.runAll", "Run All Tests").when(|a, cx| a.workspace().is_some() && !testing::store(cx).read(cx).is_running()).run(|a, _, cx| {
+            a.layout.panel_open = true;
+            store(cx).update(cx, |s, cx| s.set_view(PanelView::Tests, cx));
+            testing::store(cx).update(cx, |t, cx| t.run_all(cx));
+        }),
+        Command::new("tests.rerunFailed", "Rerun Failed Tests")
+            .when(|_, cx| {
+                let t = testing::store(cx).read(cx);
+                !t.is_running() && t.has_failed()
+            })
+            .run(|a, _, cx| {
+                a.layout.panel_open = true;
+                store(cx).update(cx, |s, cx| s.set_view(PanelView::Tests, cx));
+                testing::store(cx).update(cx, |t, cx| t.rerun_failed(cx));
+            }),
+        Command::new("tests.stop", "Stop Tests").when(|_, cx| testing::store(cx).read(cx).is_running()).run(|_, _, cx| {
+            testing::store(cx).update(cx, |t, cx| t.stop(cx));
+        }),
+        Command::new("tests.refresh", "Refresh Tests").when(|a, _| a.workspace().is_some()).run(|a, _, cx| {
+            a.layout.panel_open = true;
+            store(cx).update(cx, |s, cx| s.set_view(PanelView::Tests, cx));
+            testing::store(cx).update(cx, |t, cx| t.refresh(cx));
         }),
     ] {
         commands::register(cx, command);
@@ -467,7 +516,7 @@ pub fn apply_problems(cx: &mut App) {
     let by_file: HashMap<PathBuf, Vec<Problem>> = {
         let s = store(cx).read(cx);
         let mut map: HashMap<PathBuf, Vec<Problem>> = HashMap::new();
-        for p in s.build.iter().flat_map(|b| &b.problems) {
+        for p in s.builds.iter().flat_map(|b| &b.problems) {
             if let Some(path) = &p.open {
                 map.entry(path.clone()).or_default().push(p.problem.clone());
             }
@@ -514,7 +563,32 @@ fn now_ms() -> u128 {
 
 impl RunStore {
     pub fn is_building(&self) -> bool {
-        self.build.as_ref().is_some_and(|b| b.status == BuildStatus::Running)
+        self.builds.iter().any(|b| b.status == BuildStatus::Running)
+    }
+
+    pub fn build(&self) -> Option<&Build> {
+        self.builds.iter().find(|b| Some(&b.key) == self.shown_build.as_ref()).or(self.builds.last())
+    }
+
+    /// The builds' status together (running, else failed, cancelled, ok) and their total time once done.
+    pub fn build_status(&self) -> Option<(BuildStatus, Option<Duration>)> {
+        let any = |st| self.builds.iter().any(|b| b.status == st);
+        let status = [BuildStatus::Running, BuildStatus::Failed, BuildStatus::Cancelled].into_iter().find(|st| any(*st)).or_else(|| self.builds.first().map(|b| b.status))?;
+        Some((status, self.builds.iter().map(|b| b.elapsed).sum()))
+    }
+
+    pub fn counts(&self) -> (usize, usize) {
+        self.builds.iter().map(Build::counts).fold((0, 0), |a, b| (a.0 + b.0, a.1 + b.1))
+    }
+
+    pub fn show_build(&mut self, key: String, cx: &mut Context<Self>) {
+        self.shown_build = Some(key);
+        cx.notify();
+    }
+
+    fn new_group(&mut self) -> u64 {
+        self.next_group += 1;
+        self.next_group
     }
 
     pub fn is_running(&self) -> bool {
@@ -668,32 +742,59 @@ impl RunStore {
 
     // ---------- build ----------
 
-    /// Builds the selected configuration; the receiver gets whether it succeeded.
-    pub fn start_build(&mut self, cx: &mut Context<Self>) -> Option<oneshot::Receiver<bool>> {
-        let t = self.target.clone()?;
-        self.build_inner(&t, false, cx)
+    /// Builds the selected configuration, a compound's one after another (a cancel stops them).
+    pub fn start_build(&mut self, cx: &mut Context<Self>) {
+        let Some(t) = self.target.clone() else { return };
+        let (members, group) = (self.members(&t), self.new_group());
+        cx.spawn(async move |this, cx| {
+            for m in members {
+                let Ok(built) = this.update(cx, |s, cx| s.queue_build(m, group, cx)) else { return };
+                let _ = built.await;
+                let cancelled = this.read_with(cx, |s, _| s.builds.last().is_some_and(|b| b.status == BuildStatus::Cancelled));
+                if cancelled.unwrap_or(true) {
+                    return;
+                }
+            }
+        })
+        .detach();
     }
 
     /// Builds every target of the selected configuration's repo.
-    pub fn start_build_all(&mut self, cx: &mut Context<Self>) -> Option<oneshot::Receiver<bool>> {
-        let t = self.target.clone()?;
-        self.build_inner(&t, true, cx)
+    pub fn start_build_all(&mut self, cx: &mut Context<Self>) {
+        let Some(t) = self.target.clone() else { return };
+        let group = self.new_group();
+        self.build_inner(&t, true, group, cx);
     }
 
     /// Before Run or Debug: the build, queued behind the current one, or a ready
     /// answer when "Before launch: Build" is off. Dropping the receiver gives up the wait.
-    pub fn prepare_launch(&mut self, launch: &Launch, cx: &mut Context<Self>) -> oneshot::Receiver<bool> {
-        let (tx, rx) = oneshot::channel();
+    pub fn prepare_launch(&mut self, launch: &Launch, group: u64, cx: &mut Context<Self>) -> oneshot::Receiver<bool> {
         if !launch.config.build_before_launch {
+            let (tx, rx) = oneshot::channel();
             let _ = tx.send(true);
             return rx;
         }
-        let target = launch.target.clone();
+        self.queue_build(launch.target.clone(), group, cx)
+    }
+
+    /// Builds `target` once the current build and those queued before it end; the
+    /// receiver gets whether it succeeded, and dropping it gives up the wait.
+    fn queue_build(&mut self, target: RunTarget, group: u64, cx: &mut Context<Self>) -> oneshot::Receiver<bool> {
+        let (tx, rx) = oneshot::channel();
+        let ticket = self.new_group();
+        self.build_queue.push(ticket);
         cx.spawn(async move |this, cx| loop {
             if tx.is_canceled() {
+                let _ = this.update(cx, |s, _| s.build_queue.retain(|t| *t != ticket));
                 return;
             }
-            match this.update(cx, |s, cx| (!s.is_building()).then(|| s.build_inner(&target, false, cx))) {
+            let turn = |s: &mut Self, cx: &mut Context<Self>| {
+                (!s.is_building() && s.build_queue.first() == Some(&ticket)).then(|| {
+                    s.build_queue.remove(0);
+                    s.build_inner(&target, false, group, cx)
+                })
+            };
+            match this.update(cx, turn) {
                 Ok(Some(built)) => {
                     let ok = match built {
                         Some(done) => done.await.unwrap_or(false),
@@ -711,12 +812,12 @@ impl RunStore {
     }
 
     pub fn cancel_build_of(&mut self, t: &RunTarget) {
-        if let Some(b) = self.build.as_ref().filter(|b| b.status == BuildStatus::Running && same(&b.target, t)) {
+        for b in self.builds.iter().filter(|b| b.status == BuildStatus::Running && same(&b.target, t)) {
             orbit_core::run::cancel(&b.key);
         }
     }
 
-    fn build_inner(&mut self, target: &RunTarget, all: bool, cx: &mut Context<Self>) -> Option<oneshot::Receiver<bool>> {
+    fn build_inner(&mut self, target: &RunTarget, all: bool, group: u64, cx: &mut Context<Self>) -> Option<oneshot::Receiver<bool>> {
         if self.is_building() {
             return None;
         }
@@ -734,8 +835,12 @@ impl RunStore {
                 let _ = tx.unbounded_send((stream, payload["line"].as_str().unwrap_or_default().to_string()));
             }
         });
-        self.build = Some(Build {
+        // A new Build, Run or Debug starts the list again; its own earlier build of this key is replaced.
+        self.builds.retain(|b| b.group == group && b.key != key);
+        self.shown_build = None;
+        self.builds.push(Build {
             key: key.clone(),
+            group,
             target: target.clone(),
             all,
             status: BuildStatus::Running,
@@ -778,7 +883,7 @@ impl RunStore {
     }
 
     fn push_lines(&mut self, key: &str, batch: Vec<(Stream, String)>, cx: &mut Context<Self>) {
-        let Some(b) = self.build.as_mut().filter(|b| b.key == key) else { return };
+        let Some(b) = self.builds.iter_mut().find(|b| b.key == key) else { return };
         let mut new_problems = false;
         for (stream, raw) in batch {
             let text = problems::strip_ansi(&raw);
@@ -819,7 +924,7 @@ impl RunStore {
     }
 
     fn finish_build(&mut self, key: &str, result: Result<orbit_core::run::BuildExit, String>, cx: &mut Context<Self>) -> bool {
-        let Some(b) = self.build.as_mut().filter(|b| b.key == key) else { return false };
+        let Some(b) = self.builds.iter_mut().find(|b| b.key == key) else { return false };
         b.status = match result {
             Ok(exit) if exit.cancelled => BuildStatus::Cancelled,
             Ok(exit) if exit.success => BuildStatus::Ok,
@@ -896,7 +1001,7 @@ impl RunStore {
     }
 
     pub fn stop(&mut self, _: &mut Context<Self>) {
-        if let Some(b) = self.build.as_ref().filter(|b| b.status == BuildStatus::Running) {
+        for b in self.builds.iter().filter(|b| b.status == BuildStatus::Running) {
             orbit_core::run::cancel(&b.key);
         }
     }
@@ -949,7 +1054,15 @@ impl RunStore {
             let targets: Vec<String> = s.targets.iter().map(|t| format!("{}:{}", t.name, t.kind)).collect();
             let _ = writeln!(out, "  targets of {}: {targets:?}", s.build_dir.as_deref().unwrap_or("-"));
         }
-        if let Some(b) = &self.build {
+        if self.builds.len() > 1 {
+            let list: Vec<String> = self
+                .builds
+                .iter()
+                .map(|b| format!("{}/{} {:?}{}", b.target.repo, b.target.name, b.status, b.elapsed.map(|d| format!(" {:.1}s", d.as_secs_f32())).unwrap_or_default()))
+                .collect();
+            let _ = writeln!(out, "  builds {list:?}, {:?} together", self.build_status().map(|b| b.0));
+        }
+        if let Some(b) = self.build() {
             let (errors, warnings) = b.counts();
             let _ = writeln!(
                 out,
@@ -1009,6 +1122,7 @@ pub fn dump(cx: &App) -> String {
         out.push_str(&p.read(cx).dump(cx));
     }
     out.push_str(&debug::gutter::dump(cx));
+    out.push_str(&testing::store(cx).read(cx).dump(cx));
     out
 }
 

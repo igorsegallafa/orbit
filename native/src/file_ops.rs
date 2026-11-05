@@ -170,6 +170,9 @@ fn on_fs_change(app: &mut OrbitApp, change: FsChange, window: &mut Window, cx: &
         if editor.update(cx, |e, cx| e.reload_from_disk(window, cx)) {
             eprintln!("reloaded {}", editor.read(cx).path.display());
         }
+        if change.git {
+            editor.update(cx, |e, cx| e.reload_git_bases(cx));
+        }
     }
 }
 

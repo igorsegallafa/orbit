@@ -30,6 +30,7 @@ pub enum PanelView {
     Run,
     Problems,
     Debug,
+    Tests,
 }
 
 pub struct Panel {
@@ -43,7 +44,11 @@ pub struct Panel {
 
 impl Panel {
     pub fn new(app: WeakEntity<OrbitApp>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let subs = vec![cx.observe(&store(cx), |_, _, cx| cx.notify()), cx.observe(&debug::store(cx), |_, _, cx| cx.notify())];
+        let subs = vec![
+            cx.observe(&store(cx), |_, _, cx| cx.notify()),
+            cx.observe(&debug::store(cx), |_, _, cx| cx.notify()),
+            cx.observe(&super::testing::store(cx), |_, _, cx| cx.notify()),
+        ];
         Self {
             debug: cx.new(|cx| DebugView::new(app.clone(), window, cx)),
             app,
@@ -75,9 +80,8 @@ impl Panel {
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let (view, build, run, counts) = {
             let s = store(cx).read(cx);
-            let build = s.build.as_ref().map(|b| (b.status, b.elapsed));
             let run = s.shown().map(|r| (r.id(), r.name.clone(), r.exited));
-            (s.view, build, run, s.build.as_ref().map(|b| b.counts()).unwrap_or_default())
+            (s.view, s.build_status(), run, s.counts())
         };
         let debug_status = debug::active(cx).map_or(DebugStatus::Idle, |s| s.read(cx).status);
         // `.panel-status`; `-running` is info and pulses (`panel-pulse`, 1s).
@@ -98,6 +102,16 @@ impl Panel {
         };
         let run_color = if store(cx).read(cx).is_running() { theme::INFO } else { theme::TEXT_FAINT };
         let debug_color = debug_color(debug_status);
+        let tests_color = {
+            let t = super::testing::store(cx).read(cx);
+            if t.is_running() {
+                theme::INFO
+            } else if t.has_failed() {
+                theme::DANGER
+            } else {
+                theme::TEXT_FAINT
+            }
+        };
         let count = |n: usize, color: u32| {
             (n > 0).then(|| div().px_1().rounded(px(8.)).text_xs().bg(c(color)).text_color(c(theme::BG)).child(n.to_string()))
         };
@@ -122,6 +136,7 @@ impl Panel {
             .child(self.tab("panel-build", PanelView::Build, view == PanelView::Build, div().flex().items_center().gap_1p5().child(dot("panel-dot-build", build_color)).child("Build").into_any_element(), cx))
             .child(self.tab("panel-run", PanelView::Run, view == PanelView::Run, div().flex().items_center().gap_1p5().child(dot("panel-dot-run", run_color)).child(run_label).into_any_element(), cx))
             .child(self.tab("panel-debug", PanelView::Debug, view == PanelView::Debug, div().flex().items_center().gap_1p5().child(dot("panel-dot-debug", debug_color)).child("Debug").into_any_element(), cx))
+            .child(self.tab("panel-tests", PanelView::Tests, view == PanelView::Tests, div().flex().items_center().gap_1p5().child(dot("panel-dot-tests", tests_color)).child("Tests").into_any_element(), cx))
             .child(self.tab(
                 "panel-problems",
                 PanelView::Problems,
@@ -259,7 +274,7 @@ impl Panel {
     }
 
     fn render_output(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let Some((key, total, tail)) = store(cx).read(cx).build.as_ref().map(|b| {
+        let Some((key, total, tail)) = store(cx).read(cx).build().map(|b| {
             let seen = if self.shown_build.as_deref() == Some(b.key.as_str()) { self.output.read(cx).seen() } else { 0 };
             let fresh = b.total.saturating_sub(seen).min(b.lines.len());
             let tail: Vec<(String, u32, Option<Link>)> = b.lines[b.lines.len() - fresh..]
@@ -289,21 +304,88 @@ impl Panel {
         }
         // Build lines never change once printed: `tail` holds only the new ones.
         self.output.update(cx, |v, cx| v.sync(total, &tail, |(text, color, link)| (text.clone(), *color, link.clone()), cx));
-        self.output.clone().into_any_element()
+        let output = div().flex_1().min_w_0().h_full().child(self.output.clone());
+        div().size_full().flex().children(self.render_builds(cx)).child(output).into_any_element()
+    }
+
+    /// With several builds (a compound's), the list beside the output: status, time; a click shows its output.
+    fn render_builds(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let s = store(cx).read(cx);
+        if s.builds.len() < 2 {
+            return None;
+        }
+        let shown = s.build().map(|b| b.key.clone());
+        let several_repos = s.builds.iter().any(|b| b.target.repo != s.builds[0].target.repo);
+        let rows = s.builds.iter().enumerate().map(|(ix, b)| {
+            let (icon, color) = match b.status {
+                BuildStatus::Running => ("●", theme::INFO),
+                BuildStatus::Ok => ("✓", theme::OK),
+                BuildStatus::Failed => ("⨯", theme::DANGER),
+                BuildStatus::Cancelled => ("◌", theme::WARN),
+            };
+            let name = if b.all { format!("{} · all", b.target.repo) } else { b.target.name.clone() };
+            let time = match b.elapsed {
+                Some(d) => format!("{:.1}s", d.as_secs_f32()),
+                None => format!("{}s", b.started.elapsed().as_secs()),
+            };
+            let (errors, _) = b.counts();
+            let active = shown.as_ref() == Some(&b.key);
+            let key = b.key.clone();
+            div()
+                .id(("build-item", ix))
+                .relative()
+                .px_2()
+                .py(px(3.))
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .cursor_pointer()
+                .when(active, |d| d.bg(c(theme::ACCENT_SOFT)))
+                .hover(|d| d.bg(c(theme::PANEL_HOVER)))
+                .child(div().w(px(12.)).flex_none().text_color(c(color)).child(icon))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(div().truncate().text_color(c(if active { theme::TEXT } else { theme::TEXT_DIM })).child(name))
+                        .when(several_repos, |d| d.child(div().truncate().text_xs().text_color(c(theme::TEXT_FAINT)).child(b.target.repo.clone()))),
+                )
+                .when(errors > 0, |d| d.child(div().text_xs().text_color(c(theme::DANGER)).child(errors.to_string())))
+                .child(div().text_xs().text_color(c(theme::TEXT_FAINT)).child(time))
+                .child(probe(format!("build-item:{}", b.target.name)))
+                .on_click(move |_, _, cx| store(cx).update(cx, |s, cx| s.show_build(key.clone(), cx)))
+        });
+        Some(
+            div()
+                .id("build-list")
+                .w(px(220.))
+                .flex_none()
+                .h_full()
+                .overflow_y_scroll()
+                .py_1()
+                .text_size(px(12.5))
+                .border_r_1()
+                .border_color(c(theme::BORDER))
+                .children(rows)
+                .into_any_element(),
+        )
     }
 
     fn render_problems(&self, cx: &mut Context<Self>) -> AnyElement {
         let s = store(cx).read(cx);
-        let Some(b) = &s.build else { return Self::empty("No problems in the last build") };
-        if b.problems.is_empty() {
+        // Every build's, numbered across them.
+        let all: Vec<(&super::Build, &super::BuildProblem)> = s.builds.iter().flat_map(|b| b.problems.iter().map(move |p| (b, p))).collect();
+        if all.is_empty() {
             return Self::empty("No problems in the last build");
         }
         // Grouped by file, errors first.
-        let mut order: Vec<usize> = (0..b.problems.len()).collect();
-        order.sort_by_key(|&i| b.problems[i].problem.severity != Severity::Error);
+        let mut order: Vec<usize> = (0..all.len()).collect();
+        order.sort_by_key(|&i| all[i].1.problem.severity != Severity::Error);
         let mut groups: Vec<(String, Vec<usize>)> = vec![];
         for i in order {
-            let p = &b.problems[i];
+            let (b, p) = all[i];
             let file = match &p.open {
                 Some(o) => o.strip_prefix(&b.linked_root).map(|r| format!("{}/{}", b.target.repo, r.display())).unwrap_or_else(|_| o.display().to_string()),
                 None => p.problem.file.clone().unwrap_or_else(|| "Linker".into()),
@@ -318,7 +400,7 @@ impl Panel {
             .flat_map(|(file, list)| {
                 let header = div().px_3().pt_2().pb_1().text_xs().text_color(c(theme::TEXT_FAINT)).child(file).into_any_element();
                 let items = list.into_iter().map(|i| {
-                    let p = &b.problems[i];
+                    let p = all[i].1;
                     let q = &p.problem;
                     let (icon, color) = if q.severity == Severity::Error { ("⨯", theme::DANGER) } else { ("⚠", theme::WARN) };
                     let target = p.open.clone().map(|o| (o, q.line, q.column));
@@ -358,6 +440,7 @@ impl Render for Panel {
                 None => Self::empty("Nothing running · Shift+F10 builds and runs the selected configuration"),
             },
             PanelView::Debug => self.debug.clone().into_any_element(),
+            PanelView::Tests => super::testing::store(cx).into_any_element(),
         };
         div()
             .size_full()

@@ -484,6 +484,9 @@ impl OrbitApp {
             self.scopes.record(scope, key.clone());
         }
         if let Some(tab) = self.active.and_then(|a| self.tabs.get(a)) {
+            if let TabKind::Editor(e) = &tab.kind {
+                e.update(cx, |e, cx| e.wake_server(cx));
+            }
             window.focus(&tab.focus_handle(cx), cx);
             if !self.applying_nav {
                 let target = tab.nav_target(cx);

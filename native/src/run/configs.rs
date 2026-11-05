@@ -798,6 +798,30 @@ impl RunConfigs {
                     cx.notify();
                 })))
         });
+        let env = div()
+            .flex()
+            .gap(px(12.))
+            .child(div().w(px(150.)).flex_none().pt(px(8.)).text_size(px(12.5)).text_color(c(theme::TEXT_DIM)).child("Environment variables"))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .children(env_rows)
+                    .child(
+                        div().flex().items_center().gap(px(10.)).child(kit::link("rc-env-add", "+ Add variable").on_click(cx.listener(|t, _: &ClickEvent, window, cx| {
+                            t.commit(cx);
+                            t.add_env_row("", "", None, window, cx);
+                            if let Some(r) = t.form.env.last() {
+                                r.key.update(cx, |i, cx| i.focus(window, cx));
+                            }
+                            cx.notify();
+                        })))
+                        .child(div().text_size(px(11.5)).text_color(c(theme::TEXT_FAINT)).child("Paste K=V;K2=V2 into a name to add several")),
+                    ),
+            );
         let shared_file = if item.shared { ".orbit/run.json — shared, commit it" } else { ".orbit/run.local.json — yours, keep it out of git" };
         let browse = kit::button("rc-browse", "Browse…", Kind::Secondary, kit::NORMAL).on_click(cx.listener(|t, _: &ClickEvent, window, cx| t.browse(window, cx)));
         let _ = window;
@@ -816,6 +840,8 @@ impl RunConfigs {
             return form
                 .child(row("Configurations", checklist))
                 .child(hint(problem.unwrap_or_else(|| "Run and Debug launch the checked configurations in this order".into())))
+                .child(env)
+                .child(hint("Every configuration gets these; its own variable of the same name wins"))
                 .child(div().h(px(1.)).bg(c(theme::BORDER)))
                 .child(checkbox("rc-shared", "Store as project file", item.shared, cx, |i| i.shared = !i.shared))
                 .child(div().mt(px(-8.)).pl(px(24.)).text_size(px(11.5)).text_color(c(theme::TEXT_FAINT)).child(shared_file))
@@ -829,32 +855,7 @@ impl RunConfigs {
             .child(row("Program arguments", field("args", &self.form.args)))
             .child(row("Working directory", div().flex().gap(px(6.)).child(div().flex_1().min_w_0().child(field("cwd", &self.form.cwd))).child(browse)))
             .child(hint("Empty: the artifact's folder (the repo for other configurations)"))
-            .child(
-                div()
-                    .flex()
-                    .gap(px(12.))
-                    .child(div().w(px(150.)).flex_none().pt(px(8.)).text_size(px(12.5)).text_color(c(theme::TEXT_DIM)).child("Environment variables"))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .gap(px(6.))
-                            .children(env_rows)
-                            .child(
-                                div().flex().items_center().gap(px(10.)).child(kit::link("rc-env-add", "+ Add variable").on_click(cx.listener(|t, _: &ClickEvent, window, cx| {
-                                    t.commit(cx);
-                                    t.add_env_row("", "", None, window, cx);
-                                    if let Some(r) = t.form.env.last() {
-                                        r.key.update(cx, |i, cx| i.focus(window, cx));
-                                    }
-                                    cx.notify();
-                                })))
-                                .child(div().text_size(px(11.5)).text_color(c(theme::TEXT_FAINT)).child("Paste K=V;K2=V2 into a name to add several")),
-                            ),
-                    ),
-            )
+            .child(env)
             .child(div().h(px(1.)).bg(c(theme::BORDER)))
             .child(checkbox("rc-shared", "Store as project file", item.shared, cx, |i| i.shared = !i.shared))
             .child(div().mt(px(-8.)).pl(px(24.)).text_size(px(11.5)).text_color(c(theme::TEXT_FAINT)).child(shared_file))

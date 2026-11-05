@@ -85,7 +85,9 @@ Sessions and free-form steps run after the fixed ones (`;`-separated):
 
 `wait:<text>[@secs]` waits for text in the active terminal, `status:<status>` for a session in that
 status, `action:<name>` dispatches any registered GPUI action by name, `type:`/`keys:` go through
-GPUI's keystroke dispatch, `dump` writes the sessions, inbox and recent list into the log. Waits
+GPUI's keystroke dispatch, `mark:<text>`/`commit:<text>` call the terminal's input handler as an
+input method does (a dead key's accent, then the composed letter), `term-drag:<col,row>:<col,row>`
+drags over terminal cells (`term-drag:shift+0,1:7,1` holds Shift for the press), `dump` writes the sessions, inbox and recent list into the log. Waits
 also record how late the UI thread ran its timers ("ui timer lag"), which is how a blocked UI shows.
 App commands (closing a tab…) are not GPUI actions by name: run them with `--do "cmd:<id>"`.
 The dump always ends with the sessions, inbox and recent list.
@@ -120,7 +122,12 @@ views `build-output` and `dbg-console` (drag in them selects, `<probe>@x,y` pick
 `var:<name>`; `run-build-menu` (the build chevron), `run-build-split`, and in Edit Configurations
 `rc-item:<name>`, `rc-input:name|program|args|cwd|build|env-key:<n>|env-value:<n>`, `rc-target`,
 `rc-add|dup|remove`, `rc-env-add`, `rc-env-remove:<n>`, `rc-shared`, `rc-build-first`,
-`rc-cancel|apply|ok`, `rc-status` (the footer's saved or error line). `move:<probe>` hovers a probe, `paste:<text>` inserts text in one go as a
+`rc-cancel|apply|ok`, `rc-status` (the footer's saved or error line); with several builds (a
+compound's) the Build tab's list rows are `build-item:<configuration>` and the dump adds
+`builds ["<repo>/<name> <status> <secs>", …], Some(<together>) together` before the shown build's `build <status>` line; the Tests tab's (`panel-tests`)
+`tests-run-all`, `tests-run-selected`, `tests-rerun-failed`, `tests-stop`, `tests-refresh`, its tree
+rows `test:<repo>/<runner>`, `test:<suite>`, `test:<suite>/<test>` (double click folds a group or
+opens a test's source) and the output log `tests-output`. `move:<probe>` hovers a probe, `paste:<text>` inserts text in one go as a
 paste does, and `\;` puts a `;` inside a `--do` step. The git and workspace pages' probes are listed in *Stage: git and workspace flows*.
 
 ## Commands and keymap (the extension point)
@@ -234,6 +241,47 @@ Other numbers:
 | clangd start → `initialize` done | ~110 ms; the editor attaches 150 ms after opening |
 | Tree, background loads | 3 levels 44 ms, 4 levels 81 ms, 5 levels (37,347 rows) 5.6 s without blocking the UI |
 | Editor open (`Game.cpp`) | < 1 ms to read; highlighting is incremental tree-sitter |
+
+### Memory
+
+Orbit was OOM-killed with clangd near 4 GB. The app itself stays at 60–150 MB; what Orbit starts is
+the cost. PSS + SwapPss of each process, sampled every 10 s, `ORBIT_CONFIG_DIR` on a copy of the
+config, i7-12650H (16 threads), aether-engine (1,845 unity translation units):
+
+| Scenario | Before | After |
+|---|---:|---:|
+| clangd, empty index, first 120 s (peak, 2 runs) | 5,767 / 5,830 MB | 2,568 / 3,474 MB |
+| Same repo open in two workspaces (warm index), after 2.5 min in one | 2 × clangd, 2,620 MB | 1 × clangd, 1,400 MB |
+| clangd still alive after a normal quit while indexing | yes (one lived ~30 s; 2 of 2 in the two-workspace run) | none |
+| clangd, no background index (for scale) | | 1,235 MB |
+
+- **clangd flags** (`orbit_core::lsp::clangd_memory_flags`): `-j=<cores/4, 2–4>` and
+  `--pch-storage=disk`, appended unless the command (Settings → Languages override included) sets
+  them. Each background-index worker holds a whole translation unit and clangd starts one per core;
+  with 4 it indexed 60–100 % as many files in the first 2 minutes (3,524–5,931 index shards vs
+  5,884–6,463) at under half the memory. `-j=2` peaked at 1,687 MB. The background index stays on
+  (navigation needs it); it lives on disk next to the compilation database and loads in seconds.
+- **Servers follow the workspace shown**: `LspRegistry::stop_idle` counts only the tabs of the
+  workspace on screen, so a repo shared by two workspaces (or two worktrees) holds one clangd, not
+  two, once `IDLE_GRACE` (2 min) has passed. Showing a tab whose server was stopped starts it again
+  (`EditorTab::wake_server`); a crashed server still shows "stopped · Restart".
+- **Servers die with Orbit**: quitting kills them (asked to exit, clangd first finishes the files it
+  is indexing), and on Linux they get `PR_SET_PDEATHSIG` so a crash or `SIGKILL` of Orbit takes
+  them too.
+- **Debugger**: checked, nothing to fix. Stop, session end, relaunch (an ended session of the same
+  configuration is dropped), quit, `SIGTERM` and `SIGKILL` of Orbit all leave no gdb or debuggee
+  (a forking test program: parent and child both gone within 2 s; gdb exits on its stdin's EOF and
+  the inferior goes with it).
+- **Capped already** (unchanged): terminal history 10,000 lines (alacritty's default; 4 terminals
+  full of 180-column colour lines cost ~25–35 MB each), PTY replay 256 KB, kitty images 320 MB per
+  terminal, build output 5,000 lines, debug console 3,000, language server stderr 400 lines, Ralph
+  feed and events, files opened up to 8 MB.
+- **Not Orbit's**: each restored agent session runs its CLI at start (Claude Code ~250 MB plus its
+  MCP servers); gdb on `game` loads its debug info (`libGraphicsEngineVk.so` is 322 MB).
+
+To reproduce: `native/scripts/measure.sh 30 --workspace <ws> --open <repo>/<file>.cpp --wait-lsp 30`
+gives one reading; a server override in a scratch config with `--compile-commands-dir=<a copy of
+compile_commands.json>` starts clangd on an empty index.
 
 ## Verified in stage 1
 
@@ -626,6 +674,30 @@ made a new one (active); a clean exit. In the real GNOME 51 session the global i
 the request reaches GNOME Shell, which prompted once; with the stored answer `DENIED` later runs
 get no prompt and no `active` event.
 
+### Text input and copy
+
+Typed text reaches the terminal the way it reaches an editor: through GPUI's input handler
+(`EntityInputHandler`, as Zed's terminal does), so dead keys and input methods compose. Before,
+the terminal had no input handler: GPUI then turns `text-input-v3` off and drops any multi-byte
+commit an input method still sends, and its own xkb compose fallback reads only `LC_CTYPE` (unset
+in a GNOME session that sets `LANG`), so it uses the `C` table (`´` + `c` gives `ć`, not `ç`). Now
+the input method composes (IBus on GNOME, as for Ghostty) and its commit is written to the PTY as
+UTF-8. `key_to_bytes` keeps the keys that are not text (arrows, Ctrl and Alt combinations). An
+uncommitted accent is drawn underlined at the cursor.
+
+Copy: `Ctrl+Shift+C`, and `Ctrl+C` while something is selected (Cmd+C under Toshy, whose GUI keymap
+Orbit gets); it drops the selection, so the next `Ctrl+C` interrupts. A finished drag also goes to
+the primary selection. Programs that redraw over a selection (Claude Code's live region) erase it,
+but its text stays copyable until the next key or click. With mouse reporting on, Shift+drag
+selects, and keeps selecting if Shift is let go. OSC 52 writes (`\e]52;c;<base64>`, how Claude Code
+copies) go to the clipboard (`p`/`s`: the primary selection).
+
+Verified: unit tests in `terminal/input.rs`; self-tests typing `café ação ç` and `mark:´`,
+`commit:é`, `mark:~`, `commit:ã` into bash (grid shows `XéãY`), OSC 52 stores recorded in the dump,
+a drag under SGR mouse mode reported to the program and a Shift+drag selecting, `Ctrl+Shift+C` after
+the program erased the selected line, `Ctrl+C` copying then interrupting. Not verified with real
+keys: dead keys through IBus need a person at the keyboard (`wtype`/`ydotool` are not installed).
+
 ## Files and search stage
 
 **How it hangs together.** The palette overlay (`src/palette.rs`) is now the search modal, with
@@ -846,6 +918,9 @@ not run (it needs GitHub).
   .orbit/run.local.json") and in a toast; a failure (an empty or duplicate name, an environment row
   with a value but no name, an invalid or repeated variable name, a write error) shows in the footer,
   selects the configuration it is in and keeps every edit; OK closes only when the save worked.
+  A compound has its own Environment variables: Run and Debug give them to every configuration it
+  launches (`run::merge_env`), and a configuration's own variable of the same name wins. Builds
+  take neither's environment.
 - **The program's environment** (`orbit_core::pty::child_env`, one function for sessions, Run and
   Debug): Orbit's own environment, without its AppImage launcher's variables (`proc::host_env`:
   `APPIMAGE`, `APPDIR`, the mount's `LD_LIBRARY_PATH`/`PATH` entries), the terminal Orbit was started
@@ -866,7 +941,9 @@ not run (it needs GitHub).
   variant.
 - **Bottom panel** (`layout.panel_height`, resizable from an 8 px handle on its top edge, saved):
   Build output, Run (the program on `orbit_core::pty` with the configuration's cwd, args and env),
-  Problems (grouped by file, errors first), Debug. A build opens it; a failed build with problems
+  Problems (grouped by file, errors first, every build's), Debug. A compound's Build, Run or Debug
+  builds its configurations one after another, in order; the Build tab then lists them beside the
+  output (status, errors, time) and a click shows one's output (`build-item:<name>`). A build opens it; a failed build with problems
   switches to Problems. Build output and the Debug Console are log views (`src/logview.rs`): ANSI
   SGR colours (16 from the theme, 256, truecolor, bold, dim, italic, underline, inverse; `ansi.rs`
   drops every other escape and control code), lines wrap at the panel's width, the view follows the
@@ -888,6 +965,26 @@ not run (it needs GitHub).
   `<log id>-thumb` / `<log id>-track` (`build-output`, `dbg-console`), present while the bar has
   something to show; the terminal dump has a `scroll:` line (display offset, scrollback, alternate
   screen) and a log view's its top line and pixel offset.
+- **Tests** (`src/run/testing.rs` on `orbit_core::testing`), a lean IntelliJ test runner in the
+  bottom panel: each repo's runners, found by their files — cargo (`Cargo.toml`), CTest (a
+  `CMakeLists.txt` whose build folder, the run widget's preset's or `${auto}`'s or a configured
+  `build/`, has a `CTestTestfile.cmake`), vitest and jest (in `package.json`'s dependencies) — in a
+  tree of runner → suite (a Rust module, a gtest suite, a JS file) → test, with pass/fail/skip marks
+  and counts. Listing: `cargo test --workspace -- --list --format terse`, `ctest
+  --show-only=json-v1` (its `DEF_SOURCE_LINE` is the test's source), `vitest list --json=<file>`;
+  jest lists nothing, its tests appear once run. Running: `cargo test --workspace --no-fail-fast --
+  --show-output [--exact names…]`, `ctest -V -j<cpus> [-R '^(names)$']`, `vitest run` / `jest`
+  with a JSON report file (`[files…] -t <titles>` for a selection; only the asked tests take
+  results, since a filtered file reports the rest skipped); JS tools through `pnpm exec`, `yarn`
+  or `npx` by the lockfile. Output streams into the run's log, parsed as it comes (libtest's
+  `test x ... ok` and `---- x stdout ----` blocks, CTest's `N: ` prefixed lines and `Test #N:`
+  verdicts); selecting a test shows its output and failure, a runner or suite the whole log.
+  Commands: `tests.show` (Show Tests), `tests.runAll` (Run All Tests; lists first when needed),
+  `tests.rerunFailed` (Rerun Failed Tests), `tests.stop` (Stop Tests: kills the process group),
+  `tests.refresh` (Refresh Tests); the toolbar adds Run Selected. Runners run one after another,
+  one run at a time; tests are listed when the tab is first shown or the workspace changes. CTest
+  runs what was last built (no build first); only the repo root is searched (no monorepo packages).
+  The self-test dump has a `--- tests:` block.
 - **Problems**: `problems.rs` is `problems.ts` with its tests. Problems under the repo's real root
   are mapped to the workspace path and set on open editors as diagnostics with source `build`,
   next to clangd's (`EditorTab::set_build_diagnostics`), so they count in the status bar and `F8`.

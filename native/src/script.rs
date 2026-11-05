@@ -13,7 +13,7 @@
 use crate::app::{OrbitApp, TabKind};
 use crate::{sessions, terminal};
 use gpui::{
-    AnyWindowHandle, AsyncApp, Entity, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
+    AnyWindowHandle, AsyncApp, Entity, EntityInputHandler, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, PlatformInput, Point, Pixels, WindowHandle,
 };
 use gpui_component::input::RopeExt;
@@ -282,6 +282,7 @@ pub fn dump(app: &OrbitApp, log: &str, cx: &gpui::App) -> String {
             let _ = writeln!(out, "line {line}: {}", text.slice_line((line - 1) as usize).to_string().trim_end());
             let _ = writeln!(out, "selection: {:?}", state.selected_text().to_string());
             let _ = writeln!(out, "status: {}", e.status_text(cx));
+            let _ = writeln!(out, "change marks: {}", e.marks_text());
             let _ = writeln!(out, "breadcrumb: {}", e.display_path.replace('/', " › "));
             if let Some(m) = &e.message {
                 let _ = writeln!(out, "message: {m}");
@@ -535,18 +536,7 @@ pub async fn run(script: Script, window: WindowHandle<Root>, app: Entity<OrbitAp
     }
 
     if let Some((from, to)) = script.term_drag {
-        let points = app.read_with(cx, |a, cx| {
-            let t = a.active_terminal()?;
-            let t = t.read(cx);
-            Some((t.cell_position(from.0, from.1)?, t.cell_position(to.0, to.1)?))
-        });
-        match points {
-            // Just left of the center: the drag starts on the cell's left half, so the cell is included.
-            Some((a, b)) => drag(any_window, a - gpui::point(gpui::px(3.), gpui::px(0.)), b, cx).await,
-            None => {
-                let _ = writeln!(log, "term-drag: no painted terminal is active");
-            }
-        }
+        term_drag(any_window, &app, from, to, Modifiers::default(), &mut log, cx).await;
     }
 
     if script.scroll != 0 {
@@ -568,6 +558,8 @@ pub async fn run(script: Script, window: WindowHandle<Root>, app: Entity<OrbitAp
 /// `status:<status>[@secs]` until some session has that status ·
 /// `action:<name>` dispatches a GPUI action by name (`sessions::NextSessionNeedingInput`) ·
 /// `type:<text>` types into the focused view, `keys:<specs>` presses keys (`ctrl-c`) (`\n` is Enter) · `sleep:<ms>` ·
+/// `term-drag:<col,row>:<col,row>` (`shift+` first holds Shift for the press) ·
+/// `mark:<text>` / `commit:<text>` compose and commit text as an input method does ·
 /// `notify-click` clicks the newest desktop notification (the handler a real click runs) ·
 /// `dump` writes the sessions, inbox and recent list into the log.
 /// Waits also record how late the UI thread ran its timers (a blocked UI).
@@ -632,6 +624,30 @@ async fn run_steps(steps: &[String], window: AnyWindowHandle, app: &Entity<Orbit
                 let _ = writeln!(log, "step {step}: typed");
             }
             "sleep" => sleep(cx, arg.parse().unwrap_or(0)).await,
+            "mark" | "commit" => {
+                let marked = window.update(cx, |_, window, cx| {
+                    let t = app.read(cx).active_terminal()?;
+                    t.update(cx, |t, cx| {
+                        match kind {
+                            "mark" => t.replace_and_mark_text_in_range(None, arg, None, window, cx),
+                            _ => t.replace_text_in_range(None, arg, window, cx),
+                        }
+                        Some(t.marked_text_range(window, cx))
+                    })
+                });
+                let _ = writeln!(log, "step {step}: marked range {:?}", marked.ok().flatten().flatten());
+                sleep(cx, 100).await;
+            }
+            "term-drag" => {
+                let shift = arg.starts_with("shift+");
+                let cells = arg.trim_start_matches("shift+").split_once(':').and_then(|(a, b)| Some((cell(a)?, cell(b)?)));
+                match cells {
+                    Some((from, to)) => term_drag(window, app, from, to, Modifiers { shift, ..Default::default() }, log, cx).await,
+                    None => {
+                        let _ = writeln!(log, "step {step}: bad cells");
+                    }
+                }
+            }
             "notify-click" => {
                 let tag = cx.update(crate::notifications::click_latest);
                 let _ = writeln!(log, "step {step}: clicked {tag:?}");
@@ -669,11 +685,12 @@ pub(crate) async fn ctrl_click(window: AnyWindowHandle, pos: Point<Pixels>, cx: 
     sleep(cx, 1000).await;
 }
 
-async fn drag(window: AnyWindowHandle, from: Point<Pixels>, to: Point<Pixels>, cx: &mut AsyncApp) {
+/// `press` is held for the press only.
+async fn drag(window: AnyWindowHandle, from: Point<Pixels>, to: Point<Pixels>, press: Modifiers, cx: &mut AsyncApp) {
     let none = Modifiers::default();
     send(
         window,
-        PlatformInput::MouseDown(MouseDownEvent { button: MouseButton::Left, position: from, modifiers: none, click_count: 1, first_mouse: false }),
+        PlatformInput::MouseDown(MouseDownEvent { button: MouseButton::Left, position: from, modifiers: press, click_count: 1, first_mouse: false }),
         cx,
     );
     sleep(cx, 20).await;
@@ -686,6 +703,29 @@ async fn drag(window: AnyWindowHandle, from: Point<Pixels>, to: Point<Pixels>, c
     }
     send(window, PlatformInput::MouseUp(MouseUpEvent { button: MouseButton::Left, position: to, modifiers: none, click_count: 1 }), cx);
     sleep(cx, 100).await;
+}
+
+async fn term_drag(
+    window: AnyWindowHandle,
+    app: &Entity<OrbitApp>,
+    from: (usize, usize),
+    to: (usize, usize),
+    press: Modifiers,
+    log: &mut String,
+    cx: &mut AsyncApp,
+) {
+    let points = app.read_with(cx, |a, cx| {
+        let t = a.active_terminal()?;
+        let t = t.read(cx);
+        Some((t.cell_position(from.0, from.1)?, t.cell_position(to.0, to.1)?))
+    });
+    match points {
+        // Just left of the center: the drag starts on the cell's left half, so the cell is included.
+        Some((a, b)) => drag(window, a - gpui::point(gpui::px(3.), gpui::px(0.)), b, press, cx).await,
+        None => {
+            let _ = writeln!(log, "term-drag: no painted terminal is active");
+        }
+    }
 }
 
 async fn finish(script: Script, app: &Entity<OrbitApp>, log: String, started: Instant, cx: &mut AsyncApp) {

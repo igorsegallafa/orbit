@@ -31,6 +31,8 @@ struct Shared {
     real_root: PathBuf,
     pending: Pending,
     exited: AtomicBool,
+    /// `shutdown` was asked: the exit is ours, not a crash.
+    stopped: AtomicBool,
     notifications: mpsc::UnboundedSender<Notification>,
     /// `$/progress` texts by token (clangd's indexing).
     progress: Mutex<Vec<(String, String)>>,
@@ -70,6 +72,7 @@ impl LspServer {
             real_root: real_root.clone(),
             pending: Mutex::new(HashMap::new()),
             exited: AtomicBool::new(false),
+            stopped: AtomicBool::new(false),
             notifications,
             progress: Mutex::new(vec![]),
             applied_edits: Mutex::new(vec![]),
@@ -103,6 +106,11 @@ impl LspServer {
 
     pub fn has_exited(&self) -> bool {
         self.shared.exited.load(Ordering::Acquire)
+    }
+
+    /// Orbit stopped it (idle, restart), as opposed to a crash.
+    pub fn was_stopped(&self) -> bool {
+        self.shared.stopped.load(Ordering::Acquire)
     }
 
     /// A capability by JSON pointer (`/renameProvider`); None when absent or false.
@@ -233,6 +241,7 @@ impl LspServer {
 
     /// LSP shutdown and exit; killed if still running two seconds later.
     pub fn shutdown(&self) {
+        self.shared.stopped.store(true, Ordering::Release);
         lsp::stop(self.id);
     }
 }
