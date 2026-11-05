@@ -272,6 +272,12 @@ fn active_diff(app: &OrbitApp) -> Option<Entity<DiffTab>> {
     }
 }
 
+/// Opens the review of a feature's PRs in one tab (the workspace page's Code Review).
+pub fn open_prs_review(app: &mut OrbitApp, prs: Vec<orbit_core::github::PullRequest>, window: &mut Window, cx: &mut Context<OrbitApp>) {
+    let host = crate::pages::Host(cx.entity().downgrade());
+    pr_review::open(app, host, prs, window, cx);
+}
+
 /// Opens a PR's review tab by number (self-test step `pr-review:`).
 pub fn open_pr_review(app: &mut OrbitApp, owner_repo: &str, number: u64, window: &mut Window, cx: &mut Context<OrbitApp>) {
     let repo = owner_repo.rsplit('/').next().unwrap_or(owner_repo).to_string();
