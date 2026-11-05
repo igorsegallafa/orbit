@@ -107,6 +107,7 @@ pub struct ChangesView {
     texts: HashMap<String, String>,
     /// First added line per file: where a note goes without a selection.
     first_added: HashMap<String, u32>,
+    shape: Vec<crate::marker_track::FileShape>,
     pub composer: Option<Composer>,
     pub sel: crate::diff_select::Handle,
 }
@@ -126,7 +127,7 @@ impl ChangesView {
                     highlighter.styles(&(0..text.len()), &*highlight_theme)
                 })
         });
-        Self { diff, sig: 0, viewed: load_viewed(ws), texts: HashMap::new(), first_added: HashMap::new(), composer: None, sel: crate::diff_select::new() }
+        Self { diff, sig: 0, viewed: load_viewed(ws), texts: HashMap::new(), first_added: HashMap::new(), shape: vec![], composer: None, sel: crate::diff_select::new() }
     }
 }
 
@@ -181,6 +182,14 @@ impl ReviewTab {
         let per_patch: Vec<(&[DiffFile], &str)> = parsed.iter().map(|(f, p)| (f.as_slice(), *p)).collect();
         self.chg.sel.borrow_mut().set_patches(&per_patch, &[DiffSide::Modified]);
         let files: Vec<DiffFile> = parsed.iter().flat_map(|(f, _)| f.iter().cloned()).collect();
+        self.chg.shape = parsed
+            .iter()
+            .flat_map(|(f, p)| {
+                let mut shape = crate::marker_track::shapes(p);
+                shape.resize_with(f.len(), Default::default);
+                shape
+            })
+            .collect();
         let viewed = self.chg.viewed.clone();
         self.chg.diff.update(cx, |s, cx| {
             s.set_files(files, cx);
@@ -672,7 +681,14 @@ impl ReviewTab {
             .min_h_0()
             .pt(px(12.))
             .px(px(16.))
-            .child(div().size_full().relative().child(diff).child(crate::probe::probe("chg-diff")))
+            .child(
+                div()
+                    .size_full()
+                    .relative()
+                    .child(diff)
+                    .child(crate::marker_track::diff(&self.chg.shape, &self.chg.diff, false, cx))
+                    .child(crate::probe::probe("chg-diff")),
+            )
     }
 }
 

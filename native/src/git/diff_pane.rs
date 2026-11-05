@@ -52,6 +52,7 @@ pub struct DiffPane {
     state: Entity<DiffState>,
     sel: crate::diff_select::Handle,
     changes: usize,
+    shape: Vec<crate::marker_track::FileShape>,
     change_ix: Option<usize>,
     error: Option<String>,
     /// Shown with no file.
@@ -63,7 +64,7 @@ impl DiffPane {
         // The whole file, as Monaco's diff editor shows it.
         let state = highlighted_state(vec![], DiffMode::Unified, cx);
         state.update(cx, |s, cx| s.set_context_lines(None, cx));
-        Self { label: String::new(), source: None, state, sel: crate::diff_select::new(), changes: 0, change_ix: None, error: None, empty: empty.into() }
+        Self { label: String::new(), source: None, state, sel: crate::diff_select::new(), changes: 0, shape: vec![], change_ix: None, error: None, empty: empty.into() }
     }
 
     /// The selection and last copy, for the self-test dump.
@@ -95,6 +96,7 @@ impl DiffPane {
                         let language = file_language(Path::new(source.rel())).highlight;
                         let files: Vec<DiffFile> = DiffFile::parse(&patch).unwrap_or_default().into_iter().map(|f| f.with_language(language)).collect();
                         p.changes = ui::change_blocks(&patch);
+                        p.shape = crate::marker_track::shapes(&patch);
                         p.change_ix = None;
                         p.state.update(cx, |s, cx| s.set_files(files, cx));
                     }
@@ -162,6 +164,7 @@ impl Render for DiffPane {
                 .min_h_0()
                 .relative()
                 .child(crate::diff_select::attach(Diff::new(&self.state).size_full().header_visible(false), &self.sel, &self.state, &[], None, cx))
+                .child(crate::marker_track::diff(&self.shape, &self.state, false, cx))
                 .child(crate::probe::probe("pane-diff"))
                 .into_any_element(),
         };

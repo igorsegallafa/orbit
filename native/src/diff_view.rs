@@ -3,6 +3,7 @@
 //! is also a local review: notes from REVIEW.md (the Tauri app's file) show
 //! under their lines, and the `+` beside a line or a selection leaves one.
 use crate::diff_select;
+use crate::marker_track;
 use crate::lsp::file_language;
 use crate::probe::probe;
 use crate::review::notes::{self as rnotes, Anchor};
@@ -193,6 +194,8 @@ pub struct DiffTab {
     pub sel: diff_select::Handle,
     first_added: Option<u32>,
     changes: usize,
+    /// The patch's shape, for the scrollbar's marks.
+    shape: Vec<marker_track::FileShape>,
     change_ix: Option<usize>,
     file_stamp: Option<SystemTime>,
     refreshing: bool,
@@ -232,6 +235,7 @@ impl DiffTab {
         let LoadedDiff { files, patch, first_added, changes, review, stamp } = loaded;
         let sel = diff_select::new();
         sel.borrow_mut().set_files(&files, &patch, &[DiffSide::Modified]);
+        let shape = marker_track::shapes(&patch);
         let (additions, deletions) = counts(&files);
         let highlight_theme = cx.theme().highlight_theme.clone();
         let mode = if split { DiffMode::Split } else { DiffMode::Unified };
@@ -263,6 +267,7 @@ impl DiffTab {
             sel,
             first_added,
             changes,
+            shape,
             change_ix: None,
             file_stamp: stamp,
             refreshing: false,
@@ -330,6 +335,7 @@ impl DiffTab {
         (self.additions, self.deletions) = counts(&loaded.files);
         self.first_added = loaded.first_added;
         self.changes = loaded.changes;
+        self.shape = marker_track::shapes(&loaded.patch);
         self.change_ix = None;
         self.sel.borrow_mut().set_files(&loaded.files, &loaded.patch, &[DiffSide::Modified]);
         self.state.update(cx, |s, cx| s.set_files(loaded.files, cx));
@@ -680,7 +686,7 @@ impl Render for DiffTab {
             .flex_col()
             .bg(c(theme::BG))
             .child(bar)
-            .child(div().flex_1().min_h_0().relative().child(diff).child(probe("diff-body")))
+            .child(div().flex_1().min_h_0().relative().child(diff).child(marker_track::diff(&self.shape, &self.state, true, cx)).child(probe("diff-body")))
     }
 }
 

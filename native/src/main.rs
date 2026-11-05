@@ -15,6 +15,7 @@ mod file_tree;
 mod git;
 mod icons;
 mod logview;
+mod marker_track;
 mod lsp;
 mod motion;
 mod nav;

@@ -198,6 +198,7 @@ pub struct PrReviewPage {
     pub review: Option<ReviewData>,
     selected: Sel,
     pub diff: Load<Entity<DiffState>>,
+    shape: Vec<crate::marker_track::FileShape>,
     pub sel: crate::diff_select::Handle,
     split: bool,
     saved: Saved,
@@ -242,6 +243,7 @@ impl PrReviewPage {
             review: None,
             selected: Sel::Overview,
             diff: Load::Idle,
+            shape: vec![],
             sel: crate::diff_select::new(),
             split: false,
             saved: Saved::default(),
@@ -358,6 +360,7 @@ impl PrReviewPage {
                     Ok((files, patch)) => {
                         let files: Vec<DiffFile> = files.into_iter().map(|f| f.with_language(language)).collect();
                         page.sel.borrow_mut().set_files(&files, &patch, &[DiffSide::Original, DiffSide::Modified]);
+                        page.shape = crate::marker_track::shapes(&patch);
                         let mode = if split { DiffMode::Split } else { DiffMode::Unified };
                         let theme = highlight_theme.clone();
                         Load::Ready(cx.new(|cx| {
@@ -1522,7 +1525,15 @@ impl PrReviewPage {
                         .children(off.iter().map(|t| div().flex_none().child(self.render_thread(t, Some(off_location(t)), cx)))),
                 )
             })
-            .child(div().flex_1().min_h_0().relative().child(diff).child(probe("pr-diff")))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .relative()
+                    .child(diff)
+                    .child(crate::marker_track::diff(&self.shape, &state, false, cx))
+                    .child(probe("pr-diff")),
+            )
             .into_any_element()
     }
 
