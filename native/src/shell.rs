@@ -208,8 +208,17 @@ fn tokens(n: u64) -> String {
 }
 
 /// Re-reads the repo briefs (sidebar badges) and the focused workspace's AI
-/// usage (status bar) in the background, as `useRepoBriefs` and `UsageBar` poll.
+/// usage (status bar) in the background, as `useRepoBriefs` and `UsageBar`
+/// poll, and stops language servers no tab needs (`LspRegistry::stop_idle`).
 pub fn start_polls(window: &mut Window, cx: &mut Context<OrbitApp>) {
+    cx.spawn_in(window, async move |this, cx| loop {
+        cx.background_executor().timer(Duration::from_secs(15)).await;
+        let stopped = this.update(cx, |a, cx| a.lsp.stop_idle(&crate::editor::servers_in_use(cx), Instant::now()));
+        if stopped.is_err() {
+            break;
+        }
+    })
+    .detach();
     cx.spawn_in(window, async move |this, cx| loop {
         let briefs = cx.background_executor().spawn(async { orbit_core::repo::briefs() }).await;
         let ok = this.update(cx, |a, cx| {

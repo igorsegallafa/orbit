@@ -154,6 +154,11 @@ pub fn set_diagnostic_filters(languages: &[orbit_core::lsp::LanguageStatus], cx:
     }
 }
 
+/// The (repo, server language) pairs open tabs use: their servers stay up.
+pub fn servers_in_use(cx: &mut App) -> Vec<crate::lsp::ServerKey> {
+    open_editors(cx).iter().filter_map(|e| e.read(cx).server_key().map(|(k, l)| (k.clone(), l))).collect()
+}
+
 /// The React editor's rule: no severity counts as an error; codes compare as text.
 fn diagnostic_shown(filter: &(bool, Vec<String>), d: &lsp_types::Diagnostic) -> bool {
     let (errors_only, hidden) = filter;
