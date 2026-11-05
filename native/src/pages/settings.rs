@@ -888,8 +888,8 @@ impl SettingsPage {
             .chain(self.gnome.filter(|g| *g != inhibit::Gnome::Unknown).map(|g| {
                 let (label, hint) = match g {
                     inhibit::Gnome::Allowed => ("Allowed", "GNOME lets Orbit's terminals take these keys."),
-                    inhibit::Gnome::Denied => ("Denied", "GNOME keeps these keys and won't ask again. Ask again resets the answer: GNOME asks the next time a terminal takes focus."),
-                    _ => ("Not asked yet", "GNOME asks the first time a terminal takes focus."),
+                    inhibit::Gnome::Denied => ("Denied", "GNOME keeps these keys and won't ask again. Ask again resets the answer; then restart Orbit and focus a terminal to get GNOME's prompt."),
+                    _ => ("Not asked yet", "GNOME asks the first time a terminal takes focus. After Ask again, restart Orbit first: GNOME remembers its last answer for an open window."),
                 };
                 kit::setting(
                     format!("GNOME permission: {label}"),

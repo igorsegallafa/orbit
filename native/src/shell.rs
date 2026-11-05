@@ -1482,7 +1482,7 @@ impl OrbitApp {
                     "GNOME blocks terminal keys for Orbit",
                     Some("It was denied once, so GNOME won't ask again and Super+V, Super+A… (Ctrl+V, Ctrl+A under Toshy) stay GNOME shortcuts in the terminal.".into()),
                     crate::toast::ToastAction {
-                        label: "Ask again".into(),
+                        label: "Ask again (then restart Orbit)".into(),
                         run: std::rc::Rc::new(|cx| cx.background_executor().spawn(async { inhibit::gnome_forget() }).detach()),
                     },
                     cx,
