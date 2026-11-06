@@ -488,6 +488,27 @@ impl OrbitApp {
         }
     }
 
+    /// Find in Files' matches to the bottom panel's Find tab (Rider's "Open in Find Window").
+    pub fn find_to_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(p) = &self.palette else { return };
+        let (Mode::Find, Some((_, root)), Some((query, Ok(result)))) = (p.mode, &p.ws, &p.text) else { return };
+        if result.matches.is_empty() {
+            return;
+        }
+        let opts = cx.default_global::<FindOptions>().clone();
+        let matches = result.matches.iter().map(|m| (m.clone(), search::hits(&m.text, query, &opts, m.col))).collect();
+        let found = search::results::Found {
+            query: query.clone(),
+            summary: p.status.as_ref().map(|s| s.to_string()).unwrap_or_default(),
+            root: root.clone(),
+            matches,
+        };
+        let store = search::results::store(cx);
+        store.update(cx, |s, cx| s.set(found, cx));
+        self.close_palette(window, cx);
+        crate::run::store(cx).update(cx, |s, cx| s.reveal(crate::run::PanelView::Find, cx));
+    }
+
     pub fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.remember_query(cx);
         if self.palette.take().is_some() {
@@ -621,6 +642,7 @@ impl OrbitApp {
                 }
             }))
             .on_action(cx.listener(|this, _: &search::ToggleSearch, w, cx| this.close_palette(w, cx)))
+            .on_action(cx.listener(|this, _: &search::OpenInPanel, w, cx| this.find_to_panel(w, cx)))
             .occlude()
             .w(px(if find { 760. } else { 640. }))
             .max_w(relative(0.9))
@@ -930,7 +952,10 @@ impl OrbitApp {
                     .border_color(c(theme::BORDER))
                     .text_size(px(11.))
                     .text_color(c(theme::TEXT_FAINT))
-                    .child("↑↓ navigate · Enter open · Alt+C / W / X options")
+                    .child(format!(
+                        "↑↓ navigate · Enter open · {} open in panel · Alt+C / W / X options",
+                        commands::display_keys("ctrl-enter")
+                    ))
                     .children(current.map(|t| div().min_w_0().truncate().font_family(theme::MONO_FONT).child(t))),
             )
     }

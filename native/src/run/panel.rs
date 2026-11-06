@@ -31,6 +31,7 @@ pub enum PanelView {
     Problems,
     Debug,
     Tests,
+    Find,
 }
 
 pub struct Panel {
@@ -44,10 +45,12 @@ pub struct Panel {
 
 impl Panel {
     pub fn new(app: WeakEntity<OrbitApp>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let find = crate::search::results::store(cx);
         let subs = vec![
             cx.observe(&store(cx), |_, _, cx| cx.notify()),
             cx.observe(&debug::store(cx), |_, _, cx| cx.notify()),
             cx.observe(&super::testing::store(cx), |_, _, cx| cx.notify()),
+            cx.observe(&find, |_, _, cx| cx.notify()),
         ];
         Self {
             debug: cx.new(|cx| DebugView::new(app.clone(), window, cx)),
@@ -155,6 +158,9 @@ impl Panel {
                 div().flex().items_center().gap_1p5().child("Problems").children(count(counts.0, theme::DANGER)).children(count(counts.1, theme::WARN)).into_any_element(),
                 cx,
             ))
+            .when(crate::search::results::store(cx).read(cx).has_results(), |d| {
+                d.child(self.tab("panel-find", PanelView::Find, view == PanelView::Find, div().child("Find").into_any_element(), cx))
+            })
             .child(div().flex_1())
             .when(view == PanelView::Build, |d| d.child(div().text_xs().text_color(c(theme::TEXT_FAINT)).child(meta)))
             .when_some(exited_run.filter(|_| view == PanelView::Run), |d, id| {
@@ -277,7 +283,8 @@ impl Panel {
     /// The output views, for the self-test dump.
     pub fn dump(&self, cx: &App) -> String {
         let d = self.debug.read(cx);
-        format!("--- panel\n  {}\n  {}\n  debug tab {:?}\n", self.output.read(cx).dump(), d.console.read(cx).dump(), d.tab)
+        let find = cx.try_global::<crate::search::results::GlobalFind>().map(|g| g.0.read(cx).dump()).unwrap_or_default();
+        format!("--- panel\n  {}\n  {}\n  debug tab {:?}\n{find}", self.output.read(cx).dump(), d.console.read(cx).dump(), d.tab)
     }
 
     fn empty(text: &'static str) -> AnyElement {
@@ -455,6 +462,7 @@ impl Render for Panel {
             },
             PanelView::Debug => self.debug.clone().into_any_element(),
             PanelView::Tests => super::testing::store(cx).into_any_element(),
+            PanelView::Find => crate::search::results::store(cx).into_any_element(),
         };
         div()
             .size_full()
