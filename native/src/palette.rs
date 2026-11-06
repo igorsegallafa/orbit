@@ -869,7 +869,28 @@ impl OrbitApp {
                             .text_size(px(11.5))
                             .text_color(c(theme::TEXT_FAINT))
                             .when(p.searching && summary.is_some(), |d| d.child(crate::workspace_ui::kit::spinner("find-spin", 11., c(theme::ACCENT))))
-                            .children(summary.map(|s| div().min_w_0().truncate().child(s))),
+                            .children(summary.map(|s| div().min_w_0().truncate().child(s)))
+                            // Rider's "Open in Find Window": the matches to the bottom panel.
+                            .when(has_matches && !idle, |d| {
+                                d.child(
+                                    div()
+                                        .id("find-open-panel")
+                                        .relative()
+                                        .flex_none()
+                                        .ml(px(4.))
+                                        .px(px(8.))
+                                        .py(px(2.))
+                                        .rounded(px(5.))
+                                        .border_1()
+                                        .border_color(c(theme::BORDER_STRONG))
+                                        .text_color(c(theme::TEXT_DIM))
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(c(theme::PANEL_RAISED)).text_color(c(theme::TEXT)))
+                                        .child(format!("Open in panel  {}", commands::display_keys("ctrl-enter")))
+                                        .child(crate::probe::probe("find-open-panel"))
+                                        .on_click(cx.listener(|this, _, window, cx| this.find_to_panel(window, cx))),
+                                )
+                            }),
                     ),
             )
             .child(
