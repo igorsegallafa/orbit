@@ -4,25 +4,24 @@
 //! and shown on scroll or hover. A click on the track pages, where
 //! gpui-component's jumps there.
 use crate::probe;
-use crate::theme::{self, hsla};
+use crate::theme;
 use gpui::{canvas, div, point, prelude::*, px, Bounds, ElementId, Pixels, Point};
 use gpui_component::scroll::{Scrollbar, ScrollbarHandle, ScrollbarMode, ScrollbarThumbStyle};
 use std::sync::atomic::Ordering;
 
 const TRACK: f32 = 14.;
-const THUMB: f32 = 9.;
-const THUMB_HOVER: f32 = 11.;
-const INSET: f32 = 2.;
+const THUMB: f32 = 14.;
+const THUMB_HOVER: f32 = 14.;
+const INSET: f32 = 0.;
 const MIN_THUMB: f32 = 20.;
 
 /// The vertical scrollbar over `handle`'s viewport, for a `relative()` parent.
 /// `name` is its id and, in self-tests, the probes `<name>-thumb` and `<name>-track`.
 pub fn vertical<H: ScrollbarHandle + Clone>(name: &str, handle: &H) -> impl IntoElement {
-    let rest = hsla(theme::BORDER_STRONG);
-    let hover = hsla(theme::mix(theme::hex(theme::TEXT_FAINT), theme::hex(theme::BORDER_STRONG), 0.5));
-    let active = hsla(theme::TEXT_FAINT);
+    // VS Code's: a full-width square thumb, translucent so marks under it show.
+    let (rest, hover, active) = theme::scrollbar_thumb_colors();
     let thumb = |s: ScrollbarThumbStyle, w: f32, bg: gpui::Hsla| {
-        s.width(px(w)).inset(px(INSET)).radius(px(w / 2.)).min_length(px(MIN_THUMB)).bg(bg)
+        s.width(px(w)).inset(px(INSET)).radius(px(0.)).min_length(px(MIN_THUMB)).bg(bg)
     };
     let bar = Scrollbar::vertical(handle)
         .id(ElementId::Name(format!("{name}-scrollbar").into()))
@@ -121,9 +120,9 @@ mod tests {
     #[test]
     fn track_clicks_page_towards_the_click() {
         let h = Fake { offset: Rc::new(Cell::new(px(-400.))), content: 1000. };
-        // A 40 px thumb half way along 160 px of travel, less the 2 px insets.
+        // A 40 px thumb half way along 160 px of travel (no inset).
         let t = thumb_span(&h).unwrap();
-        assert_eq!((t.start, t.len), (px(82.), px(36.)));
+        assert_eq!((t.start, t.len), (px(80.), px(40.)));
         assert!(!page(&h, point(px(95.), px(100.))), "on the thumb");
         assert!(!page(&h, point(px(50.), px(10.))), "off the track");
         assert!(page(&h, point(px(95.), px(10.))));

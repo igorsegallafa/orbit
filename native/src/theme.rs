@@ -402,21 +402,33 @@ fn apply(ix: usize, cx: &mut App) {
         t.apply_config(&config);
         t.mode = mode;
     });
-    widen_scrollbars(cx);
+    vscode_scrollbars(cx);
     cx.refresh_windows();
 }
 
-/// The component scrollbars (editor, lists) default to a 6px thumb, hard to
-/// grab; this widens them within the base layer's 16px track.
-fn widen_scrollbars(cx: &mut App) {
+/// VS Code's scrollbar thumb colours (rest, hover, dragging): translucent, so
+/// the change and problem marks under it stay visible.
+pub fn scrollbar_thumb_colors() -> (Hsla, Hsla, Hsla) {
+    let base = hsla(TEXT_FAINT);
+    (base.opacity(0.4), base.opacity(0.6), base.opacity(0.75))
+}
+
+/// The component scrollbars (editor, lists) as VS Code's: a 14px square thumb
+/// filling the track, shown while the mouse is over the view.
+fn vscode_scrollbars(cx: &mut App) {
+    let (rest, hover, active) = scrollbar_thumb_colors();
+    let thumb = |s: gpui_base::ScrollbarThumbStyle, bg: Hsla| s.width(px(14.)).inset(px(1.)).radius(px(0.)).bg(bg);
     let base = &mut gpui_base::Theme::global_mut(cx).scrollbar;
     let styles = base
         .styles()
         .clone()
-        .thumb(|s| s.width(px(9.)).inset(px(2.5)))
-        .thumb_hover(|s| s.width(px(11.)).inset(px(2.5)))
-        .thumb_active(|s| s.width(px(11.)).inset(px(2.5)));
-    *base = gpui_base::ScrollbarTheme::new().with_mode(base.mode()).with_motion(base.motion()).with_styles(styles);
+        .thumb(|s| thumb(s, rest))
+        .thumb_hover(|s| thumb(s, hover))
+        .thumb_active(|s| thumb(s, active));
+    *base = gpui_base::ScrollbarTheme::new()
+        .with_mode(gpui_base::ScrollbarMode::Hover)
+        .with_motion(base.motion())
+        .with_styles(styles);
 }
 
 /// Applies the saved choice; with none, the Tauri app's (its localStorage), else Nord.
