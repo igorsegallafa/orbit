@@ -3,6 +3,7 @@
 //! (`palette.rs`); this module has their sources, commands and keys.
 //! References: `SearchEverywhereModal.tsx`, `FindInFiles.tsx`.
 pub mod fuzzy;
+pub mod results;
 
 use crate::app::OrbitApp;
 use crate::commands::{self, Command};
@@ -13,7 +14,7 @@ use serde_json::{json, Value};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-actions!(orbit_search, [NextTab, PrevTab, ToggleCase, ToggleWord, ToggleRegex, PageUp, PageDown, ToggleSearch]);
+actions!(orbit_search, [NextTab, PrevTab, ToggleCase, ToggleWord, ToggleRegex, PageUp, PageDown, ToggleSearch, OpenInPanel]);
 
 /// Key context of the search modal.
 pub const CONTEXT: &str = "OrbitSearch";
@@ -30,6 +31,8 @@ pub fn init(cx: &mut App) {
             KeyBinding::new("pageup", PageUp, Some(ctx)),
             KeyBinding::new("pagedown", PageDown, Some(ctx)),
             KeyBinding::new("shift shift", ToggleSearch, Some(ctx)),
+            // Rider's "Open in Find Window": Find in Files' matches to the bottom panel.
+            crate::commands::binding("ctrl-enter", OpenInPanel, Some(ctx)),
         ]);
     }
     let has_ws = |a: &OrbitApp, _: &App| a.workspace().is_some();

@@ -615,6 +615,27 @@ impl PrReviewPage {
 
     /// `ws_address_review` on every open thread plus the reviewers' change
     /// requests; the agent edits the worktree and drafts one reply per thread.
+    /// Opens a PR file in Orbit's editor: from the workspace that has the PR
+    /// checked out, else from the repo's base clone.
+    fn open_in_editor(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let repo = self.pr().repo.clone();
+        let dir = match &self.workspace {
+            Some(ws) => orbit_core::workspace::repo_path(&ws.meta.name, &repo),
+            None => orbit_core::workspace::clone_dir_of(&repo),
+        };
+        let file = match dir {
+            Ok(d) => d.join(path),
+            Err(e) => return self.host.error("Couldn't open the file", e, cx),
+        };
+        if !file.is_file() {
+            let msg = format!("{} isn't in the local checkout (deleted, or not pulled yet)", file.display());
+            return self.host.error("Couldn't open the file", msg, cx);
+        }
+        self.host.with_app(window, cx, move |a, w, cx| {
+            a.open_file(file, false, w, cx);
+        });
+    }
+
     fn address_with_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (Some(ws), Some(review)) = (&self.workspace, &self.review) else { return };
         let threads: Vec<String> = review.threads.iter().filter(|t| !t.is_resolved).map(|t| t.id.clone()).collect();
@@ -1099,7 +1120,18 @@ impl PrReviewPage {
         if let Some(path) = path.clone() {
             let viewed = self.saved.viewed.contains(&path);
             let split = self.split;
+            let open_tip = if self.workspace.is_some() {
+                "Open in the editor (the PR's workspace)"
+            } else {
+                "Open in the editor (the repo's base clone; check out the PR as a workspace for its version)"
+            };
+            let open_path = path.clone();
             actions = actions
+                .child(pr_ui::tip(
+                    nav_btn("pr-open-file", "file-code")
+                        .on_click(cx.listener(move |p, _, window, cx| p.open_in_editor(&open_path, window, cx))),
+                    open_tip,
+                ))
                 .child(
                     div()
                         .flex()

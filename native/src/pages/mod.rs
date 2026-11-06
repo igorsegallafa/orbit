@@ -93,12 +93,21 @@ impl Host {
         cx: &mut App,
     ) {
         let Some(app) = self.0.upgrade() else { return };
+        let on_confirm = Rc::new(on_confirm);
         let dialog = Dialog {
             title: title.into(),
             message: message.into(),
             buttons: vec![
                 DialogButton { label: "Cancel".into(), style: ButtonStyle::Secondary, run: Rc::new(|_, _, _| {}) },
-                DialogButton { label: confirm.into(), style: ButtonStyle::Primary, run: Rc::new(move |_, w, cx| on_confirm(w, cx)) },
+                // Deferred: the dialog's click runs inside an app update, and the action often updates the app (a toast).
+                DialogButton {
+                    label: confirm.into(),
+                    style: ButtonStyle::Primary,
+                    run: Rc::new(move |_, w, cx| {
+                        let f = on_confirm.clone();
+                        w.defer(cx, move |w, cx| f(w, cx));
+                    }),
+                },
             ],
             on_cancel: Rc::new(|_, _, _| {}),
         };

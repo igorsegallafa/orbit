@@ -22,6 +22,8 @@ gpui-component = { version = "=0.9.0", features = [
     "tree-sitter-tsx",
     "tree-sitter-javascript",
 ] }
+# gpui-component's base layer, for its scrollbar theme (wider editor scrollbars).
+gpui-base = "=0.9.0"
 # Lucide icons used by gpui-component widgets.
 gpui-kit-assets = "=0.9.0"
 # Must match gpui-component's, whose provider traits take these types.

@@ -58,7 +58,7 @@ pub fn dir_to_project_name(p: &std::path::Path) -> String {
 
 /// Rough ISO-8601 ("2026-09-14T18:59:59.123Z") -> unix seconds.
 // ponytail: hand-rolled date math instead of a chrono dependency.
-fn iso_to_epoch(s: &str) -> Option<i64> {
+pub(crate) fn iso_to_epoch(s: &str) -> Option<i64> {
     let b = s.as_bytes();
     if b.len() < 19 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' {
         return None;

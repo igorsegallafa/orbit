@@ -16,7 +16,7 @@ use crate::review::ui::Tone;
 use crate::workspace_ui::kit::{self, Kind};
 use crate::theme::{self, c};
 use crate::workspace_ui::PageTab;
-use gpui::{actions, anchored, deferred, div, point, prelude::*, px, AnyElement, App, ClickEvent, Context, Div, KeyBinding, Rgba, SharedString, Stateful, Window};
+use gpui::{actions, anchored, deferred, div, point, prelude::*, px, AnyElement, App, ClickEvent, Context, Div, Rgba, SharedString, Stateful, Window};
 
 actions!(orbit_git, [SubmitCommit]);
 
@@ -25,8 +25,7 @@ pub const COMMIT_CONTEXT: &str = "OrbitCommit";
 
 pub fn init(cx: &mut App) {
     // Bound on the inputs themselves, ahead of their own Ctrl+Enter (a newline).
-    let key = if cfg!(target_os = "macos") { "cmd-enter" } else { "ctrl-enter" };
-    cx.bind_keys([KeyBinding::new(key, SubmitCommit, Some("OrbitCommit > Input"))]);
+    cx.bind_keys([crate::commands::binding("ctrl-enter", SubmitCommit, Some("OrbitCommit > Input"))]);
 }
 
 pub enum Flow {

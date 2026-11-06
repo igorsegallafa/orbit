@@ -117,7 +117,7 @@ pub fn register(cx: &mut App, command: Command) {
                 Some(Run::Action(a)) => a.boxed_clone(),
                 _ => Box::new(RunCommand { id: command.id.clone(), from_key: true }),
             };
-            KeyBinding::load(keys, action, predicate.clone(), false, None, cx)
+            KeyBinding::load(&platform_keys(keys), action, predicate.clone(), false, None, cx)
                 .map_err(|e| eprintln!("command {}: bad keys {keys:?}: {e:?}", command.id))
                 .ok()
         })
@@ -169,17 +169,56 @@ pub fn on_run_command(app: &mut OrbitApp, action: &RunCommand, window: &mut Wind
     run(&action.id, app, window, cx);
 }
 
-/// `ctrl-shift-t` → `Ctrl+Shift+T`, `alt-left` → `Alt+←`, `shift shift` → `Shift Shift`.
+/// Shortcuts that stay on Ctrl on macOS too, as in VS Code: Cmd+Space is
+/// Spotlight, Cmd+Tab switches apps, Cmd+G is Find Next.
+const MAC_KEEPS_CTRL: &[&str] = &["ctrl-space", "ctrl-shift-space", "ctrl-tab", "ctrl-shift-tab", "ctrl-g"];
+
+/// A shortcut as this OS binds it. Keys are written once with Ctrl; on macOS
+/// Ctrl becomes Cmd (Ctrl+S → Cmd+S) unless it is one Mac apps keep on Ctrl.
+/// Every binding goes through here, so no view picks a modifier per OS.
+pub fn platform_keys(spec: &str) -> String {
+    keys_for(spec, cfg!(target_os = "macos"))
+}
+
+fn keys_for(spec: &str, mac: bool) -> String {
+    if !mac {
+        return spec.to_string();
+    }
+    spec.split_whitespace()
+        .map(|stroke| match stroke.strip_prefix("ctrl-") {
+            Some(rest) if !MAC_KEEPS_CTRL.contains(&stroke) => format!("cmd-{rest}"),
+            _ => stroke.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// A key binding with [`platform_keys`] applied. GPUI wants a `'static`
+/// spec: the few translated ones are leaked, once, at startup.
+pub fn binding<A: Action>(spec: &str, action: A, context: Option<&str>) -> KeyBinding {
+    KeyBinding::new(Box::leak(platform_keys(spec).into_boxed_str()), action, context)
+}
+
+/// A shortcut as shown to people on this OS: `Ctrl+Shift+T`, or `⌘⇧T` on macOS.
 pub fn display_keys(spec: &str) -> String {
+    display_for(spec, cfg!(target_os = "macos"))
+}
+
+fn display_for(spec: &str, mac: bool) -> String {
+    let spec = keys_for(spec, mac);
     spec.split_whitespace()
         .map(|stroke| {
-            stroke
+            let parts: Vec<String> = stroke
                 .split('-')
                 .map(|part| match part {
-                    "ctrl" => "Ctrl".to_string(),
+                    "ctrl" if mac => "⌃".to_string(),
+                    "shift" if mac => "⇧".to_string(),
+                    "alt" if mac => "⌥".to_string(),
+                    "cmd" | "secondary" if mac => "⌘".to_string(),
+                    "ctrl" | "secondary" => "Ctrl".to_string(),
                     "shift" => "Shift".to_string(),
                     "alt" => "Alt".to_string(),
-                    "cmd" | "super" | "secondary" => "Super".to_string(),
+                    "cmd" | "super" => "Super".to_string(),
                     "left" => "←".to_string(),
                     "right" => "→".to_string(),
                     "up" => "↑".to_string(),
@@ -188,6 +227,7 @@ pub fn display_keys(spec: &str) -> String {
                     "escape" => "Esc".to_string(),
                     "tab" => "Tab".to_string(),
                     "space" => "Space".to_string(),
+                    "backspace" if mac => "⌫".to_string(),
                     other if other.len() == 1 => other.to_uppercase(),
                     // f12, pageup…
                     other => {
@@ -196,8 +236,9 @@ pub fn display_keys(spec: &str) -> String {
                         s
                     }
                 })
-                .collect::<Vec<_>>()
-                .join("+")
+                .collect();
+            // Mac menus write ⌘⇧T; elsewhere Ctrl+Shift+T. A lone key (Shift Shift) is the same.
+            parts.join(if mac { "" } else { "+" })
         })
         .collect::<Vec<_>>()
         .join(" ")
@@ -208,11 +249,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mac_turns_ctrl_into_cmd() {
+        assert_eq!(keys_for("ctrl-shift-f", true), "cmd-shift-f");
+        assert_eq!(keys_for("ctrl-s", true), "cmd-s");
+        assert_eq!(keys_for("ctrl-f12", true), "cmd-f12");
+        assert_eq!(keys_for("ctrl-alt-r", true), "cmd-alt-r");
+        // Kept on Ctrl, as Mac apps do.
+        for keep in ["ctrl-space", "ctrl-tab", "ctrl-shift-tab", "ctrl-g"] {
+            assert_eq!(keys_for(keep, true), keep);
+        }
+        assert_eq!(keys_for("shift shift", true), "shift shift");
+        assert_eq!(keys_for("cmd-backspace", true), "cmd-backspace");
+        // Linux and Windows: as written.
+        assert_eq!(keys_for("ctrl-shift-f", false), "ctrl-shift-f");
+        assert_eq!(keys_for("ctrl-g", false), "ctrl-g");
+    }
+
+    #[test]
+    fn mac_displays_symbols() {
+        assert_eq!(display_for("ctrl-shift-f", true), "⌘⇧F");
+        assert_eq!(display_for("ctrl-space", true), "⌃Space");
+        assert_eq!(display_for("shift shift", true), "⇧ ⇧");
+        assert_eq!(display_for("ctrl-shift-f", false), "Ctrl+Shift+F");
+    }
+
+    #[test]
+    fn every_key_parses_on_every_os() {
+        // What the app binds, translated for each OS, must be valid GPUI keystrokes.
+        for spec in ["ctrl-shift-f", "ctrl-,", "ctrl-.", "ctrl-alt-w", "ctrl-f12", "ctrl-space", "shift shift", "cmd-backspace"] {
+            for mac in [true, false] {
+                let keys: &'static str = Box::leak(keys_for(spec, mac).into_boxed_str());
+                for stroke in keys.split_whitespace() {
+                    assert!(gpui::Keystroke::parse(stroke).is_ok(), "{stroke} (mac {mac})");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn displays_keys() {
-        assert_eq!(display_keys("ctrl-shift-t"), "Ctrl+Shift+T");
-        assert_eq!(display_keys("alt-left"), "Alt+←");
-        assert_eq!(display_keys("f12"), "F12");
-        assert_eq!(display_keys("ctrl-f9"), "Ctrl+F9");
-        assert_eq!(display_keys("shift shift"), "Shift Shift");
+        assert_eq!(display_for("ctrl-shift-t", false), "Ctrl+Shift+T");
+        assert_eq!(display_for("alt-left", false), "Alt+←");
+        assert_eq!(display_for("f12", false), "F12");
+        assert_eq!(display_for("ctrl-f9", false), "Ctrl+F9");
+        assert_eq!(display_for("shift shift", false), "Shift Shift");
     }
 }

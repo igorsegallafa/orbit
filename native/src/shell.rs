@@ -796,7 +796,9 @@ impl OrbitApp {
                 locations.push((scope, "repo", repo.clone(), Some("repo")));
             }
         }
-        let item = |id: SharedString| {
+        // `on`: the picked row, whose hover keeps its stronger tint (one `hover` per element:
+        // GPUI's debug builds panic on a second).
+        let item = |id: SharedString, on: bool| {
             div()
                 .id(id.clone())
                 .relative()
@@ -810,16 +812,15 @@ impl OrbitApp {
                 .whitespace_nowrap()
                 .text_size(px(size::TAB_FONT))
                 .text_color(c(theme::TEXT))
-                .hover(|s| s.bg(c(theme::ACCENT_SOFT)))
+                .hover(move |s| s.bg(c(if on { theme::ACCENT_STRONG_SOFT } else { theme::ACCENT_SOFT })))
                 .child(probe(id.to_string()))
         };
         let rows = locations.into_iter().map(|(scope, icon, label, hint)| {
             let on = scope == target;
             let s = scope.clone();
-            item(format!("nsm:{label}").into())
+            item(format!("nsm:{label}").into(), on)
                 .when(on, |d| {
                     d.bg(c(theme::ACCENT_STRONG_SOFT))
-                        .hover(|s| s.bg(c(theme::ACCENT_STRONG_SOFT)))
                         .text_color(c(theme::ACCENT))
                         .font_weight(FontWeight::SEMIBOLD)
                         .child(div().absolute().left_0().top_0().bottom_0().w(px(3.)).rounded_l(px(5.)).bg(c(theme::ACCENT)))
@@ -837,7 +838,7 @@ impl OrbitApp {
                     cx.notify();
                 }))
         });
-        let choose = item("nsm:Choose folder…".into())
+        let choose = item("nsm:Choose folder…".into(), false)
             .child(orbit_icon("folder", 13., c(theme::TEXT_FAINT)))
             .child("Choose folder…")
             .on_click(cx.listener(|a, _, _, cx| {
@@ -864,7 +865,7 @@ impl OrbitApp {
         let agents = AGENTS.iter().map(|(label, _, cmd)| {
             let target = target.clone();
             let cmd = *cmd;
-            item(format!("nsm:{label}").into()).child(*label).on_click(cx.listener(move |a, _, w, cx| {
+            item(format!("nsm:{label}").into(), false).child(*label).on_click(cx.listener(move |a, _, w, cx| {
                 a.chrome.new_session = None;
                 sessions::new_session_in(a, target.clone(), cmd, None, w, cx);
                 cx.notify();

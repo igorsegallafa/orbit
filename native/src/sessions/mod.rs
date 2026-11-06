@@ -710,11 +710,35 @@ fn restore(app: &mut OrbitApp, saved: Vec<SessionMeta>, window: &mut Window, cx:
     // The shell restored the files first: their active tab stays active.
     let active = app.active_tab().map(|t| t.key(cx));
     let first = app.tabs.len();
+    let dir_of = |m: &SessionMeta| pty::session_dir(&m.workspace, m.repo.as_deref(), m.cwd.as_deref()).ok();
+    // omp tabs per folder, paired by launch order with the sessions last written there.
+    let mut omp: HashMap<std::path::PathBuf, Vec<(u64, String)>> = HashMap::new();
+    for m in saved.iter().filter(|m| m.cmd.as_deref().is_some_and(pty::is_omp)) {
+        if let (Some(d), Some(at)) = (dir_of(m), launched_ms(&m.id)) {
+            omp.entry(d).or_default().push((at, m.id.clone()));
+        }
+    }
+    let mut omp_ids: HashMap<String, String> = HashMap::new();
+    for (dir, mut tabs) in omp {
+        tabs.sort();
+        let ids = pty::omp_recent_sessions(&dir, tabs[0].0, tabs.len());
+        // Fewer sessions than tabs: the newest tabs get them.
+        let skip = tabs.len() - ids.len();
+        omp_ids.extend(tabs.into_iter().skip(skip).map(|(_, key)| key).zip(ids));
+    }
     for meta in saved {
+        let dir = dir_of(&meta);
         let (args, replay) = match (&meta.cmd, &meta.agent_session_id) {
             (Some(cmd), Some(id)) if pty::is_claude(cmd) => {
-                let exists = pty::claude_session_exists(&meta.workspace, id);
+                let exists = dir.as_deref().is_some_and(|d| pty::claude_session_exists(d, id));
                 (vec![if exists { "--resume" } else { "--session-id" }.to_string(), id.clone()], None)
+            }
+            (Some(cmd), _) if pty::is_omp(cmd) => {
+                match omp_ids.remove(&meta.id) {
+                    // Resumed omp redraws the conversation itself.
+                    Some(id) => (vec!["--resume".to_string(), id], None),
+                    None => (vec![], Some(pty::scrollback(&meta.id))),
+                }
             }
             _ => (vec![], Some(pty::scrollback(&meta.id))),
         };
@@ -726,6 +750,11 @@ fn restore(app: &mut OrbitApp, saved: Vec<SessionMeta>, window: &mut Window, cx:
         None if app.tabs.len() > first => app.activate(0, window, cx),
         None => {}
     }
+}
+
+/// The launch time a tab key carries (`tm:<ms>-<rand>`).
+fn launched_ms(key: &str) -> Option<u64> {
+    key.strip_prefix("tm:")?.split('-').next()?.parse().ok()
 }
 
 fn settle_active(app: &mut OrbitApp, window: &mut Window, cx: &mut Context<OrbitApp>) {
