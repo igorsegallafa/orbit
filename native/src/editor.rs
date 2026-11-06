@@ -5,6 +5,7 @@
 //! breadcrumb and status bar, clangd's missing compile database banner, and
 //! the Markdown preview.
 mod changes;
+mod indent;
 pub mod markdown;
 mod picker;
 mod provider;
@@ -50,6 +51,8 @@ actions!(
         RestartLanguageServer,
         GenerateCompileCommands,
         CodeActions,
+        DeleteLine,
+        SmartPaste,
     ]
 );
 
@@ -88,6 +91,7 @@ pub fn editor_actions() -> Vec<EditorCommand> {
         cmd("orbit_editor::CodeActions", "Quick Fix…", &["ctrl-.", "alt-enter"], "Input"),
         cmd("orbit_editor::RenameSymbol", "Rename Symbol", &["f2"], "OrbitEditor"),
         cmd("orbit_editor::FormatDocument", "Format Document", &["ctrl-shift-i", "shift-alt-f"], "OrbitEditor"),
+        cmd("orbit_editor::DeleteLine", "Delete Line", &[DELETE_LINE_KEY], "OrbitEditor > Input"),
         cmd("orbit_editor::RestartLanguageServer", "Restart Language Server", &[], "OrbitEditor"),
         cmd("orbit_editor::GenerateCompileCommands", "Generate compile_commands.json (CMake)", &[], "OrbitEditor"),
     ]
@@ -103,6 +107,10 @@ pub fn register_languages() {
         registry.register("cpp", &cpp);
     }
 }
+
+/// Rider's and Xcode's Delete Line on macOS; VS Code's elsewhere. Bound on the
+/// editor's input so it wins over the component's Cmd+Backspace (delete to line start).
+const DELETE_LINE_KEY: &str = if cfg!(target_os = "macos") { "cmd-backspace" } else { "ctrl-shift-k" };
 
 pub fn bind_keys(cx: &mut App) {
     let editor = Some("OrbitEditor");
@@ -125,6 +133,8 @@ pub fn bind_keys(cx: &mut App) {
         // its Enter also reached the text as a newline.
         KeyBinding::new("ctrl-.", CodeActions, Some("Input")),
         KeyBinding::new("alt-enter", CodeActions, Some("Input")),
+        KeyBinding::new(DELETE_LINE_KEY, DeleteLine, Some("OrbitEditor > Input")),
+        KeyBinding::new(if cfg!(target_os = "macos") { "cmd-v" } else { "ctrl-v" }, SmartPaste, Some("OrbitEditor > Input")),
     ]);
     markdown::register(cx);
 }
@@ -1170,6 +1180,120 @@ impl EditorTab {
         });
     }
 
+    /// Deletes every line the selection touches, keeping the caret's column.
+    fn delete_line(&mut self, _: &DeleteLine, window: &mut Window, cx: &mut Context<Self>) {
+        self.state.update(cx, |s, cx| {
+            let text = s.text().clone();
+            let sel = s.selected_range();
+            let first = text.offset_to_position(sel.start).line as usize;
+            let mut last = text.offset_to_position(sel.end).line as usize;
+            // A selection ending at a line's start doesn't take that line.
+            if last > first && text.offset_to_position(sel.end).character == 0 {
+                last -= 1;
+            }
+            let column = s.cursor_position().character;
+            let lines = text.lines_len();
+            let mut range = text.line_start_offset(first)..text.line_start_offset(last + 1);
+            if last + 1 >= lines {
+                // The last line has no newline after it: take the one before it.
+                range = text.line_start_offset(first).saturating_sub(usize::from(first > 0))..text.len();
+            }
+            if range.is_empty() {
+                return;
+            }
+            s.set_selected_range(range, cx);
+            s.replace("", window, cx);
+            let line = first.min(s.text().lines_len().saturating_sub(1)) as u32;
+            s.set_cursor_position(lsp_types::Position::new(line, column), window, cx);
+        });
+    }
+
+    /// Paste re-indented to where it lands when the caret is in the line's
+    /// indent (or the line is empty); otherwise the component's own paste.
+    fn smart_paste(&mut self, _: &SmartPaste, window: &mut Window, cx: &mut Context<Self>) {
+        let pasted = cx.read_from_clipboard().and_then(|c| c.text());
+        let tab = self.tab_size;
+        let handled = pasted.filter(|t| t.contains('\n')).is_some_and(|pasted| {
+            self.state.update(cx, |s, cx| {
+                let text = s.text().clone();
+                let sel = s.selected_range();
+                let pos = text.offset_to_position(sel.start);
+                let row = pos.line as usize;
+                let line_start = text.line_start_offset(row);
+                let before = text.slice(line_start..sel.start).to_string();
+                if !before.trim().is_empty() {
+                    return false;
+                }
+                let target = if before.is_empty() && text.slice_line(row).to_string().trim().is_empty() {
+                    let all = text.to_string();
+                    let lines: Vec<&str> = all.split('\n').collect();
+                    indent::context_indent(&lines, row, pasted.trim_start().chars().next(), tab.tab_size)
+                } else {
+                    indent::indent_cols(&before, tab.tab_size)
+                };
+                let block = indent::reindent_block(&pasted, target, tab.tab_size, tab.hard_tabs);
+                s.set_selected_range(line_start..sel.end, cx);
+                s.replace(block, window, cx);
+                true
+            })
+        });
+        if !handled {
+            window.dispatch_action(Box::new(gpui_component::input::Paste), cx);
+        }
+    }
+
+    /// Rider's smart indent while typing: a `}` on a blank line goes to its
+    /// `{` line's indent, and the first character on an empty line to the block's.
+    fn smart_type(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let m = &ev.keystroke.modifiers;
+        if m.control || m.platform || m.alt || m.function || self.picker.is_some() {
+            return;
+        }
+        let Some(ch) = ev.keystroke.key_char.as_deref().and_then(|k| {
+            let mut it = k.chars();
+            it.next().filter(|_| it.next().is_none())
+        }) else {
+            return;
+        };
+        if ch.is_whitespace() || ch.is_control() || ch == '#' || !self.state.focus_handle(cx).is_focused(window) {
+            return;
+        }
+        let tab = self.tab_size;
+        let edit = self.state.update(cx, |s, _| {
+            let text = s.text().clone();
+            let sel = s.selected_range();
+            if !sel.is_empty() {
+                return None;
+            }
+            let row = text.offset_to_position(sel.start).line as usize;
+            let line_start = text.line_start_offset(row);
+            let line = text.slice_line(row).to_string();
+            let line = line.trim_end_matches('\r');
+            let before = &line[..(sel.start - line_start).min(line.len())];
+            if !before.trim().is_empty() || !line[before.len()..].trim().is_empty() {
+                return None;
+            }
+            let all = text.to_string();
+            let indent = if ch == '}' {
+                indent::matching_open_indent(&all, sel.start)?.to_string()
+            } else if line.is_empty() {
+                let lines: Vec<&str> = all.split('\n').collect();
+                let cols = indent::context_indent(&lines, row, Some(ch), tab.tab_size);
+                indent::make_indent(cols, tab.tab_size, tab.hard_tabs)
+            } else {
+                return None;
+            };
+            (indent != before).then(|| (line_start..line_start + line.len(), indent))
+        });
+        // Only the indent changes here: the key still reaches the editor, which
+        // types the character (with its auto-closing and skipping over).
+        let Some((range, insert)) = edit else { return };
+        self.state.update(cx, |s, cx| {
+            s.set_selected_range(range, cx);
+            s.replace(insert, window, cx);
+        });
+    }
+
     fn on_escape(&mut self, _: &Escape, _: &mut Window, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| s.clear_hover_state(cx));
         if self.signature.take().is_some() || self.message.take().is_some() {
@@ -1776,6 +1900,9 @@ impl Render for EditorTab {
             .on_action(cx.listener(Self::restart_server))
             .on_action(cx.listener(Self::generate_compile_commands))
             .on_action(cx.listener(Self::on_escape))
+            .on_action(cx.listener(Self::delete_line))
+            .on_action(cx.listener(Self::smart_paste))
+            .capture_key_down(cx.listener(Self::smart_type))
             .on_action(cx.listener(Self::show_code_actions))
             .size_full()
             .flex()

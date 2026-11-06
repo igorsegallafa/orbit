@@ -77,6 +77,15 @@ pub struct Preview {
     /// The match line and its hits.
     decos: RangeDecorationCollection,
 }
+/// The last query of Search Everywhere and of Find in Files, shown again on the next open.
+#[derive(Default)]
+struct LastQueries {
+    everywhere: String,
+    find: String,
+}
+
+impl gpui::Global for LastQueries {}
+
 /// Results per section of the All tab.
 const ALL_FILES: usize = 8;
 const ALL_SYMBOLS: usize = 8;
@@ -169,7 +178,20 @@ impl OrbitApp {
 
     fn new_palette(&mut self, mode: Mode, placeholder: &str, window: &mut Window, cx: &mut Context<Self>) -> Palette {
         self.menu = None;
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder.to_string()));
+        self.remember_query(cx);
+        // As Rider: the editor's selection when there is one, else the last query (selected, so typing replaces it).
+        let initial = self.editor_selection(cx).unwrap_or_else(|| {
+            let last = cx.default_global::<LastQueries>();
+            match mode {
+                Mode::Everywhere(_) => last.everywhere.clone(),
+                Mode::Find => last.find.clone(),
+            }
+        });
+        let input = cx.new(|cx| {
+            let mut i = InputState::new(window, cx).placeholder(placeholder.to_string()).default_value(initial);
+            i.select_all(window, cx);
+            i
+        });
         let sub = cx.subscribe_in(&input, window, |this, _, event: &InputEvent, _, cx| {
             if matches!(event, InputEvent::Change) {
                 this.on_query_changed(cx);
@@ -447,7 +469,27 @@ impl OrbitApp {
         cx.notify();
     }
 
+    /// The active editor's selection, when it is a single line worth searching for.
+    fn editor_selection(&self, cx: &App) -> Option<String> {
+        let editor = self.active_editor()?;
+        let text = editor.read(cx).state.read(cx).selected_text().to_string();
+        let text = text.trim();
+        (!text.is_empty() && !text.contains('\n') && text.chars().count() <= 200).then(|| text.to_string())
+    }
+
+    /// Keeps the open palette's query for the next open of the same kind.
+    fn remember_query(&mut self, cx: &mut Context<Self>) {
+        let Some(p) = &self.palette else { return };
+        let (mode, q) = (p.mode, p.input.read(cx).value().to_string());
+        let last = cx.default_global::<LastQueries>();
+        match mode {
+            Mode::Everywhere(_) => last.everywhere = q,
+            Mode::Find => last.find = q,
+        }
+    }
+
     pub fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.remember_query(cx);
         if self.palette.take().is_some() {
             self.restore_focus(window, cx);
             cx.notify();
@@ -508,7 +550,6 @@ impl OrbitApp {
                     let from = text.position_to_offset(&start);
                     let to = text.position_to_offset(&lsp_types::Position::new(start.line, start.character + len as u32));
                     s.set_selected_range(from..to, cx);
-                    center_line(s, start.line, cx);
                 });
             }
         });
@@ -929,7 +970,10 @@ impl OrbitApp {
             let _ = cx.update_window(window, |_, window, cx| {
                 let state = match (reuse, text) {
                     (Some(s), _) => s,
-                    (None, Some(Ok(t))) => cx.new(|cx| EditorState::new(window, cx).language(language).line_number(true).default_value(t)),
+                    // No soft wrap: centering counts lines, and wrapped rows above the match pushed it off screen.
+                    (None, Some(Ok(t))) => cx.new(|cx| {
+                        EditorState::new(window, cx).language(language).line_number(true).soft_wrap(false).default_value(t)
+                    }),
                     _ => return,
                 };
                 let decos = state.update(cx, |s, cx| {
@@ -950,10 +994,9 @@ impl OrbitApp {
                                 .with_color(theme::hsla(theme::WARN).opacity(if *on { 0.45 } else { 0.22 })),
                         );
                     }
-                    let decos = s.create_range_decorations_collection(decos, cx);
-                    center_line(s, line, cx);
-                    decos
+                    s.create_range_decorations_collection(decos, cx)
                 });
+                center_line(&state, line, window, cx);
                 let _ = this.update(cx, |app, cx| {
                     let Some(p) = app.palette.as_mut() else { return decos.dispose(cx) };
                     if p.preview_wanted.borrow().as_deref() != Some(key.as_str()) {
@@ -978,11 +1021,23 @@ impl OrbitApp {
     }
 }
 
-/// Scrolls the preview so `line` (0-based) sits in the middle (`revealLineInCenter`).
-fn center_line(s: &mut EditorState, line: u32, cx: &mut Context<EditorState>) {
-    let lh = s.line_height().unwrap_or(px(20.));
-    let y = (lh * line as f32 - px(100.)).max(px(0.));
-    s.set_scroll_offset(gpui::point(px(0.), -y), cx);
+/// Scrolls the preview so `line` (0-based) sits near the middle (`revealLineInCenter`).
+/// A new editor has no line height until its first layout: it waits for it
+/// (a guessed height drifted further off the deeper the match).
+fn center_line(state: &Entity<EditorState>, line: u32, window: &mut Window, cx: &mut App) {
+    center_line_after(state.clone(), line, 10, window, cx);
+}
+
+fn center_line_after(state: Entity<EditorState>, line: u32, tries: u8, window: &mut Window, cx: &mut App) {
+    let lh = state.read(cx).line_height();
+    match lh {
+        Some(lh) => state.update(cx, |s, cx| {
+            let y = (lh * line as f32 - px(100.)).max(px(0.));
+            s.set_scroll_offset(gpui::point(px(0.), -y), cx);
+        }),
+        None if tries > 0 => window.on_next_frame(move |window, cx| center_line_after(state, line, tries - 1, window, cx)),
+        None => {}
+    }
 }
 
 /// A Lucide icon from gpui-kit-assets, in an explicit colour.

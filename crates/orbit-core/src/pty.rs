@@ -401,17 +401,60 @@ fn leftovers_in(config: &Path, live: &[String]) -> Vec<(PathBuf, u64)> {
     out
 }
 
-/// True when Claude Code has a transcript for this session id in the
-/// workspace folder, i.e. `--resume <id>` will find it.
-pub fn claude_session_exists(workspace: &str, session_id: &str) -> bool {
+/// True when Claude Code has a transcript for this session id for the folder
+/// the session runs in (its repo or cwd, not always the workspace root), i.e.
+/// `--resume <id>` will find it.
+pub fn claude_session_exists(dir: &Path, session_id: &str) -> bool {
     if session_id.is_empty() || !session_id.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
         return false;
     }
-    let (Ok(ws), Ok(home)) = (crate::workspace::scope_dir(workspace), crate::config::home_dir()) else { return false };
+    let Ok(home) = crate::config::home_dir() else { return false };
     home.join(".claude/projects")
-        .join(crate::usage::dir_to_project_name(&ws))
+        .join(crate::usage::dir_to_project_name(dir))
         .join(format!("{session_id}.jsonl"))
         .exists()
+}
+
+/// True for oh-my-pi's CLI (`omp`).
+pub fn is_omp(cmd: &str) -> bool {
+    let name = Path::new(cmd.trim()).file_stem().map(|s| s.to_string_lossy().to_lowercase());
+    name.as_deref() == Some("omp")
+}
+
+/// omp's session folder for `dir`: `~/.omp/agent/sessions/-Documents-x` for
+/// `~/Documents/x`, `--private-tmp--` outside the home folder.
+fn omp_sessions_dir(home: &Path, dir: &Path) -> PathBuf {
+    let flat = |p: &Path| p.to_string_lossy().trim_matches('/').replace(['/', '\\'], "-");
+    let name = match dir.strip_prefix(home) {
+        Ok(rel) => format!("-{}", flat(rel)),
+        Err(_) => format!("--{}--", flat(dir)),
+    };
+    home.join(".omp/agent/sessions").join(name)
+}
+
+/// The omp sessions `count` omp tabs in `dir` were last in, to `omp --resume`
+/// them: omp can't take an id at launch, and `/resume` inside a tab switches
+/// to an older session, so they are the `count` sessions written to last
+/// (since `since_ms`, the first tab's launch). Oldest-created first, to pair
+/// with the tabs by launch order. Files are `<ISO time>_<id>.jsonl`.
+pub fn omp_recent_sessions(dir: &Path, since_ms: u64, count: usize) -> Vec<String> {
+    let Ok(home) = crate::config::home_dir() else { return vec![] };
+    let Ok(entries) = std::fs::read_dir(omp_sessions_dir(&home, dir)) else { return vec![] };
+    let since = std::time::UNIX_EPOCH + Duration::from_millis(since_ms.saturating_sub(5_000));
+    let mut found: Vec<(std::time::SystemTime, i64, String)> = entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            let (time, id) = name.strip_suffix(".jsonl")?.split_once('_')?;
+            let created = crate::usage::iso_to_epoch(time)?;
+            let modified = e.metadata().and_then(|m| m.modified()).ok().filter(|m| *m >= since)?;
+            Some((modified, created, id.to_string()))
+        })
+        .collect();
+    found.sort_by(|a, b| b.0.cmp(&a.0));
+    found.truncate(count);
+    found.sort_by_key(|f| f.1);
+    found.into_iter().map(|f| f.2).collect()
 }
 
 /// The opencode session a terminal tab started: the latest one in the tab's
@@ -460,6 +503,14 @@ pub fn default_shell() -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn omp_session_folder_names() {
+        let home = Path::new("/Users/me");
+        let dir = |p: &str| omp_sessions_dir(home, Path::new(p)).file_name().unwrap().to_string_lossy().to_string();
+        assert_eq!(dir("/Users/me/Documents/orbit-workspace/workspaces/a-b"), "-Documents-orbit-workspace-workspaces-a-b");
+        assert_eq!(dir("/private/tmp"), "--private-tmp--");
+    }
 
     #[test]
     fn picks_the_tabs_session_in_its_folder() {

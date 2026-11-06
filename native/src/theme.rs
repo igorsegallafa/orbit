@@ -402,7 +402,21 @@ fn apply(ix: usize, cx: &mut App) {
         t.apply_config(&config);
         t.mode = mode;
     });
+    widen_scrollbars(cx);
     cx.refresh_windows();
+}
+
+/// The component scrollbars (editor, lists) default to a 6px thumb, hard to
+/// grab; this widens them within the base layer's 16px track.
+fn widen_scrollbars(cx: &mut App) {
+    let base = &mut gpui_base::Theme::global_mut(cx).scrollbar;
+    let styles = base
+        .styles()
+        .clone()
+        .thumb(|s| s.width(px(9.)).inset(px(2.5)))
+        .thumb_hover(|s| s.width(px(11.)).inset(px(2.5)))
+        .thumb_active(|s| s.width(px(11.)).inset(px(2.5)));
+    *base = gpui_base::ScrollbarTheme::new().with_mode(base.mode()).with_motion(base.motion()).with_styles(styles);
 }
 
 /// Applies the saved choice; with none, the Tauri app's (its localStorage), else Nord.

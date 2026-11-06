@@ -9,9 +9,9 @@ use gpui::{canvas, div, point, prelude::*, px, Bounds, ElementId, Pixels, Point}
 use gpui_component::scroll::{Scrollbar, ScrollbarHandle, ScrollbarMode, ScrollbarThumbStyle};
 use std::sync::atomic::Ordering;
 
-const TRACK: f32 = 10.;
-const THUMB: f32 = 6.;
-const THUMB_HOVER: f32 = 8.;
+const TRACK: f32 = 14.;
+const THUMB: f32 = 9.;
+const THUMB_HOVER: f32 = 11.;
 const INSET: f32 = 2.;
 const MIN_THUMB: f32 = 20.;
 
