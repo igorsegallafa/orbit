@@ -870,27 +870,7 @@ impl OrbitApp {
                             .text_color(c(theme::TEXT_FAINT))
                             .when(p.searching && summary.is_some(), |d| d.child(crate::workspace_ui::kit::spinner("find-spin", 11., c(theme::ACCENT))))
                             .children(summary.map(|s| div().min_w_0().truncate().child(s)))
-                            // Rider's "Open in Find Window": the matches to the bottom panel.
-                            .when(has_matches && !idle, |d| {
-                                d.child(
-                                    div()
-                                        .id("find-open-panel")
-                                        .relative()
-                                        .flex_none()
-                                        .ml(px(4.))
-                                        .px(px(8.))
-                                        .py(px(2.))
-                                        .rounded(px(5.))
-                                        .border_1()
-                                        .border_color(c(theme::BORDER_STRONG))
-                                        .text_color(c(theme::TEXT_DIM))
-                                        .cursor_pointer()
-                                        .hover(|s| s.bg(c(theme::PANEL_RAISED)).text_color(c(theme::TEXT)))
-                                        .child(format!("Open in panel  {}", commands::display_keys("ctrl-enter")))
-                                        .child(crate::probe::probe("find-open-panel"))
-                                        .on_click(cx.listener(|this, _, window, cx| this.find_to_panel(window, cx))),
-                                )
-                            }),
+
                     ),
             )
             .child(
@@ -973,11 +953,37 @@ impl OrbitApp {
                     .border_color(c(theme::BORDER))
                     .text_size(px(11.))
                     .text_color(c(theme::TEXT_FAINT))
-                    .child(format!(
-                        "↑↓ navigate · Enter open · {} open in panel · Alt+C / W / X options",
-                        commands::display_keys("ctrl-enter")
-                    ))
-                    .children(current.map(|t| div().min_w_0().truncate().font_family(theme::MONO_FONT).child(t))),
+                    .child("↑↓ navigate · Enter open · Alt+C / W / X options")
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .gap(px(10.))
+                            .children(current.map(|t| div().min_w_0().truncate().font_family(theme::MONO_FONT).child(t)))
+                            // Rider's "Open in Find Window", bottom right: the matches to the bottom panel.
+                            .when(has_matches && !idle, |d| {
+                                d.child(
+                                    div()
+                                        .id("find-open-panel")
+                                        .relative()
+                                        .flex_none()
+                                        .px(px(10.))
+                                        .py(px(3.))
+                                        .rounded(px(5.))
+                                        .bg(c(theme::PANEL_RAISED))
+                                        .border_1()
+                                        .border_color(c(theme::BORDER_STRONG))
+                                        .text_size(px(11.5))
+                                        .text_color(c(theme::TEXT))
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(c(theme::PANEL_HOVER)))
+                                        .child(format!("Open in Find Window  {}", commands::display_keys("ctrl-enter")))
+                                        .child(crate::probe::probe("find-open-panel"))
+                                        .on_click(cx.listener(|this, _, window, cx| this.find_to_panel(window, cx))),
+                                )
+                            }),
+                    ),
             )
     }
 
