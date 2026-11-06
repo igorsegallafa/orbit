@@ -18,9 +18,6 @@ actions!(orbit_search, [NextTab, PrevTab, ToggleCase, ToggleWord, ToggleRegex, P
 /// Key context of the search modal.
 pub const CONTEXT: &str = "OrbitSearch";
 
-/// Cmd+Shift+F on macOS (Ctrl+Shift+F still works there), Ctrl+Shift+F elsewhere.
-const FIND_KEYS: &[&str] = if cfg!(target_os = "macos") { &["cmd-shift-f", "ctrl-shift-f"] } else { &["ctrl-shift-f"] };
-
 pub fn init(cx: &mut App) {
     // `> Input` too: the query field binds Tab and PageUp/Down itself.
     for ctx in [CONTEXT, "OrbitSearch > Input"] {
@@ -41,7 +38,7 @@ pub fn init(cx: &mut App) {
         Command::new("search.files", "Go to File…").when(has_ws).run(|a, w, cx| a.open_search(SeTab::Files, w, cx)),
         Command::new("search.symbols", "Go to Symbol…").when(has_ws).run(|a, w, cx| a.open_search(SeTab::Symbols, w, cx)),
         Command::new("search.text", "Search Text…").when(has_ws).run(|a, w, cx| a.open_search(SeTab::Text, w, cx)),
-        Command::new("search.findInFiles", "Find in Files…").keys(FIND_KEYS.iter().copied()).when(has_ws).run(|a, w, cx| a.open_find(w, cx)),
+        Command::new("search.findInFiles", "Find in Files…").keys(["ctrl-shift-f"]).when(has_ws).run(|a, w, cx| a.open_find(w, cx)),
     ] {
         commands::register(cx, command);
     }

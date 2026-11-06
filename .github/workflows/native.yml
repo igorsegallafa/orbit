@@ -83,3 +83,9 @@ jobs:
           shared-key: native-${{ matrix.platform }}
 
       - run: cargo check --locked -p orbit-native --all-targets ${{ matrix.features }}
+
+      # The unit tests on macOS too: shortcuts and paths differ per OS. (Windows: not yet, its tests were never run there.)
+      - if: matrix.platform == 'macos-latest'
+        run: |
+          cargo test --locked -p orbit-core
+          cargo test --locked -p orbit-native ${{ matrix.features }}

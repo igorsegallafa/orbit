@@ -115,26 +115,26 @@ const DELETE_LINE_KEY: &str = if cfg!(target_os = "macos") { "cmd-backspace" } e
 pub fn bind_keys(cx: &mut App) {
     let editor = Some("OrbitEditor");
     cx.bind_keys([
-        KeyBinding::new("ctrl-s", Save, editor),
-        KeyBinding::new("ctrl-g", GoToLine, editor),
-        KeyBinding::new("ctrl-shift-o", FileOutline, editor),
-        KeyBinding::new("ctrl-t", WorkspaceSymbols, editor),
+        crate::commands::binding("ctrl-s", Save, editor),
+        crate::commands::binding("ctrl-g", GoToLine, editor),
+        crate::commands::binding("ctrl-shift-o", FileOutline, editor),
+        crate::commands::binding("ctrl-t", WorkspaceSymbols, editor),
         KeyBinding::new("shift-f12", FindReferences, editor),
-        KeyBinding::new("ctrl-f12", GoToImplementation, editor),
+        crate::commands::binding("ctrl-f12", GoToImplementation, editor),
         KeyBinding::new("f8", NextProblem, editor),
         KeyBinding::new("shift-f8", PreviousProblem, editor),
-        KeyBinding::new("ctrl-shift-space", SignatureHelp, editor),
+        crate::commands::binding("ctrl-shift-space", SignatureHelp, editor),
         KeyBinding::new("f2", RenameSymbol, editor),
-        KeyBinding::new("ctrl-shift-i", FormatDocument, editor),
+        crate::commands::binding("ctrl-shift-i", FormatDocument, editor),
         KeyBinding::new("shift-alt-f", FormatDocument, editor),
         KeyBinding::new("f12", GoToDefinition, Some("Input")),
-        KeyBinding::new("ctrl-space", ShowCompletions, Some("Input")),
+        crate::commands::binding("ctrl-space", ShowCompletions, Some("Input")),
         // Replaces the component's code action menu (ctrl-. → ToggleCodeActions):
         // its Enter also reached the text as a newline.
-        KeyBinding::new("ctrl-.", CodeActions, Some("Input")),
+        crate::commands::binding("ctrl-.", CodeActions, Some("Input")),
         KeyBinding::new("alt-enter", CodeActions, Some("Input")),
         KeyBinding::new(DELETE_LINE_KEY, DeleteLine, Some("OrbitEditor > Input")),
-        KeyBinding::new(if cfg!(target_os = "macos") { "cmd-v" } else { "ctrl-v" }, SmartPaste, Some("OrbitEditor > Input")),
+        crate::commands::binding("ctrl-v", SmartPaste, Some("OrbitEditor > Input")),
     ]);
     markdown::register(cx);
 }

@@ -451,7 +451,7 @@ pub fn omp_recent_sessions(dir: &Path, since_ms: u64, count: usize) -> Vec<Strin
             Some((modified, created, id.to_string()))
         })
         .collect();
-    found.sort_by(|a, b| b.0.cmp(&a.0));
+    found.sort_by_key(|f| std::cmp::Reverse(f.0));
     found.truncate(count);
     found.sort_by_key(|f| f.1);
     found.into_iter().map(|f| f.2).collect()
