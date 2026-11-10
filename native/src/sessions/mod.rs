@@ -30,6 +30,7 @@ actions!(
         NewClaudeSession,
         NewOpencodeSession,
         NewOmpSession,
+        NewCodexSession,
         NewShellSession,
         /// Reopens the most recently ended agent session of the current scope.
         ResumeLastSession,
@@ -41,11 +42,12 @@ actions!(
 );
 
 /// What a new session runs: (menu label, tab label, command; none is the shell).
-pub const AGENTS: [(&str, &str, Option<&str>); 4] = [
+pub const AGENTS: [(&str, &str, Option<&str>); 5] = [
     ("Terminal", "shell", None),
     ("Claude Code", "claude", Some("claude")),
     ("Open Code", "opencode", Some("opencode")),
     ("OMP", "omp", Some("omp")),
+    ("Codex", "codex", Some("codex")),
 ];
 
 /// One session tab, as saved (field names follow the React app's `TerminalTab`).
@@ -55,7 +57,7 @@ pub struct SessionMeta {
     pub id: String,
     /// Workspace name or scope (`dir:<path>`, `@repo`).
     pub workspace: String,
-    /// What was launched: "shell" | "claude" | "opencode" | "omp".
+    /// What was launched: "shell" | "claude" | "opencode" | "omp" | "codex".
     pub label: String,
     /// What the session is called: its codename, or the name the user gave it.
     pub session_name: String,
@@ -405,6 +407,7 @@ fn register_actions(cx: &mut App) {
     cx.on_action(|_: &NewClaudeSession, cx| with_app(cx, |a, w, cx| new_session(a, Some("claude"), None, w, cx)));
     cx.on_action(|_: &NewOpencodeSession, cx| with_app(cx, |a, w, cx| new_session(a, Some("opencode"), None, w, cx)));
     cx.on_action(|_: &NewOmpSession, cx| with_app(cx, |a, w, cx| new_session(a, Some("omp"), None, w, cx)));
+    cx.on_action(|_: &NewCodexSession, cx| with_app(cx, |a, w, cx| new_session(a, Some("codex"), None, w, cx)));
     cx.on_action(|_: &NewShellSession, cx| with_app(cx, |a, w, cx| new_session(a, None, None, w, cx)));
     cx.on_action(|_: &ResumeLastSession, cx| {
         with_app(cx, |a, w, cx| {
@@ -456,7 +459,7 @@ pub fn new_session_in(app: &mut OrbitApp, scope: String, cmd: Option<&str>, inpu
 }
 
 /// An agent session in workspace `ws` seeded with `prompt` (`openPromptedSession`
-/// in App.tsx): claude and omp take it as an argument, others get it typed in.
+/// in App.tsx): claude, omp and codex take it as an argument, others get it typed in.
 #[allow(clippy::too_many_arguments)]
 pub fn new_prompted_session(
     app: &mut OrbitApp,
@@ -469,7 +472,7 @@ pub fn new_prompted_session(
     window: &mut Window,
     cx: &mut Context<OrbitApp>,
 ) {
-    let argv = agent == "claude" || agent == "omp";
+    let argv = matches!(agent, "claude" | "omp" | "codex");
     let agent_session_id = (agent == "claude").then(new_uuid);
     let mut args: Vec<String> = agent_session_id.iter().flat_map(|id| ["--session-id".to_string(), id.clone()]).collect();
     if !model.is_empty() {

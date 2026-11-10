@@ -136,6 +136,7 @@ pub fn default_models(agent: &str) -> Vec<String> {
             "aihub/cheap".into(),
             "aihub/balanced".into(),
         ],
+        "codex" => vec!["gpt-6-luna".into(), "gpt-5.6-terra".into(), "gpt-5.6-luna".into()],
         "opencode" => vec![
             "aihub/aihub/best".into(),
             "aihub/aihub/cheap".into(),
@@ -184,6 +185,8 @@ pub fn list_models(agent: &str) -> Vec<String> {
                 _ => default_models(agent),
             }
         }
+        "codex" => codex_models(&std::fs::read_to_string(crate::config::home_dir().map(|h| h.join(".codex/models_cache.json")).unwrap_or_default()).unwrap_or_default())
+            .unwrap_or_else(|| default_models(agent)),
         "opencode" => {
             let out = crate::proc::cmd("opencode")
                 .arg("models")
@@ -201,6 +204,26 @@ pub fn list_models(agent: &str) -> Vec<String> {
         }
         _ => default_models(agent),
     }
+}
+
+/// Codex has no listing command; it caches the account's models in
+/// `~/.codex/models_cache.json`. Hidden ones are internal.
+fn codex_models(cache: &str) -> Option<Vec<String>> {
+    let v: serde_json::Value = serde_json::from_str(cache).ok()?;
+    let models: Vec<String> = v["models"]
+        .as_array()?
+        .iter()
+        .filter(|m| m["visibility"] == "list")
+        .filter_map(|m| m["slug"].as_str().map(String::from))
+        .collect();
+    (!models.is_empty()).then_some(models)
+}
+
+#[test]
+fn reads_codex_models_cache() {
+    let cache = r#"{"models":[{"slug":"hidden","visibility":"hide"},{"slug":"gpt-6-luna","visibility":"list"}]}"#;
+    assert_eq!(codex_models(cache), Some(vec!["gpt-6-luna".to_string()]));
+    assert_eq!(codex_models("not json"), None);
 }
 
 // ---------- Plan task tracking ----------

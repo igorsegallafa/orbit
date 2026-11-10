@@ -12,7 +12,7 @@ use orbit_core::workspace::Workspace;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-const AGENTS: [(&str, &str); 3] = [("claude", "Claude Code"), ("opencode", "OpenCode"), ("omp", "omp")];
+const AGENTS: [(&str, &str); 4] = [("claude", "Claude Code"), ("opencode", "OpenCode"), ("omp", "omp"), ("codex", "Codex")];
 
 #[derive(Clone)]
 pub struct Contestant {

@@ -2,14 +2,14 @@
 
 A desktop workspace for shipping features that span several repositories with AI coding agents.
 
-A feature in Orbit is a **workspace**: one branch across every repo it touches, each checked out as a git worktree. From there Orbit runs the whole loop in one window: plan the work from a tracker card, let agents (Claude Code, OpenCode or OMP) implement it, review the diff, then commit, push, open PRs, watch CI and squash-merge, with AI drafting the boring parts.
+A feature in Orbit is a **workspace**: one branch across every repo it touches, each checked out as a git worktree. From there Orbit runs the whole loop in one window: plan the work from a tracker card, let agents (Claude Code, OpenCode, OMP or Codex) implement it, review the diff, then commit, push, open PRs, watch CI and squash-merge, with AI drafting the boring parts.
 
 Orbit is a native Rust app: the UI is built on [GPUI](https://www.gpui.rs/) and [gpui-component](https://github.com/longbridge/gpui-kit) (`native/`), over a backend crate with no UI dependency (`crates/orbit-core/`).
 
 ## Features
 
 - **Multi-repo workspaces**: one branch, many repos, as git worktrees next to each other. Dependency folders (`node_modules`, build output) are shared with the base clone instead of reinstalled.
-- **Agent sessions**: terminals running `claude`, `opencode` or `omp` inside the workspace, with live status (thinking, editing, waiting for you).
+- **Agent sessions**: terminals running `claude`, `opencode`, `omp` or `codex` inside the workspace, with live status (thinking, editing, waiting for you).
 - **Ralph**: write a PRD and let the agent implement it story by story in a loop.
 - **Delivery pipeline**: commit (AI-drafted message), push, pull requests (AI-drafted title and description that follow the repo's PR template), CI checks with re-run, squash and merge, and rebase with AI conflict resolution. Merged work is detected even after a squash.
 - **Code review**: review the workspace's changes with notes, and send them to the PR.
@@ -30,7 +30,7 @@ Orbit drives these CLIs, which must be on your `PATH` (Settings → Health check
 
 - [Git](https://git-scm.com) 2.38 or newer
 - [GitHub CLI](https://cli.github.com), logged in with `gh auth login`
-- An agent CLI: [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [OpenCode](https://opencode.ai) or OMP (pick it in Settings → AI)
+- An agent CLI: [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [OpenCode](https://opencode.ai), OMP or [Codex](https://github.com/openai/codex) (pick it in Settings → AI)
 - `curl`, only for the Linear, Shortcut and Figma integrations
 
 A Vulkan driver is used when present, OpenGL otherwise.

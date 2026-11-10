@@ -47,7 +47,7 @@ pub struct Script {
     /// Drag-select in the active terminal: `col,row:col,row` (0-based cells).
     pub term_drag: Option<((usize, usize), (usize, usize))>,
     pub scroll: i32,
-    /// Sessions to open at start: "shell", "claude", "opencode", "omp" or any command.
+    /// Sessions to open at start: "shell", "claude", "opencode", "omp", "codex" or any command.
     pub sessions: Vec<String>,
     /// `--steps "a; b; …"`, run in order last (see [`run_steps`]).
     pub steps: Vec<String>,

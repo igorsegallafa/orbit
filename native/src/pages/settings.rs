@@ -136,7 +136,7 @@ fn def(section: Section) -> &'static SectionDef {
     NAV.iter().flat_map(|(_, s)| s.iter()).find(|s| s.id == section).expect("every section is listed")
 }
 
-const AGENTS: &[(&str, &str)] = &[("claude", "Claude Code"), ("opencode", "OpenCode"), ("omp", "OMP")];
+const AGENTS: &[(&str, &str)] = &[("claude", "Claude Code"), ("opencode", "OpenCode"), ("omp", "OMP"), ("codex", "Codex")];
 
 pub struct SettingsPage {
     pub(super) host: Host,
@@ -508,6 +508,7 @@ impl SettingsPage {
         let model_hint = match ai.agent.as_str() {
             "opencode" => "Provider/model as listed by `opencode models`.",
             "omp" => "As listed by `omp models` (fuzzy match supported).",
+            "codex" => "Passed to `codex --model`; the list comes from Codex's model cache.",
             _ => "Passed to `claude --model`. Each AI feature uses it unless a run overrides it.",
         };
         let loading = matches!(self.models, Load::Loading);

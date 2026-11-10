@@ -38,6 +38,16 @@ pub fn agent_args(ai: &AiSettings, prompt: &str, access: Access, stream_json: bo
                 a.push("--auto".into());
             }
         }
+        "codex" => {
+            // Temp-dir runs (test_agent) aren't git repos; exec refuses those by default.
+            a.extend(["exec".into(), "--skip-git-repo-check".into()]);
+            a.extend(match access {
+                Access::Answer | Access::ReadOnly => vec!["--sandbox".into(), "read-only".into()],
+                Access::Edit => vec!["--sandbox".into(), "workspace-write".into()],
+                Access::Full => vec!["--dangerously-bypass-approvals-and-sandbox".into()],
+            });
+            a.extend(["--model".into(), ai.model.clone()]);
+        }
         "omp" => {
             a.push("-p".into());
             if access.writes() {
@@ -180,6 +190,10 @@ mod tests {
         assert_eq!(agent_args(&ai("opencode"), "hi", Access::Edit, false), ["run", "--model", "m", "--auto", "hi"]);
         assert_eq!(agent_args(&ai("omp"), "hi", Access::ReadOnly, false), ["-p", "--model", "m", "hi"]);
         assert_eq!(agent_args(&ai("omp"), "hi", Access::Full, false), ["-p", "--auto-approve", "--model", "m", "hi"]);
+        let codex = |access| agent_args(&ai("codex"), "hi", access, false);
+        assert_eq!(codex(Access::ReadOnly), ["exec", "--skip-git-repo-check", "--sandbox", "read-only", "--model", "m", "hi"]);
+        assert_eq!(codex(Access::Edit), ["exec", "--skip-git-repo-check", "--sandbox", "workspace-write", "--model", "m", "hi"]);
+        assert_eq!(codex(Access::Full)[2], "--dangerously-bypass-approvals-and-sandbox");
     }
 
     #[test]

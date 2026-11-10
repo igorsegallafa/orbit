@@ -191,6 +191,7 @@ pub fn default_model(agent: &str) -> &'static str {
     match agent {
         "opencode" => "aihub/aihub/best",
         "omp" => "aihub/glm-5.3",
+        "codex" => "gpt-6-luna",
         _ => "claude-sonnet-5-5",
     }
 }
