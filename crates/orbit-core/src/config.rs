@@ -169,7 +169,7 @@ impl Config {
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct AiSettings {
-    /// "claude" | "opencode"
+    /// "claude" | "opencode" | "omp" | "codex"
     #[serde(default = "default_agent")]
     pub agent: String,
     /// claude: model alias ("claude-sonnet-5"); opencode: "provider/model".
@@ -195,7 +195,7 @@ impl AiSettings {
     /// CLI binary for the configured agent (unknown values run claude).
     pub fn agent_bin(&self) -> String {
         match self.agent.as_str() {
-            "opencode" | "omp" => self.agent.clone(),
+            "opencode" | "omp" | "codex" => self.agent.clone(),
             _ => "claude".into(),
         }
     }

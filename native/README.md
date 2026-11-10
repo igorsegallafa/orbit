@@ -565,7 +565,7 @@ the program ended) and `pty-error` events for a failed start, as before.
   since the core's read queue is bounded, a flooding program runs at the parser's pace. The UI
   thread only learns "something changed" (one pending wake-up) and repaints once per frame.
 - Actions for the command registry and keymap (`sessions::…`): `NewAgentSession` (Settings → AI
-  agent), `NewClaudeSession`, `NewOpencodeSession`, `NewOmpSession`, `NewShellSession`,
+  agent), `NewClaudeSession`, `NewOpencodeSession`, `NewOmpSession`, `NewCodexSession`, `NewShellSession`,
   `ResumeLastSession`, `NextSessionNeedingInput`, `MarkInboxRead`, `ClearInbox`. They are global
   handlers, so they work from any focus; none is bound to a key yet.
 - Rename (`src/sessions/rename.rs`, App.tsx `renameTab`): *Rename Session* in the tab menu, a

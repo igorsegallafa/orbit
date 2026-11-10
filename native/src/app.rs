@@ -271,6 +271,7 @@ pub fn init(cx: &mut App) {
         Command::new("sessions.newClaude", "New Claude Session").action(crate::sessions::NewClaudeSession),
         Command::new("sessions.newOpencode", "New OpenCode Session").action(crate::sessions::NewOpencodeSession),
         Command::new("sessions.newOmp", "New omp Session").action(crate::sessions::NewOmpSession),
+        Command::new("sessions.newCodex", "New Codex Session").action(crate::sessions::NewCodexSession),
         Command::new("sessions.newShell", "New Shell Session").action(crate::sessions::NewShellSession),
         Command::new("sessions.resumeLast", "Resume Last Session").keys(["ctrl-alt-r"]).action(crate::sessions::ResumeLastSession),
         Command::new("sessions.nextNeedingInput", "Next Session Needing Input")

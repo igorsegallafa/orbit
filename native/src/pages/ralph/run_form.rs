@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-const AGENTS: [(&str, &str); 4] = [("", "From AI settings"), ("claude", "Claude Code (live activity)"), ("opencode", "OpenCode"), ("omp", "omp")];
+const AGENTS: [(&str, &str); 5] = [("", "From AI settings"), ("claude", "Claude Code (live activity)"), ("opencode", "OpenCode"), ("omp", "omp"), ("codex", "Codex")];
 
 fn remembered_path() -> Option<PathBuf> {
     orbit_core::config::config_dir().ok().map(|d| d.join("native-ralph.json"))
