@@ -950,7 +950,7 @@ mod tests {
 
         #[test]
         fn a_clean_run_mentioning_a_rate_limit_is_not_a_usage_limit() {
-            // A text agent (omp): no closing event, only its last lines.
+            // A plain-text agent: no closing event, only its last lines.
             let agent = format!("{COMMIT_US1}\necho 'Added the rate limit middleware.'");
             let (_root, mut env) = prd_env("prd-rate-limit", quick(), &agent);
             assert_eq!(env.run_iteration(1), Iteration::Done);

@@ -85,7 +85,7 @@ fn codex_args(ai: &AiSettings, access: Access, resume: bool) -> Vec<String> {
 
 /// Argv for a headless run whose progress shows live: one JSON event per
 /// line from claude (stream-json), opencode (--format json) and codex
-/// (--json); omp prints text. `resume` continues an earlier conversation of
+/// (--json) and omp (--mode json). `resume` continues an earlier conversation of
 /// the same agent. No sub-agents: their steps never reach the stream, so a
 /// run delegating its exploration looked frozen for minutes.
 pub fn live_args(ai: &AiSettings, prompt: &str, access: Access, resume: Option<&str>) -> Vec<String> {
@@ -105,24 +105,19 @@ pub fn live_args(ai: &AiSettings, prompt: &str, access: Access, resume: Option<&
     match (bin.as_str(), resume) {
         ("claude", Some(id)) => a.extend(["--resume".into(), id.into()]),
         ("opencode", Some(id)) => a.extend(["--session".into(), id.into()]),
+        ("omp", Some(id)) => a.extend(["--resume".into(), id.into()]),
         _ => {}
     }
     if bin == "opencode" {
         a.extend(["--format".into(), "json".into(), "--thinking".into()]);
     }
-    if bin == "omp" && omp_json() {
-        // pi's JSON mode prints events instead of -p's final text.
+    if bin == "omp" {
+        // JSON mode prints events instead of -p's final text, and exits at the end too.
         a.retain(|x| x != "-p");
         a.extend(["--mode".into(), "json".into()]);
     }
     a.push(prompt_arg);
     a
-}
-
-/// shortcut: omp's JSON event mode isn't confirmed yet (pi has `--mode json`);
-/// on behind ORBIT_OMP_JSON=1 until tested, then always.
-fn omp_json() -> bool {
-    std::env::var("ORBIT_OMP_JSON").is_ok_and(|v| v == "1")
 }
 
 /// Claude and Codex take the prompt (last of `args`) on stdin: as an
@@ -238,7 +233,8 @@ mod tests {
             live_args(&ai("opencode"), "hi", Access::Edit, Some("ses_1")),
             ["run", "--model", "m", "--auto", "--session", "ses_1", "--format", "json", "--thinking", "hi"]
         );
-        assert_eq!(live_args(&ai("omp"), "hi", Access::ReadOnly, Some("x")), ["-p", "--model", "m", "hi"]);
+        assert_eq!(live_args(&ai("omp"), "hi", Access::ReadOnly, Some("x")), ["--model", "m", "--resume", "x", "--mode", "json", "hi"]);
+        assert_eq!(live_args(&ai("omp"), "hi", Access::Full, None), ["--auto-approve", "--model", "m", "--mode", "json", "hi"]);
         assert_eq!(
             live_args(&ai("codex"), "hi", Access::Full, None),
             ["exec", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", "--model", "m", "--json", "hi"]

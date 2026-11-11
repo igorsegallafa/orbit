@@ -80,7 +80,7 @@ pub fn run_live(
         Line::Out(l) => {
             let events = stream::parse_line(&l);
             if events.is_empty() {
-                // Plain-text agents (omp) and stray output: shown as is.
+                // Stray non-JSON output: shown as is.
                 if !l.trim().is_empty() && !l.trim_start().starts_with('{') {
                     emit("text", "", l.trim_end());
                     texts.push(l);

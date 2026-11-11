@@ -51,7 +51,7 @@ struct Closing {
 #[derive(Default)]
 pub struct AgentRun {
     result: Option<Closing>,
-    /// Its messages, and plain-text agents' stdout lines.
+    /// Its messages, and stray non-JSON stdout lines.
     texts: Vec<String>,
     step_cost: f64,
     step_tokens: u64,
