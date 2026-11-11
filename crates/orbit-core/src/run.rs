@@ -92,6 +92,21 @@ pub fn compound_parts<'a>(compound: &RunConfig, own: &str, configs: impl IntoIte
     (parts, problems)
 }
 
+/// Repos the `compounds` list as "<repo>/<name>" that aren't in the workspace
+/// (`in_ws`) but are configured without worktrees, so their one clone is the
+/// right checkout to launch from.
+pub fn outside_repos<'a>(compounds: impl IntoIterator<Item = &'a RunConfig>, in_ws: &[String], services: &[crate::config::Service]) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    for entry in compounds.into_iter().filter(|c| c.is_compound()).flat_map(|c| &c.configs) {
+        let Some((repo, _)) = entry.split_once('/') else { continue };
+        let known = services.iter().any(|s| s.name == repo && !s.worktree);
+        if known && !in_ws.iter().any(|r| r == repo) && !out.iter().any(|r| r == repo) {
+            out.push(repo.to_string());
+        }
+    }
+    out
+}
+
 /// A compound's environment under one of its configurations': the configuration's own keys win.
 pub fn merge_env(compound: &BTreeMap<String, String>, own: &BTreeMap<String, String>) -> BTreeMap<String, String> {
     compound.iter().chain(own).map(|(k, v)| (k.clone(), v.clone())).collect()
@@ -1047,6 +1062,13 @@ mod tests {
         assert_eq!(compound_parts(&c("x", "compound", &["a/b"]), "dataserver", every.clone()).0, [pair("dataserver", "a/b")]);
         assert_eq!(part_ref("aether", "dataserver", "server"), "dataserver/server");
         assert_eq!(part_ref("aether", "aether", "game"), "game");
+
+        // Repos outside the workspace load only when configured without worktrees.
+        let svc = |name: &str, worktree: bool| crate::config::Service { worktree, ..crate::config::Service::new(name.into(), String::new()) };
+        let services = [svc("dataserver", false), svc("web", true)];
+        let stacks = [mixed.clone(), c("w", "compound", &["web/x", "unknown/y", "dataserver/z"]), c("dataserver/fake", "cargo", &[])];
+        assert_eq!(outside_repos(&stacks, &["aether".into()], &services), ["dataserver"]);
+        assert!(outside_repos(&stacks, &["aether".into(), "dataserver".into()], &services).is_empty());
 
         let parsed: RunConfig = serde_json::from_value(json!({ "name": "both", "kind": "compound", "configs": ["game", "gameserver"] })).unwrap();
         assert_eq!(parsed, all[2]);

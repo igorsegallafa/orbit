@@ -676,24 +676,27 @@ impl RunStore {
         let want = preferred.clone();
         let name = ws.clone();
         let found = cx.background_spawn(async move {
-            repos
-                .iter()
-                .filter_map(|repo| {
-                    let preset = want.as_ref().filter(|t| &t.repo == repo).and_then(|t| t.preset.clone());
-                    let s = orbit_core::run::setup(&name, repo, preset.as_deref()).ok()?;
-                    (!s.configs.is_empty()).then(|| {
-                        let setup = Setup {
-                            root: s.root.into(),
-                            linked_root: s.linked_root.into(),
-                            configs: s.configs,
-                            presets: s.presets,
-                            build_dir: s.build_dir,
-                            targets: s.targets,
-                        };
-                        (repo.clone(), setup)
-                    })
+            let load = |scope: &str, repo: &String| {
+                let preset = want.as_ref().filter(|t| &t.repo == repo).and_then(|t| t.preset.clone());
+                let s = orbit_core::run::setup(scope, repo, preset.as_deref()).ok()?;
+                (!s.configs.is_empty()).then(|| {
+                    let setup = Setup {
+                        root: s.root.into(),
+                        linked_root: s.linked_root.into(),
+                        configs: s.configs,
+                        presets: s.presets,
+                        build_dir: s.build_dir,
+                        targets: s.targets,
+                    };
+                    (repo.clone(), setup)
                 })
-                .collect::<Vec<_>>()
+            };
+            let mut found = repos.iter().filter_map(|repo| load(&name, repo)).collect::<Vec<_>>();
+            // A compound may launch a configured repo the workspace doesn't hold: load it from its clone.
+            let services = orbit_core::config::Config::load().map(|c| c.services).unwrap_or_default();
+            let outside = orbit_core::run::outside_repos(found.iter().flat_map(|(_, s)| s.configs.iter().map(|c| &c.raw)), &repos, &services);
+            found.extend(outside.iter().filter_map(|repo| load(&format!("@{repo}"), repo)));
+            found
         });
         self._load = cx.spawn(async move |this, cx| {
             let found = found.await;
