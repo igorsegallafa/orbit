@@ -85,7 +85,7 @@ fn codex_args(ai: &AiSettings, access: Access, resume: bool) -> Vec<String> {
 
 /// Argv for a headless run whose progress shows live: one JSON event per
 /// line from claude (stream-json), opencode (--format json) and codex
-/// (--json); omp prints text. `resume` continues an earlier conversation of
+/// (--json) and omp (--mode json). `resume` continues an earlier conversation of
 /// the same agent. No sub-agents: their steps never reach the stream, so a
 /// run delegating its exploration looked frozen for minutes.
 pub fn live_args(ai: &AiSettings, prompt: &str, access: Access, resume: Option<&str>) -> Vec<String> {
@@ -105,24 +105,35 @@ pub fn live_args(ai: &AiSettings, prompt: &str, access: Access, resume: Option<&
     match (bin.as_str(), resume) {
         ("claude", Some(id)) => a.extend(["--resume".into(), id.into()]),
         ("opencode", Some(id)) => a.extend(["--session".into(), id.into()]),
+        ("omp", Some(id)) => a.extend(["--resume".into(), id.into()]),
         _ => {}
     }
     if bin == "opencode" {
         a.extend(["--format".into(), "json".into(), "--thinking".into()]);
     }
+    if bin == "omp" {
+        // JSON mode prints events instead of -p's final text, and exits at the end too.
+        a.retain(|x| x != "-p");
+        a.extend(["--mode".into(), "json".into()]);
+    }
     a.push(prompt_arg);
     a
 }
 
-/// Claude takes the prompt (last of `args`) on stdin: as an argument, one
-/// carrying a diff overflows Windows' 32k command line (os error 206).
-// ponytail: opencode/omp still get it as an argument; pipe theirs if they hit the limit.
+/// Claude and Codex take the prompt (last of `args`) on stdin: as an
+/// argument, one carrying a diff overflows Windows' 32k command line (os
+/// error 206). Codex reads it there when the argument is `-`.
+// shortcut: opencode/omp still get it as an argument; pipe theirs if they hit the limit.
 fn with_prompt(ai: &AiSettings, mut args: Vec<String>) -> Command {
-    let mut c = crate::proc::cmd(&ai.agent_bin());
+    let bin = ai.agent_bin();
+    let mut c = crate::proc::cmd(&bin);
     c.stdin(Stdio::null());
-    if ai.agent_bin() == "claude" {
+    if bin == "claude" || bin == "codex" {
         if let Ok((reader, mut writer)) = std::io::pipe() {
             let prompt = args.pop().unwrap_or_default();
+            if bin == "codex" {
+                args.push("-".into());
+            }
             c.stdin(reader);
             // Off-thread: past the pipe buffer the write blocks until the child reads.
             std::thread::spawn(move || {
@@ -222,7 +233,8 @@ mod tests {
             live_args(&ai("opencode"), "hi", Access::Edit, Some("ses_1")),
             ["run", "--model", "m", "--auto", "--session", "ses_1", "--format", "json", "--thinking", "hi"]
         );
-        assert_eq!(live_args(&ai("omp"), "hi", Access::ReadOnly, Some("x")), ["-p", "--model", "m", "hi"]);
+        assert_eq!(live_args(&ai("omp"), "hi", Access::ReadOnly, Some("x")), ["--model", "m", "--resume", "x", "--mode", "json", "hi"]);
+        assert_eq!(live_args(&ai("omp"), "hi", Access::Full, None), ["--auto-approve", "--model", "m", "--mode", "json", "hi"]);
         assert_eq!(
             live_args(&ai("codex"), "hi", Access::Full, None),
             ["exec", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", "--model", "m", "--json", "hi"]
@@ -240,6 +252,9 @@ mod tests {
         assert_eq!(args(agent_cmd(&ai("claude"), &long, Access::Answer, false)), ["-p", "--model", "m", "--tools=", "--strict-mcp-config"]);
         assert!(!args(live_cmd(&ai("claude"), &long, Access::ReadOnly, None)).contains(&long));
         assert_eq!(args(agent_cmd(&ai("opencode"), "hi", Access::Answer, false)), ["run", "--model", "m", "hi"]);
+        let codex = args(live_cmd(&ai("codex"), &long, Access::Full, Some("t1")));
+        assert_eq!(codex.last().map(String::as_str), Some("-"));
+        assert_eq!(codex[codex.len() - 2], "t1");
     }
 
     #[test]

@@ -29,7 +29,7 @@ pub fn describe(ev: &Value) -> String {
             ev["commits"].as_u64().unwrap_or(0),
             ev["passed"].as_u64().unwrap_or(0),
             ev["total"].as_u64().unwrap_or(0),
-            ev["costUsd"].as_f64().map(|c| format!(" · ${c:.2}")).unwrap_or_default()
+            spend(ev).map(|s| format!(" · {s}")).unwrap_or_default()
         ),
         "push" if ev["ok"].as_bool() == Some(true) => "pushed".into(),
         "push" => format!("push failed: {}", s("message")),
@@ -389,8 +389,8 @@ pub fn iteration_block(g: &Group, live: bool, activity: Option<&Activity>, idle_
                 if let Some(ms) = end["durationMs"].as_u64().filter(|ms| *ms > 0) {
                     text += &format!(" · {}", duration(ms / 1000));
                 }
-                if let Some(cost) = end["costUsd"].as_f64().filter(|c| *c > 0.) {
-                    text += &format!(" · ${cost:.2}");
+                if let Some(s) = spend(end) {
+                    text += &format!(" · {s}");
                 }
                 let color = |o: &str| if o == "passed (recovered)" { theme::OK } else { theme::DANGER };
                 Some(div().flex().items_center().gap(px(6.)).children(outcome.map(|o| div().font_weight(FontWeight::SEMIBOLD).text_color(c(color(&o))).child(o))).child(text))
@@ -432,6 +432,15 @@ pub fn iteration_block(g: &Group, live: bool, activity: Option<&Activity>, idle_
     block.child(div().flex().flex_col().gap(px(2.)).children(g.events.iter().filter_map(|e| feed_line(e))))
 }
 
+/// "$0.42", or the tokens when the agent reports no cost (Codex).
+pub(super) fn spend(v: &Value) -> Option<String> {
+    match (v["costUsd"].as_f64().filter(|c| *c > 0.), v["tokens"].as_u64().filter(|t| *t > 0)) {
+        (Some(cost), _) => Some(format!("${cost:.2}")),
+        (None, Some(t)) => Some(format!("{} tokens", crate::pages::usage::tokens(t))),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -462,6 +471,9 @@ mod tests {
             d(&json!({"kind": "stopped", "reason": {"kind": "maxIterations"}, "iterations": 3})),
             "■ stopped: max iterations after 3 iterations"
         );
+        assert_eq!(super::spend(&json!({"tokens": 28252})).as_deref(), Some(format!("{} tokens", crate::pages::usage::tokens(28252)).as_str()));
+        assert_eq!(super::spend(&json!({"costUsd": 0.5, "tokens": 9})).as_deref(), Some("$0.50"));
+        assert_eq!(super::spend(&json!({"costUsd": 0.0})), None);
         assert_eq!(d(&json!({"kind": "iteration_end", "n": 1, "outcome": "Done", "commits": 1, "passed": 1, "total": 2, "costUsd": 0.5})), "iteration 1 Done · 1 commits · 1/2 done · $0.50");
     }
 
