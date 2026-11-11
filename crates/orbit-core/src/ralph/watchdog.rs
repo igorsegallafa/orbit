@@ -23,7 +23,7 @@ pub struct Activity {
     pub background: Vec<String>,
 }
 
-/// Follows tool calls (Claude's stream-json, Codex's items) and Claude's background shells.
+/// Follows tool calls (Claude's stream-json, Codex's items, omp's tool executions) and Claude's background shells.
 #[derive(Default)]
 pub struct Tracker {
     /// tool_use id → label, oldest first.
@@ -67,10 +67,20 @@ impl Tracker {
                     }
                 }
             }
-            Some("result") | Some("turn.completed") | Some("turn.failed") => self.pending.clear(),
+            Some("result") | Some("turn.completed") | Some("turn.failed") | Some("agent_end") => self.pending.clear(),
+            // omp: from tool_execution_start to tool_execution_end.
+            Some("tool_execution_start") => {
+                for e in summarize_started(line) {
+                    self.pending.push((v["toolCallId"].as_str().unwrap_or("").to_string(), relativize(&e)));
+                }
+            }
+            Some("tool_execution_end") => {
+                let id = v["toolCallId"].as_str().unwrap_or("");
+                self.pending.retain(|(p, _)| p != id);
+            }
             // Codex: a tool runs from its item.started to its item.completed.
             Some("item.started") => {
-                for e in summarize_codex(line) {
+                for e in summarize_started(line) {
                     self.pending.push((v["item"]["id"].as_str().unwrap_or("").to_string(), relativize(&e)));
                 }
             }
@@ -92,8 +102,8 @@ impl Tracker {
     }
 }
 
-/// "Bash: cargo test" for each tool a Codex line starts.
-fn summarize_codex(line: &str) -> Vec<String> {
+/// "Bash: cargo test" for each tool a Codex or omp line starts.
+fn summarize_started(line: &str) -> Vec<String> {
     parse_line(line)
         .into_iter()
         .filter_map(|e| match e {
@@ -221,6 +231,12 @@ mod tests {
         assert!(t.line(codex, rel));
         assert_eq!(t.tool().as_deref(), Some("Bash: cargo test"));
         assert!(t.line(&codex.replace("item.started", "item.completed"), rel));
+        assert_eq!(t.tool(), None);
+
+        let omp = r#"{"type":"tool_execution_start","toolCallId":"c1","toolName":"bash","args":{"command":"cargo build"}}"#;
+        assert!(t.line(omp, rel));
+        assert_eq!(t.tool().as_deref(), Some("Bash: cargo build"));
+        assert!(t.line(r#"{"type":"tool_execution_end","toolCallId":"c1","toolName":"bash","isError":false}"#, rel));
         assert_eq!(t.tool(), None);
     }
 

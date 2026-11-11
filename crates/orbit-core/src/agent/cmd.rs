@@ -110,8 +110,19 @@ pub fn live_args(ai: &AiSettings, prompt: &str, access: Access, resume: Option<&
     if bin == "opencode" {
         a.extend(["--format".into(), "json".into(), "--thinking".into()]);
     }
+    if bin == "omp" && omp_json() {
+        // pi's JSON mode prints events instead of -p's final text.
+        a.retain(|x| x != "-p");
+        a.extend(["--mode".into(), "json".into()]);
+    }
     a.push(prompt_arg);
     a
+}
+
+/// shortcut: omp's JSON event mode isn't confirmed yet (pi has `--mode json`);
+/// on behind ORBIT_OMP_JSON=1 until tested, then always.
+fn omp_json() -> bool {
+    std::env::var("ORBIT_OMP_JSON").is_ok_and(|v| v == "1")
 }
 
 /// Claude and Codex take the prompt (last of `args`) on stdin: as an

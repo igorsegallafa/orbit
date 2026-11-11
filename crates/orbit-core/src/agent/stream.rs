@@ -44,6 +44,9 @@ pub fn parse_line(line: &str) -> Vec<Event> {
     if kind.starts_with("thread.") || kind.starts_with("turn.") || kind.starts_with("item.") {
         return codex(&v, kind);
     }
+    if matches!(kind, "session" | "tool_execution_start" | "message_end" | "agent_end") {
+        return pi(&v, kind);
+    }
     match v.get("type").and_then(Value::as_str) {
         Some("system") => {
             let mut out: Vec<Event> =
@@ -131,6 +134,47 @@ fn codex(v: &Value, kind: &str) -> Vec<Event> {
         _ => None,
     };
     event.into_iter().filter(|e| !matches!(e, Event::Text { text } | Event::Thinking { text } if text.is_empty())).collect()
+}
+
+/// omp (pi's `--mode json`): `session`, `tool_execution_*`, `message_*`,
+/// `agent_end`. Messages are read whole at `message_end`.
+fn pi(v: &Value, kind: &str) -> Vec<Event> {
+    let msg = &v["message"];
+    match kind {
+        "session" => v["id"].as_str().map(|id| Event::Session { id: id.to_string() }).into_iter().collect(),
+        "tool_execution_start" => {
+            let name = tool_name(v["toolName"].as_str().unwrap_or("tool"));
+            vec![Event::Tool { summary: summarize(&name, &v["args"]), name }]
+        }
+        "message_end" if msg["role"] == "assistant" => {
+            let mut out: Vec<Event> = msg["content"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|b| {
+                    let text = |k: &str| b[k].as_str().map(str::trim).filter(|t| !t.is_empty()).map(String::from);
+                    match b["type"].as_str()? {
+                        "text" => text("text").map(|text| Event::Text { text }),
+                        "thinking" => text("thinking").map(|text| Event::Thinking { text }),
+                        _ => None,
+                    }
+                })
+                .collect();
+            let u = &msg["usage"];
+            let usd = u["cost"]["total"].as_f64().unwrap_or(0.0);
+            let tokens = ["input", "output", "cacheRead", "cacheWrite"].iter().filter_map(|k| u[*k].as_u64()).sum();
+            if usd > 0.0 || tokens > 0 {
+                out.push(Event::Cost { usd, tokens });
+            }
+            out
+        }
+        "agent_end" => {
+            // The last assistant message's error, if the run ended on one.
+            let error = v["messages"].as_array().and_then(|m| m.iter().rev().find(|m| m["role"] == "assistant")).and_then(|m| m["errorMessage"].as_str()).unwrap_or("");
+            vec![Event::Result { text: error.to_string(), is_error: !error.is_empty(), cost_usd: None, duration_ms: None, turns: None, tokens: None }]
+        }
+        _ => vec![],
+    }
 }
 
 /// Input (cached and cache writes included) plus output tokens of a Claude or
@@ -270,6 +314,24 @@ mod tests {
         assert!(matches!(&p(r#"{"type":"turn.completed","usage":{"input_tokens":28209,"cached_input_tokens":23040,"output_tokens":43}}"#)[..], [Event::Result { is_error: false, tokens: Some(28252), .. }]));
         assert!(matches!(&p(r#"{"type":"turn.failed","error":{"message":"usage limit reached"}}"#)[..], [Event::Result { is_error: true, text, .. }] if text == "usage limit reached"));
         assert_eq!(unwrap_shell("ls -c foo"), "ls -c foo");
+    }
+
+    #[test]
+    fn parses_pi_events() {
+        let p = |l: &str| parse_line(l);
+        assert_eq!(p(r#"{"type":"session","version":3,"id":"s-1","cwd":"/w"}"#), vec![Event::Session { id: "s-1".into() }]);
+        assert_eq!(
+            p(r#"{"type":"tool_execution_start","toolCallId":"c1","toolName":"bash","args":{"command":"cargo test"}}"#),
+            vec![Event::Tool { name: "Bash".into(), summary: "cargo test".into() }]
+        );
+        let end = r#"{"type":"message_end","message":{"role":"assistant","content":[{"type":"thinking","thinking":"hm"},{"type":"text","text":"Done <task-done/>"},{"type":"toolCall","id":"c2","name":"read","arguments":{}}],"usage":{"input":100,"output":20,"cacheRead":0,"cacheWrite":0,"cost":{"total":0.01}}}}"#;
+        assert_eq!(
+            p(end),
+            vec![Event::Thinking { text: "hm".into() }, Event::Text { text: "Done <task-done/>".into() }, Event::Cost { usd: 0.01, tokens: 120 }]
+        );
+        assert!(p(r#"{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#).is_empty());
+        assert!(matches!(&p(r#"{"type":"agent_end","messages":[]}"#)[..], [Event::Result { is_error: false, .. }]));
+        assert!(matches!(&p(r#"{"type":"agent_end","messages":[{"role":"assistant","errorMessage":"429 rate limit"}]}"#)[..], [Event::Result { is_error: true, .. }]));
     }
 
     #[test]
