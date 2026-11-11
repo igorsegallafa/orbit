@@ -114,15 +114,20 @@ pub fn live_args(ai: &AiSettings, prompt: &str, access: Access, resume: Option<&
     a
 }
 
-/// Claude takes the prompt (last of `args`) on stdin: as an argument, one
-/// carrying a diff overflows Windows' 32k command line (os error 206).
-// ponytail: opencode/omp still get it as an argument; pipe theirs if they hit the limit.
+/// Claude and Codex take the prompt (last of `args`) on stdin: as an
+/// argument, one carrying a diff overflows Windows' 32k command line (os
+/// error 206). Codex reads it there when the argument is `-`.
+// shortcut: opencode/omp still get it as an argument; pipe theirs if they hit the limit.
 fn with_prompt(ai: &AiSettings, mut args: Vec<String>) -> Command {
-    let mut c = crate::proc::cmd(&ai.agent_bin());
+    let bin = ai.agent_bin();
+    let mut c = crate::proc::cmd(&bin);
     c.stdin(Stdio::null());
-    if ai.agent_bin() == "claude" {
+    if bin == "claude" || bin == "codex" {
         if let Ok((reader, mut writer)) = std::io::pipe() {
             let prompt = args.pop().unwrap_or_default();
+            if bin == "codex" {
+                args.push("-".into());
+            }
             c.stdin(reader);
             // Off-thread: past the pipe buffer the write blocks until the child reads.
             std::thread::spawn(move || {
@@ -240,6 +245,9 @@ mod tests {
         assert_eq!(args(agent_cmd(&ai("claude"), &long, Access::Answer, false)), ["-p", "--model", "m", "--tools=", "--strict-mcp-config"]);
         assert!(!args(live_cmd(&ai("claude"), &long, Access::ReadOnly, None)).contains(&long));
         assert_eq!(args(agent_cmd(&ai("opencode"), "hi", Access::Answer, false)), ["run", "--model", "m", "hi"]);
+        let codex = args(live_cmd(&ai("codex"), &long, Access::Full, Some("t1")));
+        assert_eq!(codex.last().map(String::as_str), Some("-"));
+        assert_eq!(codex[codex.len() - 2], "t1");
     }
 
     #[test]
