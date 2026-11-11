@@ -98,6 +98,18 @@ const TERM_GRACE: Duration = Duration::from_secs(5);
 const ORPHAN_GRACE: Duration = Duration::from_secs(2);
 /// How often `run_watched` asks `done`.
 const DONE_POLL: Duration = Duration::from_secs(3);
+/// The idle limit grows this much while a tool runs: a long build prints
+/// nothing to the agent's stream, yet a wait that never ends must still stop.
+const BUSY_IDLE_FACTOR: u32 = 4;
+
+/// What one line told `run_watched`.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Report {
+    /// The run reported it is finished.
+    pub finished: bool,
+    /// A tool call is waiting for its result.
+    pub busy: bool,
+}
 
 pub enum Line {
     Out(String),
@@ -135,7 +147,7 @@ pub fn run_streaming(
         Watch::default(),
         |l| {
             on_line(l);
-            false
+            Report::default()
         },
         || false,
     )?;
@@ -145,8 +157,8 @@ pub fn run_streaming(
     Ok(o)
 }
 
-/// `run_streaming` with `watch`'s stop rules: `on_line` returns true once
-/// the run reported it is finished, `done` (asked every few seconds) once
+/// `run_streaming` with `watch`'s stop rules: `on_line` reports when the
+/// run says it is finished and whether a tool is running, `done` (asked every few seconds) once
 /// its work is found finished, whatever it prints; a timeout is an `Ended`,
 /// not an error.
 pub fn run_watched(
@@ -155,7 +167,7 @@ pub fn run_watched(
     timeout: Duration,
     id: Option<&str>,
     watch: Watch,
-    mut on_line: impl FnMut(Line) -> bool,
+    mut on_line: impl FnMut(Line) -> Report,
     mut done: impl FnMut() -> bool,
 ) -> Result<Outcome, String> {
     // PWD too: opencode takes its project directory from it, and the one
@@ -206,6 +218,7 @@ pub fn run_watched(
     let (mut stdout, mut stderr) = (String::new(), String::new());
     let mut ended = Ended::Exited;
     let mut last_line = Instant::now();
+    let mut busy = false;
     let mut finished_at: Option<Instant> = None;
     // From `done`: cleared when it stops holding (the agent went back to work).
     let mut found_done_at: Option<Instant> = None;
@@ -227,7 +240,9 @@ pub fn run_watched(
                         stderr.push('\n');
                     }
                 }
-                if on_line(line) && finished_at.is_none() {
+                let report = on_line(line);
+                busy = report.busy;
+                if report.finished && finished_at.is_none() {
                     finished_at = Some(Instant::now());
                 }
             }
@@ -244,7 +259,7 @@ pub fn run_watched(
         }
         let stop = if now > deadline {
             Some(Ended::Timeout)
-        } else if watch.idle.is_some_and(|d| now - last_line > d) {
+        } else if watch.idle.is_some_and(|d| now - last_line > if busy { d * BUSY_IDLE_FACTOR } else { d }) {
             Some(Ended::Idle)
         } else if finished_at.or(found_done_at).zip(watch.exit_grace).is_some_and(|(t, d)| now - t > d) {
             Some(Ended::ExitGrace)
@@ -367,7 +382,7 @@ mod tests {
     fn idle_watch_kills_the_whole_group() {
         let watch = Watch { idle: Some(Duration::from_millis(600)), exit_grace: None };
         let start = Instant::now();
-        let o = run_watched(shell("echo hi; sleep 30 & sleep 30"), &std::env::temp_dir(), Duration::from_secs(60), None, watch, |_| false, || false).unwrap();
+        let o = run_watched(shell("echo hi; sleep 30 & sleep 30"), &std::env::temp_dir(), Duration::from_secs(60), None, watch, |_| Report::default(), || false).unwrap();
         assert_eq!(o.ended, Ended::Idle);
         assert!(!o.success);
         assert!(start.elapsed() < Duration::from_secs(10));
@@ -376,10 +391,25 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn a_running_tool_stretches_the_idle_limit() {
+        let watch = Watch { idle: Some(Duration::from_millis(400)), exit_grace: None };
+        let busy = |l: Line| Report { finished: false, busy: matches!(l, Line::Out(s) if s == "tool started") };
+        // Silent for 1 s: past the 400 ms idle, within the busy limit (1.6 s).
+        let o = run_watched(shell("echo 'tool started'; sleep 1; echo ok"), &std::env::temp_dir(), Duration::from_secs(60), None, watch, busy, || false).unwrap();
+        assert_eq!(o.ended, Ended::Exited);
+        // The busy limit still stops a tool that never returns.
+        let start = Instant::now();
+        let o = run_watched(shell("echo 'tool started'; sleep 30"), &std::env::temp_dir(), Duration::from_secs(60), None, watch, busy, || false).unwrap();
+        assert_eq!(o.ended, Ended::Idle);
+        assert!(start.elapsed() < Duration::from_secs(10));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn exit_grace_kills_a_finished_run_that_stays_alive() {
         let watch = Watch { idle: Some(Duration::from_secs(60)), exit_grace: Some(Duration::from_millis(500)) };
         let o = run_watched(shell("echo done; sleep 30"), &std::env::temp_dir(), Duration::from_secs(60), None, watch, |l| {
-            matches!(l, Line::Out(s) if s == "done")
+            Report { finished: matches!(l, Line::Out(s) if s == "done"), busy: false }
         }, || false)
         .unwrap();
         assert_eq!(o.ended, Ended::ExitGrace);
@@ -394,7 +424,7 @@ mod tests {
         let _ = std::fs::remove_file(&marker);
         let script = format!("touch '{}'; sleep 30", marker.display());
         let start = Instant::now();
-        let o = run_watched(shell(&script), &std::env::temp_dir(), Duration::from_secs(60), None, watch, |_| false, || marker.exists()).unwrap();
+        let o = run_watched(shell(&script), &std::env::temp_dir(), Duration::from_secs(60), None, watch, |_| Report::default(), || marker.exists()).unwrap();
         assert_eq!(o.ended, Ended::ExitGrace);
         assert!(start.elapsed() < Duration::from_secs(15), "{:?}", start.elapsed());
         assert!(!group_alive(o.pid));
@@ -406,7 +436,7 @@ mod tests {
     fn watched_run_reaps_children_left_holding_the_pipes() {
         let watch = Watch { idle: Some(Duration::from_secs(60)), exit_grace: None };
         let start = Instant::now();
-        let o = run_watched(shell("sleep 30 & echo bye"), &std::env::temp_dir(), Duration::from_secs(60), None, watch, |_| false, || false).unwrap();
+        let o = run_watched(shell("sleep 30 & echo bye"), &std::env::temp_dir(), Duration::from_secs(60), None, watch, |_| Report::default(), || false).unwrap();
         assert_eq!(o.ended, Ended::Exited);
         assert!(o.success);
         assert!(start.elapsed() < Duration::from_secs(15));

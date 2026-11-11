@@ -3,7 +3,7 @@
 use super::supervisor::{self, Iteration};
 use super::watchdog::{self, Tracker};
 use super::{iteration_timeout, now, record, record_model, relativize, runs, snapshot, Activity, RunConfig};
-use crate::agent::runner::{self, Line, Outcome};
+use crate::agent::runner::{self, Line, Outcome, Report};
 use crate::agent::stream::{self, Event};
 use crate::events::Events;
 use serde_json::json;
@@ -85,6 +85,7 @@ pub fn run(app: &Events, key: &str, n: u32, cmd: std::process::Command, dir: &Pa
                 out.tail.pop_front();
             }
             live.line(text);
+            let busy = live.tracker.tool().is_some();
             let events = if is_err { vec![] } else { stream::parse_line(text) };
             if events.is_empty() && !text.trim_start().starts_with('{') && !text.trim().is_empty() {
                 if !is_err {
@@ -113,7 +114,7 @@ pub fn run(app: &Events, key: &str, n: u32, cmd: std::process::Command, dir: &Pa
                     Event::Session { .. } => {}
                 }
             }
-            finished
+            Report { finished, busy }
         },
         done,
     );

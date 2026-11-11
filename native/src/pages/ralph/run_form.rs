@@ -503,7 +503,7 @@ impl RalphPage {
                     .grid()
                     .grid_cols(2)
                     .gap(px(12.))
-                    .child(field("Idle timeout (min)", pkit::field("ralph-run-idle", &f.idle, window, cx), Some("no agent output this long kills its processes · 0 = off")))
+                    .child(field("Idle timeout (min)", pkit::field("ralph-run-idle", &f.idle, window, cx), Some("no agent output this long kills its processes (4× while a command runs) · 0 = off")))
                     .child(field("Exit grace (s)", pkit::field("ralph-run-grace", &f.grace, window, cx), Some("a finished agent still running after this is killed · 0 = off"))),
             )
             .child(
