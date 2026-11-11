@@ -460,9 +460,8 @@ impl RalphPage {
             if let Some(m) = r["model"].as_str() {
                 stats = stats.child(stat(m.to_string(), "model"));
             }
-            let cost = r["costUsd"].as_f64().unwrap_or(0.);
-            if cost > 0. {
-                stats = stats.child(stat(format!("${cost:.2}"), "cost"));
+            if let Some(s) = feed::spend(r) {
+                stats = stats.child(stat(s.clone(), if s.starts_with('$') { "cost" } else { "usage" }));
             }
             let start = r["startedAt"].as_u64().unwrap_or(now);
             stats = stats.child(stat(duration(r["finishedAt"].as_u64().unwrap_or(now).saturating_sub(start)), "time"));
@@ -619,11 +618,11 @@ impl RalphPage {
                 let ok = r["reason"]["kind"].as_str() == Some("complete");
                 let active = self.viewing.as_ref().is_some_and(|(v, _)| *v == id);
                 let commits = r["commits"].as_u64().unwrap_or(0);
-                let cost = r["costUsd"].as_f64().unwrap_or(0.);
+                let spend = feed::spend(r);
                 let when = r["startedAt"].as_i64().map(local_time).unwrap_or_default();
                 let mut meta = if running { "running".to_string() } else { format!("{commits} commit{}", if commits == 1 { "" } else { "s" }) };
-                if cost > 0. {
-                    meta += &format!(" · ${cost:.2}");
+                if let Some(s) = &spend {
+                    meta += &format!(" · {s}");
                 }
                 let rid = id.clone();
                 div()

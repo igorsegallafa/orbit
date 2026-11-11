@@ -94,6 +94,8 @@ pub struct RunState {
     pub total: usize,
     pub commits: u32,
     pub cost_usd: f64,
+    /// Tokens the agents reported (Codex reports no cost).
+    pub tokens: u64,
     pub limit_until: Option<u64>,
     /// The model the agent reported running (Claude's init line), latest
     /// iteration: proof of what ran, not just what was asked for.
@@ -367,7 +369,7 @@ impl RalphEnv for RealEnv {
                 it => it,
             },
         };
-        let (cost, duration, turns) = (run.cost(), run.duration_ms(), run.turns());
+        let (cost, duration, turns, tokens) = (run.cost(), run.duration_ms(), run.turns(), run.tokens());
 
         let after = self.prd();
         let newly = match (&after, &before) {
@@ -384,12 +386,13 @@ impl RalphEnv for RealEnv {
             &self.key,
             json!({
                 "kind": "iteration_end", "n": n, "outcome": format!("{iteration:?}"),
-                "commits": commits, "costUsd": cost, "durationMs": duration, "turns": turns,
+                "commits": commits, "costUsd": cost, "tokens": tokens, "durationMs": duration, "turns": turns,
                 "passed": passed, "total": total,
             }),
             |st| {
                 st.commits += commits;
                 st.cost_usd += cost.unwrap_or(0.0);
+                st.tokens += tokens.unwrap_or(0);
                 st.passed = passed;
                 st.total = total;
                 st.activity = Activity::default();
@@ -636,6 +639,7 @@ pub fn start(app: Events, workspace: String, repo: String, config: RunConfig) ->
                 total: prd.user_stories.len(),
                 commits: 0,
                 cost_usd: 0.0,
+                tokens: 0,
                 limit_until: None,
                 model: None,
                 config: config.clone(),

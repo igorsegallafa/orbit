@@ -315,6 +315,7 @@ pub mod fixture {
                 total: 0,
                 commits: 0,
                 cost_usd: 0.0,
+                tokens: 0,
                 limit_until: None,
                 model: None,
                 config: config.clone(),

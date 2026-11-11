@@ -226,7 +226,7 @@ impl RalphEnv for PlanEnv {
         let cmd = agent_command(&self.stub, || live_cmd(&self.ai, &prompt, Access::Full, None));
         let (outcome, run) = agent_run::run(&self.app, &self.key, n, cmd, &dir, &self.cfg, || watchdog::work_done(&dir, &head_before, &task.id, &[".orbit/"]));
         let full = run.full();
-        let (cost, duration, turns) = (run.cost(), run.duration_ms(), run.turns());
+        let (cost, duration, turns, tokens) = (run.cost(), run.duration_ms(), run.turns(), run.tokens());
         let mut iteration = match &outcome {
             Err(e) => Iteration::Failed(e.clone()),
             Ok(o) if cut_short(o) => {
@@ -274,12 +274,13 @@ impl RalphEnv for PlanEnv {
             &self.key,
             json!({
                 "kind": "iteration_end", "n": n, "outcome": format!("{iteration:?}"), "repo": repo,
-                "commits": commits, "costUsd": cost, "durationMs": duration, "turns": turns,
+                "commits": commits, "costUsd": cost, "tokens": tokens, "durationMs": duration, "turns": turns,
                 "passed": passed, "total": total,
             }),
             |st| {
                 st.commits += commits;
                 st.cost_usd += cost.unwrap_or(0.0);
+                st.tokens += tokens.unwrap_or(0);
                 st.passed = passed;
                 st.total = total;
                 st.activity = Activity::default();
@@ -406,6 +407,7 @@ pub fn start(app: Events, workspace: String, config: RunConfig) -> Result<(), St
                 total: items.len(),
                 commits: 0,
                 cost_usd: 0.0,
+                tokens: 0,
                 limit_until: None,
                 model: None,
                 config: config.clone(),

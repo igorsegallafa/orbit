@@ -21,14 +21,16 @@ pub enum Event {
         cost_usd: Option<f64>,
         duration_ms: Option<u64>,
         turns: Option<u64>,
+        /// Input plus output tokens of the run, when the agent reports them.
+        tokens: Option<u64>,
     },
     /// The conversation id to resume with (`--resume` / `--session`).
     Session { id: String },
     /// Claude: the model the CLI resolved and actually runs (its init line),
     /// which can differ from the alias Orbit asked for.
     Model { name: String },
-    /// OpenCode: cost of one step (Claude reports it in its Result).
-    Cost { usd: f64 },
+    /// OpenCode: cost and tokens of one step (Claude and Codex report them in their Result).
+    Cost { usd: f64, tokens: u64 },
 }
 
 /// Events in one stream line (a Claude assistant message can carry several
@@ -62,6 +64,7 @@ pub fn parse_line(line: &str) -> Vec<Event> {
             cost_usd: v.get("total_cost_usd").and_then(Value::as_f64),
             duration_ms: v.get("duration_ms").and_then(Value::as_u64),
             turns: v.get("num_turns").and_then(Value::as_u64),
+            tokens: usage_tokens(&v["usage"]),
         }],
         _ => vec![],
     }
@@ -94,8 +97,11 @@ fn opencode(v: &Value) -> Vec<Event> {
             out.push(Event::Tool { summary: summarize(&name, input), name });
         }
         Some("step_finish") => {
-            if let Some(usd) = part.get("cost").and_then(Value::as_f64).filter(|c| *c > 0.0) {
-                out.push(Event::Cost { usd });
+            let usd = part.get("cost").and_then(Value::as_f64).unwrap_or(0.0);
+            let t = &part["tokens"];
+            let tokens = [t["input"].as_u64(), t["output"].as_u64(), t["reasoning"].as_u64()].into_iter().flatten().sum();
+            if usd > 0.0 || tokens > 0 {
+                out.push(Event::Cost { usd, tokens });
             }
         }
         _ => {}
@@ -120,11 +126,19 @@ fn codex(v: &Value, kind: &str) -> Vec<Event> {
         }
         ("item.started", "mcp_tool_call") => Some(Event::Tool { name: s(&item["tool"]), summary: s(&item["server"]) }),
         ("item.started", "web_search") => Some(Event::Tool { name: "WebSearch".into(), summary: s(&item["query"]) }),
-        ("turn.completed", _) => Some(Event::Result { text: String::new(), is_error: false, cost_usd: None, duration_ms: None, turns: None }),
-        ("turn.failed", _) => Some(Event::Result { text: s(&v["error"]["message"]), is_error: true, cost_usd: None, duration_ms: None, turns: None }),
+        ("turn.completed", _) => Some(Event::Result { text: String::new(), is_error: false, cost_usd: None, duration_ms: None, turns: None, tokens: usage_tokens(&v["usage"]) }),
+        ("turn.failed", _) => Some(Event::Result { text: s(&v["error"]["message"]), is_error: true, cost_usd: None, duration_ms: None, turns: None, tokens: None }),
         _ => None,
     };
     event.into_iter().filter(|e| !matches!(e, Event::Text { text } | Event::Thinking { text } if text.is_empty())).collect()
+}
+
+/// Input (cached and cache writes included) plus output tokens of a Claude or
+/// Codex `usage` object.
+fn usage_tokens(usage: &Value) -> Option<u64> {
+    let keys = ["input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens"];
+    let n: u64 = keys.iter().filter_map(|k| usage[*k].as_u64()).sum();
+    (n > 0).then_some(n)
 }
 
 /// "/usr/bin/bash -lc 'cargo test'" → "cargo test": Codex wraps every command in a shell.
@@ -212,7 +226,8 @@ mod tests {
                 is_error: false,
                 cost_usd: Some(0.42),
                 duration_ms: Some(1000),
-                turns: Some(7)
+                turns: Some(7),
+                tokens: None
             }]
         );
         let s = r#"{"type":"system","subtype":"init","session_id":"abc-123"}"#;
@@ -231,7 +246,9 @@ mod tests {
         let x = r#"{"type":"text","sessionID":"ses_1","part":{"type":"text","text":" done. "}}"#;
         assert_eq!(parse_line(x), vec![Event::Session { id: "ses_1".into() }, Event::Text { text: "done.".into() }]);
         let f = r#"{"type":"step_finish","sessionID":"ses_1","part":{"type":"step-finish","cost":0.01}}"#;
-        assert_eq!(parse_line(f), vec![Event::Session { id: "ses_1".into() }, Event::Cost { usd: 0.01 }]);
+        assert_eq!(parse_line(f), vec![Event::Session { id: "ses_1".into() }, Event::Cost { usd: 0.01, tokens: 0 }]);
+        let t = r#"{"type":"step_finish","part":{"type":"step-finish","cost":0,"tokens":{"input":100,"output":20,"reasoning":5,"cache":{"read":0,"write":0}}}}"#;
+        assert_eq!(parse_line(t), vec![Event::Cost { usd: 0.0, tokens: 125 }]);
     }
 
     #[test]
@@ -250,7 +267,7 @@ mod tests {
             p(r#"{"type":"item.completed","item":{"id":"i","type":"file_change","changes":[{"path":"/w/a.rs","kind":"update"}],"status":"completed"}}"#),
             vec![Event::Tool { name: "Edit".into(), summary: "/w/a.rs".into() }]
         );
-        assert!(matches!(&p(r#"{"type":"turn.completed","usage":{"input_tokens":1}}"#)[..], [Event::Result { is_error: false, .. }]));
+        assert!(matches!(&p(r#"{"type":"turn.completed","usage":{"input_tokens":28209,"cached_input_tokens":23040,"output_tokens":43}}"#)[..], [Event::Result { is_error: false, tokens: Some(28252), .. }]));
         assert!(matches!(&p(r#"{"type":"turn.failed","error":{"message":"usage limit reached"}}"#)[..], [Event::Result { is_error: true, text, .. }] if text == "usage limit reached"));
         assert_eq!(unwrap_shell("ls -c foo"), "ls -c foo");
     }
