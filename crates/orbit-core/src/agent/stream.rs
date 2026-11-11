@@ -1,5 +1,6 @@
 // Parses the live event streams agents print when run headless:
-// Claude Code `--output-format stream-json` and OpenCode `run --format json`
+// Claude Code `--output-format stream-json`, OpenCode `run --format json` and
+// Codex `exec --json`
 // (one JSON object per line). What a UI feed needs: text, tool calls, the
 // session id (to continue the conversation) and the final result.
 use serde::Serialize;
@@ -13,7 +14,7 @@ pub enum Event {
     /// with --thinking): what fills the long pauses.
     Thinking { text: String },
     Tool { name: String, summary: String },
-    /// Claude only: its closing summary of the run.
+    /// The run's end: Claude's closing summary, Codex's turn end (no text).
     Result {
         text: String,
         is_error: bool,
@@ -36,6 +37,10 @@ pub fn parse_line(line: &str) -> Vec<Event> {
     let Ok(v) = serde_json::from_str::<Value>(line.trim()) else { return vec![] };
     if v.get("part").is_some() {
         return opencode(&v);
+    }
+    let kind = v.get("type").and_then(Value::as_str).unwrap_or("");
+    if kind.starts_with("thread.") || kind.starts_with("turn.") || kind.starts_with("item.") {
+        return codex(&v, kind);
     }
     match v.get("type").and_then(Value::as_str) {
         Some("system") => {
@@ -96,6 +101,39 @@ fn opencode(v: &Value) -> Vec<Event> {
         _ => {}
     }
     out
+}
+
+/// Codex `exec --json`: `thread.*`, `turn.*` and `item.*` events.
+fn codex(v: &Value, kind: &str) -> Vec<Event> {
+    let item = &v["item"];
+    let s = |val: &Value| val.as_str().unwrap_or("").trim().to_string();
+    let event = match (kind, item["type"].as_str().unwrap_or("")) {
+        ("thread.started", _) => Some(Event::Session { id: s(&v["thread_id"]) }),
+        ("item.started", "command_execution") => {
+            Some(Event::Tool { name: "Bash".into(), summary: summarize("Bash", &serde_json::json!({ "command": unwrap_shell(item["command"].as_str().unwrap_or("")) })) })
+        }
+        ("item.completed", "agent_message") => Some(Event::Text { text: s(&item["text"]) }),
+        ("item.completed", "reasoning") => Some(Event::Thinking { text: s(&item["text"]) }),
+        ("item.completed", "file_change") => {
+            let paths: Vec<&str> = item["changes"].as_array().into_iter().flatten().filter_map(|c| c["path"].as_str()).collect();
+            Some(Event::Tool { name: "Edit".into(), summary: paths.join(", ") })
+        }
+        ("item.started", "mcp_tool_call") => Some(Event::Tool { name: s(&item["tool"]), summary: s(&item["server"]) }),
+        ("item.started", "web_search") => Some(Event::Tool { name: "WebSearch".into(), summary: s(&item["query"]) }),
+        ("turn.completed", _) => Some(Event::Result { text: String::new(), is_error: false, cost_usd: None, duration_ms: None, turns: None }),
+        ("turn.failed", _) => Some(Event::Result { text: s(&v["error"]["message"]), is_error: true, cost_usd: None, duration_ms: None, turns: None }),
+        _ => None,
+    };
+    event.into_iter().filter(|e| !matches!(e, Event::Text { text } | Event::Thinking { text } if text.is_empty())).collect()
+}
+
+/// "/usr/bin/bash -lc 'cargo test'" → "cargo test": Codex wraps every command in a shell.
+fn unwrap_shell(cmd: &str) -> &str {
+    let shell = cmd.split_whitespace().next().is_some_and(|b| b.ends_with("sh"));
+    match cmd.split_once(" -lc ").or_else(|| cmd.split_once(" -c ")) {
+        Some((_, inner)) if shell => inner.trim().trim_matches(['\'', '"']),
+        _ => cmd,
+    }
 }
 
 /// OpenCode names tools in lowercase ("read", "bash"): Claude's casing, so
@@ -194,6 +232,27 @@ mod tests {
         assert_eq!(parse_line(x), vec![Event::Session { id: "ses_1".into() }, Event::Text { text: "done.".into() }]);
         let f = r#"{"type":"step_finish","sessionID":"ses_1","part":{"type":"step-finish","cost":0.01}}"#;
         assert_eq!(parse_line(f), vec![Event::Session { id: "ses_1".into() }, Event::Cost { usd: 0.01 }]);
+    }
+
+    #[test]
+    fn parses_codex_events() {
+        let p = |l: &str| parse_line(l);
+        assert_eq!(p(r#"{"type":"thread.started","thread_id":"t-1"}"#), vec![Event::Session { id: "t-1".into() }]);
+        assert!(p(r#"{"type":"turn.started"}"#).is_empty());
+        let cmd = r#"{"type":"item.started","item":{"id":"item_0","type":"command_execution","command":"/usr/bin/bash -lc 'cargo test'","status":"in_progress"}}"#;
+        assert_eq!(p(cmd), vec![Event::Tool { name: "Bash".into(), summary: "cargo test".into() }]);
+        assert!(p(&cmd.replace("item.started", "item.completed")).is_empty(), "a command shows once");
+        assert_eq!(
+            p(r#"{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"hello <task-done/>"}}"#),
+            vec![Event::Text { text: "hello <task-done/>".into() }]
+        );
+        assert_eq!(
+            p(r#"{"type":"item.completed","item":{"id":"i","type":"file_change","changes":[{"path":"/w/a.rs","kind":"update"}],"status":"completed"}}"#),
+            vec![Event::Tool { name: "Edit".into(), summary: "/w/a.rs".into() }]
+        );
+        assert!(matches!(&p(r#"{"type":"turn.completed","usage":{"input_tokens":1}}"#)[..], [Event::Result { is_error: false, .. }]));
+        assert!(matches!(&p(r#"{"type":"turn.failed","error":{"message":"usage limit reached"}}"#)[..], [Event::Result { is_error: true, text, .. }] if text == "usage limit reached"));
+        assert_eq!(unwrap_shell("ls -c foo"), "ls -c foo");
     }
 
     #[test]
