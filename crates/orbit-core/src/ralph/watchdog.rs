@@ -150,6 +150,12 @@ pub fn check(dir: &Path, head_before: &Option<String>, id: &str, ignore: &[&str]
     }
 }
 
+/// The story's commit is in and nothing else is left uncommitted: the
+/// iteration's work is done, whatever the agent prints or whether it exits.
+pub fn work_done(dir: &Path, head_before: &Option<String>, id: &str, ignore: &[&str]) -> bool {
+    story_committed(dir, head_before, id) && tree_clean(dir, ignore)
+}
+
 fn story_committed(dir: &Path, from: &Option<String>, id: &str) -> bool {
     let range = from.as_ref().map(|f| format!("{f}..HEAD")).unwrap_or_else(|| "HEAD".into());
     let prefix = format!("feat: [{id}]");

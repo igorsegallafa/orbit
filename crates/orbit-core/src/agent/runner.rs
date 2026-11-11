@@ -78,7 +78,8 @@ pub fn terminate_tree(child: &mut Child, grace: Duration) {
 pub struct Watch {
     /// Kill the tree when no output line arrives for this long.
     pub idle: Option<Duration>,
-    /// Kill the tree this long after `on_line` reported the run finished.
+    /// Kill the tree this long after the run reported it finished
+    /// (`on_line`) or was found done (`done`).
     pub exit_grace: Option<Duration>,
 }
 
@@ -95,6 +96,8 @@ pub enum Ended {
 const TERM_GRACE: Duration = Duration::from_secs(5);
 /// How long a watched leader's children may hold the pipes after it exits.
 const ORPHAN_GRACE: Duration = Duration::from_secs(2);
+/// How often `run_watched` asks `done`.
+const DONE_POLL: Duration = Duration::from_secs(3);
 
 pub enum Line {
     Out(String),
@@ -124,10 +127,18 @@ pub fn run_streaming(
     mut on_line: impl FnMut(Line),
 ) -> Result<Outcome, String> {
     let program = cmd.get_program().to_string_lossy().to_string();
-    let o = run_watched(cmd, dir, timeout, id, Watch::default(), |l| {
-        on_line(l);
-        false
-    })?;
+    let o = run_watched(
+        cmd,
+        dir,
+        timeout,
+        id,
+        Watch::default(),
+        |l| {
+            on_line(l);
+            false
+        },
+        || false,
+    )?;
     if o.ended == Ended::Timeout {
         return Err(format!("{program} timed out after {}s", timeout.as_secs()));
     }
@@ -135,7 +146,9 @@ pub fn run_streaming(
 }
 
 /// `run_streaming` with `watch`'s stop rules: `on_line` returns true once
-/// the run reported it is finished, and a timeout is an `Ended`, not an error.
+/// the run reported it is finished, `done` (asked every few seconds) once
+/// its work is found finished, whatever it prints; a timeout is an `Ended`,
+/// not an error.
 pub fn run_watched(
     mut cmd: Command,
     dir: &Path,
@@ -143,6 +156,7 @@ pub fn run_watched(
     id: Option<&str>,
     watch: Watch,
     mut on_line: impl FnMut(Line) -> bool,
+    mut done: impl FnMut() -> bool,
 ) -> Result<Outcome, String> {
     // PWD too: opencode takes its project directory from it, and the one
     // inherited from wherever Orbit was launched would win over current_dir.
@@ -193,6 +207,9 @@ pub fn run_watched(
     let mut ended = Ended::Exited;
     let mut last_line = Instant::now();
     let mut finished_at: Option<Instant> = None;
+    // From `done`: cleared when it stops holding (the agent went back to work).
+    let mut found_done_at: Option<Instant> = None;
+    let mut polled_at = Instant::now();
     let mut leader_gone: Option<Instant> = None;
     let mut orphans_killed = false;
     // Lines keep flowing until both pipes close (process exit or kill).
@@ -221,11 +238,15 @@ pub fn run_watched(
             continue;
         }
         let now = Instant::now();
+        if watch.exit_grace.is_some() && finished_at.is_none() && now - polled_at >= DONE_POLL {
+            polled_at = now;
+            found_done_at = if done() { found_done_at.or(Some(now)) } else { None };
+        }
         let stop = if now > deadline {
             Some(Ended::Timeout)
         } else if watch.idle.is_some_and(|d| now - last_line > d) {
             Some(Ended::Idle)
-        } else if finished_at.zip(watch.exit_grace).is_some_and(|(t, d)| now - t > d) {
+        } else if finished_at.or(found_done_at).zip(watch.exit_grace).is_some_and(|(t, d)| now - t > d) {
             Some(Ended::ExitGrace)
         } else {
             None
@@ -346,7 +367,7 @@ mod tests {
     fn idle_watch_kills_the_whole_group() {
         let watch = Watch { idle: Some(Duration::from_millis(600)), exit_grace: None };
         let start = Instant::now();
-        let o = run_watched(shell("echo hi; sleep 30 & sleep 30"), &std::env::temp_dir(), Duration::from_secs(60), None, watch, |_| false).unwrap();
+        let o = run_watched(shell("echo hi; sleep 30 & sleep 30"), &std::env::temp_dir(), Duration::from_secs(60), None, watch, |_| false, || false).unwrap();
         assert_eq!(o.ended, Ended::Idle);
         assert!(!o.success);
         assert!(start.elapsed() < Duration::from_secs(10));
@@ -359,7 +380,7 @@ mod tests {
         let watch = Watch { idle: Some(Duration::from_secs(60)), exit_grace: Some(Duration::from_millis(500)) };
         let o = run_watched(shell("echo done; sleep 30"), &std::env::temp_dir(), Duration::from_secs(60), None, watch, |l| {
             matches!(l, Line::Out(s) if s == "done")
-        })
+        }, || false)
         .unwrap();
         assert_eq!(o.ended, Ended::ExitGrace);
         assert!(!group_alive(o.pid));
@@ -367,10 +388,25 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn exit_grace_also_starts_when_the_work_is_found_done() {
+        let watch = Watch { idle: Some(Duration::from_secs(60)), exit_grace: Some(Duration::from_millis(500)) };
+        let marker = std::env::temp_dir().join(format!("orbit-done-{}", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        let script = format!("touch '{}'; sleep 30", marker.display());
+        let start = Instant::now();
+        let o = run_watched(shell(&script), &std::env::temp_dir(), Duration::from_secs(60), None, watch, |_| false, || marker.exists()).unwrap();
+        assert_eq!(o.ended, Ended::ExitGrace);
+        assert!(start.elapsed() < Duration::from_secs(15), "{:?}", start.elapsed());
+        assert!(!group_alive(o.pid));
+        let _ = std::fs::remove_file(&marker);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn watched_run_reaps_children_left_holding_the_pipes() {
         let watch = Watch { idle: Some(Duration::from_secs(60)), exit_grace: None };
         let start = Instant::now();
-        let o = run_watched(shell("sleep 30 & echo bye"), &std::env::temp_dir(), Duration::from_secs(60), None, watch, |_| false).unwrap();
+        let o = run_watched(shell("sleep 30 & echo bye"), &std::env::temp_dir(), Duration::from_secs(60), None, watch, |_| false, || false).unwrap();
         assert_eq!(o.ended, Ended::Exited);
         assert!(o.success);
         assert!(start.elapsed() < Duration::from_secs(15));

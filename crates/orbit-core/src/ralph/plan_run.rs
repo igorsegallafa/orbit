@@ -288,6 +288,7 @@ impl RalphEnv for PlanEnv {
                 }
                 finished
             },
+            || watchdog::work_done(&dir, &head_before, &task.id, &[".orbit/"]),
         );
 
         let (res_text, res_error, cost, duration, turns) = result.clone().unwrap_or_default();
@@ -661,6 +662,19 @@ mod tests {
             assert!(c.kinds().contains(&"story_passed".to_string()));
             assert!(c.ticked());
             assert!(c.pushed());
+            assert!(group_empty(&pgid(&c.root)));
+        }
+
+        #[test]
+        fn a_silent_agent_is_found_done_by_its_commit() {
+            // No result line (omp, OpenCode): the commit alone says the task is done.
+            let cfg = RunConfig { idle_timeout_min: 10.0, ..quick() };
+            let mut c = case("silent", cfg, &format!("{COMMIT_T1}\necho 'Implemented it.'\nsleep 1200 &\nwait"));
+            let start = Instant::now();
+            assert_eq!(c.env.run_iteration(1), Iteration::Recovered);
+            // A done poll, the exit grace and the SIGTERM round trip, not the 10 min idle.
+            assert!(start.elapsed() < Duration::from_secs(12), "{:?}", start.elapsed());
+            assert!(c.ticked());
             assert!(group_empty(&pgid(&c.root)));
         }
 
