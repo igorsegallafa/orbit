@@ -1,6 +1,7 @@
 // Ralph: an autonomous loop that implements a PRD one user story per agent
 // iteration (snarktank/ralph pattern), run natively by Orbit so every tool
 // call is visible live instead of only when a story finishes.
+mod agent_run;
 mod plan_run;
 pub mod prd;
 mod prompts;
@@ -18,11 +19,10 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use crate::agent::stream::{self, Event};
 use supervisor::{Iteration, RalphEnv};
 pub use supervisor::{Limits, StopReason};
 pub use watchdog::Activity;
-use watchdog::{Check, Tracker};
+use watchdog::Check;
 use crate::events::Events;
 
 const MAX_EVENTS_IN_MEMORY: usize = 600;
@@ -209,36 +209,6 @@ fn save_summary(key: &str) {
     }
 }
 
-/// Per-line bookkeeping shared by both run kinds: the activity the UI
-/// shows, emitted on `ralph-activity` when it changes or every few seconds.
-struct Live {
-    app: Events,
-    key: String,
-    root: String,
-    tracker: Tracker,
-    emitted_at: u64,
-}
-
-impl Live {
-    fn new(app: &Events, key: &str, root: &str) -> Self {
-        Live { app: app.clone(), key: key.to_string(), root: root.to_string(), tracker: Tracker::default(), emitted_at: 0 }
-    }
-
-    fn line(&mut self, text: &str) {
-        let root = &self.root;
-        let changed = self.tracker.line(text, |s| relativize(s, root));
-        let t = now();
-        let activity = Activity { last_event_at: Some(t), tool: self.tracker.tool(), background: self.tracker.background() };
-        if let Some(st) = runs().lock().unwrap().get_mut(&self.key) {
-            st.activity = activity.clone();
-        }
-        if changed || t >= self.emitted_at + 5 {
-            self.emitted_at = t;
-            let _ = self.app.emit("ralph-activity", json!({ "key": self.key, "activity": activity }));
-        }
-    }
-}
-
 fn iteration_timeout(cfg: &RunConfig) -> Duration {
     Duration::from_secs(cfg.iteration_timeout_min.max(1) * 60)
 }
@@ -382,104 +352,22 @@ impl RalphEnv for RealEnv {
             );
             live_cmd(&self.ai, &prompt, Access::Full, None)
         });
-        let run_dir = snapshot(&self.key).map(|s| s.dir).unwrap_or_default();
-        let mut raw_log = std::fs::File::create(run_dir.join(format!("iter-{n}.log"))).ok();
-        let mut result: Option<Event> = None;
-        let mut texts: Vec<String> = Vec::new();
-        let mut step_cost = 0.0;
-        let mut tail: VecDeque<String> = VecDeque::new();
-        let (app, key) = (self.app.clone(), self.key.clone());
-        let root = self.dir.to_string_lossy().to_string();
-        let mut live = Live::new(&app, &key, &root);
-
-        let outcome = runner::run_watched(
-            cmd,
-            &self.dir,
-            iteration_timeout(&self.cfg),
-            Some(&format!("ralph:{}", self.key)),
-            watchdog::watch(&self.cfg),
-            |line| {
-                let (text, is_err) = match &line {
-                    Line::Out(l) => (l.as_str(), false),
-                    Line::Err(l) => (l.as_str(), true),
-                };
-                if let Some(f) = raw_log.as_mut() {
-                    let _ = writeln!(f, "{}{text}", if is_err { "[stderr] " } else { "" });
-                }
-                tail.push_back(text.to_string());
-                if tail.len() > 10 {
-                    tail.pop_front();
-                }
-                live.line(text);
-                let events = if is_err { vec![] } else { stream::parse_line(text) };
-                if events.is_empty() && !text.trim_start().starts_with('{') && !text.trim().is_empty() {
-                    if !is_err {
-                        texts.push(text.to_string());
-                    }
-                    record(&app, &key, json!({"kind": "log", "text": text, "stderr": is_err}), |_| {});
-                }
-                let mut finished = false;
-                for e in events {
-                    match &e {
-                        Event::Result { .. } => {
-                            finished = true;
-                            result = Some(e)
-                        }
-                        Event::Text { text } => {
-                            texts.push(text.clone());
-                            record(&app, &key, json!({"kind": "text", "text": text}), |_| {})
-                        }
-                        Event::Thinking { text } => record(&app, &key, json!({"kind": "thinking", "text": text}), |_| {}),
-                        Event::Cost { usd } => step_cost += usd,
-                        Event::Tool { name, summary } => {
-                            let summary = relativize(summary, &root);
-                            record(&app, &key, json!({"kind": "tool", "name": name, "summary": summary}), |_| {})
-                        }
-                        Event::Model { name } => record_model(&app, &key, name),
-                        Event::Session { .. } => {}
-                    }
-                }
-                finished
-            },
-            || story.as_ref().is_some_and(|(id, _)| watchdog::work_done(&self.dir, &head_before, id, PRD_IGNORED)),
-        );
-
-        let (res_text, res_error, cost, duration, turns) = match &result {
-            Some(Event::Result { text, is_error, cost_usd, duration_ms, turns }) => {
-                (text.clone(), *is_error, *cost_usd, *duration_ms, *turns)
-            }
-            _ => (String::new(), false, None, None, None),
-        };
-        let cost = cost.or((step_cost > 0.0).then_some(step_cost));
-        let full = if res_text.trim().is_empty() { texts.join("\n") } else { res_text.clone() };
-        let tail_text = tail.iter().cloned().collect::<Vec<_>>().join("\n");
+        let (outcome, run) = agent_run::run(&self.app, &self.key, n, cmd, &self.dir, &self.cfg, || {
+            story.as_ref().is_some_and(|(id, _)| watchdog::work_done(&self.dir, &head_before, id, PRD_IGNORED))
+        });
         let iteration = match &outcome {
             Err(e) => Iteration::Failed(e.clone()),
             Ok(o) if cut_short(o) => {
                 record_ending(&self.app, &self.key, n, o, &self.cfg);
-                let last = texts.last().cloned().unwrap_or_default();
-                let message = if res_text.trim().is_empty() { &last } else { &res_text };
-                self.reconcile(story.as_ref().map(|(id, _)| id.as_str()), &head_before, message, res_error, o.cancelled)
+                self.reconcile(story.as_ref().map(|(id, _)| id.as_str()), &head_before, &run.last_message(), run.is_error(), o.cancelled)
             }
-            Ok(o) => {
-                let limited = if result.is_some() {
-                    res_error && supervisor::looks_like_limit(&res_text)
-                } else {
-                    // A clean exit isn't a limit, whatever the last lines say.
-                    !o.success && supervisor::looks_like_limit(&tail_text)
-                };
-                if limited {
-                    Iteration::Limit
-                } else if full.contains("<promise>COMPLETE</promise>") {
-                    Iteration::Complete
-                } else if !o.success || res_error {
-                    let msg = if res_text.trim().is_empty() { tail_text.clone() } else { res_text.clone() };
-                    Iteration::Failed(msg.chars().take(400).collect())
-                } else {
-                    Iteration::Done
-                }
-            }
+            Ok(o) => match run.exited(o) {
+                Iteration::Limit => Iteration::Limit,
+                _ if run.full().contains("<promise>COMPLETE</promise>") => Iteration::Complete,
+                it => it,
+            },
         };
+        let (cost, duration, turns) = (run.cost(), run.duration_ms(), run.turns());
 
         let after = self.prd();
         let newly = match (&after, &before) {

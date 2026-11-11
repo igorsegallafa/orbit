@@ -6,17 +6,14 @@
 use super::prd::{Prd, Story};
 use super::supervisor::{self, Iteration, RalphEnv};
 use super::{
-    agent_command, cut_short, human_time, iteration_timeout, now, prompts, reconciled, record, record_ending, relativize, runs, runs_dir,
-    save_summary, snapshot, watchdog, Activity, Live, RalphState, RunConfig, RunState,
+    agent_command, agent_run, cut_short, human_time, now, prompts, reconciled, record, record_ending, runs, runs_dir, save_summary, snapshot,
+    watchdog, Activity, RalphState, RunConfig, RunState,
 };
 use crate::agent::plan::{parse_plan, PlanItem};
-use crate::agent::runner::{self, Line};
-use crate::agent::stream::{self, Event};
 use crate::agent::{live_cmd, set_task_in_content, Access, PLAN_FILE};
 use crate::config::{AiSettings, Config};
 use serde_json::json;
 use std::collections::{HashMap, VecDeque};
-use std::io::Write;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use crate::events::Events;
@@ -31,9 +28,6 @@ fn blocked_reason(text: &str) -> Option<String> {
     let reason = rest.split("</task-blocked>").next().unwrap_or(rest).trim();
     Some(if reason.is_empty() { "the agent gave no reason".to_string() } else { reason.chars().take(1200).collect() })
 }
-
-/// Claude's closing result: text, is_error, cost, duration ms, turns.
-type RunResult = (String, bool, Option<f64>, Option<u64>, Option<u64>);
 
 fn plan_path(ws_dir: &std::path::Path) -> PathBuf {
     ws_dir.join(PLAN_FILE)
@@ -229,78 +223,15 @@ impl RalphEnv for PlanEnv {
             &self.cfg.extra_instructions,
         );
 
-        let run_dir = snapshot(&self.key).map(|s| s.dir).unwrap_or_default();
-        let mut raw_log = std::fs::File::create(run_dir.join(format!("iter-{n}.log"))).ok();
-        let mut result: Option<RunResult> = None;
-        let mut texts: Vec<String> = Vec::new();
-        let mut step_cost = 0.0;
-        let mut tail: VecDeque<String> = VecDeque::new();
-        let (app, key) = (self.app.clone(), self.key.clone());
-        let root = dir.to_string_lossy().to_string();
-        let mut live = Live::new(&app, &key, &root);
-
-        let outcome = runner::run_watched(
-            agent_command(&self.stub, || live_cmd(&self.ai, &prompt, Access::Full, None)),
-            &dir,
-            iteration_timeout(&self.cfg),
-            Some(&format!("ralph:{}", self.key)),
-            watchdog::watch(&self.cfg),
-            |line| {
-                let (text, is_err) = match &line {
-                    Line::Out(l) => (l.as_str(), false),
-                    Line::Err(l) => (l.as_str(), true),
-                };
-                if let Some(f) = raw_log.as_mut() {
-                    let _ = writeln!(f, "{}{text}", if is_err { "[stderr] " } else { "" });
-                }
-                tail.push_back(text.to_string());
-                if tail.len() > 10 {
-                    tail.pop_front();
-                }
-                live.line(text);
-                let events = if is_err { vec![] } else { stream::parse_line(text) };
-                if events.is_empty() && !text.trim_start().starts_with('{') && !text.trim().is_empty() {
-                    if !is_err {
-                        texts.push(text.to_string());
-                    }
-                    record(&app, &key, json!({"kind": "log", "text": text, "stderr": is_err}), |_| {});
-                }
-                let mut finished = false;
-                for e in events {
-                    match e {
-                        Event::Result { text, is_error, cost_usd, duration_ms, turns } => {
-                            finished = true;
-                            result = Some((text, is_error, cost_usd, duration_ms, turns))
-                        }
-                        Event::Text { text } => {
-                            record(&app, &key, json!({"kind": "text", "text": text}), |_| {});
-                            texts.push(text);
-                        }
-                        Event::Thinking { text } => record(&app, &key, json!({"kind": "thinking", "text": text}), |_| {}),
-                        Event::Tool { name, summary } => {
-                            let summary = relativize(&summary, &root);
-                            record(&app, &key, json!({"kind": "tool", "name": name, "summary": summary}), |_| {})
-                        }
-                        Event::Cost { usd } => step_cost += usd,
-                        Event::Model { name } => super::record_model(&app, &key, &name),
-                        Event::Session { .. } => {}
-                    }
-                }
-                finished
-            },
-            || watchdog::work_done(&dir, &head_before, &task.id, &[".orbit/"]),
-        );
-
-        let (res_text, res_error, cost, duration, turns) = result.clone().unwrap_or_default();
-        let cost = cost.or((step_cost > 0.0).then_some(step_cost));
-        let full = if res_text.trim().is_empty() { texts.join("\n") } else { res_text.clone() };
-        let tail_text = tail.iter().cloned().collect::<Vec<_>>().join("\n");
+        let cmd = agent_command(&self.stub, || live_cmd(&self.ai, &prompt, Access::Full, None));
+        let (outcome, run) = agent_run::run(&self.app, &self.key, n, cmd, &dir, &self.cfg, || watchdog::work_done(&dir, &head_before, &task.id, &[".orbit/"]));
+        let full = run.full();
+        let (cost, duration, turns) = (run.cost(), run.duration_ms(), run.turns());
         let mut iteration = match &outcome {
             Err(e) => Iteration::Failed(e.clone()),
             Ok(o) if cut_short(o) => {
                 record_ending(&self.app, &self.key, n, o, &self.cfg);
-                let message = if res_text.trim().is_empty() { texts.last().cloned().unwrap_or_default() } else { res_text.clone() };
-                let c = watchdog::check(&dir, &head_before, &task.id, &[".orbit/"], &message, res_error);
+                let c = watchdog::check(&dir, &head_before, &task.id, &[".orbit/"], &run.last_message(), run.is_error());
                 let it = reconciled(&self.app, &self.key, &task.id, &c, o.cancelled);
                 if it == Iteration::Recovered {
                     match self.mark_done(task.index) {
@@ -310,21 +241,7 @@ impl RalphEnv for PlanEnv {
                 }
                 it
             }
-            Ok(o) => {
-                let limited = if result.is_some() {
-                    res_error && supervisor::looks_like_limit(&res_text)
-                } else {
-                    !o.success && supervisor::looks_like_limit(&tail_text)
-                };
-                if limited {
-                    Iteration::Limit
-                } else if !o.success || res_error {
-                    let msg = if res_text.trim().is_empty() { tail_text.clone() } else { res_text.clone() };
-                    Iteration::Failed(msg.chars().take(400).collect())
-                } else {
-                    Iteration::Done
-                }
-            }
+            Ok(o) => run.exited(o),
         };
 
         let commits = self.commits_since(&repo, &head_before);
