@@ -3,7 +3,7 @@
 use super::supervisor::{self, Iteration};
 use super::watchdog::{self, Tracker};
 use super::{iteration_timeout, now, record, record_model, relativize, runs, snapshot, Activity, RunConfig};
-use crate::agent::runner::{self, Line, Outcome};
+use crate::agent::runner::{self, Line, Outcome, Report};
 use crate::agent::stream::{self, Event};
 use crate::events::Events;
 use serde_json::json;
@@ -44,6 +44,7 @@ struct Closing {
     cost_usd: Option<f64>,
     duration_ms: Option<u64>,
     turns: Option<u64>,
+    tokens: Option<u64>,
 }
 
 /// What the agent printed.
@@ -53,6 +54,7 @@ pub struct AgentRun {
     /// Its messages, and plain-text agents' stdout lines.
     texts: Vec<String>,
     step_cost: f64,
+    step_tokens: u64,
     /// The last lines, stdout and stderr.
     tail: VecDeque<String>,
 }
@@ -85,6 +87,7 @@ pub fn run(app: &Events, key: &str, n: u32, cmd: std::process::Command, dir: &Pa
                 out.tail.pop_front();
             }
             live.line(text);
+            let busy = live.tracker.tool().is_some();
             let events = if is_err { vec![] } else { stream::parse_line(text) };
             if events.is_empty() && !text.trim_start().starts_with('{') && !text.trim().is_empty() {
                 if !is_err {
@@ -95,9 +98,9 @@ pub fn run(app: &Events, key: &str, n: u32, cmd: std::process::Command, dir: &Pa
             let mut finished = false;
             for e in events {
                 match e {
-                    Event::Result { text, is_error, cost_usd, duration_ms, turns } => {
+                    Event::Result { text, is_error, cost_usd, duration_ms, turns, tokens } => {
                         finished = true;
-                        out.result = Some(Closing { text, is_error, cost_usd, duration_ms, turns });
+                        out.result = Some(Closing { text, is_error, cost_usd, duration_ms, turns, tokens });
                     }
                     Event::Text { text } => {
                         record(app, key, json!({"kind": "text", "text": text}), |_| {});
@@ -108,12 +111,15 @@ pub fn run(app: &Events, key: &str, n: u32, cmd: std::process::Command, dir: &Pa
                         let summary = relativize(&summary, &root);
                         record(app, key, json!({"kind": "tool", "name": name, "summary": summary}), |_| {})
                     }
-                    Event::Cost { usd } => out.step_cost += usd,
+                    Event::Cost { usd, tokens } => {
+                        out.step_cost += usd;
+                        out.step_tokens += tokens;
+                    }
                     Event::Model { name } => record_model(app, key, &name),
                     Event::Session { .. } => {}
                 }
             }
-            finished
+            Report { finished, busy }
         },
         done,
     );
@@ -131,6 +137,10 @@ impl AgentRun {
 
     pub fn cost(&self) -> Option<f64> {
         self.result.as_ref().and_then(|r| r.cost_usd).or((self.step_cost > 0.0).then_some(self.step_cost))
+    }
+
+    pub fn tokens(&self) -> Option<u64> {
+        self.result.as_ref().and_then(|r| r.tokens).or((self.step_tokens > 0).then_some(self.step_tokens))
     }
 
     pub fn duration_ms(&self) -> Option<u64> {
