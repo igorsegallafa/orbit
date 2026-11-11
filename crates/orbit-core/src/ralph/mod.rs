@@ -28,6 +28,8 @@ use crate::events::Events;
 const MAX_EVENTS_IN_MEMORY: usize = 600;
 const GENERATE_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const INTERVIEW_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+/// Orbit's and Ralph's own files: they don't count as uncommitted work.
+const PRD_IGNORED: &[&str] = &[".orbit/", "scripts/ralph/"];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -337,7 +339,7 @@ impl RealEnv {
     /// prd.json box is ticked here when the agent didn't get to it.
     fn reconcile(&self, story: Option<&str>, head_before: &Option<String>, message: &str, is_error: bool, cancelled: bool) -> Iteration {
         let Some(id) = story else { return if cancelled { Iteration::Cancelled } else { Iteration::Stalled } };
-        let c = watchdog::check(&self.dir, head_before, id, &[".orbit/", "scripts/ralph/"], message, is_error);
+        let c = watchdog::check(&self.dir, head_before, id, PRD_IGNORED, message, is_error);
         let it = reconciled(&self.app, &self.key, id, &c, cancelled);
         if it == Iteration::Recovered {
             if let Some(mut p) = self.prd() {
@@ -439,6 +441,7 @@ impl RalphEnv for RealEnv {
                 }
                 finished
             },
+            || story.as_ref().is_some_and(|(id, _)| watchdog::work_done(&self.dir, &head_before, id, PRD_IGNORED)),
         );
 
         let (res_text, res_error, cost, duration, turns) = match &result {
