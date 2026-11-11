@@ -38,16 +38,7 @@ pub fn agent_args(ai: &AiSettings, prompt: &str, access: Access, stream_json: bo
                 a.push("--auto".into());
             }
         }
-        "codex" => {
-            // Temp-dir runs (test_agent) aren't git repos; exec refuses those by default.
-            a.extend(["exec".into(), "--skip-git-repo-check".into()]);
-            a.extend(match access {
-                Access::Answer | Access::ReadOnly => vec!["--sandbox".into(), "read-only".into()],
-                Access::Edit => vec!["--sandbox".into(), "workspace-write".into()],
-                Access::Full => vec!["--dangerously-bypass-approvals-and-sandbox".into()],
-            });
-            a.extend(["--model".into(), ai.model.clone()]);
-        }
+        "codex" => a = codex_args(ai, access, false),
         "omp" => {
             a.push("-p".into());
             if access.writes() {
@@ -74,13 +65,38 @@ pub fn agent_args(ai: &AiSettings, prompt: &str, access: Access, stream_json: bo
     a
 }
 
+/// `codex exec` (or `exec resume`) up to the prompt.
+fn codex_args(ai: &AiSettings, access: Access, resume: bool) -> Vec<String> {
+    let mut a: Vec<String> = vec!["exec".into()];
+    if resume {
+        a.push("resume".into());
+    }
+    // Temp-dir runs (test_agent) aren't git repos; exec refuses those by default.
+    a.push("--skip-git-repo-check".into());
+    // The config key rather than --sandbox, which `exec resume` doesn't take.
+    a.extend(match access {
+        Access::Answer | Access::ReadOnly => vec!["-c".into(), r#"sandbox_mode="read-only""#.into()],
+        Access::Edit => vec!["-c".into(), r#"sandbox_mode="workspace-write""#.into()],
+        Access::Full => vec!["--dangerously-bypass-approvals-and-sandbox".into()],
+    });
+    a.extend(["--model".into(), ai.model.clone()]);
+    a
+}
+
 /// Argv for a headless run whose progress shows live: one JSON event per
-/// line from claude (stream-json) and opencode (--format json); omp prints
-/// text. `resume` continues an earlier conversation of the same agent.
-/// No sub-agents: their steps never reach the stream, so a run delegating
-/// its exploration looked frozen for minutes.
+/// line from claude (stream-json), opencode (--format json) and codex
+/// (--json); omp prints text. `resume` continues an earlier conversation of
+/// the same agent. No sub-agents: their steps never reach the stream, so a
+/// run delegating its exploration looked frozen for minutes.
 pub fn live_args(ai: &AiSettings, prompt: &str, access: Access, resume: Option<&str>) -> Vec<String> {
     let bin = ai.agent_bin();
+    if bin == "codex" {
+        let mut a = codex_args(ai, access, resume.is_some());
+        a.push("--json".into());
+        a.extend(resume.map(String::from));
+        a.push(prompt.to_string());
+        return a;
+    }
     let mut a = agent_args(ai, prompt, access, bin == "claude");
     let prompt_arg = a.pop().unwrap_or_default();
     if bin == "claude" {
@@ -191,8 +207,8 @@ mod tests {
         assert_eq!(agent_args(&ai("omp"), "hi", Access::ReadOnly, false), ["-p", "--model", "m", "hi"]);
         assert_eq!(agent_args(&ai("omp"), "hi", Access::Full, false), ["-p", "--auto-approve", "--model", "m", "hi"]);
         let codex = |access| agent_args(&ai("codex"), "hi", access, false);
-        assert_eq!(codex(Access::ReadOnly), ["exec", "--skip-git-repo-check", "--sandbox", "read-only", "--model", "m", "hi"]);
-        assert_eq!(codex(Access::Edit), ["exec", "--skip-git-repo-check", "--sandbox", "workspace-write", "--model", "m", "hi"]);
+        assert_eq!(codex(Access::ReadOnly), ["exec", "--skip-git-repo-check", "-c", r#"sandbox_mode="read-only""#, "--model", "m", "hi"]);
+        assert_eq!(codex(Access::Edit), ["exec", "--skip-git-repo-check", "-c", r#"sandbox_mode="workspace-write""#, "--model", "m", "hi"]);
         assert_eq!(codex(Access::Full)[2], "--dangerously-bypass-approvals-and-sandbox");
     }
 
@@ -207,6 +223,14 @@ mod tests {
             ["run", "--model", "m", "--auto", "--session", "ses_1", "--format", "json", "--thinking", "hi"]
         );
         assert_eq!(live_args(&ai("omp"), "hi", Access::ReadOnly, Some("x")), ["-p", "--model", "m", "hi"]);
+        assert_eq!(
+            live_args(&ai("codex"), "hi", Access::Full, None),
+            ["exec", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", "--model", "m", "--json", "hi"]
+        );
+        assert_eq!(
+            live_args(&ai("codex"), "hi", Access::ReadOnly, Some("t1")),
+            ["exec", "resume", "--skip-git-repo-check", "-c", r#"sandbox_mode="read-only""#, "--model", "m", "--json", "t1", "hi"]
+        );
     }
 
     #[test]

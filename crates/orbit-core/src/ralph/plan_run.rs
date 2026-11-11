@@ -257,9 +257,7 @@ impl RalphEnv for PlanEnv {
                 if tail.len() > 10 {
                     tail.pop_front();
                 }
-                if !is_err {
-                    live.line(text);
-                }
+                live.line(text);
                 let events = if is_err { vec![] } else { stream::parse_line(text) };
                 if events.is_empty() && !text.trim_start().starts_with('{') && !text.trim().is_empty() {
                     if !is_err {

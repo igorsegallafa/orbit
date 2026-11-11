@@ -4,7 +4,7 @@
 use super::supervisor::looks_like_limit;
 use super::RunConfig;
 use crate::agent::runner::Watch;
-use crate::agent::stream::summarize;
+use crate::agent::stream::{parse_line, summarize, Event};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -23,7 +23,7 @@ pub struct Activity {
     pub background: Vec<String>,
 }
 
-/// Follows tool calls and background shells through Claude's stream-json.
+/// Follows tool calls (Claude's stream-json, Codex's items) and Claude's background shells.
 #[derive(Default)]
 pub struct Tracker {
     /// tool_use id → label, oldest first.
@@ -67,7 +67,17 @@ impl Tracker {
                     }
                 }
             }
-            Some("result") => self.pending.clear(),
+            Some("result") | Some("turn.completed") | Some("turn.failed") => self.pending.clear(),
+            // Codex: a tool runs from its item.started to its item.completed.
+            Some("item.started") => {
+                for e in summarize_codex(line) {
+                    self.pending.push((v["item"]["id"].as_str().unwrap_or("").to_string(), relativize(&e)));
+                }
+            }
+            Some("item.completed") => {
+                let id = v["item"]["id"].as_str().unwrap_or("");
+                self.pending.retain(|(p, _)| p != id);
+            }
             _ => {}
         }
         before != (self.tool(), self.background())
@@ -80,6 +90,17 @@ impl Tracker {
     pub fn background(&self) -> Vec<String> {
         self.shells.iter().map(|(_, c)| c.clone()).collect()
     }
+}
+
+/// "Bash: cargo test" for each tool a Codex line starts.
+fn summarize_codex(line: &str) -> Vec<String> {
+    parse_line(line)
+        .into_iter()
+        .filter_map(|e| match e {
+            Event::Tool { name, summary } => Some(format!("{name}: {summary}")),
+            _ => None,
+        })
+        .collect()
 }
 
 fn result_text(content: &Value) -> String {
@@ -188,6 +209,13 @@ mod tests {
         t.line(r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t3","name":"KillShell","input":{"shell_id":"b7x"}}]}}"#, rel);
         assert!(t.background().is_empty());
         assert!(!t.line("not json", rel));
+
+        let mut t = Tracker::default();
+        let codex = r#"{"type":"item.started","item":{"id":"item_3","type":"command_execution","command":"/bin/bash -lc 'cargo test'"}}"#;
+        assert!(t.line(codex, rel));
+        assert_eq!(t.tool().as_deref(), Some("Bash: cargo test"));
+        assert!(t.line(&codex.replace("item.started", "item.completed"), rel));
+        assert_eq!(t.tool(), None);
     }
 
     #[test]

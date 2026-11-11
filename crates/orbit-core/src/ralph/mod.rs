@@ -8,7 +8,7 @@ mod supervisor;
 mod watchdog;
 
 use crate::agent::runner::{self, Ended, Line, Outcome};
-use crate::agent::{agent_cmd, Access, GrillRound};
+use crate::agent::{agent_cmd, live_cmd, Access, GrillRound};
 use crate::config::{AiSettings, Config};
 use prd::Prd;
 use serde::{Deserialize, Serialize};
@@ -378,12 +378,13 @@ impl RalphEnv for RealEnv {
                 &self.repo,
                 &self.cfg.extra_instructions,
             );
-            agent_cmd(&self.ai, &prompt, Access::Full, self.ai.agent_bin() == "claude")
+            live_cmd(&self.ai, &prompt, Access::Full, None)
         });
         let run_dir = snapshot(&self.key).map(|s| s.dir).unwrap_or_default();
         let mut raw_log = std::fs::File::create(run_dir.join(format!("iter-{n}.log"))).ok();
         let mut result: Option<Event> = None;
-        let mut last_text = String::new();
+        let mut texts: Vec<String> = Vec::new();
+        let mut step_cost = 0.0;
         let mut tail: VecDeque<String> = VecDeque::new();
         let (app, key) = (self.app.clone(), self.key.clone());
         let root = self.dir.to_string_lossy().to_string();
@@ -407,11 +408,12 @@ impl RalphEnv for RealEnv {
                 if tail.len() > 10 {
                     tail.pop_front();
                 }
-                if !is_err {
-                    live.line(text);
-                }
+                live.line(text);
                 let events = if is_err { vec![] } else { stream::parse_line(text) };
                 if events.is_empty() && !text.trim_start().starts_with('{') && !text.trim().is_empty() {
+                    if !is_err {
+                        texts.push(text.to_string());
+                    }
                     record(&app, &key, json!({"kind": "log", "text": text, "stderr": is_err}), |_| {});
                 }
                 let mut finished = false;
@@ -422,15 +424,17 @@ impl RalphEnv for RealEnv {
                             result = Some(e)
                         }
                         Event::Text { text } => {
-                            last_text = text.clone();
+                            texts.push(text.clone());
                             record(&app, &key, json!({"kind": "text", "text": text}), |_| {})
                         }
+                        Event::Thinking { text } => record(&app, &key, json!({"kind": "thinking", "text": text}), |_| {}),
+                        Event::Cost { usd } => step_cost += usd,
                         Event::Tool { name, summary } => {
                             let summary = relativize(summary, &root);
                             record(&app, &key, json!({"kind": "tool", "name": name, "summary": summary}), |_| {})
                         }
                         Event::Model { name } => record_model(&app, &key, name),
-                        Event::Session { .. } | Event::Cost { .. } | Event::Thinking { .. } => {}
+                        Event::Session { .. } => {}
                     }
                 }
                 finished
@@ -443,21 +447,24 @@ impl RalphEnv for RealEnv {
             }
             _ => (String::new(), false, None, None, None),
         };
+        let cost = cost.or((step_cost > 0.0).then_some(step_cost));
+        let full = if res_text.trim().is_empty() { texts.join("\n") } else { res_text.clone() };
         let tail_text = tail.iter().cloned().collect::<Vec<_>>().join("\n");
         let iteration = match &outcome {
             Err(e) => Iteration::Failed(e.clone()),
             Ok(o) if cut_short(o) => {
                 record_ending(&self.app, &self.key, n, o, &self.cfg);
-                let message = if res_text.trim().is_empty() { &last_text } else { &res_text };
+                let last = texts.last().cloned().unwrap_or_default();
+                let message = if res_text.trim().is_empty() { &last } else { &res_text };
                 self.reconcile(story.as_ref().map(|(id, _)| id.as_str()), &head_before, message, res_error, o.cancelled)
             }
             Ok(o) => {
                 let limited = if result.is_some() {
                     res_error && supervisor::looks_like_limit(&res_text)
                 } else {
-                    supervisor::looks_like_limit(&tail_text)
+                    // A clean exit isn't a limit, whatever the last lines say.
+                    !o.success && supervisor::looks_like_limit(&tail_text)
                 };
-                let full = if result.is_some() { res_text.clone() } else { o.stdout.clone() };
                 if limited {
                     Iteration::Limit
                 } else if full.contains("<promise>COMPLETE</promise>") {
@@ -1005,6 +1012,32 @@ mod tests {
             assert!(env.story_passed("US-001"));
             assert_eq!(git(&root.join("remote.git"), &["rev-parse", "feat/x"]), git(&env.dir, &["rev-parse", "HEAD"]));
             assert!(fixture::group_empty(&fixture::pgid(&root)));
+        }
+
+        /// A Codex `exec --json` run that says `text` and ends its turn.
+        fn codex_done(text: &str) -> String {
+            format!(
+                r#"printf '%s\n' '{{"type":"thread.started","thread_id":"t"}}' '{{"type":"item.completed","item":{{"id":"i","type":"agent_message","text":"{text}"}}}}' '{{"type":"turn.completed","usage":{{}}}}'"#
+            )
+        }
+
+        #[test]
+        fn a_codex_run_that_stays_alive_after_its_turn_is_recovered_by_the_exit_grace() {
+            let cfg = RunConfig { idle_timeout_min: 10.0, ..quick() };
+            let (root, mut env) = prd_env("prd-codex-grace", cfg, &format!("{COMMIT_US1}\n{}\nsleep 1200 &\nwait", codex_done("Implemented it.")));
+            let start = Instant::now();
+            assert_eq!(env.run_iteration(1), Iteration::Recovered);
+            assert!(start.elapsed() < Duration::from_secs(8), "{:?}", start.elapsed());
+            assert!(env.story_passed("US-001"));
+            assert!(fixture::group_empty(&fixture::pgid(&root)));
+        }
+
+        #[test]
+        fn a_clean_run_mentioning_a_rate_limit_is_not_a_usage_limit() {
+            // A text agent (omp): no closing event, only its last lines.
+            let agent = format!("{COMMIT_US1}\necho 'Added the rate limit middleware.'");
+            let (_root, mut env) = prd_env("prd-rate-limit", quick(), &agent);
+            assert_eq!(env.run_iteration(1), Iteration::Done);
         }
 
         #[test]
