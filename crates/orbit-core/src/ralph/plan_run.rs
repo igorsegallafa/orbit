@@ -378,13 +378,7 @@ pub fn start(app: Events, workspace: String, config: RunConfig) -> Result<(), St
     if !problems.is_empty() {
         return Err(format!("fix the plan first: {}", problems.join("; ")));
     }
-    let mut ai = Config::load()?.ai;
-    if let Some(a) = config.agent.clone().filter(|a| !a.is_empty()) {
-        ai.agent = a;
-    }
-    if let Some(m) = config.model.clone().filter(|m| !m.is_empty()) {
-        ai.model = m;
-    }
+    let ai = super::run_ai(Config::load()?.ai, &config);
     let started = now();
     let id = format!("{started}-{PLAN_REPO}");
     let run_dir = runs_dir(&workspace)?.join(&id);

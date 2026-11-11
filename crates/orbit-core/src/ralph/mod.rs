@@ -610,13 +610,7 @@ pub fn start(app: Events, workspace: String, repo: String, config: RunConfig) ->
     if crate::workspace::repo_scope(&workspace).is_some() && crate::git::default_branch(&dir).as_deref() == Some(branch.as_str()) {
         return Err(format!("Ralph commits each story: switch {repo} to a feature branch first (it's on {branch})"));
     }
-    let mut ai = Config::load()?.ai;
-    if let Some(a) = config.agent.clone().filter(|a| !a.is_empty()) {
-        ai.agent = a;
-    }
-    if let Some(m) = config.model.clone().filter(|m| !m.is_empty()) {
-        ai.model = m;
-    }
+    let ai = run_ai(Config::load()?.ai, &config);
     let started = now();
     let run_dir = runs_dir(&workspace)?.join(format!("{started}-{repo}"));
     std::fs::create_dir_all(&run_dir).map_err(|e| e.to_string())?;
@@ -674,6 +668,19 @@ pub fn start(app: Events, workspace: String, repo: String, config: RunConfig) ->
         finish(&app, &key, &summary, watchdog::unpushed(&env.dir));
     });
     Ok(())
+}
+
+/// The run's agent and model: the form's, else the AI settings'. Another
+/// agent with no model gets its own default: a model names one agent's model.
+fn run_ai(mut ai: AiSettings, config: &RunConfig) -> AiSettings {
+    if let Some(a) = config.agent.clone().filter(|a| !a.is_empty() && *a != ai.agent) {
+        ai.model = crate::settings::default_model(&a).into();
+        ai.agent = a;
+    }
+    if let Some(m) = config.model.clone().filter(|m| !m.is_empty()) {
+        ai.model = m;
+    }
+    ai
 }
 
 /// Records the run's end, with how many commits it left unpushed.
@@ -847,6 +854,20 @@ mod tests {
         assert!(!p.contains('{') || p.contains("<promise>"));
     }
 
+
+    #[test]
+    fn another_agent_with_no_model_runs_its_default() {
+        let settings = AiSettings { agent: "claude".into(), model: "claude-opus-5-5".into(), ..Default::default() };
+        let pick = |agent: Option<&str>, model: Option<&str>| {
+            let c = RunConfig { agent: agent.map(String::from), model: model.map(String::from), ..Default::default() };
+            let ai = run_ai(settings.clone(), &c);
+            (ai.agent, ai.model)
+        };
+        assert_eq!(pick(None, None), ("claude".into(), "claude-opus-5-5".into()));
+        assert_eq!(pick(Some("codex"), None), ("codex".into(), crate::settings::default_model("codex").into()));
+        assert_eq!(pick(Some("codex"), Some("gpt-5.6-terra")), ("codex".into(), "gpt-5.6-terra".into()));
+        assert_eq!(pick(Some("claude"), None), ("claude".into(), "claude-opus-5-5".into()));
+    }
 
     /// Stub agents are shell scripts, and the checks use process groups.
     #[cfg(unix)]
