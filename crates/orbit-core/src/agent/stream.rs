@@ -186,7 +186,7 @@ pub(crate) fn usage_tokens(usage: &Value) -> Option<u64> {
 }
 
 /// "/usr/bin/bash -lc 'cargo test'" → "cargo test": Codex wraps every command in a shell.
-fn unwrap_shell(cmd: &str) -> &str {
+pub(crate) fn unwrap_shell(cmd: &str) -> &str {
     let shell = cmd.split_whitespace().next().is_some_and(|b| b.ends_with("sh"));
     match cmd.split_once(" -lc ").or_else(|| cmd.split_once(" -c ")) {
         Some((_, inner)) if shell => inner.trim().trim_matches(['\'', '"']),

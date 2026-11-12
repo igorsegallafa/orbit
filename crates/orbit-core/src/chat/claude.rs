@@ -1,26 +1,20 @@
 // Claude Code over stream-json: one long-lived `claude -p` process, user
 // messages in as NDJSON on stdin, partial-message stream events out.
-use super::{ChatBackend, ChatEvent, ChatInput, FileDiff, PermissionOption, SlashCommand};
-use crate::agent::{runner, stream};
+use super::{Agent, ChatBackend, ChatEvent, ChatInput, FileDiff, PermissionOption, SlashCommand};
+use crate::agent::stream;
 use base64::Engine;
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 struct Claude {
-    stdin: Mutex<ChildStdin>,
-    child: Arc<Mutex<Child>>,
-    stopped: Arc<AtomicBool>,
+    agent: Agent,
     key: String,
 }
 
 pub fn start(cwd: &Path, resume: Option<String>, sink: impl Fn(ChatEvent) + Send + 'static) -> Result<Box<dyn ChatBackend>, String> {
-    static NEXT: AtomicU64 = AtomicU64::new(1);
-    let key = format!("chat:{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
+    let key = super::session_key();
     let (launch_args, launch_env) = crate::agent_hooks::session_launch("claude", &key);
     let mut cmd = crate::proc::cmd("claude");
     cmd.args(["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages"]);
@@ -31,51 +25,25 @@ pub fn start(cwd: &Path, resume: Option<String>, sink: impl Fn(ChatEvent) + Send
     if launch_args.iter().any(|a| a.starts_with("--mcp-config=")) {
         cmd.args(["--permission-prompt-tool", "mcp__orbit__permission"]);
     }
-    cmd.args(launch_args).envs(launch_env).current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    // Own process group, so stop() takes the agent's shells and builds down with it.
-    #[cfg(unix)]
-    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
-    let mut child = cmd.spawn().map_err(|e| format!("could not start claude: {e}"))?;
-    let stdin = child.stdin.take().ok_or("claude has no stdin")?;
-    let stdout = child.stdout.take().ok_or("claude has no stdout")?;
-    let stderr = child.stderr.take().ok_or("claude has no stderr")?;
-    let child = Arc::new(Mutex::new(child));
-    let stopped = Arc::new(AtomicBool::new(false));
+    cmd.args(launch_args).envs(launch_env).current_dir(cwd);
     // Shared with the hook listener's threads, which deliver permission requests.
     let sink = Arc::new(Mutex::new(sink));
     let ask_sink = sink.clone();
     crate::agent_hooks::on_permission(&key, move |id, tool, input| {
         (ask_sink.lock().unwrap())(permission_asked(id, &tool, &input));
     });
-
-    let tail = Arc::new(Mutex::new(Vec::<String>::new()));
-    let tail_w = tail.clone();
-    std::thread::spawn(move || {
-        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-            let mut t = tail_w.lock().unwrap();
-            t.push(line);
-            if t.len() > 20 {
-                t.remove(0);
-            }
-        }
-    });
-    let (child_r, stopped_r, key_r) = (child.clone(), stopped.clone(), key.clone());
-    std::thread::spawn(move || {
-        let mut parser = Parser::default();
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            parser.line(&line).into_iter().for_each(|e| (sink.lock().unwrap())(e));
-        }
-        crate::agent_hooks::forget_permissions(&key_r);
-        let status = child_r.lock().unwrap().wait();
-        let error = match status {
-            _ if stopped_r.load(Ordering::Relaxed) => None,
-            Ok(s) if s.success() => None,
-            Ok(s) => Some(Some(tail.lock().unwrap().join("\n")).filter(|t| !t.trim().is_empty()).unwrap_or_else(|| format!("claude exited with {s}"))),
-            Err(e) => Some(e.to_string()),
-        };
-        (sink.lock().unwrap())(ChatEvent::Exited { error });
-    });
-    Ok(Box::new(Claude { stdin: Mutex::new(stdin), child, stopped, key }))
+    let (line_sink, key_r) = (sink.clone(), key.clone());
+    let mut parser = Parser::default();
+    let agent = Agent::spawn(
+        cmd,
+        "claude",
+        move |line| parser.line(line).into_iter().for_each(|e| (line_sink.lock().unwrap())(e)),
+        move |error| {
+            crate::agent_hooks::forget_permissions(&key_r);
+            (sink.lock().unwrap())(ChatEvent::Exited { error });
+        },
+    )?;
+    Ok(Box::new(Claude { agent, key }))
 }
 
 impl ChatBackend for Claude {
@@ -89,14 +57,12 @@ impl ChatBackend for Claude {
                 return;
             }
         };
-        // A failed write means the process is gone; the reader thread reports Exited.
-        let _ = writeln!(self.stdin.lock().unwrap(), "{line}");
+        self.agent.write(&line);
     }
 
     fn stop(&self) {
-        self.stopped.store(true, Ordering::Relaxed);
         crate::agent_hooks::forget_permissions(&self.key);
-        runner::kill_tree(&mut self.child.lock().unwrap());
+        self.agent.stop();
     }
 }
 

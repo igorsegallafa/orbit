@@ -1,8 +1,13 @@
 //! Chat sessions: Orbit drives an agent through its machine protocol and gets
 //! back one event model, so the chat UI never branches on which agent runs.
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 mod claude;
+mod codex;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ChatEvent {
@@ -93,7 +98,76 @@ pub fn start(
 ) -> Result<Box<dyn ChatBackend>, String> {
     match agent {
         "claude" => claude::start(cwd, resume, sink),
+        "codex" => codex::start(cwd, resume, sink),
         _ => Err(format!("chat mode is not available for {agent} yet")),
+    }
+}
+
+fn session_key() -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    format!("chat:{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed))
+}
+
+struct Agent {
+    stdin: Mutex<ChildStdin>,
+    child: Arc<Mutex<Child>>,
+    stopped: Arc<AtomicBool>,
+}
+
+impl Agent {
+    /// Spawns `cmd` in its own process group, so stop() takes its shells and builds down with it.
+    /// Each stdout line goes to `on_line`; at EOF `on_exit` gets the error (stderr's tail), None after stop().
+    fn spawn(
+        mut cmd: Command,
+        name: &str,
+        mut on_line: impl FnMut(&str) + Send + 'static,
+        on_exit: impl FnOnce(Option<String>) + Send + 'static,
+    ) -> Result<Agent, String> {
+        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+        let mut child = cmd.spawn().map_err(|e| format!("could not start {name}: {e}"))?;
+        let stdin = child.stdin.take().ok_or("no stdin")?;
+        let stdout = child.stdout.take().ok_or("no stdout")?;
+        let stderr = child.stderr.take().ok_or("no stderr")?;
+        let child = Arc::new(Mutex::new(child));
+        let stopped = Arc::new(AtomicBool::new(false));
+        let tail = Arc::new(Mutex::new(Vec::<String>::new()));
+        let tail_w = tail.clone();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                let mut t = tail_w.lock().unwrap();
+                t.push(line);
+                if t.len() > 20 {
+                    t.remove(0);
+                }
+            }
+        });
+        let (child_r, stopped_r, name) = (child.clone(), stopped.clone(), name.to_string());
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                on_line(&line);
+            }
+            let status = child_r.lock().unwrap().wait();
+            on_exit(match status {
+                _ if stopped_r.load(Ordering::Relaxed) => None,
+                Ok(s) if s.success() => None,
+                Ok(s) => Some(Some(tail.lock().unwrap().join("\n")).filter(|t| !t.trim().is_empty()).unwrap_or_else(|| format!("{name} exited with {s}"))),
+                Err(e) => Some(e.to_string()),
+            });
+        });
+        Ok(Agent { stdin: Mutex::new(stdin), child, stopped })
+    }
+
+    /// A failed write means the process is gone; the reader thread reports Exited.
+    fn write(&self, line: &serde_json::Value) {
+        use std::io::Write;
+        let _ = writeln!(self.stdin.lock().unwrap(), "{line}");
+    }
+
+    fn stop(&self) {
+        self.stopped.store(true, Ordering::Relaxed);
+        crate::agent::runner::kill_tree(&mut self.child.lock().unwrap());
     }
 }
 
