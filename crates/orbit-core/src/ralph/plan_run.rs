@@ -102,6 +102,28 @@ fn as_prd(title: &str, context: &str, branch: &str, items: &[PlanItem]) -> Prd {
     }
 }
 
+fn task_body(task: &PlanItem, retry: bool) -> String {
+    let mut body = String::new();
+    if !task.description.is_empty() {
+        body.push_str(&task.description);
+        body.push_str("\n\n");
+    }
+    body.push_str("Acceptance criteria:\n");
+    if task.accept.is_empty() {
+        body.push_str("- (none listed) the change works, and the repo's typecheck/lint/tests pass\n");
+    } else {
+        for c in &task.accept {
+            body.push_str(&format!("- {c}\n"));
+        }
+    }
+    if retry {
+        body.push('\n');
+        body.push_str(&prompts::PLAN_RETRY.replace("{task_id}", &task.id));
+        body.push('\n');
+    }
+    body
+}
+
 fn plan_title(ws_dir: &std::path::Path) -> String {
     std::fs::read_to_string(plan_path(ws_dir))
         .ok()
@@ -124,6 +146,8 @@ struct PlanEnv {
     dirs: HashMap<String, PathBuf>,
     /// Tests: a script run instead of the agent.
     stub: Option<PathBuf>,
+    /// The task whose last iteration ended without closing it.
+    unclosed: Option<String>,
 }
 
 impl PlanEnv {
@@ -198,19 +222,7 @@ impl RalphEnv for PlanEnv {
             },
         );
 
-        let mut body = String::new();
-        if !task.description.is_empty() {
-            body.push_str(&task.description);
-            body.push_str("\n\n");
-        }
-        body.push_str("Acceptance criteria:\n");
-        if task.accept.is_empty() {
-            body.push_str("- (none listed) the change works, and the repo's typecheck/lint/tests pass\n");
-        } else {
-            for c in &task.accept {
-                body.push_str(&format!("- {c}\n"));
-            }
-        }
+        let body = task_body(&task, self.unclosed.as_deref() == Some(task.id.as_str()));
         let prompt = prompts::render_plan_iteration(
             &repo,
             &self.branch,
@@ -274,6 +286,8 @@ impl RalphEnv for PlanEnv {
                 iteration = Iteration::Blocked(format!("{}: {why}", task.id));
             }
         }
+        let closed = read_items(&self.ws_dir).1.get(task.index).is_some_and(|i| i.done);
+        self.unclosed = (!closed && matches!(iteration, Iteration::Done | Iteration::Stalled)).then(|| task.id.clone());
         record(
             &self.app,
             &self.key,
@@ -434,6 +448,7 @@ pub fn start(app: Events, workspace: String, config: RunConfig) -> Result<(), St
         last_pushed: HashMap::new(),
         dirs,
         stub: None,
+        unclosed: None,
         branch: meta.branch.clone(),
         repos: meta.repos.clone(),
         ws_dir,
@@ -531,6 +546,7 @@ mod tests {
                 last_pushed: HashMap::from([("app".to_string(), Some(head))]),
                 dirs: HashMap::from([("app".to_string(), repo.clone())]),
                 stub: Some(fixture::stub(&root, agent)),
+                unclosed: None,
             };
             Case { root, repo, run_dir, env }
         }
@@ -636,6 +652,16 @@ mod tests {
         }
 
         #[test]
+        fn a_task_left_without_its_commit_is_retried_with_the_note() {
+            let mut c = case("retry", quick(), RESULT_DONE);
+            assert_eq!(c.env.run_iteration(1), Iteration::Done);
+            assert_eq!(c.env.unclosed.as_deref(), Some("T1"));
+            let task = &read_items(&c.env.ws_dir).1[0];
+            assert!(task_body(task, true).contains("ended without its `feat: [T1]` commit"));
+            assert!(!task_body(task, false).contains("previous attempt"));
+        }
+
+        #[test]
         fn a_normal_iteration_is_unchanged() {
             let mut c = case("normal", quick(), &format!("{COMMIT_T1}\n{RESULT_DONE}"));
             assert_eq!(c.env.run_iteration(1), Iteration::Complete);
@@ -645,6 +671,7 @@ mod tests {
             }
             assert!(c.ticked());
             assert!(c.pushed());
+            assert_eq!(c.env.unclosed, None);
         }
     }
 }

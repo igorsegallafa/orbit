@@ -120,6 +120,9 @@ Before committing, check whether edited directories have an AGENTS.md or CLAUDE.
 - Do NOT commit broken code: every commit passes this project's checks.
 - Only work inside this worktree (the progress log is the one file outside it you write)."#;
 
+/// Added to a task's body when its previous iteration ended without closing it.
+pub const PLAN_RETRY: &str = "**The previous attempt at this task ended without its `feat: [{task_id}]` commit.** Check the state first. If the work is done and its checks pass, commit it (`git commit --allow-empty` when nothing is left to change) and finish with `<task-done/>`. If it can't be finished, finish with `<task-blocked>` and the reason. Do not end this attempt without one of the two.";
+
 #[allow(clippy::too_many_arguments)]
 pub fn render_plan_iteration(repo: &str, branch: &str, context: &str, task_id: &str, task_title: &str, task_body: &str, progress: &str, plan: &str, extra: &str) -> String {
     let mut out = PLAN_ITERATION
