@@ -42,6 +42,21 @@ def show_image():
     return f"Here it is, and a smaller one inline:\n\n![small icon]({rel})\n\nDone."
 
 
+def tools(out):
+    # Asked for "tools": three reads and a grep (one collapsed row), an edit with a diff,
+    # a long command output and a failing command, each finished after a short delay.
+    cwd = os.getcwd()
+    calls = [(f"r{i}", "Read", {"file_path": os.path.join(cwd, f)}, "1\tfn main() {}", False) for i, f in enumerate(["a.rs", "b.rs", "c.rs"])]
+    calls.append(("g", "Grep", {"pattern": "main"}, "a.rs\nb.rs", False))
+    calls.append(("e", "Edit", {"file_path": os.path.join(cwd, "a.rs"), "old_string": "fn main() {}\nlet a = 1;", "new_string": "fn main() {\n    hi();\n}\nlet a = 1;"}, "ok", False))
+    calls.append(("b", "Bash", {"command": "seq 250"}, "\n".join(str(i) for i in range(1, 251)), False))
+    calls.append(("x", "Bash", {"command": "false"}, "exit code 1", True))
+    for id, name, input, result, err in calls:
+        out({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": id, "name": name, "input": input}]}})
+        time.sleep(0.15)
+        out({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": id, "content": result, "is_error": err}]}})
+
+
 def chat():
     # Orbit's chat mode (`--input-format stream-json`): one user message per stdin line,
     # each answered with a streamed turn like the real claude's (thinking, text deltas, result).
@@ -58,6 +73,9 @@ def chat():
         reply = MARKDOWN if "markdown" in text else f"Stub reply to: {text}. This line streams in word by word."
         if "image" in text:
             reply = show_image()
+        if "tools" in text:
+            tools(out)
+            reply = "Tools done."
         for word in re.split(r"(?<= )", reply):
             out({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": word}}})
             time.sleep(0.02)

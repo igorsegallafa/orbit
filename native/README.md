@@ -109,6 +109,9 @@ A prompt containing "image" posts a `ShowImage` to the session's hook route (as 
 MCP tool does) and replies with a relative markdown image; inline images are `image:<ix>`. Step
 `drop:<probe>=<path>[,<path>…]` drops files from outside (`drop:chat-prompt=/tmp/a.png` attaches it;
 the thumbnails' remove buttons are `unattach:<ix>`).
+A prompt containing "tools" runs three Reads and a Grep (one collapsed row), an Edit with a diff,
+a 250-line Bash output and a failing Bash; tool rows are `tool:<ix>` (click expands) and the
+output's "Show all" link is `tool-all:<ix>`.
 
 `--do` runs shell steps last, separated by `;` (`src/steps.rs`). Mouse steps target elements that
 render a `probe("name")` (tabs `tab:<ix>`, menu items `menu:<label>`, dialog buttons

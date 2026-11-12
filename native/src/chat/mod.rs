@@ -14,7 +14,8 @@ use gpui::{
 };
 use gpui_component::input::{InputEvent, Textarea, TextareaState};
 use gpui_component::text::{TextView, TextViewState};
-use orbit_core::chat::{ChatBackend, ChatEvent, ChatInput};
+use gpui_component::diff::{Diff, DiffFile, DiffMode, DiffState};
+use orbit_core::chat::{ChatBackend, ChatEvent, ChatInput, FileDiff};
 use regex::Regex;
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -29,6 +30,52 @@ enum Item {
     Image { path: PathBuf, title: String, size: Option<(f32, f32)> },
     /// Errors and the session's end.
     Note(String),
+    /// One tool call, or a run of consecutive read-only ones drawn as one row.
+    Tool { calls: Vec<Call>, open: bool, all: bool, diff: Option<(Entity<DiffState>, usize)> },
+}
+
+struct Call {
+    id: String,
+    name: String,
+    summary: String,
+    output: String,
+    /// None while running, then whether it succeeded.
+    ok: Option<bool>,
+}
+
+const READ_ONLY: [&str; 5] = ["Read", "Grep", "Glob", "LS", "list"];
+const MAX_OUTPUT_LINES: usize = 200;
+/// The diff view's row height at the chat's mono size, and the most rows shown before it scrolls.
+const DIFF_ROW_H: f32 = 21.;
+const MAX_DIFF_ROWS: usize = 24;
+
+fn tool_icon(name: &str) -> &'static str {
+    match name {
+        "Read" => "doc",
+        "Grep" | "Glob" | "LS" | "list" => "search",
+        "Edit" | "MultiEdit" | "Write" => "pencil",
+        "Bash" => "terminal",
+        _ => "hammer",
+    }
+}
+
+fn group_label(calls: &[Call]) -> String {
+    let reads = calls.iter().filter(|c| c.name == "Read").count();
+    let other = calls.len() - reads;
+    let plural = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+    match (reads, other) {
+        (0, n) => format!("Searched {}", plural(n, "time", "times")),
+        (r, 0) => format!("Read {}", plural(r, "file", "files")),
+        (r, n) => format!("Read {}, {}", plural(r, "file", "files"), plural(n, "search", "searches")),
+    }
+}
+
+fn file_patch(d: &FileDiff) -> String {
+    let path = d.path.display().to_string();
+    let lines = |t: &str| if t.is_empty() { String::new() } else { format!("{t}\n") };
+    let (old, new) = (lines(&d.old_text), lines(&d.new_text));
+    let diff = similar::TextDiff::from_lines(&old, &new);
+    diff.unified_diff().context_radius(3).header(&format!("a/{path}"), &format!("b/{path}")).to_string()
 }
 
 const MAX_IMAGE_H: f32 = 480.;
@@ -159,6 +206,13 @@ impl ChatView {
         }
     }
 
+    fn call(&mut self, id: &str) -> Option<(usize, &mut Call)> {
+        self.items.iter_mut().enumerate().rev().find_map(|(ix, item)| match item {
+            Item::Tool { calls, .. } => calls.iter_mut().find(|c| c.id == id).map(|c| (ix, c)),
+            _ => None,
+        })
+    }
+
     fn open_link(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
         use crate::editor::markdown::{resolve_link, Link};
         // A stand-in file so relative links resolve against the session folder.
@@ -190,6 +244,39 @@ impl ChatView {
             ChatEvent::Image { path, title } => {
                 let size = image_size(&path);
                 self.push(Item::Image { path, title, size });
+            }
+            ChatEvent::ToolStarted { id, name, summary } => {
+                let call = Call { id, name, summary, output: String::new(), ok: None };
+                let read_only = READ_ONLY.contains(&call.name.as_str());
+                match self.items.last_mut() {
+                    Some(Item::Tool { calls, .. }) if read_only && calls.iter().all(|c| READ_ONLY.contains(&c.name.as_str())) => {
+                        calls.push(call);
+                        let n = self.items.len();
+                        self.list.remeasure_items(n - 1..n);
+                    }
+                    _ => self.push(Item::Tool { calls: vec![call], open: false, all: false, diff: None }),
+                }
+            }
+            ChatEvent::ToolOutput { id, text } => {
+                if let Some((ix, call)) = self.call(&id) {
+                    call.output.push_str(&text);
+                    self.list.remeasure_items(ix..ix + 1);
+                }
+            }
+            ChatEvent::ToolFinished { id, ok, diff } => {
+                if let Some((ix, call)) = self.call(&id) {
+                    call.ok = Some(ok);
+                    let state = diff.map(|d| {
+                        let patch = file_patch(&d);
+                        let language = crate::lsp::file_language(&d.path).highlight;
+                        let files = DiffFile::parse(&patch).unwrap_or_default().into_iter().map(|f| f.with_language(language)).collect();
+                        (crate::diff_view::highlighted_state(files, DiffMode::Unified, cx), patch.lines().count().saturating_sub(2))
+                    });
+                    if let (Some(state), Some(Item::Tool { diff, .. })) = (state, self.items.get_mut(ix)) {
+                        *diff = Some(state);
+                    }
+                    self.list.remeasure_items(ix..ix + 1);
+                }
             }
             ChatEvent::Exited { error } => {
                 self.backend = None;
@@ -291,7 +378,91 @@ impl ChatView {
                     .into_any_element()
             }
             Item::Note(text) => row.text_color(c(theme::DANGER)).child(text.clone()).into_any_element(),
+            Item::Tool { .. } => self.render_tool(ix, row, cx),
         }
+    }
+
+    fn render_tool(&self, ix: usize, row: gpui::Div, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let Item::Tool { calls, open, all, diff } = &self.items[ix] else { unreachable!() };
+        let (open, all, diff) = (*open, *all, diff.as_ref());
+        use crate::pages::kit::icon;
+        let toggle = move |this: &mut Self, ix: usize, all_lines: bool| {
+            if let Some(Item::Tool { open, all, .. }) = this.items.get_mut(ix) {
+                if all_lines {
+                    *all = true;
+                } else {
+                    *open = !*open;
+                }
+            }
+            this.list.remeasure_items(ix..ix + 1);
+        };
+        let first = &calls[0];
+        let (name, summary) =
+            if calls.len() > 1 { (group_label(calls), calls.iter().map(|c| c.summary.as_str()).collect::<Vec<_>>().join(", ")) } else { (first.name.clone(), first.summary.clone()) };
+        let running = calls.iter().any(|c| c.ok.is_none());
+        let failed = calls.iter().any(|c| c.ok == Some(false));
+        let status = if running {
+            crate::workspace_ui::kit::spinner(gpui::ElementId::NamedInteger("tool-spin".into(), ix as u64), 12., c(theme::ACCENT)).into_any_element()
+        } else if failed {
+            icon("x", 12., c(theme::DANGER)).into_any_element()
+        } else {
+            icon("check", 12., c(theme::OK)).into_any_element()
+        };
+        let header = div()
+            .id(("tool", ix))
+            .relative()
+            .flex()
+            .items_center()
+            .gap_2()
+            .cursor_pointer()
+            .child(icon(tool_icon(&first.name), 13., c(theme::TEXT_DIM)))
+            .child(div().flex_none().text_color(c(theme::TEXT)).child(name))
+            .child(div().flex_1().min_w_0().truncate().text_color(c(theme::TEXT_FAINT)).child(summary))
+            .child(status)
+            .child(probe(format!("tool:{ix}")))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                toggle(this, ix, false);
+                cx.notify();
+            }));
+        let mut body = div().w_full().flex().flex_col().gap_1().child(header);
+        if open {
+            if let Some((state, rows)) = diff {
+                let h = (*rows).clamp(1, MAX_DIFF_ROWS) as f32 * DIFF_ROW_H + 8.;
+                body = body.child(div().w_full().h(px(h)).rounded(px(4.)).overflow_hidden().border_1().border_color(c(theme::BORDER)).child(Diff::new(state).size_full().header_visible(false)));
+            }
+            let output: String = calls.iter().map(|c| c.output.as_str()).filter(|o| !o.is_empty()).collect::<Vec<_>>().join("\n");
+            if !output.is_empty() && diff.is_none() {
+                let total = output.lines().count();
+                let shown = if all || total <= MAX_OUTPUT_LINES { output } else { output.lines().take(MAX_OUTPUT_LINES).collect::<Vec<_>>().join("\n") };
+                body = body.child(
+                    div()
+                        .w_full()
+                        .p_2()
+                        .rounded(px(4.))
+                        .bg(c(theme::PANEL_RAISED))
+                        .font_family(theme::MONO_FONT)
+                        .text_size(px(12.))
+                        .text_color(c(theme::TEXT_DIM))
+                        .child(shown),
+                );
+                if !all && total > MAX_OUTPUT_LINES {
+                    body = body.child(
+                        div()
+                            .id(("tool-all", ix))
+                            .relative()
+                            .cursor_pointer()
+                            .text_color(c(theme::ACCENT))
+                            .child(format!("Show all {total} lines"))
+                            .child(probe(format!("tool-all:{ix}")))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                toggle(this, ix, true);
+                                cx.notify();
+                            })),
+                    );
+                }
+            }
+        }
+        row.child(body).into_any_element()
     }
 
     fn attach(&mut self, paths: impl IntoIterator<Item = PathBuf>, cx: &mut Context<Self>) {
@@ -378,6 +549,15 @@ impl PageView for ChatView {
                 Item::Thinking { text, open, .. } => writeln!(out, "    thinking ({}): {text:?}", if *open { "open" } else { "collapsed" }),
                 Item::Image { path, title, size } => writeln!(out, "    image: {} {title:?} {size:?}", path.display()),
                 Item::Note(t) => writeln!(out, "    note: {t:?}"),
+                Item::Tool { calls, open, all, diff } => {
+                    let state = |c: &Call| match c.ok {
+                        None => "running",
+                        Some(true) => "ok",
+                        Some(false) => "failed",
+                    };
+                    let list: Vec<String> = calls.iter().map(|c| format!("{} {:?} {} ({} lines)", c.name, c.summary, state(c), c.output.lines().count())).collect();
+                    writeln!(out, "    tool{}{}{}: {}", if *open { " open" } else { "" }, if *all { " all" } else { "" }, if diff.is_some() { " diff" } else { "" }, list.join("; "))
+                }
             };
         }
         for path in &self.attached {
@@ -458,7 +638,26 @@ pub fn init(cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::linkify;
+    use super::{file_patch, group_label, linkify, Call};
+    use orbit_core::chat::FileDiff;
+
+    #[test]
+    fn edit_patch_parses_as_one_file() {
+        let d = FileDiff { path: "src/a.rs".into(), old_text: "a\nb".into(), new_text: "a\nc".into() };
+        let files = gpui_component::diff::DiffFile::parse(&file_patch(&d)).unwrap();
+        assert_eq!((files.len(), files[0].additions(), files[0].deletions()), (1, 1, 1));
+        let new = FileDiff { path: "n.rs".into(), old_text: String::new(), new_text: "x".into() };
+        let new = &gpui_component::diff::DiffFile::parse(&file_patch(&new)).unwrap()[0];
+        assert_eq!((new.additions(), new.deletions()), (1, 0));
+    }
+
+    #[test]
+    fn read_only_runs_are_labelled_by_kind() {
+        let call = |name: &str| Call { id: String::new(), name: name.into(), summary: String::new(), output: String::new(), ok: None };
+        assert_eq!(group_label(&[call("Read"), call("Read")]), "Read 2 files");
+        assert_eq!(group_label(&[call("Read"), call("Grep")]), "Read 1 file, 1 search");
+        assert_eq!(group_label(&[call("Glob"), call("Grep")]), "Searched 2 times");
+    }
 
     #[test]
     fn links_file_lines_outside_code() {
