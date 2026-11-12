@@ -11,8 +11,8 @@ struct Codex {
     parser: Arc<Mutex<Parser>>,
 }
 
-pub fn start(cwd: &Path, resume: Option<String>, sink: impl Fn(ChatEvent) + Send + 'static) -> Result<Box<dyn ChatBackend>, String> {
-    let (launch_args, launch_env) = crate::agent_hooks::session_launch("codex", &super::session_key());
+pub fn start(cwd: &Path, resume: Option<String>, key: &str, sink: impl Fn(ChatEvent) + Send + 'static) -> Result<Box<dyn ChatBackend>, String> {
+    let (launch_args, launch_env) = crate::agent_hooks::session_launch("codex", key);
     let mut cmd = crate::proc::cmd("codex");
     cmd.arg("app-server").args(launch_args).envs(launch_env).current_dir(cwd);
     let parser = Arc::new(Mutex::new(Parser { cwd: cwd.to_path_buf(), resume, ..Parser::default() }));

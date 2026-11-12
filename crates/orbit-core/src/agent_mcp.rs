@@ -109,7 +109,7 @@ pub(crate) fn permission(args: &Value, url: Option<&str>) -> String {
 }
 
 /// One POST to Orbit's loopback listener (`agent_hooks`), answered 200; returns the body.
-fn post(url: &str, body: &str, timeout: Duration) -> std::io::Result<String> {
+pub(crate) fn post(url: &str, body: &str, timeout: Duration) -> std::io::Result<String> {
     let bad = || std::io::Error::other(format!("bad url {url}"));
     let (host, path) = url.strip_prefix("http://").and_then(|r| r.split_once('/')).ok_or_else(bad)?;
     let mut s = TcpStream::connect(host)?;

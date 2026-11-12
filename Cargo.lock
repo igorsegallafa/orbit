@@ -4514,6 +4514,7 @@ dependencies = [
  "gpui-pre-wgpu",
  "ignore",
  "image",
+ "imagesize 0.14.0",
  "lsp-types",
  "memchr",
  "notify-rust",

@@ -255,6 +255,25 @@ pub async fn run(steps: &[String], window: AnyWindowHandle, app: &Entity<OrbitAp
                     }
                 }
             }
+            // drop:<probe>=<path>[,<path>…] drops files from outside onto that element.
+            "drop" => {
+                let (name, files) = arg.split_once('=').unwrap_or((arg, ""));
+                match locate(window, name, cx).await {
+                    Some(position) => {
+                        let paths = gpui::ExternalPaths(files.split(',').map(PathBuf::from).collect());
+                        send(window, PlatformInput::FileDrop(gpui::FileDropEvent::Entered { position, paths }), cx);
+                        // A frame in between, so the drop lands on a hitbox painted with the drag active.
+                        sleep(cx, 60).await;
+                        send(window, PlatformInput::FileDrop(gpui::FileDropEvent::Pending { position }), cx);
+                        sleep(cx, 60).await;
+                        send(window, PlatformInput::FileDrop(gpui::FileDropEvent::Submit { position }), cx);
+                        sleep(cx, 150).await;
+                    }
+                    None => {
+                        let _ = writeln!(log, "  no element {name:?} on screen");
+                    }
+                }
+            }
             "chat" => match locate(window, "chat-prompt", cx).await {
                 Some(at) => {
                     click(window, at, MouseButton::Left, 1, false, cx).await;

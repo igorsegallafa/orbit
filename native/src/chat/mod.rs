@@ -25,20 +25,39 @@ enum Item {
     /// `md` renders `text` with `path:line` mentions turned into links.
     Assistant { id: String, text: String, md: Entity<TextViewState>, _parsed: Subscription },
     Thinking { id: String, text: String, open: bool },
+    /// `size` is the drawn size, at most `MAX_IMAGE_H` tall.
+    Image { path: PathBuf, title: String, size: Option<(f32, f32)> },
     /// Errors and the session's end.
     Note(String),
+}
+
+const MAX_IMAGE_H: f32 = 480.;
+const IMAGE_EXT: [&str; 6] = ["png", "jpg", "jpeg", "gif", "webp", "bmp"];
+
+/// Known up front so the list measures the row right before the picture loads.
+fn image_size(path: &std::path::Path) -> Option<(f32, f32)> {
+    let s = imagesize::size(path).ok()?;
+    let (w, h) = (s.width as f32, s.height as f32);
+    let scale = (MAX_IMAGE_H / h).min(1.);
+    (w > 0. && h > 0.).then_some((w * scale, h * scale))
+}
+
+fn is_image(path: &std::path::Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| IMAGE_EXT.contains(&e.to_lowercase().as_str()))
 }
 
 pub struct ChatView {
     agent: String,
     cwd: PathBuf,
-    /// The last link clicked, for the self-test dump.
+    /// The last link or image clicked, for the self-test dump.
     opened: Option<String>,
     backend: Option<Box<dyn ChatBackend>>,
     session_id: Option<String>,
     items: Vec<Item>,
     list: ListState,
     prompt: Entity<TextareaState>,
+    /// Images pasted or dropped into the prompt, sent with the next message.
+    attached: Vec<PathBuf>,
     _events: Task<()>,
     _prompt: Subscription,
 }
@@ -81,6 +100,7 @@ impl ChatView {
             items: vec![],
             list,
             prompt,
+            attached: vec![],
             _events: events,
             _prompt: sub,
         };
@@ -167,6 +187,10 @@ impl ChatView {
             ChatEvent::TextDelta { message_id, text } => self.append(false, message_id, &text, cx),
             ChatEvent::ThinkingDelta { message_id, text } => self.append(true, message_id, &text, cx),
             ChatEvent::TurnEnded { error: Some(e), .. } => self.push(Item::Note(e)),
+            ChatEvent::Image { path, title } => {
+                let size = image_size(&path);
+                self.push(Item::Image { path, title, size });
+            }
             ChatEvent::Exited { error } => {
                 self.backend = None;
                 self.push(Item::Note(error.map_or("The session ended.".into(), |e| format!("The session ended: {e}"))));
@@ -177,13 +201,18 @@ impl ChatView {
 
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.prompt.read(cx).value().trim().to_string();
-        if text.is_empty() || !self.ready() {
+        if (text.is_empty() && self.attached.is_empty()) || !self.ready() {
             return;
         }
+        let images = std::mem::take(&mut self.attached);
         if let Some(b) = &self.backend {
-            b.send(ChatInput::Prompt { text: text.clone(), images: vec![] });
+            b.send(ChatInput::Prompt { text: text.clone(), images: images.clone() });
         }
         self.push(Item::User(text));
+        for path in images {
+            let size = image_size(&path);
+            self.push(Item::Image { path, title: String::new(), size });
+        }
         self.list.set_follow_mode(FollowMode::Tail);
         self.prompt.update(cx, |p, cx| p.set_value("", window, cx));
         cx.notify();
@@ -207,12 +236,20 @@ impl ChatView {
                 .into_any_element(),
             Item::Assistant { md, .. } => {
                 let this = cx.weak_entity();
+                let stand_in = self.cwd.join("_");
                 let view = TextView::new(md)
                     .style(crate::editor::markdown::preview_style())
                     .selectable(true)
                     .inline_code_style(gpui::StyleRefinement::default().bg(c(theme::PANEL_RAISED)))
                     .on_link_click(move |url, _, window, cx| {
                         let _ = this.update(cx, |v, cx| v.open_link(url, window, cx));
+                    })
+                    .image_source(move |uri| {
+                        use crate::editor::markdown::{resolve_image, ImageRef};
+                        match resolve_image(uri, &stand_in, None) {
+                            ImageRef::Local(path) => path.into(),
+                            _ => uri.clone().into(),
+                        }
                     });
                 row.relative().text_color(c(theme::TEXT)).child(div().w_full().child(view)).child(probe(format!("reply:{ix}"))).into_any_element()
             }
@@ -234,8 +271,63 @@ impl ChatView {
                     }))
                     .into_any_element()
             }
+            Item::Image { path, title, size } => {
+                let open = path.clone();
+                let mut pic = gpui::img(path.clone()).max_w_full().max_h(px(MAX_IMAGE_H));
+                if let Some((w, h)) = size {
+                    pic = pic.w(px(*w)).h(px(*h));
+                }
+                row.relative()
+                    .flex_col()
+                    .gap_1()
+                    .when(!title.is_empty(), |d| d.text_color(c(theme::TEXT_DIM)).child(title.clone()))
+                    .child(div().id(("image", ix)).cursor_pointer().child(pic).on_click(cx.listener(move |this, _, _, cx| {
+                        if !crate::probe::ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
+                            cx.open_with_system(&open);
+                        }
+                        this.opened = Some(open.display().to_string());
+                    })))
+                    .child(probe(format!("image:{ix}")))
+                    .into_any_element()
+            }
             Item::Note(text) => row.text_color(c(theme::DANGER)).child(text.clone()).into_any_element(),
         }
+    }
+
+    fn attach(&mut self, paths: impl IntoIterator<Item = PathBuf>, cx: &mut Context<Self>) {
+        self.attached.extend(paths.into_iter().filter(|p| is_image(p) && p.is_file()));
+        cx.notify();
+    }
+
+    fn attachments(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div().flex().flex_wrap().gap_2().pb_2().children(self.attached.iter().enumerate().map(|(i, path)| {
+            div()
+                .relative()
+                .size(px(56.))
+                .rounded(px(4.))
+                .border_1()
+                .border_color(c(theme::BORDER))
+                .overflow_hidden()
+                .child(gpui::img(path.clone()).size_full().object_fit(gpui::ObjectFit::Cover))
+                .child(
+                    div()
+                        .id(("unattach", i))
+                        .absolute()
+                        .top_0()
+                        .right_0()
+                        .p(px(2.))
+                        .bg(c(theme::PANEL))
+                        .cursor_pointer()
+                        .child(crate::pages::kit::icon("x", 10., c(theme::TEXT_DIM)))
+                        .child(probe(format!("unattach:{i}")))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if i < this.attached.len() {
+                                this.attached.remove(i);
+                            }
+                            cx.notify();
+                        })),
+                )
+        }))
     }
 }
 
@@ -250,6 +342,7 @@ impl Drop for ChatView {
 impl Render for ChatView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ready = self.ready();
+        let this = cx.weak_entity();
         div()
             .size_full()
             .flex()
@@ -262,8 +355,11 @@ impl Render for ChatView {
                     .p_3()
                     .border_t_1()
                     .border_color(c(theme::BORDER))
-                    .child(Textarea::new(&self.prompt).disabled(!ready))
-                    .child(probe("chat-prompt")),
+                    .on_drop(cx.listener(|this, paths: &gpui::ExternalPaths, _, cx| this.attach(paths.paths().to_vec(), cx)))
+                    .when(!self.attached.is_empty(), |d| d.child(self.attachments(cx)))
+                    .child(div().relative().child(Textarea::new(&self.prompt).disabled(!ready).on_paste(move |item, _, cx| {
+                        paste_images(&this, item, cx)
+                    })).child(probe("chat-prompt"))),
             )
     }
 }
@@ -280,10 +376,38 @@ impl PageView for ChatView {
                 Item::User(t) => writeln!(out, "    you: {t:?}"),
                 Item::Assistant { text, .. } => writeln!(out, "    agent: {text:?}"),
                 Item::Thinking { text, open, .. } => writeln!(out, "    thinking ({}): {text:?}", if *open { "open" } else { "collapsed" }),
+                Item::Image { path, title, size } => writeln!(out, "    image: {} {title:?} {size:?}", path.display()),
                 Item::Note(t) => writeln!(out, "    note: {t:?}"),
             };
         }
+        for path in &self.attached {
+            let _ = writeln!(out, "    attached: {}", path.display());
+        }
     }
+}
+
+/// Takes a pasted image (saved to a temp file) or copied image files; text pastes go through.
+fn paste_images(view: &gpui::WeakEntity<ChatView>, item: &gpui::ClipboardItem, cx: &mut App) -> bool {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+    let mut paths = vec![];
+    for entry in item.entries() {
+        match entry {
+            gpui::ClipboardEntry::Image(image) => {
+                let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let file = std::env::temp_dir().join(format!("orbit-paste-{}-{n}.{}", std::process::id(), image.format().extension()));
+                if std::fs::write(&file, image.bytes()).is_ok() {
+                    paths.push(file);
+                }
+            }
+            gpui::ClipboardEntry::ExternalPaths(p) => paths.extend(p.paths().iter().filter(|p| is_image(p)).cloned()),
+            gpui::ClipboardEntry::String(_) => {}
+        }
+    }
+    if paths.is_empty() {
+        return false;
+    }
+    let _ = view.update(cx, |v, cx| v.attach(paths, cx));
+    true
 }
 
 /// `src/a.rs:42` (bare or as inline code, outside fenced blocks) becomes a link to that line.

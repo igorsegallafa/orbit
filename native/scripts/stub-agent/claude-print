@@ -5,7 +5,7 @@
 # - the PRD writer: writes the markdown PRD and scripts/ralph/prd.json;
 # - a Ralph iteration (stream-json): ticks the next story, commits.
 # ORBIT_STUB_LOG, when set, records each call's kind and argv.
-import json, os, re, subprocess, sys, time
+import json, os, re, subprocess, sys, time, urllib.request
 
 args = sys.argv[1:]
 
@@ -30,6 +30,18 @@ fn main() {
 Done."""
 
 
+def show_image():
+    # What Orbit's show_image MCP tool does: POST ShowImage to the session's hook route.
+    icons = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "packaging", "icons")
+    config = next((a.split("=", 1)[1] for a in args if a.startswith("--mcp-config=")), None)
+    if config:
+        url = json.loads(config)["mcpServers"]["orbit"]["args"][1]
+        body = json.dumps({"hook_event_name": "ShowImage", "path": os.path.realpath(os.path.join(icons, "256x256.png")), "message": "The app icon"})
+        urllib.request.urlopen(urllib.request.Request(url, body.encode(), {"Content-Type": "application/json"}), timeout=5).read()
+    rel = os.path.relpath(os.path.join(icons, "64x64.png"))
+    return f"Here it is, and a smaller one inline:\n\n![small icon]({rel})\n\nDone."
+
+
 def chat():
     # Orbit's chat mode (`--input-format stream-json`): one user message per stdin line,
     # each answered with a streamed turn like the real claude's (thinking, text deltas, result).
@@ -44,6 +56,8 @@ def chat():
         out({"type": "stream_event", "event": {"type": "message_start", "message": {"id": f"msg-{n}"}}})
         out({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "thinking_delta", "thinking": "The user said hello."}}})
         reply = MARKDOWN if "markdown" in text else f"Stub reply to: {text}. This line streams in word by word."
+        if "image" in text:
+            reply = show_image()
         for word in re.split(r"(?<= )", reply):
             out({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": word}}})
             time.sleep(0.02)

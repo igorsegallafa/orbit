@@ -12,8 +12,8 @@ struct Claude {
     key: String,
 }
 
-pub fn start(cwd: &Path, resume: Option<String>, sink: impl Fn(ChatEvent) + Send + 'static) -> Result<Box<dyn ChatBackend>, String> {
-    let key = super::session_key();
+pub fn start(cwd: &Path, resume: Option<String>, key: &str, sink: impl Fn(ChatEvent) + Send + 'static) -> Result<Box<dyn ChatBackend>, String> {
+    let key = key.to_string();
     let (launch_args, launch_env) = crate::agent_hooks::session_launch("claude", &key);
     let mut cmd = crate::proc::cmd("claude");
     cmd.args(["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages"]);
@@ -31,16 +31,13 @@ pub fn start(cwd: &Path, resume: Option<String>, sink: impl Fn(ChatEvent) + Send
     crate::agent_hooks::on_permission(&key, move |id, tool, input| {
         (ask_sink.lock().unwrap())(permission_asked(id, &tool, &input));
     });
-    let (line_sink, key_r) = (sink.clone(), key.clone());
+    let line_sink = sink.clone();
     let mut parser = Parser::default();
     let agent = Agent::spawn(
         cmd,
         "claude",
         move |line| parser.line(line).into_iter().for_each(|e| (line_sink.lock().unwrap())(e)),
-        move |error| {
-            crate::agent_hooks::forget_permissions(&key_r);
-            (sink.lock().unwrap())(ChatEvent::Exited { error });
-        },
+        move |error| (sink.lock().unwrap())(ChatEvent::Exited { error }),
     )?;
     Ok(Box::new(Claude { agent, key }))
 }
@@ -60,7 +57,7 @@ impl ChatBackend for Claude {
     }
 
     fn stop(&self) {
-        crate::agent_hooks::forget_permissions(&self.key);
+        crate::agent_hooks::forget(&self.key);
         self.agent.stop();
     }
 }

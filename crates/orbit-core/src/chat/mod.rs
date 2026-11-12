@@ -97,12 +97,30 @@ pub fn start(
     resume: Option<String>,
     sink: impl Fn(ChatEvent) + Send + 'static,
 ) -> Result<Box<dyn ChatBackend>, String> {
-    match agent {
-        "claude" => claude::start(cwd, resume, sink),
-        "codex" => codex::start(cwd, resume, sink),
-        "opencode" | "omp" => acp::start(agent, cwd, resume, sink),
+    let key = session_key();
+    // Shared with the hook listener, which delivers the session's `show_image` pictures.
+    let sink = Arc::new(Mutex::new(sink));
+    let show_sink = sink.clone();
+    crate::agent_hooks::on_show_image(&key, move |path, title| {
+        (show_sink.lock().unwrap())(ChatEvent::Image { path: path.into(), title: title.unwrap_or_default() });
+    });
+    let key_r = key.clone();
+    let sink = move |e: ChatEvent| {
+        if matches!(e, ChatEvent::Exited { .. }) {
+            crate::agent_hooks::forget(&key_r);
+        }
+        (sink.lock().unwrap())(e)
+    };
+    let backend = match agent {
+        "claude" => claude::start(cwd, resume, &key, sink),
+        "codex" => codex::start(cwd, resume, &key, sink),
+        "opencode" | "omp" => acp::start(agent, cwd, resume, &key, sink),
         _ => Err(format!("chat mode is not available for {agent} yet")),
+    };
+    if backend.is_err() {
+        crate::agent_hooks::forget(&key);
     }
+    backend
 }
 
 /// An image file as (media type, base64 data); None when it can't be read.

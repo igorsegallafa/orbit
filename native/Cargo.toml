@@ -44,6 +44,8 @@ similar = "2"
 base64 = "0.22"
 flate2 = "1"
 image = { version = "0.25", default-features = false, features = ["png"] }
+# Image dimensions without decoding (chat rows need their height before the picture loads); already in the lock.
+imagesize = "0.14"
 memchr = "2"
 
 # Vulkan-only renderer on Linux (GL fallback), patched in the root Cargo.toml; see vendor/PATCHES.md.

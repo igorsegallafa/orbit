@@ -28,15 +28,26 @@ static ASKERS: Mutex<Option<HashMap<String, Asker>>> = Mutex::new(None);
 static PENDING: Mutex<Option<HashMap<String, Pending>>> = Mutex::new(None);
 type Pending = (String, Sender<String>);
 
+type Viewer = Arc<dyn Fn(String, Option<String>) + Send + Sync>;
+/// Per session key: where its ShowImage pictures go (path, title) instead of `agent-event`.
+static VIEWERS: Mutex<Option<HashMap<String, Viewer>>> = Mutex::new(None);
+
+pub fn on_show_image(key: &str, show: impl Fn(String, Option<String>) + Send + Sync + 'static) {
+    VIEWERS.lock().unwrap().get_or_insert_with(HashMap::new).insert(key.into(), Arc::new(show));
+}
+
 /// Routes the requests of `agent_mcp`'s permission tool for session `key` to `ask`.
 pub fn on_permission(key: &str, ask: impl Fn(String, String, Value) + Send + Sync + 'static) {
     ASKERS.lock().unwrap().get_or_insert_with(HashMap::new).insert(key.into(), Arc::new(ask));
 }
 
-/// Stops routing `key`'s permission requests; its open ones are denied.
-pub fn forget_permissions(key: &str) {
+/// Stops routing `key`'s permission requests and pictures; its open requests are denied.
+pub fn forget(key: &str) {
     if let Some(a) = ASKERS.lock().unwrap().as_mut() {
         a.remove(key);
+    }
+    if let Some(v) = VIEWERS.lock().unwrap().as_mut() {
+        v.remove(key);
     }
     if let Some(p) = PENDING.lock().unwrap().as_mut() {
         p.retain(|_, (k, _)| k != key);
@@ -175,7 +186,15 @@ fn read_event(stream: TcpStream, token: &str) -> Option<AgentEvent> {
     if request.is_some() {
         return None;
     }
-    parse_event(key?, &body)
+    let ev = parse_event(key?, &body)?;
+    let viewer = VIEWERS.lock().unwrap().as_ref().and_then(|v| v.get(&ev.key).cloned());
+    match (ev.event.as_str(), viewer, ev.path.clone()) {
+        ("ShowImage", Some(show), Some(path)) => {
+            show(path, ev.message);
+            None
+        }
+        _ => Some(ev),
+    }
 }
 
 /// Settings JSON for one session: hooks posting here plus the status line
@@ -447,7 +466,27 @@ mod tests {
         let reply: Value = serde_json::from_str(&client.join().unwrap()).unwrap();
         assert_eq!(reply, json!({"behavior": "allow", "updatedInput": {"command": "ls"}}));
         assert!(!answer_permission(&id, "allow"));
-        forget_permissions("tm:perm");
+        forget("tm:perm");
+    }
+
+    #[test]
+    fn a_routed_session_gets_its_pictures_instead_of_an_event() {
+        let post = |key: &str| {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://127.0.0.1:{}/hook/tok/{key}", listener.local_addr().unwrap().port());
+            let body = json!({"hook_event_name": "ShowImage", "path": "/a.png", "message": "A"}).to_string();
+            let client = std::thread::spawn(move || crate::agent_mcp::post(&url, &body, Duration::from_secs(5)));
+            let (stream, _) = listener.accept().unwrap();
+            let ev = read_event(stream, "tok");
+            client.join().unwrap().unwrap();
+            ev
+        };
+        let (tx, rx) = channel();
+        on_show_image("tm:img", move |path, title| tx.send((path, title)).unwrap());
+        assert!(post("tm:img").is_none());
+        assert_eq!(rx.recv().unwrap(), ("/a.png".into(), Some("A".into())));
+        forget("tm:img");
+        assert_eq!(post("tm:img").unwrap().path.as_deref(), Some("/a.png"));
     }
 
     #[test]

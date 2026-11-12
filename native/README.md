@@ -104,7 +104,11 @@ With `--input-format stream-json` (chat mode) it answers each user line with a s
 (thinking, text deltas, result). `--do "cmd:chat.newClaude;chat:hello;until:Stub reply@10"` opens a
 chat tab, types into its prompt box (probe `chat-prompt`; thinking rows are `thinking:<ix>`, replies
 `reply:<ix>`) and waits for the reply in the dump. A prompt containing "markdown" gets a reply with a
-heading, list, table, code block and `path:line` links; the dump's `opened` shows the last link clicked.
+heading, list, table, code block and `path:line` links; the dump's `opened` shows the last link or image clicked.
+A prompt containing "image" posts a `ShowImage` to the session's hook route (as Orbit's `show_image`
+MCP tool does) and replies with a relative markdown image; inline images are `image:<ix>`. Step
+`drop:<probe>=<path>[,<path>…]` drops files from outside (`drop:chat-prompt=/tmp/a.png` attaches it;
+the thumbnails' remove buttons are `unattach:<ix>`).
 
 `--do` runs shell steps last, separated by `;` (`src/steps.rs`). Mouse steps target elements that
 render a `probe("name")` (tabs `tab:<ix>`, menu items `menu:<label>`, dialog buttons
