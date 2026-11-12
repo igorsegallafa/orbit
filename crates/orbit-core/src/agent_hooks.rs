@@ -24,6 +24,8 @@ pub struct AgentEvent {
     pub event: String,
     pub notification_type: Option<String>,
     pub message: Option<String>,
+    /// ShowImage (from `agent_mcp`): the picture to show.
+    pub path: Option<String>,
 }
 
 /// Binds the loopback listener. Without it sessions still run, just
@@ -74,7 +76,9 @@ fn parse_event(key: &str, body: &[u8]) -> Option<AgentEvent> {
         key: key.to_string(),
         event: s("hook_event_name")?,
         notification_type: s("notification_type"),
-        message: s("message"),
+        // UserPromptSubmit carries the prompt instead.
+        message: s("message").or_else(|| s("prompt")),
+        path: s("path"),
     })
 }
 
@@ -127,7 +131,9 @@ fn session_settings(key: &str, statusline: Option<String>) -> Option<Value> {
             "Stop": hook,
             "StopFailure": hook,
             "Notification": hook,
-        }
+        },
+        // Orbit's own MCP tool only shows a picture; never ask for it.
+        "permissions": { "allow": ["mcp__orbit__show_image"] }
     });
     if let Some(cmd) = statusline {
         v["statusLine"] = json!({ "type": "command", "command": cmd });
@@ -148,6 +154,74 @@ pub fn claude_args(key: &str) -> Vec<String> {
         return vec![];
     }
     vec!["--settings".into(), file.to_string_lossy().into_owned()]
+}
+
+/// The session's hook route; `agent_mcp` posts its pictures there.
+fn hook_url(key: &str) -> Option<String> {
+    let (port, token) = ADDR.get()?;
+    valid_key(key).then(|| format!("http://127.0.0.1:{port}/hook/{token}/{key}"))
+}
+
+/// Appended to agent sessions' system prompt; `ai.reply_style` replaces it, empty turns it off.
+pub const REPLY_STYLE: &str = "\
+Orbit shows your replies in a terminal pane. Write them for a fast read:
+- Lead with the answer or result in one or two sentences. No preamble, no recap of the request.
+- Prefer short bullets or a small table to paragraphs; one idea per bullet.
+- Don't narrate what you are about to do or repeat output the user already saw.
+- Write links as full URLs (they are clickable) and files as path:line.
+- If something was skipped or is risky, end with it in one line.
+- To show the user an image (a screenshot, chart, rendered UI), call Orbit's show_image tool with its path.";
+
+fn reply_style() -> Option<String> {
+    let custom = crate::config::Config::load().ok().and_then(|c| c.ai.reply_style);
+    Some(custom.unwrap_or_else(|| REPLY_STYLE.into())).filter(|s| !s.trim().is_empty())
+}
+
+/// Argv and environment giving an agent session Orbit's MCP server and reply style (and claude its hooks).
+// shortcut: omp only reads MCP servers from files (no flag or env), so it gets the style alone.
+pub fn session_launch(cmd: &str, key: &str) -> (Vec<String>, Vec<(String, String)>) {
+    let name = std::path::Path::new(cmd.trim()).file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();
+    let style = reply_style();
+    let server = hook_url(key).zip(std::env::current_exe().ok()).map(|(url, exe)| (exe.to_string_lossy().into_owned(), url));
+    let mut args: Vec<String> = vec![];
+    let mut env = vec![];
+    match name.as_str() {
+        "claude" => {
+            args = claude_args(key);
+            if let Some((exe, url)) = &server {
+                // `=`: --mcp-config is variadic and would swallow a prompt after it.
+                args.push(format!("--mcp-config={}", json!({ "mcpServers": { "orbit": { "command": exe, "args": ["--orbit-mcp", url] } } })));
+            }
+            args.extend(style.map(|s| format!("--append-system-prompt={s}")));
+        }
+        "codex" => {
+            // -c values are TOML; a JSON string or array of strings is valid TOML.
+            if let Some((exe, url)) = &server {
+                args.extend(["-c".into(), format!("mcp_servers.orbit.command={}", json!(exe))]);
+                args.extend(["-c".into(), format!("mcp_servers.orbit.args={}", json!(["--orbit-mcp", url]))]);
+                args.extend(["-c".into(), r#"mcp_servers.orbit.default_tools_approval_mode="approve""#.into()]);
+            }
+            if let Some(s) = style {
+                args.extend(["-c".into(), format!("developer_instructions={}", json!(s))]);
+            }
+        }
+        "opencode" => {
+            let mut config = json!({});
+            if let Some((exe, url)) = &server {
+                config["mcp"] = json!({ "orbit": { "type": "local", "command": [exe, "--orbit-mcp", url] } });
+            }
+            let file = crate::config::config_dir().map(|d| d.join("reply-style.md"));
+            if let (Some(s), Ok(file)) = (style, file) {
+                if std::fs::write(&file, s).is_ok() {
+                    config["instructions"] = json!([file]);
+                }
+            }
+            env.push(("OPENCODE_CONFIG_CONTENT".into(), config.to_string()));
+        }
+        "omp" => args.extend(style.map(|s| format!("--append-system-prompt={s}"))),
+        _ => {}
+    }
+    (args, env)
 }
 
 // ---------- status line passthrough + rate limits ----------
@@ -294,8 +368,17 @@ mod tests {
         });
         let (stream, _) = listener.accept().unwrap();
         let ev = read_event(stream, "tok").unwrap();
-        assert_eq!(ev, AgentEvent { key: "tm:9".into(), event: "Stop".into(), notification_type: None, message: None });
+        assert_eq!(ev, AgentEvent { key: "tm:9".into(), event: "Stop".into(), notification_type: None, message: None, path: None });
         assert!(client.join().unwrap().starts_with("HTTP/1.1 200"));
+    }
+
+    #[test]
+    fn wires_the_reply_style_into_each_agent() {
+        let has = |a: &[String], p: &str| a.iter().any(|x| x.starts_with(p));
+        assert!(has(&session_launch("omp", "tm:1").0, "--append-system-prompt="));
+        assert!(has(&session_launch("/usr/bin/codex", "tm:1").0, "developer_instructions="));
+        assert_eq!(session_launch("opencode", "tm:1").1[0].0, "OPENCODE_CONFIG_CONTENT");
+        assert_eq!(session_launch("bash", "tm:1"), (vec![], vec![]));
     }
 
     #[test]

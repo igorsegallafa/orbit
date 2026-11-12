@@ -182,6 +182,10 @@ pub struct AiSettings {
     /// Claude sessions opened in Orbit start with `--remote-control`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub remote_control: bool,
+    /// Replaces the reply style Orbit appends to agent sessions'
+    /// system prompt (`agent_hooks::REPLY_STYLE`); empty turns it off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_style: Option<String>,
 }
 
 fn default_agent() -> String {
@@ -217,6 +221,7 @@ impl Default for AiSettings {
             model: default_model(),
             fast_model: None,
             remote_control: false,
+            reply_style: None,
         }
     }
 }

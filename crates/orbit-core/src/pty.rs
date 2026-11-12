@@ -184,16 +184,15 @@ pub fn spawn(id: u32, spec: Spawn, mut on_output: impl FnMut(Output) + Send + 's
 fn command(spec: &Spawn) -> CommandBuilder {
     let cmd = spec.cmd.as_deref().map(str::trim).filter(|c| !c.is_empty());
     let mut b = CommandBuilder::new(cmd.map_or_else(default_shell, str::to_string));
-    // Claude sessions report their lifecycle back to Orbit via hooks.
+    // Agent sessions get Orbit's MCP server and reply style; claude also reports its lifecycle via hooks.
+    let mut launch_env = vec![];
     if let (Some(c), Some(k)) = (cmd, &spec.key) {
-        if is_claude(c) {
-            if crate::config::Config::load().is_ok_and(|cfg| cfg.ai.remote_control) {
-                b.arg("--remote-control");
-            }
-            for a in crate::agent_hooks::claude_args(k) {
-                b.arg(a);
-            }
+        if is_claude(c) && crate::config::Config::load().is_ok_and(|cfg| cfg.ai.remote_control) {
+            b.arg("--remote-control");
         }
+        let (args, env) = crate::agent_hooks::session_launch(c, k);
+        b.args(args);
+        launch_env = env;
     }
     // Extra argv for the launched program (e.g. a prompt for an agent).
     for a in &spec.args {
@@ -201,7 +200,10 @@ fn command(spec: &Spawn) -> CommandBuilder {
     }
     b.cwd(&spec.cwd);
     b.env_clear();
-    for (k, v) in child_env(&spec.env, &spec.program_version) {
+    // The spec's own variables win: an OPENCODE_CONFIG_CONTENT set by a caller stays.
+    launch_env.retain(|(k, _)| !spec.env.iter().any(|(sk, _)| sk == k));
+    launch_env.extend(spec.env.iter().cloned());
+    for (k, v) in child_env(&launch_env, &spec.program_version) {
         b.env(k, v);
     }
     b

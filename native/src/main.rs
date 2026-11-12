@@ -55,6 +55,8 @@ fn main() {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
         Some("--orbit-statusline") => return orbit_core::agent_hooks::statusline_helper(args.next()),
+        // Every agent session runs `<this exe> --orbit-mcp <hook url>` as an MCP server.
+        Some("--orbit-mcp") => return orbit_core::agent_mcp::serve(args.next()),
         Some("--version") => return println!("Orbit {}", pages::updates::version()),
         Some("--update") => return update_from_cli(),
         Some(flag) if flag.starts_with("--orbit-") => {
