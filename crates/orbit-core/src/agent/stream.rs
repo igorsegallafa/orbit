@@ -179,7 +179,7 @@ fn pi(v: &Value, kind: &str) -> Vec<Event> {
 
 /// Input (cached and cache writes included) plus output tokens of a Claude or
 /// Codex `usage` object.
-fn usage_tokens(usage: &Value) -> Option<u64> {
+pub(crate) fn usage_tokens(usage: &Value) -> Option<u64> {
     let keys = ["input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens"];
     let n: u64 = keys.iter().filter_map(|k| usage[*k].as_u64()).sum();
     (n > 0).then_some(n)

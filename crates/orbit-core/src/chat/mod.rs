@@ -2,6 +2,8 @@
 //! back one event model, so the chat UI never branches on which agent runs.
 use std::path::{Path, PathBuf};
 
+mod claude;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ChatEvent {
     /// The agent's own session id, used to resume the conversation.
@@ -85,11 +87,14 @@ pub trait ChatBackend: Send {
 /// Events reach `sink` on the backend's own thread.
 pub fn start(
     agent: &str,
-    _cwd: &Path,
-    _resume: Option<String>,
-    _sink: impl Fn(ChatEvent) + Send + 'static,
+    cwd: &Path,
+    resume: Option<String>,
+    sink: impl Fn(ChatEvent) + Send + 'static,
 ) -> Result<Box<dyn ChatBackend>, String> {
-    Err(format!("chat mode is not available for {agent} yet"))
+    match agent {
+        "claude" => claude::start(cwd, resume, sink),
+        _ => Err(format!("chat mode is not available for {agent} yet")),
+    }
 }
 
 #[cfg(test)]
