@@ -1,5 +1,5 @@
 // Codex over `codex app-server`: JSON-RPC on stdio, one thread per chat session.
-use super::{Agent, ChatBackend, ChatEvent, ChatInput, FileDiff, SlashCommand};
+use super::{Agent, ChatBackend, ChatEvent, ChatInput, FileDiff, PermissionOption, SlashCommand};
 use crate::agent::stream;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -58,6 +58,10 @@ impl ChatBackend for Codex {
                     let params = json!({ "threadId": p.thread_id, "turnId": p.turn_id });
                     p.request("turn/interrupt", params)
                 }
+                ChatInput::AnswerPermission { id, option_id } => match p.answer(&id, &option_id) {
+                    Some(reply) => reply,
+                    None => return,
+                },
                 _ => return,
             }
         };
@@ -83,6 +87,8 @@ struct Parser {
     /// Command items whose output already streamed, so their aggregated output isn't repeated.
     streamed: HashSet<String>,
     turn_tokens: u64,
+    /// Approval requests waiting for the user: PermissionAsked id → the server's request.
+    approvals: HashMap<String, Value>,
 }
 
 impl Parser {
@@ -101,7 +107,10 @@ impl Parser {
             return self.response(&request, &v);
         }
         if !v["id"].is_null() {
-            // shortcut: server requests (approvals, user input) are refused until Orbit answers them.
+            if let Some(asked) = self.approval(&v) {
+                return vec![asked];
+            }
+            // shortcut: other server requests (user input, elicitation) are refused until Orbit answers them.
             self.outbox.push(json!({ "jsonrpc": "2.0", "id": v["id"], "error": { "code": -32601, "message": format!("Orbit does not handle {method}") } }));
             return vec![];
         }
@@ -177,6 +186,36 @@ impl Parser {
             }
             _ => vec![],
         }
+    }
+
+    fn approval(&mut self, v: &Value) -> Option<ChatEvent> {
+        let p = &v["params"];
+        let reason = p["reason"].as_str().unwrap_or("");
+        let (title, detail) = match v["method"].as_str()? {
+            "item/commandExecution/requestApproval" => ("Run command", format!("{}\n{reason}", stream::unwrap_shell(p["command"].as_str().unwrap_or("")))),
+            "item/fileChange/requestApproval" => ("Change files", reason.to_string()),
+            "item/permissions/requestApproval" => ("Grant permissions", format!("{reason}\n{}", p["permissions"])),
+            _ => return None,
+        };
+        // A command approval may list `cancel` but not `decline`, so offer only what the server lists.
+        let all = [("accept", "Allow", "allow_once"), ("acceptForSession", "Allow for this session", "allow_always"), ("decline", "Deny", "reject_once"), ("cancel", "Deny and stop", "reject_once")];
+        let offered = |d: &str| p["availableDecisions"].as_array().map_or(d != "cancel", |a| a.iter().any(|x| x == d));
+        let options = all.into_iter().filter(|(id, ..)| offered(id)).map(|(id, label, kind)| PermissionOption { id: id.into(), label: label.into(), kind: kind.into() }).collect();
+        let id = v["id"].to_string();
+        self.approvals.insert(id.clone(), v.clone());
+        Some(ChatEvent::PermissionAsked { id, title: title.into(), detail: detail.trim().into(), options })
+    }
+
+    fn answer(&mut self, id: &str, option_id: &str) -> Option<Value> {
+        let request = self.approvals.remove(id)?;
+        let result = if request["method"] == "item/permissions/requestApproval" {
+            // Permissions are granted by echoing the requested profile; an empty profile denies.
+            let granted = if option_id.starts_with("accept") { request["params"]["permissions"].clone() } else { json!({}) };
+            json!({ "permissions": granted, "scope": if option_id == "acceptForSession" { "session" } else { "turn" } })
+        } else {
+            json!({ "decision": option_id })
+        };
+        Some(json!({ "jsonrpc": "2.0", "id": request["id"], "result": result }))
     }
 
     fn tool_finished(&mut self, item: &Value) -> Vec<ChatEvent> {
@@ -317,6 +356,34 @@ mod tests {
         assert!(p.line(r#"{"id":7,"method":"item/tool/requestUserInput","params":{}}"#).is_empty());
         assert_eq!(p.outbox[0]["id"], 7);
         assert!(p.outbox[0]["error"]["message"].is_string());
+    }
+
+    #[test]
+    fn recorded_command_approval_is_asked_and_answered() {
+        let (mut p, events) = replay("approval.jsonl");
+        let [ChatEvent::PermissionAsked { id, title, detail, options }] = &events[..] else { panic!("{events:?}") };
+        assert_eq!(title, "Run command");
+        assert!(detail.starts_with("touch b.txt\nMay I create b.txt"), "{detail}");
+        let ids: Vec<_> = options.iter().map(|o| o.id.as_str()).collect();
+        assert_eq!(ids, ["accept", "cancel"]);
+        let reply = p.answer(id, "accept").unwrap();
+        assert_eq!(reply.to_string(), r#"{"jsonrpc":"2.0","id":0,"result":{"decision":"accept"}}"#);
+        assert!(p.answer(id, "accept").is_none(), "answered twice");
+    }
+
+    #[test]
+    fn file_and_permission_approvals() {
+        let mut p = Parser::default();
+        let asked = p.line(r#"{"id":"f","method":"item/fileChange/requestApproval","params":{"itemId":"i","threadId":"t","turnId":"u","startedAtMs":0,"reason":"write a.txt"}}"#);
+        let [ChatEvent::PermissionAsked { id, options, .. }] = &asked[..] else { panic!("{asked:?}") };
+        assert_eq!(options.iter().map(|o| o.id.as_str()).collect::<Vec<_>>(), ["accept", "acceptForSession", "decline"]);
+        assert_eq!(p.answer(id, "decline").unwrap().to_string(), r#"{"jsonrpc":"2.0","id":"f","result":{"decision":"decline"}}"#);
+        let line = r#"{"id":9,"method":"item/permissions/requestApproval","params":{"itemId":"i","threadId":"t","turnId":"u","startedAtMs":0,"cwd":"/w","permissions":{"network":{"enabled":true}}}}"#;
+        p.line(line);
+        assert_eq!(p.answer("9", "acceptForSession").unwrap()["result"], json!({ "permissions": { "network": { "enabled": true } }, "scope": "session" }));
+        p.line(line);
+        assert_eq!(p.answer("9", "decline").unwrap()["result"], json!({ "permissions": {}, "scope": "turn" }));
+        assert!(p.outbox.is_empty());
     }
 
     #[test]
