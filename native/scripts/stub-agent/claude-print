@@ -83,7 +83,7 @@ def chat():
             continue
         n += 1
         text = " ".join(c.get("text", "") for c in msg["message"]["content"] if c.get("type") == "text")
-        out({"type": "system", "subtype": "init", "session_id": sid, "slash_commands": ["compact"]})
+        out({"type": "system", "subtype": "init", "session_id": sid, "slash_commands": ["compact", "review", "init", "pr-comments", "security-review"]})
         out({"type": "stream_event", "event": {"type": "message_start", "message": {"id": f"msg-{n}"}}})
         out({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "thinking_delta", "thinking": "The user said hello."}}})
         reply = MARKDOWN if "markdown" in text else f"Stub reply to: {text}. This line streams in word by word."

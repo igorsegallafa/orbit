@@ -119,6 +119,9 @@ A prompt containing "slow" streams for a minute until interrupted (Stop is `chat
 `chat-send`, or `key:escape` in the prompt); one containing "crash" exits with an error, and
 `chat-restart` starts the backend again resuming the session. Each turn ends with a `footer:` line
 in the dump; chat tabs list in the sidebar under the scope they were opened in (`session:<title>`).
+Its `system/init` reports the slash commands compact, review, init, pr-comments and security-review
+(after the first prompt, like claude): `type:/re` opens the filtered list (rows `slash:<n>`),
+`key:down`/`key:tab`/`key:enter`/`key:escape` drive it; the dump's `commands:` line lists them.
 
 `--do` runs shell steps last, separated by `;` (`src/steps.rs`). Mouse steps target elements that
 render a `probe("name")` (tabs `tab:<ix>`, menu items `menu:<label>`, dialog buttons

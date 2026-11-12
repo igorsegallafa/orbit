@@ -13,10 +13,10 @@ use gpui::{
     div, list, prelude::*, px, App, Context, Entity, FollowMode, ListAlignment, ListState, SharedString, Subscription,
     Task, Window,
 };
-use gpui_component::input::{InputEvent, Textarea, TextareaState};
+use gpui_component::input::{Enter, Escape, IndentInline, InputEvent, MoveDown, MoveUp, Textarea, TextareaState};
 use gpui_component::text::{TextView, TextViewState};
 use gpui_component::diff::{Diff, DiffFile, DiffMode, DiffState};
-use orbit_core::chat::{ChatBackend, ChatEvent, ChatInput, FileDiff, PermissionOption};
+use orbit_core::chat::{ChatBackend, ChatEvent, ChatInput, FileDiff, PermissionOption, SlashCommand};
 use regex::Regex;
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -56,6 +56,7 @@ const MAX_OUTPUT_LINES: usize = 200;
 /// The diff view's row height at the chat's mono size, and the most rows shown before it scrolls.
 const DIFF_ROW_H: f32 = 21.;
 const MAX_DIFF_ROWS: usize = 24;
+const SLASH_ROWS: usize = 8;
 
 fn tool_icon(name: &str) -> &'static str {
     match name {
@@ -119,6 +120,10 @@ pub struct ChatView {
     attached: Vec<PathBuf>,
     /// When the running turn started; None between turns.
     turn: Option<Instant>,
+    commands: Vec<SlashCommand>,
+    /// The highlighted `/` row, and whether Esc closed the list until the next edit.
+    slash: usize,
+    slash_closed: bool,
     _events: Task<()>,
     _prompt: Subscription,
 }
@@ -127,8 +132,10 @@ impl ChatView {
     pub fn new(key: String, scope: String, agent: &str, cwd: PathBuf, resume: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let prompt = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 8).submit_on_enter(true).placeholder("Message the agent…"));
         let sub = cx.subscribe_in(&prompt, window, |this, _, ev: &InputEvent, window, cx| {
-            if matches!(ev, InputEvent::PressEnter { shift: false, .. }) {
-                this.send(window, cx);
+            match ev {
+                InputEvent::PressEnter { shift: false, .. } => this.send(window, cx),
+                InputEvent::Change => (this.slash, this.slash_closed) = (0, false),
+                _ => {}
             }
         });
         let list = ListState::new(0, ListAlignment::Top, px(600.));
@@ -146,6 +153,9 @@ impl ChatView {
             prompt,
             attached: vec![],
             turn: None,
+            commands: vec![],
+            slash: 0,
+            slash_closed: false,
             _events: Task::ready(()),
             _prompt: sub,
         };
@@ -229,6 +239,42 @@ impl ChatView {
             let key = self.key.clone();
             crate::sessions::store(cx).update(cx, |s, cx| s.settle(&key, cx));
         }
+        cx.notify();
+    }
+
+    fn slash_matches(&self, cx: &App) -> Vec<usize> {
+        if self.slash_closed {
+            return vec![];
+        }
+        filter_commands(&self.commands, &self.prompt.read(cx).value())
+    }
+
+    fn complete(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let text = format!("/{name} ");
+        let end = text.chars().count() as u32;
+        self.prompt.update(cx, |p, cx| {
+            p.set_value(text, window, cx);
+            p.set_cursor_position(lsp_types::Position::new(0, end), window, cx);
+        });
+        cx.notify();
+    }
+
+    /// The prompt's own key bindings run before key listeners, so these come in as its actions.
+    fn on_slash_key(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let matches = self.slash_matches(cx);
+        if matches.is_empty() {
+            return;
+        }
+        match key {
+            "up" => self.slash = self.slash.checked_sub(1).unwrap_or(matches.len() - 1),
+            "down" => self.slash = (self.slash + 1) % matches.len(),
+            "tab" | "enter" => {
+                let name = self.commands[matches[self.slash.min(matches.len() - 1)]].name.clone();
+                self.complete(&name, window, cx);
+            }
+            _ => self.slash_closed = true,
+        }
+        cx.stop_propagation();
         cx.notify();
     }
 
@@ -385,6 +431,7 @@ impl ChatView {
                 crate::sessions::store(cx).update(cx, |s, cx| s.notify(key, false, who, what, cx));
                 self.push(Item::Permission { id, title, detail, options, answer: None });
             }
+            ChatEvent::Commands(commands) => self.commands = commands,
             ChatEvent::Exited { error } => {
                 self.backend = None;
                 self.turn = None;
@@ -397,7 +444,6 @@ impl ChatView {
                 crate::sessions::store(cx).update(cx, |s, cx| s.settle(&key, cx));
                 self.push(Item::Exited(error.map_or("The session ended.".into(), |e| format!("The session ended: {e}"))));
             }
-            _ => {}
         }
     }
 
@@ -624,6 +670,42 @@ impl ChatView {
         row.child(body).into_any_element()
     }
 
+    fn slash_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let matches = self.slash_matches(cx);
+        let sel = self.slash.min(matches.len().saturating_sub(1));
+        let first = sel.saturating_sub(SLASH_ROWS - 1);
+        let rows = matches.iter().enumerate().skip(first).take(SLASH_ROWS).map(|(n, &i)| {
+            let cmd = &self.commands[i];
+            let name = cmd.name.clone();
+            div()
+                .id(("slash", n))
+                .relative()
+                .flex()
+                .gap_3()
+                .px_2()
+                .py_1()
+                .rounded(px(4.))
+                .cursor_pointer()
+                .when(n == sel, |d| d.bg(c(theme::ACCENT_SOFT)))
+                .child(div().flex_none().text_color(c(theme::TEXT)).child(format!("/{}", cmd.name)))
+                .child(div().flex_1().min_w_0().truncate().text_color(c(theme::TEXT_FAINT)).child(cmd.description.clone()))
+                .child(probe(format!("slash:{n}")))
+                .on_click(cx.listener(move |this, _, window, cx| this.complete(&name, window, cx)))
+        });
+        div().when(!matches.is_empty(), |d| {
+            d.absolute()
+                .bottom_full()
+                .left_3()
+                .right_3()
+                .p_1()
+                .rounded(px(6.))
+                .border_1()
+                .border_color(c(theme::BORDER))
+                .bg(c(theme::PANEL_RAISED))
+                .children(rows)
+        })
+    }
+
     fn attach(&mut self, paths: impl IntoIterator<Item = PathBuf>, cx: &mut Context<Self>) {
         self.attached.extend(paths.into_iter().filter(|p| is_image(p) && p.is_file()));
         cx.notify();
@@ -685,6 +767,11 @@ impl Render for ChatView {
             .flex_col()
             .text_size(px(13.))
             .capture_key_down(cx.listener(Self::on_key))
+            .capture_action(cx.listener(|this, _: &MoveUp, window, cx| this.on_slash_key("up", window, cx)))
+            .capture_action(cx.listener(|this, _: &MoveDown, window, cx| this.on_slash_key("down", window, cx)))
+            .capture_action(cx.listener(|this, _: &IndentInline, window, cx| this.on_slash_key("tab", window, cx)))
+            .capture_action(cx.listener(|this, _: &Enter, window, cx| this.on_slash_key("enter", window, cx)))
+            .capture_action(cx.listener(|this, _: &Escape, window, cx| this.on_slash_key("escape", window, cx)))
             .child(list(self.list.clone(), cx.processor(|this, ix, _, cx| this.render_item(ix, cx))).flex_1().py_2())
             .child(
                 div()
@@ -694,6 +781,7 @@ impl Render for ChatView {
                     .border_color(c(theme::BORDER))
                     .on_drop(cx.listener(|this, paths: &gpui::ExternalPaths, _, cx| this.attach(paths.paths().to_vec(), cx)))
                     .when(!self.attached.is_empty(), |d| d.child(self.attachments(cx)))
+                    .child(self.slash_list(cx))
                     .child(
                         div()
                             .flex()
@@ -750,6 +838,7 @@ impl PageView for ChatView {
         for path in &self.attached {
             let _ = writeln!(out, "    attached: {}", path.display());
         }
+        let _ = writeln!(out, "    commands: {}", self.commands.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(" "));
     }
 }
 
@@ -775,6 +864,23 @@ fn paste_images(view: &gpui::WeakEntity<ChatView>, item: &gpui::ClipboardItem, c
     }
     let _ = view.update(cx, |v, cx| v.attach(paths, cx));
     true
+}
+
+/// Commands matching a bare `/word` prompt: name prefix matches first, then names containing it.
+fn filter_commands(commands: &[SlashCommand], text: &str) -> Vec<usize> {
+    let Some(q) = text.strip_prefix('/').filter(|q| !q.contains(char::is_whitespace)) else { return vec![] };
+    let q = q.to_lowercase();
+    let (mut prefix, mut inner): (Vec<usize>, Vec<usize>) = (vec![], vec![]);
+    for (i, cmd) in commands.iter().enumerate() {
+        let name = cmd.name.to_lowercase();
+        if name.starts_with(&q) {
+            prefix.push(i);
+        } else if name.contains(&q) {
+            inner.push(i);
+        }
+    }
+    prefix.extend(inner);
+    prefix
 }
 
 /// `src/a.rs:42` (bare or as inline code, outside fenced blocks) becomes a link to that line.
@@ -845,8 +951,18 @@ pub fn init(cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::{file_patch, footer, group_label, linkify, Call};
-    use orbit_core::chat::FileDiff;
+    use super::{file_patch, filter_commands, footer, group_label, linkify, Call};
+    use orbit_core::chat::{FileDiff, SlashCommand};
+
+    #[test]
+    fn slash_list_filters_a_bare_command_word() {
+        let cmds: Vec<SlashCommand> = ["compact", "review", "pr-comments", "init"].iter().map(|n| SlashCommand { name: (*n).into(), description: String::new() }).collect();
+        assert_eq!(filter_commands(&cmds, "/"), vec![0, 1, 2, 3]);
+        assert_eq!(filter_commands(&cmds, "/CO"), vec![0, 2]);
+        assert_eq!(filter_commands(&cmds, "/re"), vec![1]);
+        assert!(filter_commands(&cmds, "/review now").is_empty());
+        assert!(filter_commands(&cmds, "hi /re").is_empty());
+    }
 
     #[test]
     fn edit_patch_parses_as_one_file() {
