@@ -1,0 +1,16 @@
+{"type": "user", "isSidechain": false, "message": {"role": "user", "content": [{"type": "text", "text": "Use the Edit tool to change hello to bye in a.txt, then reply with the single word done."}]}}
+{"type": "assistant", "isSidechain": false, "message": {"role": "assistant", "content": [{"type": "thinking", "thinking": ""}], "id": "msg_011CgyJucKWWR8dRBVsDmHjK"}}
+{"type": "assistant", "isSidechain": false, "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_016pDPUyAThb3n7GRLkBm9yr", "name": "Read", "input": {"file_path": "/tmp/rfx/a.txt"}}], "id": "msg_011CgyJucKWWR8dRBVsDmHjK"}}
+{"type": "user", "isSidechain": false, "message": {"role": "user", "content": [{"tool_use_id": "toolu_016pDPUyAThb3n7GRLkBm9yr", "type": "tool_result", "content": "1\thello\n2\t"}]}}
+{"type": "assistant", "isSidechain": false, "message": {"role": "assistant", "content": [{"type": "thinking", "thinking": ""}], "id": "msg_011CgyJukBHmzhUc8C7ctVjD"}}
+{"type": "assistant", "isSidechain": false, "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_017kVc9dhcwuoe6rVPtJFg79", "name": "Edit", "input": {"replace_all": false, "file_path": "/tmp/rfx/a.txt", "old_string": "hello", "new_string": "bye"}}], "id": "msg_011CgyJukBHmzhUc8C7ctVjD"}}
+{"type": "user", "isSidechain": false, "message": {"role": "user", "content": [{"tool_use_id": "toolu_017kVc9dhcwuoe6rVPtJFg79", "type": "tool_result", "content": "The file /tmp/rfx/a.txt has been updated successfully. (file state is current in your context \u2014 no need to Read it back)"}]}}
+{"type": "assistant", "isSidechain": false, "message": {"role": "assistant", "content": [{"type": "thinking", "thinking": ""}], "id": "msg_011CgyJurrrwdkXjBDPvAtuj"}}
+{"type": "assistant", "isSidechain": false, "message": {"role": "assistant", "content": [{"type": "text", "text": "done"}], "id": "msg_011CgyJurrrwdkXjBDPvAtuj"}}
+{"type": "user", "isSidechain": false, "message": {"role": "user", "content": [{"type": "text", "text": "Count from 1 to 2000 in words, one per line, no tools."}]}}
+{"type": "assistant", "isSidechain": false, "message": {"role": "assistant", "content": [{"type": "thinking", "thinking": ""}], "id": "msg_011CgyJzb3zXWZDggnGY9bkG"}}
+{"type": "assistant", "isSidechain": false, "message": {"role": "assistant", "content": [{"type": "text", "text": "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\neleven\ntwelve\nthirteen\nfourteen\nfifteen\nsixteen\nseventeen"}], "id": "msg_011CgyJzb3zXWZDggnGY9bkG"}}
+{"type": "user", "isSidechain": false, "message": {"role": "user", "content": [{"type": "text", "text": "[Request interrupted by user]"}]}}
+{"type": "user", "isSidechain": false, "message": {"role": "user", "content": [{"type": "text", "text": "say hi"}]}}
+{"type": "assistant", "isSidechain": false, "message": {"role": "assistant", "content": [{"type": "thinking", "thinking": ""}], "id": "msg_011CgyK1SCUN5EiH7vnQ2ukd"}}
+{"type": "assistant", "isSidechain": false, "message": {"role": "assistant", "content": [{"type": "text", "text": "Hi! \ud83d\udc4b"}], "id": "msg_011CgyK1SCUN5EiH7vnQ2ukd"}}

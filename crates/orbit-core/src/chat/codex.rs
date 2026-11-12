@@ -1,5 +1,5 @@
 // Codex over `codex app-server`: JSON-RPC on stdio, one thread per chat session.
-use super::{Agent, ChatBackend, ChatEvent, ChatInput, FileDiff, PermissionOption, SlashCommand};
+use super::{Agent, ChatBackend, ChatEvent, ChatInput, FileDiff, PermissionOption, SlashCommand, Turn};
 use crate::agent::stream;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -138,6 +138,8 @@ impl Parser {
     fn response(&mut self, request: &str, v: &Value) -> Vec<ChatEvent> {
         if let Some(message) = v["error"]["message"].as_str() {
             return match request {
+                // The thread resumed; it just comes without its history.
+                "thread/read" => vec![ChatEvent::SessionId(self.thread_id.clone())],
                 "thread/start" | "thread/resume" | "turn/start" => vec![ChatEvent::TurnEnded { cost_usd: None, tokens: None, error: Some(message.into()) }],
                 _ => vec![],
             };
@@ -148,7 +150,7 @@ impl Parser {
                 self.outbox.push(json!({ "jsonrpc": "2.0", "method": "initialized" }));
                 let cwd = self.cwd.clone();
                 let next = match self.resume.clone() {
-                    Some(id) => self.request("thread/resume", json!({ "threadId": id, "cwd": cwd })),
+                    Some(id) => self.request("thread/resume", json!({ "threadId": id, "cwd": cwd, "excludeTurns": true })),
                     None => self.request("thread/start", json!({ "cwd": cwd })),
                 };
                 self.outbox.push(next);
@@ -158,7 +160,18 @@ impl Parser {
                 self.thread_id = r["thread"]["id"].as_str().unwrap_or("").into();
                 let skills = self.request("skills/list", json!({ "cwds": [self.cwd] }));
                 self.outbox.push(skills);
-                vec![ChatEvent::SessionId(self.thread_id.clone())]
+                if request == "thread/start" {
+                    return vec![ChatEvent::SessionId(self.thread_id.clone())];
+                }
+                // Ready only once the history is in, so it lands above the next prompt.
+                let read = self.request("thread/read", json!({ "threadId": self.thread_id, "includeTurns": true }));
+                self.outbox.push(read);
+                vec![]
+            }
+            "thread/read" => {
+                let turns = self.history(&r["thread"]);
+                let history = (!turns.is_empty()).then_some(ChatEvent::History(turns));
+                history.into_iter().chain([ChatEvent::SessionId(self.thread_id.clone())]).collect()
             }
             "skills/list" => {
                 let skills = r["data"].as_array().into_iter().flatten().flat_map(|e| e["skills"].as_array().into_iter().flatten());
@@ -174,6 +187,34 @@ impl Parser {
             }
             _ => vec![],
         }
+    }
+
+    /// A thread's stored turns: each userMessage starts one, its other items replay as live events.
+    fn history(&mut self, thread: &Value) -> Vec<Turn> {
+        let mut turns = vec![];
+        let items = thread["turns"].as_array().into_iter().flatten().flat_map(|t| t["items"].as_array().into_iter().flatten());
+        for item in items {
+            let id = item["id"].as_str().unwrap_or("").to_string();
+            let strings = |key: &str| item[key].as_array().into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>().join("\n");
+            let events = match item["type"].as_str().unwrap_or("") {
+                "userMessage" => {
+                    let content = item["content"].as_array().into_iter().flatten();
+                    let (text, images): (Vec<_>, Vec<_>) = content.partition(|c| c["type"] == "text");
+                    let prompt = text.iter().filter_map(|c| c["text"].as_str()).collect::<Vec<_>>().join("\n");
+                    let images = images.iter().filter_map(|c| c["path"].as_str()).map(PathBuf::from).collect();
+                    turns.push(Turn { prompt, images, events: vec![] });
+                    continue;
+                }
+                "agentMessage" => vec![ChatEvent::TextDelta { message_id: id, text: item["text"].as_str().unwrap_or("").into() }],
+                "reasoning" => {
+                    let text = [strings("summary"), strings("content")].join("\n").trim().to_string();
+                    (!text.is_empty()).then_some(ChatEvent::ThinkingDelta { message_id: id, text }).into_iter().collect()
+                }
+                _ => tool_started(item).into_iter().chain(self.tool_finished(item)).collect(),
+            };
+            super::add_to_turn(&mut turns, events);
+        }
+        turns
     }
 
     fn approval(&mut self, v: &Value) -> Option<ChatEvent> {
@@ -332,10 +373,29 @@ mod tests {
         assert!(p.line(&json!({ "id": init["id"], "result": {} }).to_string()).is_empty());
         assert_eq!(p.outbox[0], json!({ "jsonrpc": "2.0", "method": "initialized" }));
         assert_eq!(p.outbox[1]["method"], "thread/resume");
-        assert_eq!(p.outbox[1]["params"], json!({ "threadId": "t1", "cwd": "/w" }));
+        assert_eq!(p.outbox[1]["params"], json!({ "threadId": "t1", "cwd": "/w", "excludeTurns": true }));
         let id = p.outbox[1]["id"].clone();
-        assert_eq!(p.line(&json!({ "id": id, "result": { "thread": { "id": "t1" } } }).to_string()), [ChatEvent::SessionId("t1".into())]);
+        assert!(p.line(&json!({ "id": id, "result": { "thread": { "id": "t1" } } }).to_string()).is_empty());
         assert_eq!(p.outbox[2]["method"], "skills/list");
+        assert_eq!(p.outbox[3]["params"], json!({ "threadId": "t1", "includeTurns": true }));
+        // A failed read still leaves the thread usable.
+        let read = p.outbox[3]["id"].clone();
+        assert_eq!(p.line(&json!({ "id": read, "error": { "message": "no" } }).to_string()), [ChatEvent::SessionId("t1".into())]);
+    }
+
+    #[test]
+    fn history_from_thread_read() {
+        let (_, events) = replay("history.jsonl");
+        let [ChatEvent::History(turns), ChatEvent::SessionId(_)] = &events[..] else { panic!("{events:?}") };
+        assert_eq!(turns.len(), 1);
+        assert!(turns[0].prompt.starts_with("Run `cat a.txt` in the shell"), "{}", turns[0].prompt);
+        let events = &turns[0].events;
+        let started: Vec<_> = events.iter().filter_map(|e| if let ChatEvent::ToolStarted { name, summary, .. } = e { Some((name.as_str(), summary.as_str())) } else { None }).collect();
+        assert_eq!(started[0], ("Bash", "cat a.txt"));
+        assert_eq!(started[1].0, "Edit");
+        assert!(events.iter().any(|e| matches!(e, ChatEvent::ToolOutput { text, .. } if text.contains("hello"))));
+        assert!(events.iter().any(|e| matches!(e, ChatEvent::ToolFinished { ok: true, diff: Some(d), .. } if d.new_text == "bye")));
+        assert!(matches!(events.last(), Some(ChatEvent::TextDelta { text, .. }) if text == "done"));
     }
 
     #[test]
@@ -385,7 +445,7 @@ mod tests {
     #[test]
     fn methods_orbit_uses_exist_in_the_schema() {
         let schema = std::fs::read_to_string(format!("{FIXTURES}codex_app_server_protocol.v2.schemas.json")).unwrap();
-        for m in ["initialize", "thread/start", "thread/resume", "skills/list", "turn/start", "turn/interrupt", "turn/started", "turn/completed", "item/started", "item/completed", "item/agentMessage/delta", "item/reasoning/textDelta", "item/reasoning/summaryTextDelta", "item/commandExecution/outputDelta", "thread/tokenUsage/updated", "localImage"] {
+        for m in ["initialize", "thread/start", "thread/resume", "thread/read", "excludeTurns", "includeTurns", "userMessage", "skills/list", "turn/start", "turn/interrupt", "turn/started", "turn/completed", "item/started", "item/completed", "item/agentMessage/delta", "item/reasoning/textDelta", "item/reasoning/summaryTextDelta", "item/commandExecution/outputDelta", "thread/tokenUsage/updated", "localImage"] {
             assert!(schema.contains(&format!("\"{m}\"")), "{m} is not in codex's schema");
         }
     }

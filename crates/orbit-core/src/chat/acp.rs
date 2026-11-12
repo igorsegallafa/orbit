@@ -1,5 +1,5 @@
 // ACP agents (`opencode acp`, `omp acp`): JSON-RPC on stdio, one ACP session per chat session.
-use super::{Agent, ChatBackend, ChatEvent, ChatInput, FileDiff, PermissionOption, SlashCommand};
+use super::{Agent, ChatBackend, ChatEvent, ChatInput, FileDiff, PermissionOption, SlashCommand, Turn};
 use crate::agent::stream;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -81,6 +81,8 @@ struct Parser {
     /// usage_update's cost is the session total; a turn costs the growth since the last turn ended.
     cost: Option<f64>,
     cost_before_turn: f64,
+    /// While session/load runs: the turns its replayed updates make up.
+    history: Option<Vec<Turn>>,
 }
 
 impl super::RpcParser for Parser {
@@ -117,6 +119,7 @@ impl Parser {
             return self.agent_request(method, &v);
         }
         match method {
+            "session/update" if self.history.is_some() => self.replayed(&v["params"]["update"]),
             "session/update" => self.update(&v["params"]["update"]),
             _ => vec![],
         }
@@ -158,6 +161,7 @@ impl Parser {
     fn response(&mut self, request: &str, v: &Value) -> Vec<ChatEvent> {
         if let Some(message) = v["error"]["message"].as_str() {
             self.tools.clear();
+            self.history = None;
             return match request {
                 "session/new" | "session/load" | "session/prompt" => vec![ChatEvent::TurnEnded { cost_usd: None, tokens: None, error: Some(message.into()) }],
                 _ => vec![],
@@ -168,7 +172,10 @@ impl Parser {
             "initialize" => {
                 let params = json!({ "cwd": self.cwd, "mcpServers": self.mcp_servers });
                 let next = match self.resume.clone() {
-                    Some(id) => self.request("session/load", json!({ "sessionId": id, "cwd": params["cwd"], "mcpServers": params["mcpServers"] })),
+                    Some(id) => {
+                        self.history = Some(vec![]);
+                        self.request("session/load", json!({ "sessionId": id, "cwd": params["cwd"], "mcpServers": params["mcpServers"] }))
+                    }
                     None => self.request("session/new", params),
                 };
                 self.outbox.push(next);
@@ -182,7 +189,9 @@ impl Parser {
                 self.session_id = self.resume.clone().unwrap_or_default();
                 // The cost of the history a load replays isn't the next turn's.
                 self.cost_before_turn = self.cost.unwrap_or(0.0);
-                vec![ChatEvent::SessionId(self.session_id.clone())]
+                let turns = self.history.take().unwrap_or_default();
+                let history = (!turns.is_empty()).then_some(ChatEvent::History(turns));
+                history.into_iter().chain([ChatEvent::SessionId(self.session_id.clone())]).collect()
             }
             "session/prompt" => {
                 self.tools.clear();
@@ -213,6 +222,23 @@ impl Parser {
             }
             _ => vec![],
         }
+    }
+
+    /// A history update session/load replays: user chunks start a turn, the rest joins it (commands still go live).
+    fn replayed(&mut self, u: &Value) -> Vec<ChatEvent> {
+        if u["sessionUpdate"] == "user_message_chunk" {
+            let turns = self.history.get_or_insert_default();
+            // shortcut: image blocks of a replayed prompt are not shown in history.
+            let chunk = text(&u["content"]).unwrap_or_default();
+            match turns.last_mut() {
+                Some(t) if t.events.is_empty() => t.prompt.push_str(&chunk),
+                _ => turns.push(Turn { prompt: chunk, ..Turn::default() }),
+            }
+            return vec![];
+        }
+        let (live, past): (Vec<_>, Vec<_>) = self.update(u).into_iter().partition(|e| matches!(e, ChatEvent::Commands(_)));
+        super::add_to_turn(self.history.get_or_insert_default(), past);
+        live
     }
 
     fn tool(&mut self, u: &Value) -> Vec<ChatEvent> {
@@ -387,6 +413,31 @@ mod tests {
         assert_eq!(p.outbox[0]["params"], json!({ "sessionId": "s1", "cwd": "/w", "mcpServers": [] }));
         assert_eq!(p.line(&json!({ "id": p.outbox[0]["id"], "result": null }).to_string()), [ChatEvent::SessionId("s1".into())]);
         assert_eq!(p.prompt("hi", &[])["params"], json!({ "sessionId": "s1", "prompt": [{ "type": "text", "text": "hi" }] }));
+    }
+
+    #[test]
+    fn history_from_session_load() {
+        let mut p = Parser { resume: Some("ses_e2f769eb9ffek3R3046uVjw3tH".into()), history: Some(vec![]), ..Parser::default() };
+        let commands = r#"{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"init","description":"x"}]}}}"#;
+        assert!(matches!(&p.line(commands)[..], [ChatEvent::Commands(_)]), "commands stay live during a load");
+        let mut events = vec![];
+        for line in std::fs::read_to_string(format!("{FIXTURES}opencode-load.jsonl")).unwrap().lines() {
+            match line.strip_prefix(">> ") {
+                Some(sent) => _ = p.pending.insert(2, serde_json::from_str::<Value>(sent).unwrap()["method"].as_str().unwrap().into()),
+                None => events.extend(p.line(line)),
+            }
+        }
+        let [ChatEvent::History(turns), ChatEvent::SessionId(id)] = &events[..] else { panic!("{events:?}") };
+        assert_eq!(id, "ses_e2f769eb9ffek3R3046uVjw3tH");
+        assert_eq!(turns.len(), 1);
+        assert!(turns[0].prompt.starts_with("Read a.txt, then replace hello with bye"), "{}", turns[0].prompt);
+        assert_eq!(started(&turns[0].events), [("Read", "/tmp/afx/a.txt"), ("Edit", "/tmp/afx/a.txt"), ("Bash", "ls")]);
+        assert_eq!(diff(&turns[0].events).map(|d| d.new_text), Some("bye".into()));
+        assert!(joined(&turns[0].events, true).contains("need to read a.txt"));
+        assert_eq!(joined(&turns[0].events, false), "done");
+        assert!(p.history.is_none());
+        let chunk = r#"{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","messageId":"m","content":{"type":"text","text":"hi"}}}}"#;
+        assert_eq!(p.line(chunk), [ChatEvent::TextDelta { message_id: "m".into(), text: "hi".into() }]);
     }
 
     #[test]

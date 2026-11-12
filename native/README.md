@@ -119,6 +119,11 @@ A prompt containing "slow" streams for a minute until interrupted (Stop is `chat
 `chat-send`, or `key:escape` in the prompt); one containing "crash" exits with an error, and
 `chat-restart` starts the backend again resuming the session. Each turn ends with a `footer:` line
 in the dump; chat tabs list in the sidebar under the scope they were opened in (`session:<title>`).
+History on resume: claude reads its transcript from `$HOME/.claude/projects/<cwd, non-alphanumerics as
+dashes>/<id>.jsonl`, so run with a scratch `HOME` holding one for `stub-chat-session` (e.g. a copy of
+`crates/orbit-core/tests/fixtures/chat/claude/history.jsonl`), crash the stub and click `chat-restart`:
+the history replaces the shown items, all but the last turn folded (`turn:<ix>` toggles; the dump marks
+`you (history, folded)`).
 Its `system/init` reports the slash commands compact, review, init, pr-comments and security-review
 (after the first prompt, like claude): `type:/re` opens the filtered list (rows `slash:<n>`),
 `key:down`/`key:tab`/`key:enter`/`key:escape` drive it; the dump's `commands:` line lists them.

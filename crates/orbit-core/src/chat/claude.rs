@@ -1,6 +1,6 @@
 // Claude Code over stream-json: one long-lived `claude -p` process, user
 // messages in as NDJSON on stdin, partial-message stream events out.
-use super::{Agent, ChatBackend, ChatEvent, ChatInput, FileDiff, PermissionOption, SlashCommand};
+use super::{Agent, ChatBackend, ChatEvent, ChatInput, FileDiff, PermissionOption, SlashCommand, Turn};
 use crate::agent::stream;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -19,6 +19,11 @@ pub fn start(cwd: &Path, resume: Option<String>, key: &str, sink: impl Fn(ChatEv
     cmd.args(["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages"]);
     if let Some(id) = &resume {
         cmd.args(["--resume", id]);
+        let file = crate::config::home_dir().map(|h| transcript(&h, cwd, id));
+        let turns = file.and_then(|f| std::fs::read_to_string(f).map_err(|e| e.to_string())).map(|t| history(&t)).unwrap_or_default();
+        if !turns.is_empty() {
+            sink(ChatEvent::History(turns));
+        }
     }
     // Only when Orbit's MCP server is configured (the hook listener is up).
     if launch_args.iter().any(|a| a.starts_with("--mcp-config=")) {
@@ -149,6 +154,52 @@ impl Parser {
     }
 }
 
+/// Where claude keeps a session: ~/.claude/projects/<cwd with every non-alphanumeric char a dash>/<id>.jsonl.
+fn transcript(home: &Path, cwd: &Path, id: &str) -> PathBuf {
+    let dir: String = cwd.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    home.join(".claude/projects").join(dir).join(format!("{id}.jsonl"))
+}
+
+/// A transcript's turns: each user text starts one; whole assistant messages give text, thinking and tool calls.
+fn history(transcript: &str) -> Vec<Turn> {
+    let mut parser = Parser::default();
+    let mut turns = vec![];
+    for line in transcript.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        if v["isSidechain"] == true || v["isMeta"] == true {
+            continue;
+        }
+        let content = &v["message"]["content"];
+        match v["type"].as_str() {
+            Some("user") => {
+                let prompt = match content {
+                    Value::String(t) => Some(t.clone()),
+                    _ if blocks(&v).any(|b| b["type"] == "tool_result") => None,
+                    _ => Some(result_text(content)),
+                };
+                match prompt {
+                    // shortcut: images pasted into a prompt are stored as base64 and not shown in history.
+                    Some(text) if !text.starts_with("[Request interrupted") => turns.push(Turn { prompt: text, ..Turn::default() }),
+                    Some(_) => {}
+                    None => super::add_to_turn(&mut turns, parser.line(line)),
+                }
+            }
+            Some("assistant") => {
+                let message_id = v["message"]["id"].as_str().unwrap_or("").to_string();
+                let said = blocks(&v).filter_map(|b| match (b["type"].as_str(), b["text"].as_str().or(b["thinking"].as_str())) {
+                    (Some("text"), Some(t)) => Some(ChatEvent::TextDelta { message_id: message_id.clone(), text: t.into() }),
+                    (Some("thinking"), Some(t)) if !t.is_empty() => Some(ChatEvent::ThinkingDelta { message_id: message_id.clone(), text: t.into() }),
+                    _ => None,
+                });
+                let said: Vec<_> = said.collect();
+                super::add_to_turn(&mut turns, said.into_iter().chain(parser.line(line)));
+            }
+            _ => {}
+        }
+    }
+    turns
+}
+
 fn blocks(v: &Value) -> impl Iterator<Item = &Value> {
     v["message"]["content"].as_array().into_iter().flatten()
 }
@@ -204,6 +255,20 @@ mod tests {
         let text: String = events.iter().filter_map(|e| if let ChatEvent::TextDelta { text, .. } = e { Some(text.as_str()) } else { None }).collect();
         assert_eq!(text, "done");
         assert!(matches!(events.last(), Some(ChatEvent::TurnEnded { cost_usd: Some(c), tokens: Some(t), error: None }) if *c > 0.0 && *t > 0));
+    }
+
+    #[test]
+    fn history_from_a_transcript() {
+        let text = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/chat/claude/history.jsonl")).unwrap();
+        let turns = history(&text);
+        let prompts: Vec<_> = turns.iter().map(|t| t.prompt.as_str()).collect();
+        assert_eq!(prompts, ["Use the Edit tool to change hello to bye in a.txt, then reply with the single word done.", "Count from 1 to 2000 in words, one per line, no tools.", "say hi"]);
+        let edit = &turns[0].events;
+        assert!(matches!(&edit[0], ChatEvent::ToolStarted { name, summary, .. } if name == "Read" && summary == "/tmp/rfx/a.txt"));
+        assert!(edit.iter().any(|e| matches!(e, ChatEvent::ToolFinished { ok: true, diff: Some(d), .. } if d.new_text == "bye")));
+        assert!(matches!(edit.last(), Some(ChatEvent::TextDelta { text, .. }) if text == "done"));
+        assert!(matches!(&turns[2].events[..], [ChatEvent::TextDelta { text, .. }] if text.starts_with("Hi!")));
+        assert_eq!(transcript(Path::new("/h"), Path::new("/tmp/my.app"), "x"), Path::new("/h/.claude/projects/-tmp-my-app/x.jsonl"));
     }
 
     #[test]

@@ -24,7 +24,8 @@ use std::sync::LazyLock;
 use std::time::Instant;
 
 enum Item {
-    User(String),
+    /// `folded` is Some for a history turn: whether its items are hidden.
+    User { text: String, folded: Option<bool> },
     /// `md` renders `text` with `path:line` mentions turned into links.
     Assistant { id: String, text: String, md: Entity<TextViewState>, _parsed: Subscription },
     Thinking { id: String, text: String, open: bool },
@@ -310,7 +311,7 @@ impl ChatView {
             Item::Thinking { id: x, .. } if thinking => *x == id,
             _ => false,
         });
-        let turn_start = self.items.iter().rposition(|i| matches!(i, Item::User(_)));
+        let turn_start = self.items.iter().rposition(|i| matches!(i, Item::User { .. }));
         match at.filter(|&ix| turn_start.is_none_or(|t| ix > t)) {
             Some(ix) => {
                 match &mut self.items[ix] {
@@ -432,6 +433,20 @@ impl ChatView {
                 self.push(Item::Permission { id, title, detail, options, answer: None });
             }
             ChatEvent::Commands(commands) => self.commands = commands,
+            // The agent's store has the whole conversation, so a restart's history replaces what is shown.
+            ChatEvent::History(turns) => {
+                self.items.clear();
+                self.list.reset(0);
+                let last = turns.len().saturating_sub(1);
+                for (n, turn) in turns.into_iter().enumerate() {
+                    self.push(Item::User { text: turn.prompt, folded: Some(n < last) });
+                    for path in turn.images {
+                        let size = image_size(&path);
+                        self.push(Item::Image { path, title: String::new(), size });
+                    }
+                    turn.events.into_iter().for_each(|e| self.on_event(e, window, cx));
+                }
+            }
             ChatEvent::Exited { error } => {
                 self.backend = None;
                 self.turn = None;
@@ -457,7 +472,7 @@ impl ChatView {
             b.send(ChatInput::Prompt { text: text.clone(), images: images.clone() });
         }
         self.turn = Some(Instant::now());
-        self.push(Item::User(text));
+        self.push(Item::User { text, folded: None });
         for path in images {
             let size = image_size(&path);
             self.push(Item::Image { path, title: String::new(), size });
@@ -467,11 +482,44 @@ impl ChatView {
         cx.notify();
     }
 
+    fn folded(&self, ix: usize) -> bool {
+        let turn = self.items[..ix].iter().rev().find_map(|i| if let Item::User { folded, .. } = i { Some(*folded) } else { None });
+        turn.flatten() == Some(true)
+    }
+
+    fn toggle_turn(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if let Some(Item::User { folded: Some(f), .. }) = self.items.get_mut(ix) {
+            *f = !*f;
+        }
+        let end = self.items[ix + 1..].iter().position(|i| matches!(i, Item::User { .. })).map_or(self.items.len(), |n| ix + 1 + n);
+        self.list.remeasure_items(ix..end);
+        cx.notify();
+    }
+
     fn render_item(&mut self, ix: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
+        if !matches!(self.items[ix], Item::User { .. }) && self.folded(ix) {
+            return div().into_any_element();
+        }
         let row = div().w_full().px_4().py_1p5().flex();
         match &self.items[ix] {
-            Item::User(text) => row
+            Item::User { text, folded } => row
                 .justify_end()
+                .items_center()
+                .gap_3()
+                .when_some(*folded, |d, folded| {
+                    let label = if folded { "▸ Show turn" } else { "▾ Hide turn" };
+                    d.child(
+                        div()
+                            .id(("turn", ix))
+                            .relative()
+                            .cursor_pointer()
+                            .text_size(px(11.5))
+                            .text_color(c(theme::TEXT_FAINT))
+                            .child(label)
+                            .child(probe(format!("turn:{ix}")))
+                            .on_click(cx.listener(move |this, _, _, cx| this.toggle_turn(ix, cx))),
+                    )
+                })
                 .child(
                     div()
                         .max_w(px(560.))
@@ -813,7 +861,11 @@ impl PageView for ChatView {
         let _ = writeln!(out, "  chat {} session {:?} ready {} status {} opened {:?}", self.agent, self.session_id, self.ready(), self.status().label(), self.opened);
         for item in &self.items {
             let _ = match item {
-                Item::User(t) => writeln!(out, "    you: {t:?}"),
+                Item::User { text, folded } => writeln!(out, "    you{}: {text:?}", match folded {
+                    Some(true) => " (history, folded)",
+                    Some(false) => " (history)",
+                    None => "",
+                }),
                 Item::Assistant { text, .. } => writeln!(out, "    agent: {text:?}"),
                 Item::Thinking { text, open, .. } => writeln!(out, "    thinking ({}): {text:?}", if *open { "open" } else { "collapsed" }),
                 Item::Image { path, title, size } => writeln!(out, "    image: {} {title:?} {size:?}", path.display()),

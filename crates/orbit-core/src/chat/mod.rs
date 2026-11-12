@@ -55,6 +55,24 @@ pub enum ChatEvent {
     Exited {
         error: Option<String>,
     },
+    /// A resumed conversation's earlier turns, sent once before the session is ready.
+    History(Vec<Turn>),
+}
+
+/// An earlier turn: its prompt, then what the agent did as live events.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Turn {
+    pub prompt: String,
+    pub images: Vec<PathBuf>,
+    pub events: Vec<ChatEvent>,
+}
+
+/// Adds `events` to the last turn (one without a prompt when the history starts mid-turn).
+fn add_to_turn(turns: &mut Vec<Turn>, events: impl IntoIterator<Item = ChatEvent>) {
+    if turns.is_empty() {
+        turns.push(Turn::default());
+    }
+    turns.last_mut().unwrap().events.extend(events);
 }
 
 #[derive(Debug, Clone, PartialEq)]
