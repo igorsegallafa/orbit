@@ -215,7 +215,21 @@ impl ChatView {
         self.items.iter().rposition(|i| matches!(i, Item::Permission { answer: None, .. }))
     }
 
-    fn status(&self) -> Status {
+    pub fn busy(&self) -> bool {
+        self.turn.is_some()
+    }
+
+    pub fn stop(&self) {
+        if let Some(b) = &self.backend {
+            b.stop();
+        }
+    }
+
+    pub fn stopped(&self) -> bool {
+        self.backend.is_none()
+    }
+
+    pub fn status(&self) -> Status {
         if self.pending().is_some() {
             Status::Waiting
         } else if self.backend.is_none() {
@@ -366,6 +380,9 @@ impl ChatView {
         match event {
             ChatEvent::SessionId(id) => {
                 let was_ready = self.ready();
+                // A session tab in chat mode keeps the id, to resume it in the other mode or after a restart.
+                let key = self.key.clone();
+                crate::sessions::store(cx).update(cx, |s, cx| s.set_agent_session_id(&key, &id, cx));
                 self.session_id = Some(id);
                 if !was_ready {
                     self.prompt.update(cx, |p, cx| p.focus(window, cx));

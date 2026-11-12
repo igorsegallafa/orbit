@@ -120,7 +120,8 @@ pub fn session_dir(workspace: &str, repo: Option<&str>, cwd: Option<&str>) -> Re
     if !dir.exists() {
         return Err(format!("directory does not exist: {}", dir.to_string_lossy()));
     }
-    Ok(dir)
+    // No trailing slash (`dir:~` joins ""): claude names its transcript folder after the exact path.
+    Ok(dir.components().collect())
 }
 
 /// Starts `spec` as session `id` (from [`reserve_id`]). `on_output` runs on a
@@ -504,6 +505,13 @@ pub fn default_shell() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_dir_has_no_trailing_slash() {
+        let tmp = std::env::temp_dir();
+        let with_slash = format!("{}/", tmp.to_string_lossy().trim_end_matches('/'));
+        assert_eq!(session_dir("x", None, Some(&with_slash)).unwrap().to_string_lossy(), tmp.to_string_lossy().trim_end_matches('/'));
+    }
     use serde_json::json;
 
     #[test]

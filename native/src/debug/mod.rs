@@ -756,6 +756,7 @@ fn program_terminal(config: &orbit_core::run::ResolvedRun, cx: &mut Context<Sess
         repo: None,
         agent_session_id: None,
         cwd: Some(config.cwd.clone()),
+        mode: Default::default(),
     };
     let spec = orbit_core::pty::Spawn {
         cwd: config.cwd.clone().into(),
@@ -764,7 +765,7 @@ fn program_terminal(config: &orbit_core::run::ResolvedRun, cx: &mut Context<Sess
         tty_only: true,
         ..Default::default()
     };
-    cx.new(|cx| TerminalView::new(meta, spec, None, None, cx))
+    cx.new(|cx| TerminalView::new(meta, Some(spec), None, None, cx))
 }
 
 /// The launch's `env`. gdb's replaces the program's whole environment

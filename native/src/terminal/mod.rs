@@ -300,6 +300,9 @@ pub struct TerminalView {
     shown: Vec<Shown>,
     /// The one in the viewer; none while it's closed.
     shown_ix: Option<usize>,
+    /// Chat mode: the tab shows this instead of the terminal, which runs nothing.
+    pub chat: Option<gpui::Entity<crate::chat::ChatView>>,
+    _chat_status: Option<Subscription>,
     /// The line being typed and the last one sent (Enter), for the viewer's caption.
     prompt: std::cell::RefCell<(String, Option<String>)>,
     /// The cell under the mouse, for the link underline.
@@ -359,10 +362,11 @@ pub fn restored_output(saved: &[u8], rows: usize) -> Vec<u8> {
 }
 
 impl TerminalView {
-    /// Starts `spec` on a PTY. `replay` is printed first (a restored tab's
-    /// previous output); `input` is typed once the program runs.
-    pub fn new(meta: SessionMeta, spec: pty::Spawn, replay: Option<Vec<u8>>, input: Option<String>, cx: &mut Context<Self>) -> Self {
-        let size = GridSize { cols: spec.size.cols.max(2) as usize, rows: spec.size.rows.max(1) as usize };
+    /// Starts `spec` on a PTY (none for a session in chat mode, see `set_chat`).
+    /// `replay` is printed first (a restored tab's previous output); `input` is typed once the program runs.
+    pub fn new(meta: SessionMeta, spec: Option<pty::Spawn>, replay: Option<Vec<u8>>, input: Option<String>, cx: &mut Context<Self>) -> Self {
+        let spawn_size = spec.as_ref().map_or_else(spawn_size, |s| s.size);
+        let size = GridSize { cols: spawn_size.cols.max(2) as usize, rows: spawn_size.rows.max(1) as usize };
         let pty_id = pty::reserve_id();
         let title = Arc::new(Mutex::new(None));
         let window_size = Arc::new(Mutex::new(WindowSize {
@@ -421,7 +425,7 @@ impl TerminalView {
                 }
             }
         };
-        if let Err(e) = pty::spawn(pty_id, spec, on_output) {
+        if let Err(e) = spec.map_or(Ok(()), |spec| pty::spawn(pty_id, spec, on_output)) {
             let msg = format!("\x1b[31mcould not start: {e}\x1b[0m\r\n");
             Processor::<alacritty_terminal::vte::ansi::StdSyncHandler>::new().advance(&mut *shared.term.lock(), msg.as_bytes());
             tracker.lock().unwrap().mark_exited();
@@ -476,11 +480,37 @@ impl TerminalView {
             _free_images: free_images,
             shown: vec![],
             shown_ix: None,
+            chat: None,
+            _chat_status: None,
             prompt: Default::default(),
             hover: None,
             link_mod: false,
             link_click: false,
         }
+    }
+
+    /// Shows `chat` in place of the terminal; its status becomes the session's.
+    pub fn set_chat(&mut self, chat: gpui::Entity<crate::chat::ChatView>, cx: &mut Context<Self>) {
+        self._chat_status = Some(cx.observe(&chat, |this, _, cx| this.publish_status(cx)));
+        self.chat = Some(chat);
+    }
+
+    pub fn busy(&self, cx: &App) -> bool {
+        self.chat.as_ref().map_or(self.status == Status::Busy, |c| c.read(cx).busy())
+    }
+
+    /// Ends the program (or the chat's agent); `stopped` says when it is gone.
+    pub fn stop(&self, cx: &App) {
+        match &self.chat {
+            Some(chat) => chat.read(cx).stop(),
+            None => {
+                let _ = pty::kill(self.shared.pty_id);
+            }
+        }
+    }
+
+    pub fn stopped(&self, cx: &App) -> bool {
+        self.chat.as_ref().map_or_else(|| self.exited(), |c| c.read(cx).stopped())
     }
 
     pub fn is_agent(&self) -> bool {
@@ -503,9 +533,13 @@ impl TerminalView {
     /// Recomputes the status; on a change tells the session list, and for
     /// agents without hooks turns a long busy stretch ending in idle into "done".
     fn publish_status(&mut self, cx: &mut Context<Self>) {
-        let (status, hooks) = {
-            let t = self.tracker.lock().unwrap();
-            (t.status(Instant::now()), t.has_hooks())
+        let (status, hooks) = match &self.chat {
+            // The chat reports its own Done and Waiting to the inbox.
+            Some(chat) => (chat.read(cx).status(), true),
+            None => {
+                let t = self.tracker.lock().unwrap();
+                (t.status(Instant::now()), t.has_hooks())
+            }
         };
         if self.is_agent() && !hooks {
             if status != Status::Idle && status != Status::Exited {
@@ -625,7 +659,7 @@ impl TerminalView {
             .id("shown-reopen")
             .absolute()
             .top(px(6.))
-            .right(px(16.))
+            .right(px(if self.meta.cmd.as_deref().is_some_and(pty::is_claude) { 90. } else { 16. }))
             .px_2()
             .py(px(2.))
             .rounded(px(4.))
@@ -1094,8 +1128,46 @@ impl EntityInputHandler for TerminalView {
     }
 }
 
+impl TerminalView {
+    fn mode_chip(&self) -> Option<gpui::Stateful<gpui::Div>> {
+        let label = if self.chat.is_some() { "Terminal" } else { "Chat" };
+        self.meta.cmd.as_deref().is_some_and(pty::is_claude).then(|| {
+            div()
+                .id("mode-toggle")
+                .relative()
+                .px_2()
+                .py(px(2.))
+                .rounded(px(4.))
+                .bg(c(theme::PANEL_RAISED))
+                .border_1()
+                .border_color(c(theme::BORDER_STRONG))
+                .text_size(px(11.))
+                .text_color(c(theme::TEXT_DIM))
+                .cursor_pointer()
+                .occlude()
+                .hover(|s| s.text_color(c(theme::TEXT)))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::sessions::ToggleChatMode), cx))
+                .child(label)
+                .child(crate::probe::probe("mode-toggle"))
+        })
+    }
+}
+
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(chat) = &self.chat {
+            return div()
+                .track_focus(&self.focus)
+                .flex()
+                .flex_col()
+                .size_full()
+                .bg(c(theme::BG))
+                .font_family(theme::UI_FONT)
+                .child(div().flex().justify_end().px_4().pt_1p5().children(self.mode_chip()))
+                .child(div().flex_1().min_h_0().child(chat.clone()))
+                .into_any_element();
+        }
         let shared = self.shared.clone();
         let focused = self.focus.is_focused(window);
         let viewport = self.scrollbar.bounds.clone();
@@ -1189,12 +1261,14 @@ impl Render for TerminalView {
                 .size_full(),
             )
             .child(scrollbar::vertical("term", &self.scrollbar))
-            .when(self.shown_ix.is_none() && !self.shown.is_empty(), |d| d.child(self.viewer_chip(cx)));
+            .when(self.shown_ix.is_none() && !self.shown.is_empty(), |d| d.child(self.viewer_chip(cx)))
+            .children(self.mode_chip().map(|chip| chip.absolute().top(px(6.)).right(px(16.))));
         div()
             .flex()
             .size_full()
             .child(terminal)
             .when_some(self.shown_ix, |d, ix| d.child(self.viewer(ix, cx)))
+            .into_any_element()
     }
 }
 

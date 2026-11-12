@@ -329,6 +329,10 @@ pub fn dump(app: &OrbitApp, log: &str, cx: &gpui::App) -> String {
         Some(TabKind::Terminal(t)) => {
             let t = t.read(cx);
             let _ = writeln!(out, "--- active terminal: {}", t.title());
+            if let Some(chat) = &t.chat {
+                use crate::pages::PageView as _;
+                chat.read(cx).dump(&mut out, cx);
+            }
             let _ = writeln!(out, "selection: {:?}", t.selection_text());
             let _ = writeln!(out, "copied: {:?}", t.last_copied);
             let _ = writeln!(out, "kitty graphics: {}", t.graphics_summary());
@@ -372,14 +376,16 @@ fn dump_sessions(out: &mut String, cx: &gpui::App) {
         });
         let _ = writeln!(
             out,
-            "  {} {}{} [{}] {} in {} args {:?}{}{}",
+            "  {} {}{} [{}] {} {:?} in {} args {:?} id {:?}{}{}",
             meta.id,
             meta.session_name,
             meta.codename.as_ref().map(|n| format!(" (codename {n})")).unwrap_or_default(),
             meta.label,
             status,
+            meta.mode,
             meta.workspace,
             meta.args,
+            meta.agent_session_id,
             if exited { " (exited)" } else { "" },
             osc.map(|t| format!(" title {t:?}")).unwrap_or_default(),
         );

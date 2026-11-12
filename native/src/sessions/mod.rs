@@ -38,6 +38,8 @@ actions!(
         NextSessionNeedingInput,
         MarkInboxRead,
         ClearInbox,
+        /// Switches the active claude session between its terminal and the chat view.
+        ToggleChatMode,
     ]
 );
 
@@ -76,6 +78,17 @@ pub struct SessionMeta {
     /// A folder to start in instead of the repo or scope folder.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    /// Whether the tab shows the agent's terminal or Orbit's chat view of the conversation.
+    #[serde(default)]
+    pub mode: SessionMode,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionMode {
+    #[default]
+    Terminal,
+    Chat,
 }
 
 /// An ended agent session that can be picked up again.
@@ -318,6 +331,18 @@ impl SessionStore {
         Ok(())
     }
 
+    pub fn set_agent_session_id(&mut self, key: &str, id: &str, cx: &mut Context<Self>) {
+        let Some((meta, view)) = self.open.iter_mut().find(|(m, _)| m.id == key) else { return };
+        if meta.agent_session_id.as_deref() == Some(id) {
+            return;
+        }
+        meta.agent_session_id = Some(id.to_string());
+        if let Some(view) = view.upgrade() {
+            view.update(cx, |v, _| v.meta.agent_session_id = Some(id.to_string()));
+        }
+        self.save();
+    }
+
     fn add_recent(&mut self, entry: RecentSession, cx: &mut Context<Self>) {
         self.recent.retain(|r| r.resume_id != entry.resume_id);
         self.recent.insert(0, entry);
@@ -433,6 +458,7 @@ fn register_actions(cx: &mut App) {
     cx.on_action(|_: &NextSessionNeedingInput, cx| with_app(cx, next_needing_input));
     cx.on_action(|_: &MarkInboxRead, cx| store(cx).update(cx, |s, cx| s.mark_all_read(cx)));
     cx.on_action(|_: &ClearInbox, cx| store(cx).update(cx, |s, cx| s.clear_inbox(cx)));
+    cx.on_action(|_: &ToggleChatMode, cx| with_app(cx, toggle_mode));
 }
 
 /// Where a new session runs: the selected workspace, else home.
@@ -464,6 +490,7 @@ pub fn new_session_in(app: &mut OrbitApp, scope: String, cmd: Option<&str>, inpu
         repo: None,
         agent_session_id,
         cwd: None,
+        mode: SessionMode::Terminal,
     };
     let args = meta.args.clone();
     open(app, meta, args, None, input, window, cx);
@@ -507,6 +534,7 @@ pub fn new_prompted_session(
         repo: None,
         agent_session_id,
         cwd: None,
+        mode: SessionMode::Terminal,
     };
     open(app, meta, args, None, (!argv).then(|| prompt.to_string()), window, cx);
 }
@@ -525,12 +553,29 @@ pub fn new_shell_in(app: &mut OrbitApp, dir: &std::path::Path, window: &mut Wind
         repo: None,
         agent_session_id: None,
         cwd: Some(dir.to_string_lossy().to_string()),
+        mode: SessionMode::Terminal,
     };
     open(app, meta, vec![], None, None, window, cx);
 }
 
 /// Opens `meta` as a tab running `args`, after replaying `replay`.
 fn open(
+    app: &mut OrbitApp,
+    meta: SessionMeta,
+    args: Vec<String>,
+    replay: Option<Vec<u8>>,
+    input: Option<String>,
+    window: &mut Window,
+    cx: &mut Context<OrbitApp>,
+) -> Option<Entity<TerminalView>> {
+    let view = build(app, meta, args, replay, input, window, cx)?;
+    let ix = app.insert_tab(Tab { kind: TabKind::Terminal(view.clone()), preview: false });
+    app.activate(ix, window, cx);
+    Some(view)
+}
+
+/// Registered in the store in place of any earlier view of the same key.
+fn build(
     app: &mut OrbitApp,
     meta: SessionMeta,
     args: Vec<String>,
@@ -558,20 +603,96 @@ fn open(
         program_version: env!("CARGO_PKG_VERSION").into(),
         tty_only: false,
     };
-    let view = cx.new(|cx| TerminalView::new(meta.clone(), spec, replay, input, cx));
+    let view = match meta.mode {
+        SessionMode::Terminal => cx.new(|cx| TerminalView::new(meta.clone(), Some(spec), replay, input, cx)),
+        SessionMode::Chat => {
+            let resume = meta.agent_session_id.clone().filter(|id| pty::claude_session_exists(&spec.cwd, id));
+            let (key, scope, agent) = (meta.id.clone(), meta.workspace.clone(), meta.label.clone());
+            let chat = cx.new(|cx| crate::chat::ChatView::new(key, scope, &agent, spec.cwd, resume, window, cx));
+            cx.new(|cx| {
+                let mut v = TerminalView::new(meta.clone(), None, None, None, cx);
+                v.set_chat(chat, cx);
+                v
+            })
+        }
+    };
     cx.observe(&view, |_, _, cx| cx.notify()).detach();
     let store = store(cx);
     store.update(cx, |s, cx| {
         let key = meta.id.clone();
         let sub = cx.subscribe(&view, move |s: &mut SessionStore, view, ev: &TerminalEvent, cx| on_terminal_event(s, &view, ev, cx));
         s.subscriptions.insert(key, sub);
-        s.open.push((meta, view.downgrade()));
+        match s.open.iter_mut().find(|(m, _)| m.id == meta.id) {
+            Some(entry) => *entry = (meta, view.downgrade()),
+            None => s.open.push((meta, view.downgrade())),
+        }
         s.save();
         cx.notify();
     });
-    let ix = app.insert_tab(Tab { kind: TabKind::Terminal(view.clone()), preview: false });
-    app.activate(ix, window, cx);
     Some(view)
+}
+
+/// `--resume` a claude conversation that has a transcript, else start it under that id.
+fn claude_args(dir: Option<&std::path::Path>, id: &str) -> Vec<String> {
+    let exists = dir.is_some_and(|d| pty::claude_session_exists(d, id));
+    vec![if exists { "--resume" } else { "--session-id" }.to_string(), id.to_string()]
+}
+
+/// Switches the active claude session between terminal and chat; a running turn is interrupted only if the user agrees.
+fn toggle_mode(app: &mut OrbitApp, window: &mut Window, cx: &mut Context<OrbitApp>) {
+    let Some(view) = app.active_terminal() else { return };
+    if !view.read(cx).meta.cmd.as_deref().is_some_and(pty::is_claude) {
+        return app.toast(crate::toast::ToastKind::Info, "Only claude sessions switch to chat for now", None, cx);
+    }
+    if !view.read(cx).busy(cx) {
+        return switch_mode(view, window, cx);
+    }
+    use crate::overlay::{ButtonStyle, Dialog, DialogButton};
+    use std::rc::Rc;
+    let dialog = Dialog {
+        title: "A turn is running".into(),
+        message: "Switching stops the agent now. Interrupt the turn and switch?".into(),
+        buttons: vec![
+            DialogButton { label: "Cancel".into(), style: ButtonStyle::Secondary, run: Rc::new(|_, _, _| {}) },
+            DialogButton { label: "Interrupt and switch".into(), style: ButtonStyle::Primary, run: Rc::new(move |_, w, cx| switch_mode(view.clone(), w, cx)) },
+        ],
+        on_cancel: Rc::new(|_, _, _| {}),
+    };
+    app.open_dialog(dialog, window, cx);
+}
+
+/// Waits for the old process to be gone first: never two processes on one conversation.
+fn switch_mode(view: Entity<TerminalView>, window: &mut Window, cx: &mut Context<OrbitApp>) {
+    view.read(cx).stop(cx);
+    cx.spawn_in(window, async move |app, cx| {
+        let mut stopped = false;
+        for _ in 0..200 {
+            stopped = view.read_with(cx, |v, cx| v.stopped(cx));
+            if stopped {
+                break;
+            }
+            cx.background_executor().timer(std::time::Duration::from_millis(50)).await;
+        }
+        let _ = app.update_in(cx, |a, window, cx| {
+            if !stopped {
+                return a.toast_error("The agent did not stop; the mode was not switched".to_string(), cx);
+            }
+            let Some(ix) = a.tabs.iter().position(|t| matches!(&t.kind, TabKind::Terminal(v) if *v == view)) else { return };
+            let key = view.read(cx).meta.id.clone();
+            let Some(mut meta) = store(cx).read(cx).open.iter().find(|(m, _)| m.id == key).map(|(m, _)| m.clone()) else { return };
+            meta.mode = match meta.mode {
+                SessionMode::Terminal => SessionMode::Chat,
+                SessionMode::Chat => SessionMode::Terminal,
+            };
+            let dir = pty::session_dir(&meta.workspace, meta.repo.as_deref(), meta.cwd.as_deref()).ok();
+            let args = meta.agent_session_id.as_deref().map(|id| claude_args(dir.as_deref(), id)).unwrap_or_default();
+            if let Some(new) = build(a, meta, args, None, None, window, cx) {
+                a.tabs[ix].kind = TabKind::Terminal(new);
+                a.activate(ix, window, cx);
+            }
+        });
+    })
+    .detach();
 }
 
 fn on_terminal_event(s: &mut SessionStore, view: &Entity<TerminalView>, ev: &TerminalEvent, cx: &mut Context<SessionStore>) {
@@ -706,6 +827,7 @@ pub fn resume(app: &mut OrbitApp, r: &RecentSession, window: &mut Window, cx: &m
         repo: r.repo.clone(),
         agent_session_id: claude.then(|| r.resume_id.clone()),
         cwd: None,
+        mode: SessionMode::Terminal,
     };
     open(app, meta, args, None, None, window, cx);
 }
@@ -743,10 +865,7 @@ fn restore(app: &mut OrbitApp, saved: Vec<SessionMeta>, window: &mut Window, cx:
     for meta in saved {
         let dir = dir_of(&meta);
         let (args, replay) = match (&meta.cmd, &meta.agent_session_id) {
-            (Some(cmd), Some(id)) if pty::is_claude(cmd) => {
-                let exists = dir.as_deref().is_some_and(|d| pty::claude_session_exists(d, id));
-                (vec![if exists { "--resume" } else { "--session-id" }.to_string(), id.clone()], None)
-            }
+            (Some(cmd), Some(id)) if pty::is_claude(cmd) => (claude_args(dir.as_deref(), id), None),
             (Some(cmd), _) if pty::is_omp(cmd) => {
                 match omp_ids.remove(&meta.id) {
                     // Resumed omp redraws the conversation itself.
@@ -865,6 +984,7 @@ mod tests {
             repo: None,
             agent_session_id: Some("x".into()),
             cwd: None,
+            mode: SessionMode::Terminal,
         }
     }
 

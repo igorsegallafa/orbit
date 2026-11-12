@@ -127,6 +127,14 @@ the history replaces the shown items, all but the last turn folded (`turn:<ix>` 
 Its `system/init` reports the slash commands compact, review, init, pr-comments and security-review
 (after the first prompt, like claude): `type:/re` opens the filtered list (rows `slash:<n>`),
 `key:down`/`key:tab`/`key:enter`/`key:escape` drive it; the dump's `commands:` line lists them.
+Chat mode for claude sessions: the tab's `Chat`/`Terminal` chip (probe `mode-toggle`) or the palette's
+Toggle Chat Mode (`sessions::ToggleChatMode`) stops the agent, waits for it to exit, and reopens the
+same conversation in the other mode in place (`--resume <id>` in the terminal); a running turn asks
+first. `mode` is saved in `native-sessions.json`, so a restart reopens the session in its mode. With a
+scratch `HOME`, `--session claude --do "wait:2500;click:mode-toggle;wait:1500;chat:hello;wait:1500;shot:chat"`
+shows the chat resuming the terminal's id (the stub `claude` touches a transcript for `--session-id`).
+Note `until:<text>` also matches the step text echoed into the dump, so prefer waits for text that is
+not in the `--do` string.
 
 `--do` runs shell steps last, separated by `;` (`src/steps.rs`). Mouse steps target elements that
 render a `probe("name")` (tabs `tab:<ix>`, menu items `menu:<label>`, dialog buttons

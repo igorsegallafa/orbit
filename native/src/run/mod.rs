@@ -982,6 +982,7 @@ impl RunStore {
             repo: Some(target.repo.clone()),
             agent_session_id: None,
             cwd: Some(config.cwd.clone()),
+            mode: Default::default(),
         };
         let spec = orbit_core::pty::Spawn {
             cwd: config.cwd.clone().into(),
@@ -994,7 +995,7 @@ impl RunStore {
             program_version: env!("CARGO_PKG_VERSION").into(),
             tty_only: false,
         };
-        let view = cx.new(|cx| TerminalView::new(meta, spec, None, None, cx));
+        let view = cx.new(|cx| TerminalView::new(meta, Some(spec), None, None, cx));
         let watch = cx.observe(&view, |s: &mut RunStore, view, cx| {
             let exited = view.read(cx).exited();
             if let Some(r) = s.runs.iter_mut().find(|r| r.view == view && !r.exited && exited) {
