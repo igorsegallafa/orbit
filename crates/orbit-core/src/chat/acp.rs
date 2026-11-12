@@ -1,5 +1,5 @@
 // ACP agents (`opencode acp`, `omp acp`): JSON-RPC on stdio, one ACP session per chat session.
-use super::{Agent, ChatBackend, ChatEvent, ChatInput, FileDiff, SlashCommand};
+use super::{Agent, ChatBackend, ChatEvent, ChatInput, FileDiff, PermissionOption, SlashCommand};
 use crate::agent::stream;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -41,7 +41,10 @@ impl ChatBackend for Acp {
             match input {
                 ChatInput::Prompt { text, images } => p.prompt(&text, &images),
                 ChatInput::Interrupt => json!({ "jsonrpc": "2.0", "method": "session/cancel", "params": { "sessionId": p.session_id } }),
-                ChatInput::AnswerPermission { .. } => return,
+                ChatInput::AnswerPermission { id, option_id } => match p.answer(&id, &option_id) {
+                    Some(reply) => reply,
+                    None => return,
+                },
             }
         };
         self.agent.write(&line);
@@ -74,6 +77,8 @@ struct Parser {
     outbox: Vec<Value>,
     session_id: String,
     tools: HashMap<String, Tool>,
+    /// Permission requests waiting for the user: PermissionAsked id → the agent's request id.
+    approvals: HashMap<String, Value>,
     /// usage_update's cost is the session total; a turn costs the growth since the last turn ended.
     cost: Option<f64>,
     cost_before_turn: f64,
@@ -110,14 +115,45 @@ impl Parser {
             return self.response(&request, &v);
         }
         if !v["id"].is_null() {
-            // shortcut: agent requests (permissions, fs) are refused until Orbit serves them.
-            self.outbox.push(json!({ "jsonrpc": "2.0", "id": v["id"], "error": { "code": -32601, "message": format!("Orbit does not handle {method}") } }));
-            return vec![];
+            return self.agent_request(method, &v);
         }
         match method {
             "session/update" => self.update(&v["params"]["update"]),
             _ => vec![],
         }
+    }
+
+    fn answer(&mut self, id: &str, option_id: &str) -> Option<Value> {
+        let request_id = self.approvals.remove(id)?;
+        Some(json!({ "jsonrpc": "2.0", "id": request_id, "result": { "outcome": { "outcome": "selected", "optionId": option_id } } }))
+    }
+
+    fn agent_request(&mut self, method: &str, v: &Value) -> Vec<ChatEvent> {
+        let p = &v["params"];
+        let result = match method {
+            "session/request_permission" => {
+                let call = &p["toolCall"];
+                let detail: Vec<String> = call["content"].as_array().into_iter().flatten().filter_map(|c| text(&c["content"])).collect();
+                let s = |v: &Value| v.as_str().unwrap_or("").to_string();
+                let options = p["options"].as_array().into_iter().flatten().map(|o| PermissionOption { id: s(&o["optionId"]), label: s(&o["name"]), kind: s(&o["kind"]) }).collect();
+                let id = v["id"].to_string();
+                self.approvals.insert(id.clone(), v["id"].clone());
+                return vec![ChatEvent::PermissionAsked { id, title: s(&call["title"]), detail: detail.join("\n"), options }];
+            }
+            "fs/read_text_file" => inside(&self.cwd, p["path"].as_str().unwrap_or("")).and_then(|path| std::fs::read_to_string(path).map_err(|e| e.to_string())).map(|text| {
+                // `line` is 1-based; `limit` caps the line count.
+                let skip = p["line"].as_u64().map_or(0, |l| l.saturating_sub(1)) as usize;
+                let lines = text.split_inclusive('\n').skip(skip).take(p["limit"].as_u64().map_or(usize::MAX, |l| l as usize));
+                json!({ "content": lines.collect::<String>() })
+            }),
+            "fs/write_text_file" => inside(&self.cwd, p["path"].as_str().unwrap_or("")).and_then(|path| std::fs::write(path, p["content"].as_str().unwrap_or("")).map_err(|e| e.to_string())).map(|_| Value::Null),
+            _ => Err(format!("Orbit does not handle {method}")),
+        };
+        self.outbox.push(match result {
+            Ok(result) => json!({ "jsonrpc": "2.0", "id": v["id"], "result": result }),
+            Err(message) => json!({ "jsonrpc": "2.0", "id": v["id"], "error": { "code": -32603, "message": message } }),
+        });
+        vec![]
     }
 
     fn response(&mut self, request: &str, v: &Value) -> Vec<ChatEvent> {
@@ -238,6 +274,21 @@ impl Parser {
     }
 }
 
+/// `path` if it lies inside `root`, symlinks resolved; a file being created needs only an existing ancestor.
+fn inside(root: &Path, path: &str) -> Result<PathBuf, String> {
+    let path = Path::new(path);
+    let refused = || Err(format!("{} is outside the session folder", path.display()));
+    if !path.is_absolute() || path.components().any(|c| c == std::path::Component::ParentDir) {
+        return refused();
+    }
+    let (Ok(root), Some(existing)) = (root.canonicalize(), path.ancestors().find(|a| a.exists())) else { return refused() };
+    let mut real = existing.canonicalize().map_err(|e| e.to_string())?;
+    if existing != path {
+        real.push(path.strip_prefix(existing).unwrap_or(path));
+    }
+    if real.starts_with(&root) { Ok(real) } else { refused() }
+}
+
 fn text(block: &Value) -> Option<String> {
     (block["type"] == "text").then(|| block["text"].as_str()).flatten().filter(|t| !t.is_empty()).map(String::from)
 }
@@ -340,10 +391,47 @@ mod tests {
     }
 
     #[test]
-    fn agent_requests_are_refused_not_left_hanging() {
+    fn unknown_agent_requests_are_refused_not_left_hanging() {
         let mut p = Parser::default();
-        assert!(p.line(r#"{"jsonrpc":"2.0","id":0,"method":"fs/read_text_file","params":{"path":"/x"}}"#).is_empty());
+        assert!(p.line(r#"{"jsonrpc":"2.0","id":0,"method":"terminal/create","params":{}}"#).is_empty());
         assert_eq!(p.outbox[0]["id"], 0);
         assert!(p.outbox[0]["error"]["message"].is_string());
+    }
+
+    #[test]
+    fn permission_round_trip() {
+        let line = std::fs::read_to_string(format!("{FIXTURES}omp-edit.jsonl")).unwrap().lines().find(|l| l.contains("session/request_permission")).unwrap().to_string();
+        let mut p = Parser::default();
+        let [ChatEvent::PermissionAsked { id, title, detail, options }] = &p.line(&line)[..] else { panic!() };
+        assert_eq!((title.as_str(), detail.as_str()), ("ls", "$ ls"));
+        assert_eq!(options[1], PermissionOption { id: "allow_always".into(), label: "Always allow".into(), kind: "allow_always".into() });
+        assert!(p.outbox.is_empty());
+        let reply = p.answer(id, "allow_once").unwrap();
+        assert_eq!(reply.to_string(), r#"{"jsonrpc":"2.0","id":2,"result":{"outcome":{"outcome":"selected","optionId":"allow_once"}}}"#);
+        assert_eq!(p.answer(id, "allow_once"), None);
+    }
+
+    #[test]
+    fn fs_is_served_only_inside_the_session_folder() {
+        let root = std::env::temp_dir().join(format!("orbit-acp-fs-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("sub/a.txt"), "one\ntwo\nthree\n").unwrap();
+        let mut p = Parser { cwd: root.clone(), ..Parser::default() };
+        let mut ask = |method: &str, params: Value| {
+            p.line(&json!({ "jsonrpc": "2.0", "id": 7, "method": method, "params": params }).to_string());
+            p.outbox.pop().unwrap()
+        };
+        let a = root.join("sub/a.txt");
+        assert_eq!(ask("fs/read_text_file", json!({ "path": a }))["result"]["content"], "one\ntwo\nthree\n");
+        assert_eq!(ask("fs/read_text_file", json!({ "path": a, "line": 2, "limit": 1 }))["result"]["content"], "two\n");
+        assert!(ask("fs/write_text_file", json!({ "path": root.join("b.txt"), "content": "hi" }))["result"].is_null());
+        assert_eq!(std::fs::read_to_string(root.join("b.txt")).unwrap(), "hi");
+        for outside in [json!("/etc/hostname"), json!(root.join("sub/../../x")), json!("sub/a.txt")] {
+            let reply = ask("fs/read_text_file", json!({ "path": outside }));
+            assert_eq!((reply["id"].clone(), reply["result"].is_null()), (json!(7), true));
+            assert!(reply["error"]["message"].as_str().unwrap().contains("outside"), "{reply}");
+        }
+        assert!(ask("fs/write_text_file", json!({ "path": "/tmp/orbit-acp-escape.txt", "content": "x" }))["error"].is_object());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
