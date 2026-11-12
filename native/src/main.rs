@@ -5,6 +5,7 @@
 //! tree, and the editor with language servers; see README.md.
 mod ansi;
 mod app;
+mod chat;
 mod commands;
 mod debug;
 mod diff_select;
@@ -123,6 +124,7 @@ fn run() {
         run::init(cx);
         workspace_ui::init(cx);
         pages::init(cx);
+        chat::init(cx);
 
         // Maximized, as the Tauri app opens (`tauri.conf.json`); self-tests pick a size.
         let (w, h) = script.window_size.unwrap_or((1280., 800.));

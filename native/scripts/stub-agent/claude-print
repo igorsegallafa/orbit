@@ -8,6 +8,31 @@
 import json, os, re, subprocess, sys, time
 
 args = sys.argv[1:]
+
+
+def chat():
+    # Orbit's chat mode (`--input-format stream-json`): one user message per stdin line,
+    # each answered with a streamed turn like the real claude's (thinking, text deltas, result).
+    out = lambda v: print(json.dumps(v), flush=True)
+    sid = args[args.index("--resume") + 1] if "--resume" in args else "stub-chat-session"
+    for n, line in enumerate(sys.stdin, 1):
+        msg = json.loads(line)
+        if msg.get("type") != "user":
+            continue
+        text = " ".join(c.get("text", "") for c in msg["message"]["content"] if c.get("type") == "text")
+        out({"type": "system", "subtype": "init", "session_id": sid, "slash_commands": ["compact"]})
+        out({"type": "stream_event", "event": {"type": "message_start", "message": {"id": f"msg-{n}"}}})
+        out({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "thinking_delta", "thinking": "The user said hello."}}})
+        for word in f"Stub reply to: {text}. This line streams in word by word.".split(" "):
+            out({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": word + " "}}})
+            time.sleep(0.05)
+        out({"type": "result", "is_error": False, "result": "", "total_cost_usd": 0.001, "usage": {"input_tokens": 10, "output_tokens": 12}})
+
+
+if "--input-format" in args:
+    chat()
+    sys.exit(0)
+
 prompt = sys.stdin.read()
 
 

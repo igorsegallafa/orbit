@@ -100,6 +100,10 @@ first on `PATH`. Use `SHELL=/bin/bash` (zsh may start an interactive setup wizar
 (`claude -p`, `scripts/stub-agent/claude-print`) answers Ralph's PRD interview (one round, then
 done), writes the PRD files when asked, and runs a Ralph iteration (ticks the next story and
 commits, or commits a plan task); `ORBIT_STUB_LOG=<file>` records each call.
+With `--input-format stream-json` (chat mode) it answers each user line with a streamed turn
+(thinking, text deltas, result). `--do "cmd:chat.newClaude;chat:hello;until:Stub reply@10"` opens a
+chat tab, types into its prompt box (probe `chat-prompt`; thinking rows are `thinking:<ix>`) and
+waits for the reply in the dump.
 
 `--do` runs shell steps last, separated by `;` (`src/steps.rs`). Mouse steps target elements that
 render a `probe("name")` (tabs `tab:<ix>`, menu items `menu:<label>`, dialog buttons
