@@ -250,16 +250,25 @@ Orbit shows your replies in a terminal pane. Write them for a fast read:
 - If something was skipped or is risky, end with it in one line.
 - To show the user an image (a screenshot, chart, rendered UI), call Orbit's show_image tool with its path.";
 
-fn reply_style() -> Option<String> {
+/// Added in chat mode, where Orbit renders the reply as markdown.
+pub const CHAT_STYLE: &str = "\
+Orbit renders your replies as markdown in a chat view. Structure them when it helps the reader:
+- Comparisons, options or results per item: a markdown table.
+- A multi-part answer: short `###` headings. Steps to follow: a numbered list; a checklist: `- [ ]` items.
+- Code, commands and output: fenced blocks with a language. A warning or caveat: a `> **Note:**` quote.
+- A short answer stays plain text: no structure for its own sake.";
+
+fn reply_style(chat: bool) -> Option<String> {
     let custom = crate::config::Config::load().ok().and_then(|c| c.ai.reply_style);
-    Some(custom.unwrap_or_else(|| REPLY_STYLE.into())).filter(|s| !s.trim().is_empty())
+    let style = Some(custom.unwrap_or_else(|| REPLY_STYLE.into())).filter(|s| !s.trim().is_empty())?;
+    Some(if chat { format!("{style}\n{CHAT_STYLE}") } else { style })
 }
 
 /// Argv and environment giving an agent session Orbit's MCP server and reply style (and claude its hooks).
 // shortcut: omp only reads MCP servers from files (no flag or env), so it gets the style alone.
-pub fn session_launch(cmd: &str, key: &str) -> (Vec<String>, Vec<(String, String)>) {
+pub fn session_launch(cmd: &str, key: &str, chat: bool) -> (Vec<String>, Vec<(String, String)>) {
     let name = std::path::Path::new(cmd.trim()).file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();
-    let style = reply_style();
+    let style = reply_style(chat);
     let server = hook_url(key).zip(std::env::current_exe().ok()).map(|(url, exe)| (exe.to_string_lossy().into_owned(), url));
     let mut args: Vec<String> = vec![];
     let mut env = vec![];
@@ -288,7 +297,7 @@ pub fn session_launch(cmd: &str, key: &str) -> (Vec<String>, Vec<(String, String
             if let Some((exe, url)) = &server {
                 config["mcp"] = json!({ "orbit": { "type": "local", "command": [exe, "--orbit-mcp", url] } });
             }
-            let file = crate::config::config_dir().map(|d| d.join("reply-style.md"));
+            let file = crate::config::config_dir().map(|d| d.join(if chat { "reply-style-chat.md" } else { "reply-style.md" }));
             if let (Some(s), Ok(file)) = (style, file) {
                 if std::fs::write(&file, s).is_ok() {
                     config["instructions"] = json!([file]);
@@ -327,6 +336,29 @@ fn statusline_command() -> Option<String> {
     Some(format!("{} --orbit-statusline {}", shell_arg(&exe), shell_arg(&file)))
 }
 
+fn write_rate_limits(file: &std::path::Path, limits: &Value) {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let tmp = file.with_extension("json.tmp");
+    if std::fs::write(&tmp, json!({ "rateLimits": limits, "updatedAt": now }).to_string()).is_ok() {
+        let _ = std::fs::rename(&tmp, file);
+    }
+}
+
+/// Saves the windows of a chat's `rate_limit_event` (`unifiedWindows`, utilization 0–1) in the
+/// status line's format, so the usage bar shows them too.
+pub fn save_rate_limits(windows: &Value) {
+    let Ok(file) = rate_limits_file() else { return };
+    let mut limits = serde_json::Map::new();
+    for (name, w) in windows.as_object().into_iter().flatten() {
+        if let (Some(u), Some(at)) = (w["utilization"].as_f64(), w["resetsAt"].as_u64()) {
+            limits.insert(name.clone(), json!({ "used_percentage": u * 100., "resets_at": at }));
+        }
+    }
+    if !limits.is_empty() {
+        write_rate_limits(&file, &Value::Object(limits));
+    }
+}
+
 /// Status line helper (`Orbit --orbit-statusline <file>`): saves the
 /// rate-limit windows Claude Code passes on stdin, then renders the user's
 /// own status line from the same input so it looks unchanged.
@@ -335,11 +367,7 @@ pub fn statusline_helper(file: Option<String>) {
     let _ = std::io::stdin().read_to_end(&mut input);
     if let (Some(file), Ok(v)) = (file, serde_json::from_slice::<Value>(&input)) {
         if let Some(limits) = v.get("rate_limits").filter(|l| l.is_object()) {
-            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-            let tmp = format!("{file}.tmp");
-            if std::fs::write(&tmp, json!({ "rateLimits": limits, "updatedAt": now }).to_string()).is_ok() {
-                let _ = std::fs::rename(&tmp, &file);
-            }
+            write_rate_limits(std::path::Path::new(&file), limits);
         }
     }
     if let Some(cmd) = user_statusline() {
@@ -492,10 +520,12 @@ mod tests {
     #[test]
     fn wires_the_reply_style_into_each_agent() {
         let has = |a: &[String], p: &str| a.iter().any(|x| x.starts_with(p));
-        assert!(has(&session_launch("omp", "tm:1").0, "--append-system-prompt="));
-        assert!(has(&session_launch("/usr/bin/codex", "tm:1").0, "developer_instructions="));
-        assert_eq!(session_launch("opencode", "tm:1").1[0].0, "OPENCODE_CONFIG_CONTENT");
-        assert_eq!(session_launch("bash", "tm:1"), (vec![], vec![]));
+        assert!(has(&session_launch("omp", "tm:1", false).0, "--append-system-prompt="));
+        assert!(has(&session_launch("/usr/bin/codex", "tm:1", false).0, "developer_instructions="));
+        assert_eq!(session_launch("opencode", "tm:1", false).1[0].0, "OPENCODE_CONFIG_CONTENT");
+        assert_eq!(session_launch("bash", "tm:1", false), (vec![], vec![]));
+        let chat = session_launch("claude", "tm:1", true).0;
+        assert!(chat.iter().any(|a| a.starts_with("--append-system-prompt=") && a.contains("markdown table")));
     }
 
     #[test]

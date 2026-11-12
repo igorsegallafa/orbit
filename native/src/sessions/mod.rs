@@ -52,12 +52,9 @@ pub const AGENTS: [(&str, &str, Option<&str>); 5] = [
     ("Codex", "codex", Some("codex")),
 ];
 
-/// The New Session menu: each agent's terminal entry followed by its chat entry.
+/// The New Session menu. Chat is reached from a session's Terminal | Chat switch while it is new.
 pub fn menu_entries() -> impl Iterator<Item = (String, Option<&'static str>, SessionMode)> {
-    AGENTS.iter().flat_map(|&(label, _, cmd)| {
-        let chat = cmd.map(|c| (format!("{label} (chat)"), Some(c), SessionMode::Chat));
-        std::iter::once((label.to_string(), cmd, SessionMode::Terminal)).chain(chat)
-    })
+    AGENTS.iter().map(|&(label, _, cmd)| (label.to_string(), cmd, SessionMode::Terminal))
 }
 
 /// One session tab, as saved (field names follow the React app's `TerminalTab`).

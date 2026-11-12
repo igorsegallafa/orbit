@@ -57,6 +57,49 @@ pub enum ChatEvent {
     },
     /// A resumed conversation's earlier turns, sent once before the session is ready.
     History(Vec<Turn>),
+    /// The models the agent offers, and the one in use (a value or resolved id) once known.
+    Models(Vec<Choice>),
+    Model(String),
+    /// The permission or agent modes it offers, and the current one's value.
+    Modes(Vec<Choice>),
+    Mode(String),
+    /// Plan usage limits, replacing the last report.
+    Limits(Vec<Limit>),
+    /// Tokens in the context window, and the window's size when the agent reports it.
+    Context { used: u64, window: Option<u64> },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Choice {
+    /// What `SetModel` / `SetMode` takes ("opus", "plan"…).
+    pub value: String,
+    pub label: String,
+    pub description: String,
+    /// The model id a model alias runs ("claude-opus-5-5"); the value otherwise.
+    pub resolved: String,
+}
+
+impl Choice {
+    pub fn new(value: &str, label: &str, description: &str) -> Self {
+        Choice { value: value.into(), label: label.into(), description: description.into(), resolved: value.into() }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Limit {
+    pub label: String,
+    pub used_percent: f64,
+    /// Unix seconds.
+    pub resets_at: Option<u64>,
+}
+
+/// "5h" for 300 minutes, "Week" for 10080, else hours or days.
+pub fn window_label(minutes: u64) -> String {
+    match minutes {
+        10080 => "Week".into(),
+        m if m % 1440 == 0 => format!("{}d", m / 1440),
+        m => format!("{}h", (m as f64 / 60.).round() as u64),
+    }
 }
 
 /// An earlier turn: its prompt, then what the agent did as live events.
@@ -80,6 +123,9 @@ pub enum ChatInput {
     Prompt { text: String, images: Vec<PathBuf> },
     Interrupt,
     AnswerPermission { id: String, option_id: String },
+    /// Claude's permission mode: "default", "acceptEdits", "plan", "auto" or "bypassPermissions".
+    SetMode(String),
+    SetModel(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]

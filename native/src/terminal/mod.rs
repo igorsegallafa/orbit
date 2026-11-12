@@ -825,16 +825,9 @@ impl TerminalView {
         }
     }
 
-    fn on_key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_key_down(&mut self, ev: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         let ks = &ev.keystroke;
         let m = ks.modifiers;
-        // A switcher press that beat the inhibitor's release (Alt and Tab at once, as
-        // Toshy's Cmd+Tab sends them): the next Tab reaches GNOME.
-        if m.alt && (ks.key == "tab" || ks.key == "`") && inhibit::releases_for_alt() {
-            inhibit::set_alt(true, window, cx);
-            cx.stop_propagation();
-            return;
-        }
         if m.control && m.shift && ks.key == "c" {
             self.copy(false, cx);
             cx.stop_propagation();
@@ -1129,28 +1122,35 @@ impl EntityInputHandler for TerminalView {
 }
 
 impl TerminalView {
-    fn mode_chip(&self) -> Option<gpui::Stateful<gpui::Div>> {
-        let label = if self.chat.is_some() { "Terminal" } else { "Chat" };
-        crate::sessions::has_chat(&self.meta.label).then(|| {
+    /// Agent sessions' top bar: who runs it and the Terminal | Chat switch.
+    fn session_bar(&self) -> Option<gpui::Div> {
+        if !crate::sessions::has_chat(&self.meta.label) {
+            return None;
+        }
+        let (name, color) = crate::chat::brand(&self.meta.label);
+        let chat = self.chat.is_some();
+        let switch = crate::pages::kit::seg("mode", &[(false, "Terminal"), (true, "Chat")], &chat, move |pick, window, cx| {
+            if pick != chat {
+                window.dispatch_action(Box::new(crate::sessions::ToggleChatMode), cx);
+            }
+        });
+        Some(
             div()
-                .id("mode-toggle")
-                .relative()
-                .px_2()
-                .py(px(2.))
-                .rounded(px(4.))
-                .bg(c(theme::PANEL_RAISED))
-                .border_1()
-                .border_color(c(theme::BORDER_STRONG))
-                .text_size(px(11.))
-                .text_color(c(theme::TEXT_DIM))
-                .cursor_pointer()
-                .occlude()
-                .hover(|s| s.text_color(c(theme::TEXT)))
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::sessions::ToggleChatMode), cx))
-                .child(label)
-                .child(crate::probe::probe("mode-toggle"))
-        })
+                .flex_none()
+                .h(px(34.))
+                .px_3()
+                .flex()
+                .items_center()
+                .gap_2()
+                .border_b_1()
+                .border_color(c(theme::BORDER))
+                .bg(c(theme::PANEL))
+                .text_size(px(12.))
+                .child(div().size(px(8.)).rounded_full().bg(gpui::rgb(color)))
+                .child(div().text_color(c(theme::TEXT)).font_weight(gpui::FontWeight::MEDIUM).child(name))
+                .child(div().flex_1())
+                .child(div().occlude().on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(switch)),
+        )
     }
 }
 
@@ -1164,7 +1164,7 @@ impl Render for TerminalView {
                 .size_full()
                 .bg(c(theme::BG))
                 .font_family(theme::UI_FONT)
-                .child(div().flex().justify_end().px_4().pt_1p5().children(self.mode_chip()))
+                .children(self.session_bar())
                 .child(div().flex_1().min_h_0().child(chat.clone()))
                 .into_any_element();
         }
@@ -1188,7 +1188,7 @@ impl Render for TerminalView {
             .on_modifiers_changed(cx.listener(|this, ev: &gpui::ModifiersChangedEvent, window, cx| {
                 let m = ev.modifiers;
                 // Cmd+Shift (Ctrl+Shift under Toshy) also lets go: Toshy's Cmd+Shift+3/4/5 become GNOME's Print screenshots.
-                inhibit::set_alt(m.alt || m.control && m.shift, window, cx);
+                inhibit::set_super(m.platform, window, cx);
                 if this.link_mod != (m.control || m.platform) {
                     this.link_mod = m.control || m.platform;
                     cx.notify();
@@ -1261,13 +1261,13 @@ impl Render for TerminalView {
                 .size_full(),
             )
             .child(scrollbar::vertical("term", &self.scrollbar))
-            .when(self.shown_ix.is_none() && !self.shown.is_empty(), |d| d.child(self.viewer_chip(cx)))
-            .children(self.mode_chip().map(|chip| chip.absolute().top(px(6.)).right(px(16.))));
+            .when(self.shown_ix.is_none() && !self.shown.is_empty(), |d| d.child(self.viewer_chip(cx)));
         div()
             .flex()
+            .flex_col()
             .size_full()
-            .child(terminal)
-            .when_some(self.shown_ix, |d, ix| d.child(self.viewer(ix, cx)))
+            .children(self.session_bar())
+            .child(div().flex().flex_1().min_h_0().child(terminal).when_some(self.shown_ix, |d, ix| d.child(self.viewer(ix, cx))))
             .into_any_element()
     }
 }

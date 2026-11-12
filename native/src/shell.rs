@@ -167,7 +167,7 @@ fn resizer(pane: Pane, lit: bool, cx: &mut Context<OrbitApp>) -> impl IntoElemen
 
 /// `fmtTokens`.
 /// "in 2h 14m (Wed 18:00)" for a reset time in unix seconds.
-fn resets_in(unix: u64) -> String {
+pub(crate) fn resets_in(unix: u64) -> String {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let m = unix.saturating_sub(now).div_ceil(60);
     let span = if m < 60 {
@@ -198,7 +198,7 @@ fn model_tip(m: &orbit_core::usage::ModelUsage) -> String {
     out
 }
 
-fn tokens(n: u64) -> String {
+pub(crate) fn tokens(n: u64) -> String {
     match n {
         1_000_000_000.. => format!("{:.1}B", n as f64 / 1e9),
         1_000_000.. => format!("{:.1}M", n as f64 / 1e6),

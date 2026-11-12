@@ -1,7 +1,6 @@
 //! Chat sessions: Orbit renders an agent's conversation itself from
-//! `orbit_core::chat` events (user bubbles, streamed replies, thinking rows)
-//! with a prompt box at the bottom. Deltas are applied in batches: every
-//! event that arrived while the UI thread was busy lands in one update.
+//! `orbit_core::chat` events. Deltas are applied in batches: every event that
+//! arrived while the UI thread was busy lands in one update.
 use crate::app::OrbitApp;
 use crate::commands::{self, Command};
 use crate::pages::{self, Host, PageView};
@@ -24,18 +23,16 @@ use std::sync::LazyLock;
 use std::time::Instant;
 
 enum Item {
-    /// `folded` is Some for a history turn: whether its items are hidden.
-    User { text: String, folded: Option<bool> },
+    /// As typed: attachments appear as their `[Image #1]` / `[Pasted text #1 · N lines]` references.
+    User { text: String },
     /// `md` renders `text` with `path:line` mentions turned into links.
     Assistant { id: String, text: String, md: Entity<TextViewState>, _parsed: Subscription },
     Thinking { id: String, text: String, open: bool },
-    /// `size` is the drawn size, at most `MAX_IMAGE_H` tall.
-    Image { path: PathBuf, title: String, size: Option<(f32, f32)> },
-    /// Errors.
+    /// `size` is the drawn size, at most `MAX_IMAGE_H` tall; `user` for the user's own attachments.
+    Image { path: PathBuf, title: String, size: Option<(f32, f32)>, user: bool },
     Note(String),
     /// The session ended, with its error if any; the last one offers Restart.
     Exited(String),
-    /// A finished turn's duration, tokens and cost.
     Footer(String),
     /// One tool call, or a run of consecutive read-only ones drawn as one row.
     Tool { calls: Vec<Call>, open: bool, all: bool, diff: Option<(Entity<DiffState>, usize)> },
@@ -58,6 +55,42 @@ const MAX_OUTPUT_LINES: usize = 200;
 const DIFF_ROW_H: f32 = 21.;
 const MAX_DIFF_ROWS: usize = 24;
 const SLASH_ROWS: usize = 8;
+/// The conversation column's width: replies and prompts stay close on wide windows.
+const COLUMN_W: f32 = 860.;
+/// A paste longer than this becomes an attachment chip instead of prompt text.
+const PASTE_LINES: usize = 12;
+const PASTE_CHARS: usize = 2000;
+/// The mode and model picked last per agent, applied to that agent's next chats in this run.
+static PICKED: std::sync::Mutex<Vec<(String, &'static str, String)>> = std::sync::Mutex::new(vec![]);
+
+fn remembered(agent: &str, kind: &str) -> Option<String> {
+    PICKED.lock().unwrap().iter().find(|(a, k, _)| a == agent && *k == kind).map(|(_, _, v)| v.clone())
+}
+
+fn remember(agent: &str, kind: &'static str, value: &str) {
+    let mut picked = PICKED.lock().unwrap();
+    picked.retain(|(a, k, _)| !(a == agent && *k == kind));
+    picked.push((agent.into(), kind, value.into()));
+}
+
+pub fn brand(agent: &str) -> (&'static str, u32) {
+    match agent {
+        "claude" => ("Claude Code", 0xD97757),
+        "codex" => ("Codex", 0x10A37F),
+        "opencode" => ("OpenCode", 0x5B8DEF),
+        "omp" => ("OMP", 0xA78BFA),
+        _ => ("Agent", 0x8B949E),
+    }
+}
+
+fn tool_color(name: &str) -> u32 {
+    match name {
+        "Read" | "Grep" | "Glob" | "LS" | "list" => theme::INFO,
+        "Edit" | "MultiEdit" | "Write" => theme::PURPLE,
+        "Bash" => theme::WARN,
+        _ => theme::ACCENT,
+    }
+}
 
 fn tool_icon(name: &str) -> &'static str {
     match name {
@@ -106,7 +139,6 @@ fn is_image(path: &std::path::Path) -> bool {
 pub struct ChatView {
     /// The tab's key, which is also its inbox key.
     key: String,
-    /// The sidebar scope the chat was opened in.
     scope: String,
     agent: String,
     cwd: PathBuf,
@@ -117,14 +149,34 @@ pub struct ChatView {
     items: Vec<Item>,
     list: ListState,
     prompt: Entity<TextareaState>,
-    /// Images pasted or dropped into the prompt, sent with the next message.
-    attached: Vec<PathBuf>,
+    attached: Vec<(String, PathBuf)>,
     /// When the running turn started; None between turns.
     turn: Option<Instant>,
     commands: Vec<SlashCommand>,
     /// The highlighted `/` row, and whether Esc closed the list until the next edit.
     slash: usize,
     slash_closed: bool,
+    /// When each item was added, so only new ones animate in.
+    born: Vec<Instant>,
+    /// Long pastes waiting to go with the next message, by their reference in the prompt.
+    pasted: Vec<(String, String)>,
+    /// How many images and pastes the draft has numbered.
+    refs: (usize, usize),
+    models: Vec<orbit_core::chat::Choice>,
+    /// The running model's id, and the option the user picked.
+    model: Option<String>,
+    picked: Option<String>,
+    model_menu: bool,
+    /// Tokens in context, and the window size once the agent reports it.
+    context: Option<(u64, Option<u64>)>,
+    lightbox: Option<usize>,
+    modes: Vec<orbit_core::chat::Choice>,
+    mode: Option<String>,
+    spent: (u64, f64),
+    limits: Vec<orbit_core::chat::Limit>,
+    /// Set once the agent reported limits itself; the saved ones no longer apply.
+    live_limits: bool,
+    _ticker: Task<()>,
     _events: Task<()>,
     _prompt: Subscription,
 }
@@ -157,12 +209,55 @@ impl ChatView {
             commands: vec![],
             slash: 0,
             slash_closed: false,
+            born: vec![],
+            pasted: vec![],
+            refs: (0, 0),
+            models: vec![],
+            model: None,
+            picked: None,
+            model_menu: false,
+            context: None,
+            lightbox: None,
+            modes: vec![],
+            mode: None,
+            spent: (0, 0.),
+            limits: vec![],
+            live_limits: false,
+            _ticker: Task::ready(()),
             _events: Task::ready(()),
             _prompt: sub,
         };
         view.start(resume, window, cx);
+        view.refresh_limits(cx);
         view.prompt.update(cx, |p, cx| p.focus(window, cx));
         view
+    }
+
+    /// Claude's last saved limits until the chat's own stream reports them.
+    fn refresh_limits(&mut self, cx: &mut Context<Self>) {
+        if self.agent != "claude" || self.live_limits {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            let limits = cx.background_executor().spawn(async { claude_limits(orbit_core::agent_hooks::rate_limits()) }).await;
+            let _ = this.update(cx, |v, cx| {
+                if v.live_limits {
+                    return;
+                }
+                v.limits = limits;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn set_mode(&mut self, mode: String, cx: &mut Context<Self>) {
+        remember(&self.agent, "mode", &mode);
+        if let Some(b) = &self.backend {
+            b.send(ChatInput::SetMode(mode.clone()));
+        }
+        self.mode = Some(mode);
+        cx.notify();
     }
 
     fn start(&mut self, resume: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
@@ -294,6 +389,17 @@ impl ChatView {
     }
 
     fn on_key(&mut self, ev: &gpui::KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.lightbox.is_some() {
+            match ev.keystroke.key.as_str() {
+                "escape" => self.lightbox = None,
+                "left" => self.step_lightbox(-1, cx),
+                "right" => self.step_lightbox(1, cx),
+                _ => return,
+            }
+            cx.notify();
+            cx.stop_propagation();
+            return;
+        }
         let Some(ix) = self.pending() else {
             if ev.keystroke.key == "escape" && self.turn.is_some() && gpui::Focusable::focus_handle(self.prompt.read(cx), cx).is_focused(window) {
                 self.interrupt(cx);
@@ -314,6 +420,7 @@ impl ChatView {
 
     fn push(&mut self, item: Item) {
         self.items.push(item);
+        self.born.push(Instant::now());
         let n = self.items.len();
         self.list.splice(n - 1..n - 1, 1);
     }
@@ -395,7 +502,10 @@ impl ChatView {
                     self.push(Item::Note(e));
                 }
                 let took = self.turn.take().map(|t| t.elapsed());
+                self.spent.0 += tokens.unwrap_or(0);
+                self.spent.1 += cost_usd.unwrap_or(0.);
                 self.push(Item::Footer(footer(took, tokens, cost_usd)));
+                self.refresh_limits(cx);
                 let (key, who) = (self.key.clone(), format!("{} chat finished", self.agent));
                 let what = crate::sessions::scope_label(&self.scope);
                 crate::sessions::store(cx).update(cx, |s, cx| s.notify(key.clone(), true, who, what, cx));
@@ -408,7 +518,7 @@ impl ChatView {
             }
             ChatEvent::Image { path, title } => {
                 let size = image_size(&path);
-                self.push(Item::Image { path, title, size });
+                self.push(Item::Image { path, title, size, user: false });
             }
             ChatEvent::ToolStarted { id, name, summary } => {
                 let call = Call { id, name, summary, output: String::new(), ok: None };
@@ -449,20 +559,48 @@ impl ChatView {
                 crate::sessions::store(cx).update(cx, |s, cx| s.notify(key, false, who, what, cx));
                 self.push(Item::Permission { id, title, detail, options, answer: None });
             }
+            // Claude's per-turn init lists names only: keep the described list from its handshake.
+            ChatEvent::Commands(commands) if commands.iter().all(|c| c.description.is_empty()) && !self.commands.is_empty() => {}
             ChatEvent::Commands(commands) => self.commands = commands,
+            ChatEvent::Models(models) => {
+                let picked = remembered(&self.agent, "model").filter(|v| models.iter().any(|m| &m.value == v));
+                self.models = models;
+                if let (Some(v), None) = (picked, &self.picked) {
+                    self.pick_model(v, cx);
+                }
+            }
+            ChatEvent::Modes(modes) => self.modes = modes,
+            ChatEvent::Model(model) => self.model = Some(model).filter(|m| !m.is_empty()),
+            // A mode picked earlier in Orbit wins over the one the agent starts in.
+            ChatEvent::Mode(mode) => match remembered(&self.agent, "mode").filter(|m| *m != mode && self.modes.iter().any(|c| &c.value == m)) {
+                Some(m) if self.mode.is_none() => self.set_mode(m, cx),
+                _ => self.mode = Some(mode),
+            },
+            ChatEvent::Limits(limits) => {
+                self.live_limits = true;
+                self.limits = limits;
+            }
+            ChatEvent::Context { used, window } => {
+                let window = window.or(self.context.and_then(|c| c.1));
+                self.context = Some((used, window));
+            }
             // The agent's store has the whole conversation, so a restart's history replaces what is shown.
             ChatEvent::History(turns) => {
                 self.items.clear();
+                self.born.clear();
+                self.lightbox = None;
                 self.list.reset(0);
-                let last = turns.len().saturating_sub(1);
-                for (n, turn) in turns.into_iter().enumerate() {
-                    self.push(Item::User { text: turn.prompt, folded: Some(n < last) });
+                for turn in turns {
+                    self.push(Item::User { text: turn.prompt });
                     for path in turn.images {
                         let size = image_size(&path);
-                        self.push(Item::Image { path, title: String::new(), size });
+                        self.push(Item::Image { path, title: String::new(), size, user: true });
                     }
                     turn.events.into_iter().for_each(|e| self.on_event(e, window, cx));
                 }
+                // History is already there: nothing animates in.
+                let past = Instant::now() - std::time::Duration::from_secs(1);
+                self.born.iter_mut().for_each(|b| *b = past);
             }
             ChatEvent::Exited { error } => {
                 self.backend = None;
@@ -481,71 +619,96 @@ impl ChatView {
 
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.prompt.read(cx).value().trim().to_string();
-        if (text.is_empty() && self.attached.is_empty()) || !self.ready() || self.turn.is_some() {
+        if (text.is_empty() && self.attached.is_empty() && self.pasted.is_empty()) || !self.ready() || self.turn.is_some() {
             return;
         }
-        let images = std::mem::take(&mut self.attached);
+        let attached = std::mem::take(&mut self.attached);
+        let images: Vec<PathBuf> = attached.iter().map(|(_, p)| p.clone()).collect();
+        let full = expand_pastes(&text, &std::mem::take(&mut self.pasted));
+        self.refs = (0, 0);
         if let Some(b) = &self.backend {
-            b.send(ChatInput::Prompt { text: text.clone(), images: images.clone() });
+            b.send(ChatInput::Prompt { text: full, images: images.clone() });
         }
         self.turn = Some(Instant::now());
-        self.push(Item::User { text, folded: None });
-        for path in images {
+        self._ticker = cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
+            let Ok(true) = this.update(cx, |v, cx| {
+                cx.notify();
+                v.turn.is_some()
+            }) else { break };
+        });
+        self.push(Item::User { text });
+        for (label, path) in attached {
             let size = image_size(&path);
-            self.push(Item::Image { path, title: String::new(), size });
+            self.push(Item::Image { path, title: label, size, user: true });
         }
         self.list.set_follow_mode(FollowMode::Tail);
         self.prompt.update(cx, |p, cx| p.set_value("", window, cx));
         cx.notify();
     }
 
-    fn folded(&self, ix: usize) -> bool {
-        let turn = self.items[..ix].iter().rev().find_map(|i| if let Item::User { folded, .. } = i { Some(*folded) } else { None });
-        turn.flatten() == Some(true)
-    }
-
-    fn toggle_turn(&mut self, ix: usize, cx: &mut Context<Self>) {
-        if let Some(Item::User { folded: Some(f), .. }) = self.items.get_mut(ix) {
-            *f = !*f;
-        }
-        let end = self.items[ix + 1..].iter().position(|i| matches!(i, Item::User { .. })).map_or(self.items.len(), |n| ix + 1 + n);
-        self.list.remeasure_items(ix..end);
-        cx.notify();
+    /// Whether item `ix` opens the agent's reply to a prompt (it gets the agent's name above it).
+    fn starts_reply(&self, ix: usize) -> bool {
+        let before = self.items[..ix].iter().rev().find(|i| !matches!(i, Item::Image { user: true, .. }));
+        !matches!(self.items[ix], Item::User { .. } | Item::Footer(_) | Item::Exited(_) | Item::Image { user: true, .. })
+            && matches!(before, None | Some(Item::User { .. }))
     }
 
     fn render_item(&mut self, ix: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
-        if !matches!(self.items[ix], Item::User { .. }) && self.folded(ix) {
-            return div().into_any_element();
+        let mut inner = div().w_full().flex().flex_col();
+        if matches!(self.items[ix], Item::User { .. }) && ix > 0 {
+            inner = inner.pt_5();
         }
-        let row = div().w_full().px_4().py_1p5().flex();
+        if self.starts_reply(ix) {
+            let (name, color) = brand(&self.agent);
+            inner = inner.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .pt_3()
+                    .pb_1()
+                    .child(div().size(px(18.)).rounded_full().flex().items_center().justify_center().bg(crate::pages::kit::alpha(color, 0.18)).child(crate::pages::kit::icon("spark", 11., c(color))))
+                    .child(div().text_size(px(12.)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(c(color)).child(name)),
+            );
+        }
+        let inner = inner.child(self.render_inner(ix, cx));
+        let column = div().w_full().max_w(px(COLUMN_W)).px_6();
+        let fresh = self.born.get(ix).is_some_and(|b| b.elapsed() < std::time::Duration::from_millis(400));
+        let column = if fresh {
+            crate::motion::rise_in(column.child(inner), ("born", ix), std::time::Duration::from_millis(180), 6., std::time::Duration::ZERO, crate::motion::standard())
+        } else {
+            column.child(inner).into_any_element()
+        };
+        div().w_full().flex().justify_center().child(column).into_any_element()
+    }
+
+    fn render_inner(&mut self, ix: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let row = div().w_full().py_1().flex();
         match &self.items[ix] {
-            Item::User { text, folded } => row
+            Item::User { text } => row
                 .justify_end()
-                .items_center()
-                .gap_3()
-                .when_some(*folded, |d, folded| {
-                    let label = if folded { "▸ Show turn" } else { "▾ Hide turn" };
-                    d.child(
-                        div()
-                            .id(("turn", ix))
-                            .relative()
-                            .cursor_pointer()
-                            .text_size(px(11.5))
-                            .text_color(c(theme::TEXT_FAINT))
-                            .child(label)
-                            .child(probe(format!("turn:{ix}")))
-                            .on_click(cx.listener(move |this, _, _, cx| this.toggle_turn(ix, cx))),
-                    )
-                })
                 .child(
                     div()
-                        .max_w(px(560.))
-                        .px_3()
-                        .py_2()
-                        .rounded_lg()
-                        .bg(c(theme::ACCENT_SOFT))
-                        .text_color(c(theme::TEXT))
-                        .child(text.clone()),
+                        .max_w(px(620.))
+                        .flex()
+                        .flex_col()
+                        .items_end()
+                        .gap_1()
+                        .when(!text.is_empty(), |d| {
+                            d.child(
+                                div()
+                                    .px_3p5()
+                                    .py_2()
+                                    .rounded(px(14.))
+                                    .rounded_br(px(4.))
+                                    .bg(theme::accent_soft())
+                                    .border_1()
+                                    .border_color(crate::pages::kit::alpha(theme::ACCENT, 0.35))
+                                    .text_color(c(theme::TEXT))
+                                    .child(text.clone()),
+                            )
+                        }),
                 )
                 .into_any_element(),
             Item::Assistant { md, .. } => {
@@ -568,13 +731,24 @@ impl ChatView {
                 row.relative().text_color(c(theme::TEXT)).child(div().w_full().child(view)).child(probe(format!("reply:{ix}"))).into_any_element()
             }
             Item::Thinking { text, open, .. } => {
-                let label = if *open { format!("Thinking\n{text}") } else { "Thinking…".into() };
+                let live = self.turn.is_some() && ix + 1 == self.items.len();
+                let chevron = if *open { "chevron" } else { "chevron-right" };
+                let head = div()
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .child(crate::pages::kit::icon(chevron, 11., c(theme::TEXT_FAINT)))
+                    .child(if live { "Thinking…" } else { "Thought" });
+                let head = if live { crate::motion::blink(head, ("think-blink", ix), std::time::Duration::from_millis(1400), 0.4) } else { head.into_any_element() };
                 row.id(("thinking", ix))
                     .relative()
+                    .flex_col()
+                    .gap_1()
                     .cursor_pointer()
+                    .text_size(px(12.5))
                     .text_color(c(theme::TEXT_FAINT))
-                    .italic()
-                    .child(label)
+                    .child(head)
+                    .when(*open, |d| d.child(div().ml(px(5.)).pl_3().border_l_2().border_color(c(theme::BORDER_STRONG)).italic().child(text.clone())))
                     .child(probe(format!("thinking:{ix}")))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(Item::Thinking { open, .. }) = this.items.get_mut(ix) {
@@ -585,27 +759,95 @@ impl ChatView {
                     }))
                     .into_any_element()
             }
-            Item::Image { path, title, size } => {
-                let open = path.clone();
+            Item::Image { path, title, size, user: true } => {
+                let (w, h) = size.map_or((160., 120.), |(w, h)| (w.min(160. * w / h.max(1.)).min(220.), h.min(160.)));
+                row.justify_end()
+                    .child(
+                        div()
+                            .id(("image", ix))
+                            .relative()
+                            .rounded(px(8.))
+                            .overflow_hidden()
+                            .border_1()
+                            .border_color(c(theme::BORDER_STRONG))
+                            .cursor_pointer()
+                            .child(gpui::img(path.clone()).w(px(w)).h(px(h)).object_fit(gpui::ObjectFit::Cover))
+                            .child(probe(format!("image:{ix}")))
+                            .tooltip({
+                                let t = if title.is_empty() { file_name(path) } else { title.clone() };
+                                move |window, cx| gpui_component::tooltip::Tooltip::new(t.clone()).build(window, cx)
+                            })
+                            .on_click(cx.listener(move |this, _, window, cx| this.open_lightbox(ix, window, cx))),
+                    )
+                    .into_any_element()
+            }
+            Item::Image { path, title, size, .. } => {
                 let mut pic = gpui::img(path.clone()).max_w_full().max_h(px(MAX_IMAGE_H));
                 if let Some((w, h)) = size {
                     pic = pic.w(px(*w)).h(px(*h));
                 }
-                row.relative()
-                    .flex_col()
-                    .gap_1()
-                    .when(!title.is_empty(), |d| d.text_color(c(theme::TEXT_DIM)).child(title.clone()))
-                    .child(div().id(("image", ix)).cursor_pointer().child(pic).on_click(cx.listener(move |this, _, _, cx| {
-                        if !crate::probe::ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
-                            cx.open_with_system(&open);
-                        }
-                        this.opened = Some(open.display().to_string());
-                    })))
-                    .child(probe(format!("image:{ix}")))
-                    .into_any_element()
+                let caption = if title.is_empty() { file_name(path) } else { title.clone() };
+                row.child(
+                    div()
+                        .min_w(px(320.))
+                        .max_w_full()
+                        .flex()
+                        .flex_col()
+                        .rounded(px(10.))
+                        .border_1()
+                        .border_color(c(theme::BORDER_STRONG))
+                        .bg(c(theme::PANEL))
+                        .overflow_hidden()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .pl_3()
+                                .pr_1p5()
+                                .py_1()
+                                .border_b_1()
+                                .border_color(c(theme::BORDER))
+                                .child(crate::pages::kit::icon("image", 13., c(theme::ACCENT)))
+                                .child(div().flex_1().min_w_0().truncate().text_size(px(12.)).text_color(c(theme::TEXT)).child(caption))
+                                .children(self.image_actions(ix, path, true, cx)),
+                        )
+                        .child(
+                            div()
+                                .id(("image", ix))
+                                .relative()
+                                .p_3()
+                                .flex()
+                                .justify_center()
+                                .bg(c(theme::BG))
+                                .cursor_pointer()
+                                .child(pic)
+                                .child(probe(format!("image:{ix}")))
+                                .on_click(cx.listener(move |this, _, window, cx| this.open_lightbox(ix, window, cx))),
+                        ),
+                )
+                .into_any_element()
             }
-            Item::Note(text) => row.text_color(c(theme::DANGER)).child(text.clone()).into_any_element(),
-            Item::Footer(text) => row.text_size(px(11.5)).text_color(c(theme::TEXT_FAINT)).child(text.clone()).into_any_element(),
+            Item::Note(text) => row
+                .gap_2()
+                .items_center()
+                .px_3()
+                .py_2()
+                .rounded(px(6.))
+                .bg(theme::danger_soft())
+                .text_color(c(theme::DANGER))
+                .child(crate::pages::kit::icon("x", 12., c(theme::DANGER)))
+                .child(text.clone())
+                .into_any_element(),
+            Item::Footer(text) => row
+                .items_center()
+                .gap_3()
+                .pt_1()
+                .text_size(px(11.))
+                .text_color(c(theme::TEXT_FAINT))
+                .child(div().flex_1().h(px(1.)).bg(c(theme::BORDER)))
+                .child(text.clone())
+                .into_any_element(),
             Item::Exited(text) => {
                 let last = self.backend.is_none() && !self.items[ix + 1..].iter().any(|i| matches!(i, Item::Exited(_)));
                 row.flex_col()
@@ -620,11 +862,15 @@ impl ChatView {
             }
             Item::Tool { .. } => self.render_tool(ix, row, cx),
             Item::Permission { title, answer: Some(answer), .. } => {
+                let denied = answer.starts_with("Deny") || answer.starts_with("Reject") || answer == "not answered";
+                let tone = if denied { theme::DANGER } else { theme::OK };
                 row.gap_2()
                     .items_center()
+                    .text_size(px(12.))
                     .text_color(c(theme::TEXT_DIM))
-                    .child(crate::pages::kit::icon("bell", 13., c(theme::TEXT_DIM)))
-                    .child(format!("{title} — {answer}"))
+                    .child(crate::pages::kit::icon("bell", 12., c(theme::TEXT_FAINT)))
+                    .child(title.clone())
+                    .child(div().px_1p5().rounded(px(4.)).bg(crate::pages::kit::alpha(tone, 0.15)).text_color(c(tone)).child(answer.clone()))
                     .into_any_element()
             }
             Item::Permission { title, detail, options, answer: None, .. } => {
@@ -640,9 +886,17 @@ impl ChatView {
                         .p_3()
                         .gap_2()
                         .border_color(c(theme::WARN))
-                        .child(div().text_color(c(theme::TEXT)).font_weight(gpui::FontWeight::SEMIBOLD).child(title.clone()))
+                        .border_l_4()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(crate::pages::kit::icon("bell", 13., c(theme::WARN)))
+                                .child(div().text_color(c(theme::TEXT)).font_weight(gpui::FontWeight::SEMIBOLD).child(title.clone())),
+                        )
                         .when(!detail.is_empty(), |d| {
-                            d.child(div().font_family(theme::MONO_FONT).text_size(px(12.)).text_color(c(theme::TEXT_DIM)).child(detail.clone()))
+                            d.child(div().p_2().rounded(px(4.)).bg(c(theme::BG)).font_family(theme::MONO_FONT).text_size(px(12.)).text_color(c(theme::TEXT_DIM)).child(detail.clone()))
                         })
                         .child(div().flex().flex_wrap().gap_2().children(buttons))
                         .child(div().text_size(px(11.5)).text_color(c(theme::TEXT_FAINT)).child("Press a number to choose, Esc to deny")),
@@ -650,6 +904,116 @@ impl ChatView {
                 .into_any_element()
             }
         }
+    }
+
+    fn image_actions(&self, ix: usize, path: &std::path::Path, expand: bool, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
+        let action = |id: &str, icon: &'static str, tip: &'static str| {
+            div()
+                .id(SharedString::from(format!("{id}:{ix}")))
+                .relative()
+                .p_1()
+                .rounded(px(4.))
+                .cursor_pointer()
+                .hover(|s| s.bg(c(theme::PANEL_HOVER)))
+                .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(tip).build(window, cx))
+                .child(crate::pages::kit::icon(icon, 13., c(theme::TEXT_DIM)))
+                .child(probe(format!("{id}:{ix}")))
+        };
+        let probing = || crate::probe::ENABLED.load(std::sync::atomic::Ordering::Relaxed);
+        let (open, dir, copy) = (path.to_path_buf(), path.parent().map(|p| p.to_path_buf()).unwrap_or_default(), path.display().to_string());
+        let mut out = vec![];
+        if expand {
+            out.push(action("img-expand", "maximize", "Expand").on_click(cx.listener(move |this, _, window, cx| this.open_lightbox(ix, window, cx))).into_any_element());
+        }
+        out.push(
+            action("img-open", "external", "Open in the default app")
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if !probing() {
+                        cx.open_with_system(&open);
+                    }
+                    this.opened = Some(open.display().to_string());
+                }))
+                .into_any_element(),
+        );
+        out.push(
+            action("img-folder", "folder", "Show in folder")
+                .on_click(move |_, _, cx| {
+                    if !probing() {
+                        cx.open_with_system(&dir);
+                    }
+                })
+                .into_any_element(),
+        );
+        out.push(action("img-copy", "copy", "Copy path").on_click(move |_, _, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy.clone()))).into_any_element());
+        out
+    }
+
+    fn images(&self) -> Vec<usize> {
+        (0..self.items.len()).filter(|&i| matches!(self.items[i], Item::Image { .. })).collect()
+    }
+
+    fn open_lightbox(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.lightbox = Some(ix);
+        // Its keys (Esc, arrows) arrive through the prompt's actions.
+        self.prompt.update(cx, |p, cx| p.focus(window, cx));
+        cx.notify();
+    }
+
+    /// Steps the lightbox to the previous (-1) or next (+1) image of the chat.
+    fn step_lightbox(&mut self, by: isize, cx: &mut Context<Self>) {
+        let images = self.images();
+        if let Some(at) = self.lightbox.and_then(|ix| images.iter().position(|&i| i == ix)) {
+            let n = images.len() as isize;
+            self.lightbox = Some(images[((at as isize + by).rem_euclid(n)) as usize]);
+            cx.notify();
+        }
+    }
+
+    fn render_lightbox(&self, ix: usize, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let Item::Image { path, title, .. } = self.items.get(ix)? else { return None };
+        let images = self.images();
+        let at = images.iter().position(|&i| i == ix).unwrap_or(0);
+        let caption = if title.is_empty() { file_name(path) } else { title.clone() };
+        // Never past its own size: a small picture stays sharp.
+        let mut pic = gpui::img(path.clone()).max_w_full().max_h_full().object_fit(gpui::ObjectFit::Contain);
+        if let Ok(s) = imagesize::size(path) {
+            pic = pic.w(px(s.width as f32)).h(px(s.height as f32));
+        }
+        let close = cx.listener(|this, _, _, cx| {
+            this.lightbox = None;
+            cx.notify();
+        });
+        let bar = div()
+            .flex()
+            .items_center()
+            .gap_3()
+            .px_3()
+            .py_1p5()
+            .rounded(px(8.))
+            .bg(c(theme::PANEL))
+            .border_1()
+            .border_color(c(theme::BORDER_STRONG))
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(div().max_w(px(480.)).truncate().text_color(c(theme::TEXT)).child(caption))
+            .when(images.len() > 1, |d| d.child(div().text_color(c(theme::TEXT_FAINT)).child(format!("{} / {}", at + 1, images.len()))))
+            .children(self.image_actions(ix, path, false, cx))
+            .child(div().text_size(px(11.)).text_color(c(theme::TEXT_FAINT)).child(if images.len() > 1 { "← → · Esc" } else { "Esc" }));
+        let el = div()
+            .id("lightbox")
+            .absolute()
+            .inset_0()
+            .p_6()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap_3()
+            .bg(gpui::rgba(0x000000c8))
+            .occlude()
+            .on_mouse_down(gpui::MouseButton::Left, close)
+            .child(div().flex_1().min_h_0().w_full().flex().items_center().justify_center().overflow_hidden().child(pic))
+            .child(bar)
+            .child(probe("lightbox"));
+        Some(crate::motion::overlay_in(el, ("lightbox-in", ix)))
     }
 
     fn render_tool(&self, ix: usize, row: gpui::Div, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -678,45 +1042,52 @@ impl ChatView {
         } else {
             icon("check", 12., c(theme::OK)).into_any_element()
         };
+        let tint = tool_color(&first.name);
         let header = div()
             .id(("tool", ix))
             .relative()
             .flex()
             .items_center()
             .gap_2()
+            .px_2p5()
+            .py_1p5()
             .cursor_pointer()
-            .child(icon(tool_icon(&first.name), 13., c(theme::TEXT_DIM)))
-            .child(div().flex_none().text_color(c(theme::TEXT)).child(name))
-            .child(div().flex_1().min_w_0().truncate().text_color(c(theme::TEXT_FAINT)).child(summary))
+            .hover(|s| s.bg(c(theme::PANEL_HOVER)))
+            .child(div().size(px(20.)).flex_none().rounded(px(5.)).flex().items_center().justify_center().bg(crate::pages::kit::alpha(tint, 0.16)).child(icon(tool_icon(&first.name), 12., c(tint))))
+            .child(div().flex_none().text_color(c(theme::TEXT)).font_weight(gpui::FontWeight::MEDIUM).child(name))
+            .child(div().flex_1().min_w_0().truncate().font_family(theme::MONO_FONT).text_size(px(11.5)).text_color(c(theme::TEXT_FAINT)).child(summary))
             .child(status)
+            .child(icon(if open { "chevron" } else { "chevron-right" }, 11., c(theme::TEXT_FAINT)))
             .child(probe(format!("tool:{ix}")))
             .on_click(cx.listener(move |this, _, _, cx| {
                 toggle(this, ix, false);
                 cx.notify();
             }));
-        let mut body = div().w_full().flex().flex_col().gap_1().child(header);
+        let border = if failed { theme::DANGER } else { theme::BORDER };
+        let mut body = div().w_full().flex().flex_col().rounded(px(8.)).border_1().border_color(c(border)).bg(c(theme::PANEL)).overflow_hidden().text_size(px(12.5)).child(header);
         if open {
+            let mut inside = div().w_full().flex().flex_col().gap_1().p_2().border_t_1().border_color(c(theme::BORDER));
             if let Some((state, rows)) = diff {
                 let h = (*rows).clamp(1, MAX_DIFF_ROWS) as f32 * DIFF_ROW_H + 8.;
-                body = body.child(div().w_full().h(px(h)).rounded(px(4.)).overflow_hidden().border_1().border_color(c(theme::BORDER)).child(Diff::new(state).size_full().header_visible(false)));
+                inside = inside.child(div().w_full().h(px(h)).rounded(px(4.)).overflow_hidden().border_1().border_color(c(theme::BORDER)).child(Diff::new(state).size_full().header_visible(false)));
             }
             let output: String = calls.iter().map(|c| c.output.as_str()).filter(|o| !o.is_empty()).collect::<Vec<_>>().join("\n");
             if !output.is_empty() && diff.is_none() {
                 let total = output.lines().count();
                 let shown = if all || total <= MAX_OUTPUT_LINES { output } else { output.lines().take(MAX_OUTPUT_LINES).collect::<Vec<_>>().join("\n") };
-                body = body.child(
+                inside = inside.child(
                     div()
                         .w_full()
                         .p_2()
                         .rounded(px(4.))
-                        .bg(c(theme::PANEL_RAISED))
+                        .bg(c(theme::BG))
                         .font_family(theme::MONO_FONT)
                         .text_size(px(12.))
                         .text_color(c(theme::TEXT_DIM))
                         .child(shown),
                 );
                 if !all && total > MAX_OUTPUT_LINES {
-                    body = body.child(
+                    inside = inside.child(
                         div()
                             .id(("tool-all", ix))
                             .relative()
@@ -731,6 +1102,7 @@ impl ChatView {
                     );
                 }
             }
+            body = body.child(inside);
         }
         row.child(body).into_any_element()
     }
@@ -771,40 +1143,312 @@ impl ChatView {
         })
     }
 
-    fn attach(&mut self, paths: impl IntoIterator<Item = PathBuf>, cx: &mut Context<Self>) {
-        self.attached.extend(paths.into_iter().filter(|p| is_image(p) && p.is_file()));
+    /// Adds images and long pastes, each with a reference typed at the cursor that marks where it belongs.
+    fn attach(&mut self, paths: Vec<PathBuf>, texts: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let mut refs = String::new();
+        for path in paths.into_iter().filter(|p| is_image(p) && p.is_file()) {
+            self.refs.0 += 1;
+            let label = format!("[Image #{}]", self.refs.0);
+            refs.push_str(&label);
+            refs.push(' ');
+            self.attached.push((label, path));
+        }
+        for text in texts {
+            self.refs.1 += 1;
+            let label = format!("[Pasted text #{} · {} lines]", self.refs.1, text.lines().count());
+            refs.push_str(&label);
+            refs.push(' ');
+            self.pasted.push((label, text));
+        }
+        if !refs.is_empty() {
+            self.prompt.update(cx, |p, cx| p.insert(refs, window, cx));
+        }
+        cx.notify();
+    }
+
+    fn detach(&mut self, label: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.attached.retain(|(l, _)| l != label);
+        self.pasted.retain(|(l, _)| l != label);
+        let value = self.prompt.read(cx).value().replace(&format!("{label} "), "").replace(label, "");
+        self.prompt.update(cx, |p, cx| p.set_value(value, window, cx));
         cx.notify();
     }
 
     fn attachments(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div().flex().flex_wrap().gap_2().pb_2().children(self.attached.iter().enumerate().map(|(i, path)| {
+        let remove = |id: SharedString, label: String| {
+            div()
+                .id(id.clone())
+                .relative()
+                .p(px(2.))
+                .rounded(px(3.))
+                .bg(c(theme::PANEL))
+                .cursor_pointer()
+                .child(crate::pages::kit::icon("x", 10., c(theme::TEXT_DIM)))
+                .child(probe(id.to_string()))
+                .on_click(cx.listener(move |this, _, window, cx| this.detach(&label, window, cx)))
+        };
+        let images = self.attached.iter().enumerate().map(|(i, (label, path))| {
             div()
                 .relative()
                 .size(px(56.))
-                .rounded(px(4.))
+                .rounded(px(6.))
                 .border_1()
                 .border_color(c(theme::BORDER))
                 .overflow_hidden()
                 .child(gpui::img(path.clone()).size_full().object_fit(gpui::ObjectFit::Cover))
+                .child(remove(format!("unattach:{i}").into(), label.clone()).absolute().top_0().right_0())
                 .child(
                     div()
-                        .id(("unattach", i))
                         .absolute()
-                        .top_0()
-                        .right_0()
-                        .p(px(2.))
-                        .bg(c(theme::PANEL))
-                        .cursor_pointer()
-                        .child(crate::pages::kit::icon("x", 10., c(theme::TEXT_DIM)))
-                        .child(probe(format!("unattach:{i}")))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if i < this.attached.len() {
-                                this.attached.remove(i);
-                            }
-                            cx.notify();
-                        })),
+                        .bottom_0()
+                        .left_0()
+                        .px_1()
+                        .rounded_tr(px(4.))
+                        .bg(gpui::rgba(0x000000a0))
+                        .text_size(px(10.))
+                        .text_color(gpui::rgb(0xffffff))
+                        .child(label.trim_start_matches("[Image ").trim_end_matches(']').to_string()),
                 )
-        }))
+                .into_any_element()
+        });
+        let pastes = self.pasted.iter().enumerate().map(|(i, (label, _))| {
+            div()
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .child(paste_chip(label.trim_matches(|c| c == '[' || c == ']').to_string()))
+                .child(remove(format!("unpaste:{i}").into(), label.clone()))
+                .into_any_element()
+        });
+        div().flex().flex_wrap().items_end().gap_2().children(images.chain(pastes))
+    }
+
+    fn model_label(&self) -> String {
+        let by_value = |v: &str| self.models.iter().find(|m| m.value == v);
+        let running = self.model.as_deref().and_then(|id| self.models.iter().find(|m| m.resolved == id && m.value != "default"));
+        match (self.picked.as_deref().and_then(by_value), running) {
+            (Some(m), _) | (None, Some(m)) => m.label.clone(),
+            _ => self.model.clone().or_else(|| by_value("default").map(|m| m.label.clone())).unwrap_or_else(|| "Default model".into()),
+        }
+    }
+
+    fn pick_model(&mut self, value: String, cx: &mut Context<Self>) {
+        remember(&self.agent, "model", &value);
+        if let Some(b) = &self.backend {
+            b.send(ChatInput::SetModel(value.clone()));
+        }
+        self.picked = Some(value);
+        self.model_menu = false;
+        cx.notify();
+    }
+
+    fn model_list(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        if !self.model_menu {
+            return None;
+        }
+        let current = self.model_label();
+        let rows = self.models.iter().enumerate().map(|(n, m)| {
+            let value = m.value.clone();
+            let on = m.label == current;
+            div()
+                .id(("model", n))
+                .relative()
+                .flex()
+                .flex_col()
+                .px_2()
+                .py_1()
+                .rounded(px(4.))
+                .cursor_pointer()
+                .hover(|s| s.bg(c(theme::PANEL_HOVER)))
+                .when(on, |d| d.bg(theme::accent_soft()))
+                .child(div().text_color(c(theme::TEXT)).child(m.label.clone()))
+                .when(!m.description.is_empty(), |d| d.child(div().text_size(px(11.)).text_color(c(theme::TEXT_FAINT)).child(m.description.clone())))
+                .child(probe(format!("model:{n}")))
+                .on_click(cx.listener(move |this, _, _, cx| this.pick_model(value.clone(), cx)))
+        });
+        Some(
+            div()
+                .id("model-list")
+                .absolute()
+                .bottom_full()
+                .left_6()
+                .w(px(320.))
+                .max_h(px(420.))
+                .overflow_y_scroll()
+                .mb_1()
+                .p_1()
+                .rounded(px(8.))
+                .border_1()
+                .border_color(c(theme::BORDER_STRONG))
+                .bg(c(theme::PANEL_RAISED))
+                .occlude()
+                .children(rows),
+        )
+    }
+
+    fn empty_state(&self) -> impl IntoElement {
+        let (name, color) = brand(&self.agent);
+        let tip = |key: &'static str, what: &'static str| {
+            div()
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .px_2p5()
+                .py_1()
+                .rounded_full()
+                .border_1()
+                .border_color(c(theme::BORDER))
+                .child(div().font_family(theme::MONO_FONT).text_color(c(theme::TEXT)).child(key))
+                .child(what)
+        };
+        div()
+            .flex_1()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_3()
+            .p_6()
+            .child(div().size(px(44.)).rounded_full().flex().items_center().justify_center().bg(crate::pages::kit::alpha(color, 0.16)).child(crate::pages::kit::icon("spark", 22., c(color))))
+            .child(div().text_size(px(16.)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(c(theme::TEXT)).child(format!("Chat with {name}")))
+            .child(div().text_color(c(theme::TEXT_FAINT)).child(self.cwd.display().to_string()))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .justify_center()
+                    .gap_2()
+                    .pt_2()
+                    .text_size(px(11.5))
+                    .text_color(c(theme::TEXT_DIM))
+                    .child(tip("/", "commands"))
+                    .child(tip("⌃V", "paste images or long text"))
+                    .child(tip("⇧⏎", "new line"))
+                    .child(tip("Esc", "stop a turn")),
+            )
+    }
+
+    fn working(&self) -> Option<impl IntoElement> {
+        let started = self.turn?;
+        if self.pending().is_some() {
+            return None;
+        }
+        let (_, color) = brand(&self.agent);
+        let s = started.elapsed().as_secs();
+        let took = if s < 60 { format!("{s}s") } else { format!("{}m {:02}s", s / 60, s % 60) };
+        Some(
+            div().w_full().flex().justify_center().child(
+                div()
+                    .w_full()
+                    .max_w(px(COLUMN_W))
+                    .px_6()
+                    .py_1()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(12.))
+                    .text_color(c(theme::TEXT_DIM))
+                    .child(crate::motion::status_pulse("working", 8., c(color), std::time::Duration::from_millis(1200)))
+                    .child(crate::motion::blink(div().child("Working"), "working-text", std::time::Duration::from_millis(2000), 0.55))
+                    .child(div().text_color(c(theme::TEXT_FAINT)).child(format!("· {took} · Esc to stop"))),
+            ),
+        )
+    }
+
+    fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let this = cx.weak_entity();
+        let modes: Vec<(String, &str)> = self.modes.iter().map(|m| (m.value.clone(), m.label.as_str())).collect();
+        let current = self.mode.clone().unwrap_or_default();
+        let mode = (modes.len() > 1).then(|| {
+            crate::pages::kit::seg("chat-mode", &modes, &current, move |m, _, cx| {
+                let _ = this.update(cx, |v, cx| v.set_mode(m, cx));
+            })
+        });
+        let tokens = crate::shell::tokens;
+        let spent = (self.spent.0 > 0).then(|| format!("{} tokens · ${:.2}", tokens(self.spent.0), self.spent.1));
+        let (agent_name, _) = brand(&self.agent);
+        let limit = |n: usize, l: &orbit_core::chat::Limit| {
+            let pct = l.used_percent.clamp(0., 100.);
+            let tone = if pct >= 90. { theme::DANGER } else if pct >= 80. { theme::WARN } else { theme::TEXT_FAINT };
+            let resets = l.resets_at.map(|at| format!(" · resets {}", crate::shell::resets_in(at))).unwrap_or_default();
+            let tip = format!("{agent_name} {} limit: {pct:.0}% used{resets}", l.label);
+            let label = l.label.clone();
+            div()
+                .id(("limit", n))
+                .flex()
+                .items_center()
+                .gap_1()
+                .text_color(c(tone))
+                .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
+                .child(label)
+                .child(div().w(px(28.)).h(px(4.)).rounded(px(2.)).bg(c(theme::BORDER_STRONG)).overflow_hidden().child(div().h_full().w(px(28. * pct as f32 / 100.)).bg(c(if pct >= 80. { tone } else { theme::ACCENT }))))
+                .child(format!("{pct:.0}%"))
+        };
+        let model = (!self.models.is_empty()).then(|| {
+            div()
+                .id("chat-model")
+                .relative()
+                .flex()
+                .items_center()
+                .gap_1()
+                .px_2()
+                .h(px(24.))
+                .rounded(px(6.))
+                .border_1()
+                .border_color(c(theme::BORDER))
+                .cursor_pointer()
+                .hover(|s| s.text_color(c(theme::TEXT)))
+                .child(self.model_label())
+                .child(crate::pages::kit::icon("chevron", 10., c(theme::TEXT_FAINT)))
+                .child(probe("chat-model"))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.model_menu = !this.model_menu;
+                    cx.notify();
+                }))
+        });
+        let context = self.context.map(|(used, window)| {
+            let tip = match window {
+                Some(w) => format!("Context: {} of {} tokens", tokens(used), tokens(w)),
+                None => format!("Context: {} tokens", tokens(used)),
+            };
+            let pct = window.map(|w| (used as f64 / w.max(1) as f64 * 100.).clamp(0., 100.));
+            let tone = match pct {
+                Some(p) if p >= 90. => theme::DANGER,
+                Some(p) if p >= 75. => theme::WARN,
+                _ => theme::TEXT_FAINT,
+            };
+            div()
+                .id("chat-context")
+                .flex()
+                .items_center()
+                .gap_1()
+                .text_color(c(tone))
+                .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
+                .child("Context")
+                .children(pct.map(|p| div().w(px(28.)).h(px(4.)).rounded(px(2.)).bg(c(theme::BORDER_STRONG)).overflow_hidden().child(div().h_full().w(px(28. * p as f32 / 100.)).bg(c(if p >= 75. { tone } else { theme::ACCENT })))))
+                .child(match pct {
+                    Some(p) => format!("{p:.0}%"),
+                    None => tokens(used),
+                })
+        });
+        div()
+            .flex()
+            .items_center()
+            .gap_3()
+            .text_size(px(11.))
+            .text_color(c(theme::TEXT_FAINT))
+            .children(mode)
+            .children(model)
+            .child(div().flex_1())
+            .children(context)
+            .children(spent)
+            .children((self.agent == "claude" && !self.limits.is_empty() && !self.limits.iter().any(|l| l.label == "5h")).then(|| {
+                div()
+                    .id("limit-5h-unknown")
+                    .tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("Claude Code 5h limit: updates with your next message").build(window, cx))
+                    .child("5h —")
+            }))
+            .children(self.limits.iter().enumerate().map(|(n, l)| limit(n, l)))
     }
 }
 
@@ -817,17 +1461,92 @@ impl Drop for ChatView {
 }
 
 impl Render for ChatView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        use crate::pages::kit::{button, Kind};
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ready = self.ready();
+        let (_, color) = brand(&self.agent);
+        let can_send = ready && (!self.prompt.read(cx).value().trim().is_empty() || !self.attached.is_empty() || !self.pasted.is_empty());
         let action = if self.turn.is_some() {
-            button("chat-stop", "Stop", Kind::DangerOutline).on_click(cx.listener(|this, _, _, cx| this.interrupt(cx)))
+            div()
+                .id("chat-stop")
+                .relative()
+                .size(px(30.))
+                .flex_none()
+                .rounded_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(theme::danger_soft())
+                .cursor_pointer()
+                .child(crate::pages::kit::icon("stop", 12., c(theme::DANGER)))
+                .child(probe("chat-stop"))
+                .on_click(cx.listener(|this, _, _, cx| this.interrupt(cx)))
         } else {
-            button("chat-send", "Send", Kind::Primary).when(!ready, |b| b.opacity(0.5)).on_click(cx.listener(|this, _, window, cx| this.send(window, cx)))
+            div()
+                .id("chat-send")
+                .relative()
+                .size(px(30.))
+                .flex_none()
+                .rounded_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(c(if can_send { color } else { theme::BORDER_STRONG }))
+                .cursor_pointer()
+                .child(crate::pages::kit::icon("arrow-up", 15., c(if can_send { 0xFFFFFF } else { theme::TEXT_FAINT })))
+                .child(probe("chat-send"))
+                .on_click(cx.listener(|this, _, window, cx| this.send(window, cx)))
         };
+        let focused = gpui::Focusable::focus_handle(self.prompt.read(cx), cx).is_focused(window);
         let this = cx.weak_entity();
+        let composer = div()
+            .w_full()
+            .max_w(px(COLUMN_W))
+            .px_6()
+            .relative()
+            .child(self.slash_list(cx))
+            .children(self.model_list(cx))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .p_2p5()
+                    .rounded(px(12.))
+                    .border_1()
+                    .border_color(if focused { crate::pages::kit::alpha(color, 0.7) } else { c(theme::BORDER_STRONG) })
+                    .bg(c(theme::PANEL_RAISED))
+                    .on_drop(cx.listener(|this, paths: &gpui::ExternalPaths, window, cx| this.attach(paths.paths().to_vec(), vec![], window, cx)))
+                    .when(!self.attached.is_empty() || !self.pasted.is_empty(), |d| d.child(self.attachments(cx)))
+                    .child(
+                        div()
+                            .flex()
+                            .items_end()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .relative()
+                                    .child(Textarea::new(&self.prompt).appearance(false).disabled(!ready).on_paste(move |item, window, cx| paste_into(&this, item, window, cx)))
+                                    .child(probe("chat-prompt")),
+                            )
+                            .child(action),
+                    )
+                    .child(self.toolbar(cx)),
+            );
+        let body = if self.items.is_empty() {
+            self.empty_state().into_any_element()
+        } else {
+            div()
+                .flex_1()
+                .min_h_0()
+                .relative()
+                .child(list(self.list.clone(), cx.processor(|this, ix, _, cx| this.render_item(ix, cx))).size_full().pt_3().pb_2())
+                .child(crate::scrollbar::vertical("chat", &self.list))
+                .into_any_element()
+        };
         div()
             .size_full()
+            .relative()
             .flex()
             .flex_col()
             .text_size(px(13.))
@@ -836,28 +1555,29 @@ impl Render for ChatView {
             .capture_action(cx.listener(|this, _: &MoveDown, window, cx| this.on_slash_key("down", window, cx)))
             .capture_action(cx.listener(|this, _: &IndentInline, window, cx| this.on_slash_key("tab", window, cx)))
             .capture_action(cx.listener(|this, _: &Enter, window, cx| this.on_slash_key("enter", window, cx)))
-            .capture_action(cx.listener(|this, _: &Escape, window, cx| this.on_slash_key("escape", window, cx)))
-            .child(list(self.list.clone(), cx.processor(|this, ix, _, cx| this.render_item(ix, cx))).flex_1().py_2())
-            .child(
-                div()
-                    .relative()
-                    .p_3()
-                    .border_t_1()
-                    .border_color(c(theme::BORDER))
-                    .on_drop(cx.listener(|this, paths: &gpui::ExternalPaths, _, cx| this.attach(paths.paths().to_vec(), cx)))
-                    .when(!self.attached.is_empty(), |d| d.child(self.attachments(cx)))
-                    .child(self.slash_list(cx))
-                    .child(
-                        div()
-                            .flex()
-                            .items_end()
-                            .gap_2()
-                            .child(div().flex_1().relative().child(Textarea::new(&self.prompt).disabled(!ready).on_paste(move |item, _, cx| {
-                                paste_images(&this, item, cx)
-                            })).child(probe("chat-prompt")))
-                            .child(action),
-                    ),
-            )
+            .capture_action(cx.listener(|this, _: &Escape, window, cx| {
+                if this.lightbox.take().is_some() || std::mem::take(&mut this.model_menu) {
+                    cx.stop_propagation();
+                    return cx.notify();
+                }
+                this.on_slash_key("escape", window, cx)
+            }))
+            .capture_action(cx.listener(|this, _: &gpui_component::input::MoveLeft, _, cx| {
+                if this.lightbox.is_some() {
+                    this.step_lightbox(-1, cx);
+                    cx.stop_propagation();
+                }
+            }))
+            .capture_action(cx.listener(|this, _: &gpui_component::input::MoveRight, _, cx| {
+                if this.lightbox.is_some() {
+                    this.step_lightbox(1, cx);
+                    cx.stop_propagation();
+                }
+            }))
+            .child(body)
+            .children(self.working())
+            .child(div().flex_none().w_full().flex().justify_center().pt_1().pb_3().child(composer))
+            .children(self.lightbox.and_then(|ix| self.render_lightbox(ix, cx)))
     }
 }
 
@@ -878,14 +1598,10 @@ impl PageView for ChatView {
         let _ = writeln!(out, "  chat {} session {:?} ready {} status {} opened {:?}", self.agent, self.session_id, self.ready(), self.status().label(), self.opened);
         for item in &self.items {
             let _ = match item {
-                Item::User { text, folded } => writeln!(out, "    you{}: {text:?}", match folded {
-                    Some(true) => " (history, folded)",
-                    Some(false) => " (history)",
-                    None => "",
-                }),
+                Item::User { text } => writeln!(out, "    you: {text:?}"),
                 Item::Assistant { text, .. } => writeln!(out, "    agent: {text:?}"),
                 Item::Thinking { text, open, .. } => writeln!(out, "    thinking ({}): {text:?}", if *open { "open" } else { "collapsed" }),
-                Item::Image { path, title, size } => writeln!(out, "    image: {} {title:?} {size:?}", path.display()),
+                Item::Image { path, title, size, user } => writeln!(out, "    image{}: {} {title:?} {size:?}", if *user { " (yours)" } else { "" }, path.display()),
                 Item::Note(t) => writeln!(out, "    note: {t:?}"),
                 Item::Exited(t) => writeln!(out, "    exited: {t:?}"),
                 Item::Footer(t) => writeln!(out, "    footer: {t:?}"),
@@ -904,17 +1620,25 @@ impl PageView for ChatView {
                 }
             };
         }
-        for path in &self.attached {
-            let _ = writeln!(out, "    attached: {}", path.display());
+        for (label, path) in &self.attached {
+            let _ = writeln!(out, "    attached: {label} {}", path.display());
+        }
+        for (label, _) in &self.pasted {
+            let _ = writeln!(out, "    pasted: {label}");
+        }
+        if let Some(ix) = self.lightbox {
+            let _ = writeln!(out, "    lightbox: {ix}");
         }
         let _ = writeln!(out, "    commands: {}", self.commands.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(" "));
     }
 }
 
-/// Takes a pasted image (saved to a temp file) or copied image files; text pastes go through.
-fn paste_images(view: &gpui::WeakEntity<ChatView>, item: &gpui::ClipboardItem, cx: &mut App) -> bool {
+/// Takes a pasted image (saved to a temp file), copied image files, or a long text as an attachment;
+/// short text pastes go through.
+fn paste_into(view: &gpui::WeakEntity<ChatView>, item: &gpui::ClipboardItem, window: &mut Window, cx: &mut App) -> bool {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
     let mut paths = vec![];
+    let mut texts = vec![];
     for entry in item.entries() {
         match entry {
             gpui::ClipboardEntry::Image(image) => {
@@ -925,14 +1649,64 @@ fn paste_images(view: &gpui::WeakEntity<ChatView>, item: &gpui::ClipboardItem, c
                 }
             }
             gpui::ClipboardEntry::ExternalPaths(p) => paths.extend(p.paths().iter().filter(|p| is_image(p)).cloned()),
+            gpui::ClipboardEntry::String(s) if is_long(&s.text) => texts.push(s.text.clone()),
             gpui::ClipboardEntry::String(_) => {}
         }
     }
-    if paths.is_empty() {
+    if paths.is_empty() && texts.is_empty() {
         return false;
     }
-    let _ = view.update(cx, |v, cx| v.attach(paths, cx));
+    // After the paste returns: the prompt is still mid-update while its handler runs.
+    let view = view.clone();
+    window.defer(cx, move |window, cx| {
+        let _ = view.update(cx, |v, cx| v.attach(paths, texts, window, cx));
+    });
     true
+}
+
+/// Claude's plan limits from its status line file; a window that has reset since is left out (unknown).
+fn claude_limits(r: orbit_core::agent_hooks::RateLimits) -> Vec<orbit_core::chat::Limit> {
+    let limit = |label: &str, w: &orbit_core::agent_hooks::RateWindow| orbit_core::chat::Limit { label: label.into(), used_percent: w.used_percentage, resets_at: Some(w.resets_at) };
+    r.five_hour.iter().map(|w| limit("5h", w)).chain(r.seven_day.iter().map(|w| limit("Week", w))).collect()
+}
+
+/// The prompt as sent: each paste's reference replaced by its text (or the text added at the end
+/// when the reference was deleted).
+fn expand_pastes(text: &str, pasted: &[(String, String)]) -> String {
+    let mut out = text.to_string();
+    for (label, content) in pasted {
+        if out.contains(label.as_str()) {
+            out = out.replacen(label.as_str(), &format!("\n{content}\n"), 1);
+        } else {
+            out = format!("{out}\n\n{content}");
+        }
+    }
+    out.trim().to_string()
+}
+
+fn is_long(text: &str) -> bool {
+    text.lines().count() > PASTE_LINES || text.len() > PASTE_CHARS
+}
+
+fn file_name(path: &std::path::Path) -> String {
+    path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned())
+}
+
+fn paste_chip(label: String) -> gpui::Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_1p5()
+        .px_2()
+        .py_1()
+        .rounded(px(6.))
+        .border_1()
+        .border_color(c(theme::BORDER_STRONG))
+        .bg(c(theme::PANEL))
+        .text_size(px(11.5))
+        .text_color(c(theme::TEXT_DIM))
+        .child(crate::pages::kit::icon("doc", 12., c(theme::TEXT_DIM)))
+        .child(label)
 }
 
 /// Commands matching a bare `/word` prompt: name prefix matches first, then names containing it.
@@ -1014,7 +1788,7 @@ fn open(app: &mut OrbitApp, agent: &'static str, window: &mut Window, cx: &mut C
 }
 
 pub fn init(cx: &mut App) {
-    // shortcut: a palette entry for testing, until the New Session menu lists chat sessions.
+    // A chat tab outside the session list, for self-tests; sessions switch with Terminal | Chat.
     commands::register(cx, Command::new("chat.newClaude", "New Claude Chat").run(|a, w, cx| open(a, "claude", w, cx)));
 }
 
@@ -1041,6 +1815,12 @@ mod tests {
         let new = FileDiff { path: "n.rs".into(), old_text: String::new(), new_text: "x".into() };
         let new = &gpui_component::diff::DiffFile::parse(&file_patch(&new)).unwrap()[0];
         assert_eq!((new.additions(), new.deletions()), (1, 0));
+    }
+
+    #[test]
+    fn pastes_expand_where_their_reference_is() {
+        let pasted = vec![("[Pasted text #1 · 2 lines]".to_string(), "a\nb".to_string()), ("[Pasted text #2 · 1 lines]".to_string(), "gone".to_string())];
+        assert_eq!(super::expand_pastes("see [Pasted text #1 · 2 lines] then", &pasted), "see \na\nb\n then\n\ngone");
     }
 
     #[test]

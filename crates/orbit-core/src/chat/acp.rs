@@ -1,5 +1,5 @@
 // ACP agents (`opencode acp`, `omp acp`): JSON-RPC on stdio, one ACP session per chat session.
-use super::{Agent, ChatBackend, ChatEvent, ChatInput, FileDiff, PermissionOption, SlashCommand, Turn};
+use super::{Agent, ChatBackend, ChatEvent, ChatInput, Choice, FileDiff, PermissionOption, SlashCommand, Turn};
 use crate::agent::stream;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -12,7 +12,7 @@ struct Acp {
 }
 
 pub fn start(name: &str, cwd: &Path, resume: Option<String>, key: &str, sink: impl Fn(ChatEvent) + Send + 'static) -> Result<Box<dyn ChatBackend>, String> {
-    let (launch_args, launch_env) = crate::agent_hooks::session_launch(name, key);
+    let (launch_args, launch_env) = crate::agent_hooks::session_launch(name, key, true);
     let mut cmd = crate::proc::cmd(name);
     cmd.arg("acp").args(launch_args).envs(launch_env).current_dir(cwd);
     let mcp_servers = match (crate::agent_hooks::hook_url(key), std::env::current_exe()) {
@@ -43,6 +43,17 @@ impl ChatBackend for Acp {
                 ChatInput::AnswerPermission { id, option_id } => match p.answer(&id, &option_id) {
                     Some(reply) => reply,
                     None => return,
+                },
+                ChatInput::SetModel(value) => match p.model_config.clone() {
+                    Some(id) => p.set_config(&id, &value),
+                    None => return,
+                },
+                ChatInput::SetMode(value) => match p.mode_config.clone() {
+                    Some(id) => p.set_config(&id, &value),
+                    None => {
+                        let session = p.session_id.clone();
+                        p.request("session/set_mode", json!({ "sessionId": session, "modeId": value }))
+                    }
                 },
             }
         };
@@ -83,6 +94,9 @@ struct Parser {
     cost_before_turn: f64,
     /// While session/load runs: the turns its replayed updates make up.
     history: Option<Vec<Turn>>,
+    /// The config option ids for the model and mode pickers, when the agent offers them that way.
+    model_config: Option<String>,
+    mode_config: Option<String>,
 }
 
 impl super::RpcParser for Parser {
@@ -99,6 +113,36 @@ impl Parser {
         self.next_id += 1;
         self.pending.insert(self.next_id, method.into());
         json!({ "jsonrpc": "2.0", "id": self.next_id, "method": method, "params": params })
+    }
+
+    fn set_config(&mut self, config: &str, value: &str) -> Value {
+        let session = self.session_id.clone();
+        self.request("session/set_config_option", json!({ "sessionId": session, "configId": config, "value": value }))
+    }
+
+    /// The model and mode pickers from a session's `configOptions` (or its older `modes`).
+    fn pickers(&mut self, r: &Value) -> Vec<ChatEvent> {
+        let s = |v: &Value| v.as_str().unwrap_or("").to_string();
+        let mut out = vec![];
+        for o in r["configOptions"].as_array().into_iter().flatten() {
+            let choices = o["options"].as_array().into_iter().flatten().map(|c| Choice::new(&s(&c["value"]), &s(&c["name"]), &s(&c["description"]))).collect();
+            match o["category"].as_str() {
+                Some("model") => {
+                    self.model_config = Some(s(&o["id"]));
+                    out.extend([ChatEvent::Models(choices), ChatEvent::Model(s(&o["currentValue"]))]);
+                }
+                Some("mode") => {
+                    self.mode_config = Some(s(&o["id"]));
+                    out.extend([ChatEvent::Modes(choices), ChatEvent::Mode(s(&o["currentValue"]))]);
+                }
+                _ => {}
+            }
+        }
+        if self.mode_config.is_none() && r["modes"].is_object() {
+            let choices = r["modes"]["availableModes"].as_array().into_iter().flatten().map(|m| Choice::new(&s(&m["id"]), &s(&m["name"]), &s(&m["description"]))).collect();
+            out.extend([ChatEvent::Modes(choices), ChatEvent::Mode(s(&r["modes"]["currentModeId"]))]);
+        }
+        out
     }
 
     fn prompt(&mut self, text: &str, images: &[PathBuf]) -> Value {
@@ -183,15 +227,19 @@ impl Parser {
             }
             "session/new" => {
                 self.session_id = r["sessionId"].as_str().unwrap_or("").into();
-                vec![ChatEvent::SessionId(self.session_id.clone())]
+                let mut out = vec![ChatEvent::SessionId(self.session_id.clone())];
+                out.extend(self.pickers(r));
+                out
             }
+            "session/set_config_option" => self.pickers(r),
             "session/load" => {
                 self.session_id = self.resume.clone().unwrap_or_default();
                 // The cost of the history a load replays isn't the next turn's.
                 self.cost_before_turn = self.cost.unwrap_or(0.0);
                 let turns = self.history.take().unwrap_or_default();
                 let history = (!turns.is_empty()).then_some(ChatEvent::History(turns));
-                history.into_iter().chain([ChatEvent::SessionId(self.session_id.clone())]).collect()
+                let pickers = self.pickers(r);
+                history.into_iter().chain(pickers).chain([ChatEvent::SessionId(self.session_id.clone())]).collect()
             }
             "session/prompt" => {
                 self.tools.clear();
@@ -218,8 +266,10 @@ impl Parser {
             }
             "usage_update" => {
                 self.cost = u["cost"]["amount"].as_f64().or(self.cost);
-                vec![]
+                u["used"].as_u64().map(|used| ChatEvent::Context { used, window: u["size"].as_u64() }).into_iter().collect()
             }
+            "config_option_update" => self.pickers(u),
+            "current_mode_update" => vec![ChatEvent::Mode(s(&u["currentModeId"]))],
             _ => vec![],
         }
     }
@@ -321,6 +371,21 @@ fn text(block: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_and_mode_pickers_from_config_options() {
+        let mut p = Parser::default();
+        let r = json!({ "configOptions": [
+            { "id": "mode", "category": "mode", "currentValue": "plan", "options": [{ "value": "default", "name": "Default" }, { "value": "plan", "name": "Plan" }] },
+            { "id": "model", "category": "model", "currentValue": "a/x", "options": [{ "value": "a/x", "name": "X" }] }
+        ] });
+        let events = p.pickers(&r);
+        assert!(events.contains(&ChatEvent::Mode("plan".into())) && events.contains(&ChatEvent::Model("a/x".into())));
+        assert_eq!((p.mode_config.as_deref(), p.model_config.as_deref()), (Some("mode"), Some("model")));
+        assert_eq!(p.set_config("model", "a/y")["params"], json!({ "sessionId": "", "configId": "model", "value": "a/y" }));
+        let old = Parser::default().pickers(&json!({ "modes": { "availableModes": [{ "id": "default", "name": "Default" }], "currentModeId": "default" } }));
+        assert!(old.contains(&ChatEvent::Mode("default".into())));
+    }
 
     const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/chat/acp/");
 

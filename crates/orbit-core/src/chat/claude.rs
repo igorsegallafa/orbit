@@ -1,6 +1,6 @@
 // Claude Code over stream-json: one long-lived `claude -p` process, user
 // messages in as NDJSON on stdin, partial-message stream events out.
-use super::{Agent, ChatBackend, ChatEvent, ChatInput, FileDiff, PermissionOption, SlashCommand, Turn};
+use super::{Agent, ChatBackend, ChatEvent, ChatInput, Choice, FileDiff, Limit, PermissionOption, SlashCommand, Turn};
 use crate::agent::stream;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -14,7 +14,7 @@ struct Claude {
 
 pub fn start(cwd: &Path, resume: Option<String>, key: &str, sink: impl Fn(ChatEvent) + Send + 'static) -> Result<Box<dyn ChatBackend>, String> {
     let key = key.to_string();
-    let (launch_args, launch_env) = crate::agent_hooks::session_launch("claude", &key);
+    let (launch_args, launch_env) = crate::agent_hooks::session_launch("claude", &key, true);
     let mut cmd = crate::proc::cmd("claude");
     cmd.args(["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages"]);
     if let Some(id) = &resume {
@@ -44,6 +44,8 @@ pub fn start(cwd: &Path, resume: Option<String>, key: &str, sink: impl Fn(ChatEv
         move |line| parser.line(line).into_iter().for_each(|e| (line_sink.lock().unwrap())(e)),
         move |error| (sink.lock().unwrap())(ChatEvent::Exited { error }),
     )?;
+    // Answered with the slash commands (with descriptions), the models and the permission mode, before any prompt.
+    agent.write(&json!({ "type": "control_request", "request_id": "init", "request": { "subtype": "initialize" } }));
     Ok(Box::new(Claude { agent, key }))
 }
 
@@ -53,6 +55,8 @@ impl ChatBackend for Claude {
             ChatInput::Prompt { text, images } => user_message(&text, &images),
             // SIGINT ends `claude -p` itself; the control request stops only the turn.
             ChatInput::Interrupt => json!({ "type": "control_request", "request_id": "interrupt", "request": { "subtype": "interrupt" } }),
+            ChatInput::SetModel(model) => json!({ "type": "control_request", "request_id": format!("model-{model}"), "request": { "subtype": "set_model", "model": model } }),
+            ChatInput::SetMode(mode) => json!({ "type": "control_request", "request_id": format!("mode-{mode}"), "request": { "subtype": "set_permission_mode", "mode": mode } }),
             ChatInput::AnswerPermission { id, option_id } => {
                 crate::agent_hooks::answer_permission(&id, &option_id);
                 return;
@@ -91,6 +95,8 @@ struct Parser {
     message_id: String,
     /// Tool calls waiting for their result: id → (name, input).
     tools: HashMap<String, (String, Value)>,
+    /// Tokens in context at the last message's start.
+    context: u64,
 }
 
 impl Parser {
@@ -103,14 +109,47 @@ impl Parser {
                 vec![
                     ChatEvent::SessionId(s(&v["session_id"])),
                     ChatEvent::Commands(commands.map(|name| SlashCommand { name: name.into(), description: String::new() }).collect()),
+                    ChatEvent::Model(s(&v["model"])),
                 ]
+            }
+            "rate_limit_event" => {
+                let windows = &v["rate_limit_info"]["unifiedWindows"];
+                crate::agent_hooks::save_rate_limits(windows);
+                let limit = |key: &str, label: &str| {
+                    let w = &windows[key];
+                    w["utilization"].as_f64().map(|u| Limit { label: label.into(), used_percent: u * 100., resets_at: w["resetsAt"].as_u64() })
+                };
+                let limits: Vec<Limit> = [limit("five_hour", "5h"), limit("seven_day", "Week")].into_iter().flatten().collect();
+                if limits.is_empty() {
+                    return vec![];
+                }
+                vec![ChatEvent::Limits(limits)]
+            }
+            "control_response" if v["response"]["request_id"] == "init" => {
+                let r = &v["response"]["response"];
+                let list = |k: &str| r[k].as_array().cloned().unwrap_or_default();
+                let commands = list("commands").iter().map(|c| SlashCommand { name: s(&c["name"]), description: s(&c["description"]) }).collect();
+                let models = list("models")
+                    .iter()
+                    .map(|m| Choice { value: s(&m["value"]), label: s(&m["displayName"]), description: s(&m["description"]), resolved: s(&m["resolvedModel"]) })
+                    .collect();
+                let modes = [("default", "Ask", "Asks before tools that change things"), ("acceptEdits", "Edits", "Edits files without asking"), ("plan", "Plan", "Plans only, changes nothing"), ("auto", "Auto", "Runs tools without asking")];
+                let mut out = vec![ChatEvent::Commands(commands), ChatEvent::Models(models), ChatEvent::Modes(modes.iter().map(|(v, l, d)| Choice::new(v, l, d)).collect())];
+                out.extend(r["current_permission_mode"].as_str().map(|m| ChatEvent::Mode(m.into())));
+                out
             }
             "stream_event" => {
                 let e = &v["event"];
                 match e["type"].as_str().unwrap_or("") {
                     "message_start" => {
                         self.message_id = s(&e["message"]["id"]);
-                        vec![]
+                        let u = &e["message"]["usage"];
+                        let n = |k: &str| u[k].as_u64().unwrap_or(0);
+                        self.context = n("input_tokens") + n("cache_creation_input_tokens") + n("cache_read_input_tokens");
+                        if self.context == 0 {
+                            return vec![];
+                        }
+                        vec![ChatEvent::Context { used: self.context, window: None }]
                     }
                     "content_block_delta" => {
                         let d = &e["delta"];
@@ -147,7 +186,9 @@ impl Parser {
             "result" => {
                 let is_error = v["is_error"].as_bool().unwrap_or(false);
                 let error = is_error.then(|| Some(s(&v["result"])).filter(|r| !r.is_empty()).unwrap_or_else(|| s(&v["subtype"])));
-                vec![ChatEvent::TurnEnded { cost_usd: v["total_cost_usd"].as_f64(), tokens: stream::usage_tokens(&v["usage"]), error }]
+                let window = v["modelUsage"].as_object().and_then(|m| m.values().filter_map(|u| u["contextWindow"].as_u64()).max());
+                let context = (self.context > 0).then_some(ChatEvent::Context { used: self.context, window });
+                context.into_iter().chain([ChatEvent::TurnEnded { cost_usd: v["total_cost_usd"].as_f64(), tokens: stream::usage_tokens(&v["usage"]), error }]).collect()
             }
             _ => vec![],
         }
@@ -237,6 +278,13 @@ mod tests {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/chat/claude").join(name);
         let mut p = Parser::default();
         std::fs::read_to_string(path).unwrap().lines().flat_map(|l| p.line(l)).collect()
+    }
+
+    #[test]
+    fn rate_limit_event_reports_both_windows() {
+        let line = r#"{"type":"rate_limit_event","rate_limit_info":{"unifiedWindows":{"five_hour":{"utilization":0.22,"resetsAt":10},"seven_day":{"utilization":0.39,"resetsAt":20}}}}"#;
+        let Some(ChatEvent::Limits(l)) = Parser::default().line(line).pop() else { panic!("no limits") };
+        assert_eq!((l[0].label.as_str(), l[0].used_percent.round(), l[1].resets_at), ("5h", 22., Some(20)));
     }
 
     #[test]

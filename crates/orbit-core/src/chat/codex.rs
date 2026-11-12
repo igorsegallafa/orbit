@@ -1,5 +1,5 @@
 // Codex over `codex app-server`: JSON-RPC on stdio, one thread per chat session.
-use super::{Agent, ChatBackend, ChatEvent, ChatInput, FileDiff, PermissionOption, SlashCommand, Turn};
+use super::{Agent, ChatBackend, ChatEvent, ChatInput, Choice, FileDiff, Limit, PermissionOption, SlashCommand, Turn};
 use crate::agent::stream;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -12,7 +12,7 @@ struct Codex {
 }
 
 pub fn start(cwd: &Path, resume: Option<String>, key: &str, sink: impl Fn(ChatEvent) + Send + 'static) -> Result<Box<dyn ChatBackend>, String> {
-    let (launch_args, launch_env) = crate::agent_hooks::session_launch("codex", key);
+    let (launch_args, launch_env) = crate::agent_hooks::session_launch("codex", key, true);
     let mut cmd = crate::proc::cmd("codex");
     cmd.arg("app-server").args(launch_args).envs(launch_env).current_dir(cwd);
     let parser = Arc::new(Mutex::new(Parser { cwd: cwd.to_path_buf(), resume, ..Parser::default() }));
@@ -30,8 +30,15 @@ impl ChatBackend for Codex {
                 ChatInput::Prompt { text, images } => {
                     let mut input = vec![json!({ "type": "text", "text": text })];
                     input.extend(images.iter().map(|path| json!({ "type": "localImage", "path": path })));
-                    let thread = p.thread_id.clone();
-                    p.request("turn/start", json!({ "threadId": thread, "input": input }))
+                    let mut params = json!({ "threadId": p.thread_id, "input": input });
+                    if let Some(model) = &p.model {
+                        params["model"] = json!(model);
+                    }
+                    if let Some(&(_, _, _, approval, sandbox)) = p.mode.as_deref().and_then(|m| MODES.iter().find(|x| x.0 == m)) {
+                        params["approvalPolicy"] = json!(approval);
+                        params["sandboxPolicy"] = json!({ "type": sandbox });
+                    }
+                    p.request("turn/start", params)
                 }
                 ChatInput::Interrupt if !p.turn_id.is_empty() => {
                     let params = json!({ "threadId": p.thread_id, "turnId": p.turn_id });
@@ -41,6 +48,15 @@ impl ChatBackend for Codex {
                     Some(reply) => reply,
                     None => return,
                 },
+                // Both apply from the next turn on.
+                ChatInput::SetModel(model) => {
+                    p.model = Some(model);
+                    return;
+                }
+                ChatInput::SetMode(mode) => {
+                    p.mode = Some(mode);
+                    return;
+                }
                 _ => return,
             }
         };
@@ -68,6 +84,31 @@ struct Parser {
     turn_tokens: u64,
     /// Approval requests waiting for the user: PermissionAsked id → the server's request.
     approvals: HashMap<String, Value>,
+    /// The model and mode picked in Orbit, sent with the next turn.
+    model: Option<String>,
+    mode: Option<String>,
+}
+
+/// Codex's approval presets: (value, label, description, approval policy, sandbox type).
+const MODES: [(&str, &str, &str, &str, &str); 3] = [
+    ("read-only", "Read only", "Reads and asks before any change", "on-request", "readOnly"),
+    ("auto", "Auto", "Works in the folder, asks to go outside it", "on-request", "workspaceWrite"),
+    ("full-access", "Full access", "Runs anything without asking", "never", "dangerFullAccess"),
+];
+
+fn limits(r: &Value) -> ChatEvent {
+    let windows = [&r["primary"], &r["secondary"]];
+    ChatEvent::Limits(
+        windows
+            .iter()
+            .filter(|w| w.is_object())
+            .map(|w| Limit {
+                label: w["windowDurationMins"].as_u64().map_or_else(|| "Limit".into(), super::window_label),
+                used_percent: w["usedPercent"].as_f64().unwrap_or(0.),
+                resets_at: w["resetsAt"].as_u64(),
+            })
+            .collect(),
+    )
 }
 
 impl super::RpcParser for Parser {
@@ -119,8 +160,10 @@ impl Parser {
             "thread/tokenUsage/updated" => {
                 let last = &p["tokenUsage"]["last"];
                 self.turn_tokens += last["inputTokens"].as_u64().unwrap_or(0) + last["outputTokens"].as_u64().unwrap_or(0);
-                vec![]
+                let used = last["totalTokens"].as_u64().unwrap_or(0);
+                vec![ChatEvent::Context { used, window: p["tokenUsage"]["modelContextWindow"].as_u64() }]
             }
+            "account/rateLimits/updated" => vec![limits(&p["rateLimits"])],
             "turn/completed" => {
                 let turn = &p["turn"];
                 let error = match turn["error"]["message"].as_str() {
@@ -159,14 +202,28 @@ impl Parser {
             "thread/start" | "thread/resume" => {
                 self.thread_id = r["thread"]["id"].as_str().unwrap_or("").into();
                 let skills = self.request("skills/list", json!({ "cwds": [self.cwd] }));
-                self.outbox.push(skills);
+                let models = self.request("model/list", json!({}));
+                let rate = self.request("account/rateLimits/read", Value::Null);
+                self.outbox.extend([skills, models, rate]);
+                let sandbox = r["sandbox"]["type"].as_str().or(r["sandbox"].as_str()).unwrap_or("");
+                let mode = match sandbox {
+                    "readOnly" | "read-only" => "read-only",
+                    "dangerFullAccess" | "danger-full-access" => "full-access",
+                    _ => "auto",
+                };
+                let mut pickers = vec![
+                    ChatEvent::Modes(MODES.iter().map(|(v, l, d, _, _)| Choice::new(v, l, d)).collect()),
+                    ChatEvent::Mode(mode.into()),
+                ];
+                pickers.extend(r["model"].as_str().map(|m| ChatEvent::Model(m.into())));
                 if request == "thread/start" {
-                    return vec![ChatEvent::SessionId(self.thread_id.clone())];
+                    pickers.insert(0, ChatEvent::SessionId(self.thread_id.clone()));
+                    return pickers;
                 }
                 // Ready only once the history is in, so it lands above the next prompt.
                 let read = self.request("thread/read", json!({ "threadId": self.thread_id, "includeTurns": true }));
                 self.outbox.push(read);
-                vec![]
+                pickers
             }
             "thread/read" => {
                 let turns = self.history(&r["thread"]);
@@ -185,6 +242,12 @@ impl Parser {
                 self.turn_id = r["turn"]["id"].as_str().unwrap_or("").into();
                 vec![]
             }
+            "model/list" => {
+                let s = |v: &Value| v.as_str().unwrap_or("").to_string();
+                let models = r["data"].as_array().into_iter().flatten().filter(|m| m["hidden"] != true);
+                vec![ChatEvent::Models(models.map(|m| Choice::new(&s(&m["model"]), &s(&m["displayName"]), &s(&m["description"]))).collect())]
+            }
+            "account/rateLimits/read" => vec![limits(&r["rateLimits"])],
             _ => vec![],
         }
     }
@@ -346,7 +409,9 @@ mod tests {
     fn edit_turn_fixture() {
         let (p, events) = replay("edit.jsonl");
         assert!(matches!(&events[0], ChatEvent::SessionId(id) if id == &p.thread_id && !id.is_empty()));
-        assert!(matches!(&events[1], ChatEvent::Commands(c) if c.len() == 2 && c[0].name == "imagegen" && !c[0].description.is_empty()));
+        assert!(events.iter().any(|e| matches!(e, ChatEvent::Commands(c) if c.len() == 2 && c[0].name == "imagegen" && !c[0].description.is_empty())));
+        assert!(events.iter().any(|e| matches!(e, ChatEvent::Mode(m) if m == "auto")));
+        assert!(events.iter().any(|e| matches!(e, ChatEvent::Context { window: Some(258400), .. })));
         let started: Vec<_> = events.iter().filter_map(|e| if let ChatEvent::ToolStarted { name, summary, .. } = e { Some((name.as_str(), summary.as_str())) } else { None }).collect();
         assert_eq!(started, [("Bash", "cat a.txt"), ("Edit", "/tmp/cfx/a.txt, /tmp/cfx/b.txt")]);
         assert!(events.iter().any(|e| matches!(e, ChatEvent::ToolOutput { text, .. } if text == "hello\n")));
@@ -375,11 +440,13 @@ mod tests {
         assert_eq!(p.outbox[1]["method"], "thread/resume");
         assert_eq!(p.outbox[1]["params"], json!({ "threadId": "t1", "cwd": "/w", "excludeTurns": true }));
         let id = p.outbox[1]["id"].clone();
-        assert!(p.line(&json!({ "id": id, "result": { "thread": { "id": "t1" } } }).to_string()).is_empty());
-        assert_eq!(p.outbox[2]["method"], "skills/list");
-        assert_eq!(p.outbox[3]["params"], json!({ "threadId": "t1", "includeTurns": true }));
+        let resumed = p.line(&json!({ "id": id, "result": { "thread": { "id": "t1" }, "sandbox": { "type": "readOnly" } } }).to_string());
+        assert!(resumed.contains(&ChatEvent::Mode("read-only".into())) && !resumed.iter().any(|e| matches!(e, ChatEvent::SessionId(_))));
+        let methods: Vec<&str> = p.outbox[2..].iter().filter_map(|m| m["method"].as_str()).collect();
+        assert_eq!(methods, ["skills/list", "model/list", "account/rateLimits/read", "thread/read"]);
+        assert_eq!(p.outbox[5]["params"], json!({ "threadId": "t1", "includeTurns": true }));
         // A failed read still leaves the thread usable.
-        let read = p.outbox[3]["id"].clone();
+        let read = p.outbox[5]["id"].clone();
         assert_eq!(p.line(&json!({ "id": read, "error": { "message": "no" } }).to_string()), [ChatEvent::SessionId("t1".into())]);
     }
 
