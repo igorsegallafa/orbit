@@ -6,6 +6,7 @@ pub mod agent_hooks;
 pub mod agent_mcp;
 pub mod build;
 pub mod cargo;
+pub mod chat;
 pub mod cmake_api;
 pub mod config;
 pub mod crash;
