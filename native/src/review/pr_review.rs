@@ -248,6 +248,8 @@ pub struct PrReviewPage {
     sending_notes: bool,
     _poll: Task<()>,
     _head_poll: Task<()>,
+    /// Where the local checkout last saw `origin/<branch>`: a push from here moves it at once.
+    pushed: Option<String>,
     side_w: f32,
     side_scroll: ScrollHandle,
 }
@@ -296,15 +298,21 @@ impl PrReviewPage {
             show_done: false,
             head_text: String::new(),
             sending_notes: false,
+            pushed: None,
             // Follows REVIEW.md: an agent ticking a note shows up here.
-            _poll: cx.spawn(async move |this, cx| loop {
+            _poll: cx.spawn_in(window, async move |this, cx| loop {
                 cx.background_executor().timer(std::time::Duration::from_secs(2)).await;
-                if this.update(cx, |p, cx| p.poll_notes(cx)).is_err() {
+                if this.update_in(cx, |p, window, cx| {
+                    p.poll_notes(cx);
+                    p.poll_push(window, cx);
+                })
+                .is_err()
+                {
                     break;
                 }
             }),
             _head_poll: cx.spawn_in(window, async move |this, cx| loop {
-                cx.background_executor().timer(std::time::Duration::from_secs(60)).await;
+                cx.background_executor().timer(std::time::Duration::from_secs(30)).await;
                 if this.update_in(cx, |p, window, cx| p.check_head(window, cx)).is_err() {
                     break;
                 }
@@ -363,6 +371,34 @@ impl PrReviewPage {
         .detach();
         self.load_review(true, window, cx);
         cx.notify();
+    }
+
+    /// Checks GitHub as soon as the local checkout of the PR's branch pushes.
+    fn poll_push(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(ws), Some(d)) = (&self.workspace, self.detail.ready()) else { return };
+        let (dir, name, head) = (ws.dir.join(&self.pr().repo), format!("refs/remotes/origin/{}", d.branch), d.head_sha.clone());
+        cx.spawn_in(window, async move |this, cx| {
+            let sha = cx.background_spawn(async move { orbit_core::git::ref_sha(&dir, &name) }).await;
+            let _ = this.update_in(cx, |p, window, cx| {
+                if sha.is_some() && sha != p.pushed {
+                    let moved = p.pushed.is_some() && sha.as_deref() != Some(head.as_str());
+                    p.pushed = sha;
+                    if moved {
+                        // GitHub can lag the push by a few seconds.
+                        cx.spawn_in(window, async move |this, cx| {
+                            for wait in [0, 3, 8] {
+                                cx.background_executor().timer(std::time::Duration::from_secs(wait)).await;
+                                if this.update_in(cx, |p, window, cx| p.check_head(window, cx)).is_err() {
+                                    break;
+                                }
+                            }
+                        })
+                        .detach();
+                    }
+                }
+            });
+        })
+        .detach();
     }
 
     /// Reloads the PR when its head moved, keeping the open file.

@@ -679,6 +679,11 @@ pub struct FileDiff {
     pub modified: String,
 }
 
+/// The commit `name` points at in `dir`, if it exists.
+pub fn ref_sha(dir: &Path, name: &str) -> Option<String> {
+    git_out(dir, &["rev-parse", "--verify", "-q", name]).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
 fn git_out(dir: &Path, args: &[&str]) -> Result<String, String> {
     crate::proc::run("git", args, Some(dir))
 }
