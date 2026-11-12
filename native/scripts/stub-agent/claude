@@ -9,6 +9,8 @@ args="$*"
 settings=""
 while [ $# -gt 0 ]; do
   [ "$1" = "--settings" ] && settings="$2" && shift
+  # Like claude, keep a transcript for the conversation id, so it can be --resume'd.
+  [ "$1" = "--session-id" ] && mkdir -p "$HOME/.claude/projects/$(pwd | sed 's/[^a-zA-Z0-9]/-/g')" && touch "$HOME/.claude/projects/$(pwd | sed 's/[^a-zA-Z0-9]/-/g')/$2.jsonl"
   shift
 done
 url=$(grep -o 'http://127.0.0.1:[0-9]*/hook/[^"]*' "$settings" 2>/dev/null | head -1)

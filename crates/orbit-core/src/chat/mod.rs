@@ -1,0 +1,399 @@
+//! Chat sessions: Orbit drives an agent through its machine protocol and gets
+//! back one event model, so the chat UI never branches on which agent runs.
+use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+
+mod acp;
+mod claude;
+mod codex;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ChatEvent {
+    /// The agent's own session id, used to resume the conversation.
+    SessionId(String),
+    TextDelta {
+        message_id: String,
+        text: String,
+    },
+    ThinkingDelta {
+        message_id: String,
+        text: String,
+    },
+    ToolStarted {
+        id: String,
+        name: String,
+        summary: String,
+    },
+    ToolOutput {
+        id: String,
+        text: String,
+    },
+    ToolFinished {
+        id: String,
+        ok: bool,
+        diff: Option<FileDiff>,
+    },
+    PermissionAsked {
+        id: String,
+        title: String,
+        detail: String,
+        options: Vec<PermissionOption>,
+    },
+    Commands(Vec<SlashCommand>),
+    TurnEnded {
+        cost_usd: Option<f64>,
+        tokens: Option<u64>,
+        error: Option<String>,
+    },
+    Image {
+        path: PathBuf,
+        title: String,
+    },
+    Exited {
+        error: Option<String>,
+    },
+    /// A resumed conversation's earlier turns, sent once before the session is ready.
+    History(Vec<Turn>),
+    /// The models the agent offers, and the one in use (a value or resolved id) once known.
+    Models(Vec<Choice>),
+    Model(String),
+    /// The permission or agent modes it offers, and the current one's value.
+    Modes(Vec<Choice>),
+    Mode(String),
+    /// Plan usage limits, replacing the last report.
+    Limits(Vec<Limit>),
+    /// Tokens in the context window, and the window's size when the agent reports it.
+    Context { used: u64, window: Option<u64> },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Choice {
+    /// What `SetModel` / `SetMode` takes ("opus", "plan"…).
+    pub value: String,
+    pub label: String,
+    pub description: String,
+    /// The model id a model alias runs ("claude-opus-5-5"); the value otherwise.
+    pub resolved: String,
+}
+
+impl Choice {
+    pub fn new(value: &str, label: &str, description: &str) -> Self {
+        Choice { value: value.into(), label: label.into(), description: description.into(), resolved: value.into() }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Limit {
+    pub label: String,
+    pub used_percent: f64,
+    /// Unix seconds.
+    pub resets_at: Option<u64>,
+}
+
+/// "5h" for 300 minutes, "Week" for 10080, else hours or days.
+pub fn window_label(minutes: u64) -> String {
+    match minutes {
+        10080 => "Week".into(),
+        m if m % 1440 == 0 => format!("{}d", m / 1440),
+        m => format!("{}h", (m as f64 / 60.).round() as u64),
+    }
+}
+
+/// An earlier turn: its prompt, then what the agent did as live events.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Turn {
+    pub prompt: String,
+    pub images: Vec<PathBuf>,
+    pub events: Vec<ChatEvent>,
+}
+
+/// Adds `events` to the last turn (one without a prompt when the history starts mid-turn).
+fn add_to_turn(turns: &mut Vec<Turn>, events: impl IntoIterator<Item = ChatEvent>) {
+    if turns.is_empty() {
+        turns.push(Turn::default());
+    }
+    turns.last_mut().unwrap().events.extend(events);
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ChatInput {
+    Prompt { text: String, images: Vec<PathBuf> },
+    Interrupt,
+    AnswerPermission { id: String, option_id: String },
+    /// Claude's permission mode: "default", "acceptEdits", "plan", "auto" or "bypassPermissions".
+    SetMode(String),
+    SetModel(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FileDiff {
+    pub path: PathBuf,
+    pub old_text: String,
+    pub new_text: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SlashCommand {
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PermissionOption {
+    pub id: String,
+    pub label: String,
+    /// The agent's kind for the option, e.g. `allow_once` or `reject_once`.
+    pub kind: String,
+}
+
+pub trait ChatBackend: Send {
+    fn send(&self, input: ChatInput);
+    fn stop(&self);
+}
+
+/// Events reach `sink` on the backend's own thread.
+pub fn start(
+    agent: &str,
+    cwd: &Path,
+    resume: Option<String>,
+    sink: impl Fn(ChatEvent) + Send + 'static,
+) -> Result<Box<dyn ChatBackend>, String> {
+    let key = session_key();
+    // Shared with the hook listener, which delivers the session's `show_image` pictures.
+    let sink = Arc::new(Mutex::new(sink));
+    let show_sink = sink.clone();
+    crate::agent_hooks::on_show_image(&key, move |path, title| {
+        (show_sink.lock().unwrap())(ChatEvent::Image { path: path.into(), title: title.unwrap_or_default() });
+    });
+    let key_r = key.clone();
+    let sink = move |e: ChatEvent| {
+        if matches!(e, ChatEvent::Exited { .. }) {
+            crate::agent_hooks::forget(&key_r);
+        }
+        (sink.lock().unwrap())(e)
+    };
+    let backend = match agent {
+        "claude" => claude::start(cwd, resume, &key, sink),
+        "codex" => codex::start(cwd, resume, &key, sink),
+        "opencode" | "omp" => acp::start(agent, cwd, resume, &key, sink),
+        _ => Err(format!("chat mode is not available for {agent} yet")),
+    };
+    if backend.is_err() {
+        crate::agent_hooks::forget(&key);
+    }
+    backend
+}
+
+/// An image file as (media type, base64 data); None when it can't be read.
+fn encode_image(path: &Path) -> Option<(&'static str, String)> {
+    use base64::Engine;
+    let media = match path.extension().and_then(|e| e.to_str()).map(str::to_lowercase).as_deref() {
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        _ => "image/png",
+    };
+    let bytes = std::fs::read(path).ok()?;
+    Some((media, base64::engine::general_purpose::STANDARD.encode(bytes)))
+}
+
+fn session_key() -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    format!("chat:{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed))
+}
+
+trait RpcParser: Send + 'static {
+    fn line(&mut self, line: &str) -> Vec<ChatEvent>;
+    fn take_outbox(&mut self) -> Vec<serde_json::Value>;
+}
+
+/// Spawns a JSON-RPC agent whose reader also writes, since some replies (handshake, refusals) come from the parser.
+fn spawn_rpc<P: RpcParser>(cmd: Command, name: &str, parser: Arc<Mutex<P>>, sink: impl Fn(ChatEvent) + Send + 'static) -> Result<Arc<Agent>, String> {
+    let writer = Arc::new(std::sync::OnceLock::<Arc<Agent>>::new());
+    let writer_r = writer.clone();
+    let sink = Arc::new(Mutex::new(sink));
+    let exit_sink = sink.clone();
+    let agent = Arc::new(Agent::spawn(
+        cmd,
+        name,
+        move |line| {
+            let (events, outbox) = {
+                let mut p = parser.lock().unwrap();
+                (p.line(line), p.take_outbox())
+            };
+            if let Some(agent) = writer_r.get() {
+                outbox.iter().for_each(|m| agent.write(m));
+            }
+            events.into_iter().for_each(|e| (sink.lock().unwrap())(e));
+        },
+        move |error| (exit_sink.lock().unwrap())(ChatEvent::Exited { error }),
+    )?);
+    let _ = writer.set(agent.clone());
+    Ok(agent)
+}
+
+struct Agent {
+    stdin: Mutex<ChildStdin>,
+    child: Arc<Mutex<Child>>,
+    stopped: Arc<AtomicBool>,
+}
+
+impl Agent {
+    /// Spawns `cmd` in its own process group, so stop() takes its shells and builds down with it.
+    /// Each stdout line goes to `on_line`; at EOF `on_exit` gets the error (stderr's tail), None after stop().
+    fn spawn(
+        mut cmd: Command,
+        name: &str,
+        mut on_line: impl FnMut(&str) + Send + 'static,
+        on_exit: impl FnOnce(Option<String>) + Send + 'static,
+    ) -> Result<Agent, String> {
+        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+        let mut child = cmd.spawn().map_err(|e| format!("could not start {name}: {e}"))?;
+        let stdin = child.stdin.take().ok_or("no stdin")?;
+        let stdout = child.stdout.take().ok_or("no stdout")?;
+        let stderr = child.stderr.take().ok_or("no stderr")?;
+        let child = Arc::new(Mutex::new(child));
+        let stopped = Arc::new(AtomicBool::new(false));
+        let tail = Arc::new(Mutex::new(Vec::<String>::new()));
+        let tail_w = tail.clone();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                let mut t = tail_w.lock().unwrap();
+                t.push(line);
+                if t.len() > 20 {
+                    t.remove(0);
+                }
+            }
+        });
+        let (child_r, stopped_r, name) = (child.clone(), stopped.clone(), name.to_string());
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                on_line(&line);
+            }
+            let status = child_r.lock().unwrap().wait();
+            on_exit(match status {
+                _ if stopped_r.load(Ordering::Relaxed) => None,
+                Ok(s) if s.success() => None,
+                Ok(s) => Some(Some(tail.lock().unwrap().join("\n")).filter(|t| !t.trim().is_empty()).unwrap_or_else(|| format!("{name} exited with {s}"))),
+                Err(e) => Some(e.to_string()),
+            });
+        });
+        Ok(Agent { stdin: Mutex::new(stdin), child, stopped })
+    }
+
+    /// A failed write means the process is gone; the reader thread reports Exited.
+    fn write(&self, line: &serde_json::Value) {
+        use std::io::Write;
+        let _ = writeln!(self.stdin.lock().unwrap(), "{line}");
+    }
+
+    fn stop(&self) {
+        self.stopped.store(true, Ordering::Relaxed);
+        crate::agent::runner::kill_tree(&mut self.child.lock().unwrap());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    struct Stub(Box<dyn Fn(ChatEvent) + Send>);
+
+    impl ChatBackend for Stub {
+        fn send(&self, input: ChatInput) {
+            if !matches!(input, ChatInput::Prompt { .. }) {
+                return;
+            }
+            for event in every_event() {
+                (self.0)(event);
+            }
+        }
+        fn stop(&self) {
+            (self.0)(ChatEvent::Exited { error: None });
+        }
+    }
+
+    fn every_event() -> Vec<ChatEvent> {
+        let s = |v: &str| v.to_string();
+        vec![
+            ChatEvent::SessionId(s("abc")),
+            ChatEvent::TextDelta {
+                message_id: s("m1"),
+                text: s("hi"),
+            },
+            ChatEvent::ThinkingDelta {
+                message_id: s("m1"),
+                text: s("hmm"),
+            },
+            ChatEvent::ToolStarted {
+                id: s("t1"),
+                name: s("Edit"),
+                summary: s("a.rs"),
+            },
+            ChatEvent::ToolOutput {
+                id: s("t1"),
+                text: s("ok"),
+            },
+            ChatEvent::ToolFinished {
+                id: s("t1"),
+                ok: true,
+                diff: Some(FileDiff {
+                    path: "a.rs".into(),
+                    old_text: s("a"),
+                    new_text: s("b"),
+                }),
+            },
+            ChatEvent::PermissionAsked {
+                id: s("p1"),
+                title: s("Run ls"),
+                detail: s("ls -la"),
+                options: vec![PermissionOption {
+                    id: s("allow"),
+                    label: s("Allow"),
+                    kind: s("allow_once"),
+                }],
+            },
+            ChatEvent::Commands(vec![SlashCommand {
+                name: s("review"),
+                description: s("Review"),
+            }]),
+            ChatEvent::TurnEnded {
+                cost_usd: Some(0.01),
+                tokens: Some(42),
+                error: None,
+            },
+            ChatEvent::Image {
+                path: "shot.png".into(),
+                title: s("shot"),
+            },
+        ]
+    }
+
+    #[test]
+    fn stub_backend_emits_every_event_in_order() {
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let sink = got.clone();
+        let backend: Box<dyn ChatBackend> =
+            Box::new(Stub(Box::new(move |e| sink.lock().unwrap().push(e))));
+        backend.send(ChatInput::Interrupt);
+        backend.send(ChatInput::Prompt {
+            text: "go".into(),
+            images: vec![],
+        });
+        backend.stop();
+        let mut want = every_event();
+        want.push(ChatEvent::Exited { error: None });
+        assert_eq!(*got.lock().unwrap(), want);
+    }
+
+    #[test]
+    fn unknown_agent_is_an_error() {
+        assert!(start("nope", Path::new("."), None, |_| {}).is_err());
+    }
+}

@@ -9,7 +9,7 @@ use crate::icons::orbit_icon;
 use crate::overlay::MenuItem;
 use crate::probe::probe;
 use crate::scope::{self, Scope};
-use crate::sessions::{self, InboxKind, AGENTS};
+use crate::sessions::{self, InboxKind};
 use crate::state::SIDEBAR;
 use crate::theme::{self, c, size};
 use crate::toast::ToastKind;
@@ -167,7 +167,7 @@ fn resizer(pane: Pane, lit: bool, cx: &mut Context<OrbitApp>) -> impl IntoElemen
 
 /// `fmtTokens`.
 /// "in 2h 14m (Wed 18:00)" for a reset time in unix seconds.
-fn resets_in(unix: u64) -> String {
+pub(crate) fn resets_in(unix: u64) -> String {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let m = unix.saturating_sub(now).div_ceil(60);
     let span = if m < 60 {
@@ -198,7 +198,7 @@ fn model_tip(m: &orbit_core::usage::ModelUsage) -> String {
     out
 }
 
-fn tokens(n: u64) -> String {
+pub(crate) fn tokens(n: u64) -> String {
     match n {
         1_000_000_000.. => format!("{:.1}B", n as f64 / 1e9),
         1_000_000.. => format!("{:.1}M", n as f64 / 1e6),
@@ -862,12 +862,11 @@ impl OrbitApp {
                 })
                 .detach();
             }));
-        let agents = AGENTS.iter().map(|(label, _, cmd)| {
+        let agents = sessions::menu_entries().map(|(label, cmd, mode)| {
             let target = target.clone();
-            let cmd = *cmd;
-            item(format!("nsm:{label}").into(), false).child(*label).on_click(cx.listener(move |a, _, w, cx| {
+            item(format!("nsm:{label}").into(), false).child(label).on_click(cx.listener(move |a, _, w, cx| {
                 a.chrome.new_session = None;
-                sessions::new_session_in(a, target.clone(), cmd, None, w, cx);
+                sessions::new_session_as(a, target.clone(), cmd, mode, None, w, cx);
                 cx.notify();
             }))
         });

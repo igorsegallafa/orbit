@@ -120,7 +120,8 @@ pub fn session_dir(workspace: &str, repo: Option<&str>, cwd: Option<&str>) -> Re
     if !dir.exists() {
         return Err(format!("directory does not exist: {}", dir.to_string_lossy()));
     }
-    Ok(dir)
+    // No trailing slash (`dir:~` joins ""): claude names its transcript folder after the exact path.
+    Ok(dir.components().collect())
 }
 
 /// Starts `spec` as session `id` (from [`reserve_id`]). `on_output` runs on a
@@ -190,7 +191,7 @@ fn command(spec: &Spawn) -> CommandBuilder {
         if is_claude(c) && crate::config::Config::load().is_ok_and(|cfg| cfg.ai.remote_control) {
             b.arg("--remote-control");
         }
-        let (args, env) = crate::agent_hooks::session_launch(c, k);
+        let (args, env) = crate::agent_hooks::session_launch(c, k, false);
         b.args(args);
         launch_env = env;
     }
@@ -462,19 +463,71 @@ pub fn omp_recent_sessions(dir: &Path, since_ms: u64, count: usize) -> Vec<Strin
 /// The opencode session a terminal tab started: the latest one in the tab's
 /// folder created since `since_ms` (the tab's launch), so it can be resumed
 /// with `opencode --session <id>` after the tab is closed. Blocks on opencode.
-pub fn opencode_session_id(workspace: &str, repo: Option<&str>, since_ms: u64) -> Result<Option<String>, String> {
-    let cwd = match repo.filter(|r| !r.is_empty()) {
-        Some(r) => crate::workspace::repo_path(workspace, r)?,
-        None => crate::workspace::scope_dir(workspace)?,
-    };
+pub fn opencode_session_id(cwd: &Path, since_ms: u64) -> Result<Option<String>, String> {
     let out = crate::proc::cmd("opencode")
         .args(["session", "list", "--format", "json", "-n", "50"])
-        .current_dir(&cwd)
-        .env("PWD", &cwd)
+        .current_dir(cwd)
+        .env("PWD", cwd)
         .output()
         .map_err(|e| format!("failed to run opencode: {e}"))?;
     let list: Vec<serde_json::Value> = serde_json::from_slice(&out.stdout).unwrap_or_default();
     Ok(pick_opencode_session(&list, &cwd.to_string_lossy(), since_ms))
+}
+
+/// The conversation a terminal tab of `agent` started in `dir`: the newest one
+/// created since `since_ms`, the tab's launch. Blocks.
+pub fn agent_session_id(agent: &str, dir: &Path, since_ms: u64) -> Option<String> {
+    let home = crate::config::home_dir().ok()?;
+    match agent {
+        "codex" => newest_codex_session(&home.join(".codex/sessions"), dir, since_ms),
+        "opencode" => opencode_session_id(dir, since_ms).ok().flatten(),
+        "omp" => newest_omp_session(&omp_sessions_dir(&home, dir), since_ms),
+        _ => None,
+    }
+}
+
+/// omp files are `<ISO time>_<id>.jsonl`; 5 s of slack for the tab's clock read.
+fn newest_omp_session(folder: &Path, since_ms: u64) -> Option<String> {
+    std::fs::read_dir(folder)
+        .ok()?
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            let (time, id) = name.strip_suffix(".jsonl")?.split_once('_')?;
+            let created = crate::usage::iso_to_epoch(time)? * 1000;
+            (created + 5_000 >= since_ms as i64).then(|| (created, id.to_string()))
+        })
+        .max()
+        .map(|f| f.1)
+}
+
+/// codex rollouts are `<root>/YYYY/MM/DD/rollout-<time>-<id>.jsonl`, opening
+/// with a `session_meta` line that has the id, cwd and creation time.
+fn newest_codex_session(root: &Path, dir: &Path, since_ms: u64) -> Option<String> {
+    fn entries(p: &Path) -> impl Iterator<Item = std::fs::DirEntry> {
+        std::fs::read_dir(p).into_iter().flatten().flatten()
+    }
+    let since = std::time::UNIX_EPOCH + Duration::from_millis(since_ms.saturating_sub(5_000));
+    let fresh = |e: &std::fs::DirEntry| e.metadata().and_then(|m| m.modified()).is_ok_and(|t| t >= since);
+    let norm = |p: &str| p.trim_end_matches(['/', '\\']).to_string();
+    let dir = norm(&dir.to_string_lossy());
+    // A day folder gets newer when a rollout is created in it: older ones are skipped unread.
+    let days = entries(root).flat_map(|y| entries(&y.path())).flat_map(|m| entries(&m.path())).filter(fresh);
+    days.flat_map(|d| entries(&d.path()))
+        .filter(fresh)
+        .filter_map(|f| {
+            let mut line = String::new();
+            std::io::BufRead::read_line(&mut std::io::BufReader::new(std::fs::File::open(f.path()).ok()?), &mut line).ok()?;
+            let v: serde_json::Value = serde_json::from_str(&line).ok()?;
+            let meta = &v["payload"];
+            if v["type"] != "session_meta" || meta["cwd"].as_str().map(norm).as_deref() != Some(dir.as_str()) {
+                return None;
+            }
+            let created = crate::usage::iso_to_epoch(meta["timestamp"].as_str()?)? * 1000;
+            (created + 5_000 >= since_ms as i64).then(|| (created, meta["id"].as_str().map(String::from)))
+        })
+        .max()
+        .and_then(|f| f.1)
 }
 
 /// Latest-updated session in `dir` created at or after `since_ms` (with a
@@ -504,6 +557,13 @@ pub fn default_shell() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_dir_has_no_trailing_slash() {
+        let tmp = std::env::temp_dir();
+        let with_slash = format!("{}/", tmp.to_string_lossy().trim_end_matches('/'));
+        assert_eq!(session_dir("x", None, Some(&with_slash)).unwrap().to_string_lossy(), tmp.to_string_lossy().trim_end_matches('/'));
+    }
     use serde_json::json;
 
     #[test]
@@ -523,6 +583,35 @@ mod tests {
         ];
         assert_eq!(pick_opencode_session(&list, "/w/a", 19_000).as_deref(), Some("mine"));
         assert_eq!(pick_opencode_session(&list, "/w/c", 0), None);
+    }
+
+    #[test]
+    fn finds_the_newest_codex_and_omp_session_since_launch() {
+        let root = std::env::temp_dir().join(format!("orbit-agent-ids-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let day = root.join("codex/2026/11/12");
+        std::fs::create_dir_all(&day).unwrap();
+        let rollout = |id: &str, cwd: &str, at: &str| {
+            let meta = json!({"type": "session_meta", "payload": {"id": id, "cwd": cwd, "timestamp": at}});
+            std::fs::write(day.join(format!("rollout-{at}-{id}.jsonl")), format!("{meta}\n{{}}\n")).unwrap();
+        };
+        rollout("old", "/w/a", "2026-11-12T10:00:00.000Z");
+        rollout("mine", "/w/a", "2026-11-12T12:00:00.000Z");
+        rollout("other-dir", "/w/b", "2026-11-12T12:30:00.000Z");
+        let launch = (crate::usage::iso_to_epoch("2026-11-12T11:59:58Z").unwrap() * 1000) as u64;
+        let codex = root.join("codex");
+        assert_eq!(newest_codex_session(&codex, Path::new("/w/a/"), launch).as_deref(), Some("mine"));
+        assert_eq!(newest_codex_session(&codex, Path::new("/w/c"), launch), None);
+        assert_eq!(newest_codex_session(&codex, Path::new("/w/a"), launch + 3_600_000), None);
+
+        let omp = root.join("omp");
+        std::fs::create_dir_all(&omp).unwrap();
+        for name in ["2026-11-12T10-00-00-000Z_old", "2026-11-12T12-00-01-500Z_mine", "notes"] {
+            std::fs::write(omp.join(format!("{name}.jsonl")), "{}").unwrap();
+        }
+        assert_eq!(newest_omp_session(&omp, launch).as_deref(), Some("mine"));
+        assert_eq!(newest_omp_session(&omp, launch + 3_600_000), None);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

@@ -179,14 +179,14 @@ fn pi(v: &Value, kind: &str) -> Vec<Event> {
 
 /// Input (cached and cache writes included) plus output tokens of a Claude or
 /// Codex `usage` object.
-fn usage_tokens(usage: &Value) -> Option<u64> {
+pub(crate) fn usage_tokens(usage: &Value) -> Option<u64> {
     let keys = ["input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens"];
     let n: u64 = keys.iter().filter_map(|k| usage[*k].as_u64()).sum();
     (n > 0).then_some(n)
 }
 
 /// "/usr/bin/bash -lc 'cargo test'" → "cargo test": Codex wraps every command in a shell.
-fn unwrap_shell(cmd: &str) -> &str {
+pub(crate) fn unwrap_shell(cmd: &str) -> &str {
     let shell = cmd.split_whitespace().next().is_some_and(|b| b.ends_with("sh"));
     match cmd.split_once(" -lc ").or_else(|| cmd.split_once(" -c ")) {
         Some((_, inner)) if shell => inner.trim().trim_matches(['\'', '"']),

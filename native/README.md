@@ -100,6 +100,54 @@ first on `PATH`. Use `SHELL=/bin/bash` (zsh may start an interactive setup wizar
 (`claude -p`, `scripts/stub-agent/claude-print`) answers Ralph's PRD interview (one round, then
 done), writes the PRD files when asked, and runs a Ralph iteration (ticks the next story and
 commits, or commits a plan task); `ORBIT_STUB_LOG=<file>` records each call.
+With `--input-format stream-json` (chat mode) it answers each user line with a streamed turn
+(thinking, text deltas, result). `--do "cmd:chat.newClaude;chat:hello;until:Stub reply@10"` opens a
+chat tab, types into its prompt box (probe `chat-prompt`; thinking rows are `thinking:<ix>`, replies
+`reply:<ix>`) and waits for the reply in the dump. A prompt containing "markdown" gets a reply with a
+heading, list, table, code block and `path:line` links; the dump's `opened` shows the last link or image clicked.
+A prompt containing "image" posts a `ShowImage` to the session's hook route (as Orbit's `show_image`
+MCP tool does) and replies with a relative markdown image; inline images are `image:<ix>`. Step
+`drop:<probe>=<path>[,<path>…]` drops files from outside (`drop:chat-prompt=/tmp/a.png` attaches it;
+the thumbnails' remove buttons are `unattach:<ix>`).
+A prompt containing "tools" runs three Reads and a Grep (one collapsed row), an Edit with a diff,
+a 250-line Bash output and a failing Bash; tool rows are `tool:<ix>` (click expands) and the
+output's "Show all" link is `tool-all:<ix>`.
+A prompt containing "permission" posts a `PermissionRequest` for `rm -rf build` (as Orbit's
+`permission` MCP tool does), waits for the answer and replies with it. The card's buttons are
+`perm:<ix>:<n>`; `key:1` picks the first option and `key:escape` denies.
+A prompt containing "slow" streams for a minute until interrupted (Stop is `chat-stop`, Send
+`chat-send`, or `key:escape` in the prompt); one containing "crash" exits with an error, and
+`chat-restart` starts the backend again resuming the session. Each turn ends with a `footer:` line
+in the dump; chat tabs list in the sidebar under the scope they were opened in (`session:<title>`).
+History on resume: claude reads its transcript from `$HOME/.claude/projects/<cwd, non-alphanumerics as
+dashes>/<id>.jsonl`, so run with a scratch `HOME` holding one for `00000000-0000-4000-8000-0000000c4a75` (e.g. a copy of
+`crates/orbit-core/tests/fixtures/chat/claude/history.jsonl`), crash the stub and click `chat-restart`:
+the history replaces the shown items, all but the last turn folded (`turn:<ix>` toggles; the dump marks
+`you (history, folded)`).
+Its `system/init` reports the slash commands compact, review, init, pr-comments and security-review
+(after the first prompt, like claude): `type:/re` opens the filtered list (rows `slash:<n>`),
+`key:down`/`key:tab`/`key:enter`/`key:escape` drive it; the dump's `commands:` line lists them.
+Chat mode for claude sessions: the tab's `Chat`/`Terminal` chip (probe `mode-toggle`) or the palette's
+Toggle Chat Mode (`sessions::ToggleChatMode`) stops the agent, waits for it to exit, and reopens the
+same conversation in the other mode in place (`--resume <id>` in the terminal); a running turn asks
+first. `mode` is saved in `native-sessions.json`, so a restart reopens the session in its mode. With a
+scratch `HOME`, `--session claude --do "wait:2500;click:mode-toggle;wait:1500;chat:hello;wait:1500;shot:chat"`
+shows the chat resuming the terminal's id (the stub `claude` touches a transcript for `--session-id`).
+Note `until:<text>` also matches the step text echoed into the dump, so prefer waits for text that is
+not in the `--do` string.
+codex, opencode and omp toggle too (resume with `codex resume <id>`, `opencode --session <id>`,
+`omp --resume <id>`). Their id is not fixed at launch: the first toggle of a terminal tab looks up the
+newest conversation created in the session folder since the tab opened (`pty::agent_session_id`), and
+says so in a toast when there is none and a fresh one starts. `scripts/stub-agent/codex` writes a rollout
+under `$HOME/.codex/sessions` (not with `ORBIT_STUB_NO_SESSION=1`) and its `app-server` mode answers the
+chat backend with a canned history turn naming the thread id: with a scratch `HOME`,
+`--session codex --do "wait:2500;click:mode-toggle;wait:2000;chat:hello;wait:2000;shot:chat;click:mode-toggle;wait:2500;dump:back"`
+shows the resumed thread in chat, then `resume <id>` in the terminal's argv.
+The New Session menu (`sessions-add`, rows `nsm:<label>`) lists a `<agent> (chat)` entry after each
+agent, and config `ai.session_mode: chat` makes New Agent Session (`cmd:sessions.newAgent`) open the
+configured agent in chat. With a scratch `HOME` and `ORBIT_CONFIG_DIR`, a run that opens
+`nsm:Claude Code (chat)` and sends a prompt, then a second run with `--do "wait:3000;click:tab:0;shot:claude"`,
+shows the session restored in chat with its history (the stub's transcript must exist, as above).
 
 `--do` runs shell steps last, separated by `;` (`src/steps.rs`). Mouse steps target elements that
 render a `probe("name")` (tabs `tab:<ix>`, menu items `menu:<label>`, dialog buttons

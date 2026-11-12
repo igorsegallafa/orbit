@@ -9,12 +9,71 @@ use serde_json::{json, Value};
 use std::hash::{BuildHasher, Hasher};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{channel, Sender};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use crate::events::Events;
 
 static ADDR: OnceLock<(u16, String)> = OnceLock::new();
+
+const PERMISSION_WAIT: Duration = Duration::from_secs(600);
+
+type Asker = Arc<dyn Fn(String, String, Value) + Send + Sync>;
+/// Per session key: who to ask when its agent wants a permission (id, tool name, tool input).
+static ASKERS: Mutex<Option<HashMap<String, Asker>>> = Mutex::new(None);
+/// Open permission requests: id → (session key, where the answer goes).
+static PENDING: Mutex<Option<HashMap<String, Pending>>> = Mutex::new(None);
+type Pending = (String, Sender<String>);
+
+type Viewer = Arc<dyn Fn(String, Option<String>) + Send + Sync>;
+/// Per session key: where its ShowImage pictures go (path, title) instead of `agent-event`.
+static VIEWERS: Mutex<Option<HashMap<String, Viewer>>> = Mutex::new(None);
+
+pub fn on_show_image(key: &str, show: impl Fn(String, Option<String>) + Send + Sync + 'static) {
+    VIEWERS.lock().unwrap().get_or_insert_with(HashMap::new).insert(key.into(), Arc::new(show));
+}
+
+/// Routes the requests of `agent_mcp`'s permission tool for session `key` to `ask`.
+pub fn on_permission(key: &str, ask: impl Fn(String, String, Value) + Send + Sync + 'static) {
+    ASKERS.lock().unwrap().get_or_insert_with(HashMap::new).insert(key.into(), Arc::new(ask));
+}
+
+/// Stops routing `key`'s permission requests and pictures; its open requests are denied.
+pub fn forget(key: &str) {
+    if let Some(a) = ASKERS.lock().unwrap().as_mut() {
+        a.remove(key);
+    }
+    if let Some(v) = VIEWERS.lock().unwrap().as_mut() {
+        v.remove(key);
+    }
+    if let Some(p) = PENDING.lock().unwrap().as_mut() {
+        p.retain(|_, (k, _)| k != key);
+    }
+}
+
+/// Answers an open permission request with the chosen option id (`allow` allows, anything else denies).
+pub fn answer_permission(id: &str, option_id: &str) -> bool {
+    let tx = PENDING.lock().unwrap().as_mut().and_then(|p| p.remove(id));
+    tx.is_some_and(|(_, tx)| tx.send(option_id.into()).is_ok())
+}
+
+/// Blocks until the session answers a PermissionRequest body; `deny` when nobody asks or answers.
+fn ask_permission(key: &str, body: &Value) -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let Some(ask) = ASKERS.lock().unwrap().as_ref().and_then(|a| a.get(key).cloned()) else { return "deny".into() };
+    let id = format!("perm-{}", NEXT.fetch_add(1, Ordering::Relaxed));
+    let (tx, rx) = channel();
+    PENDING.lock().unwrap().get_or_insert_with(HashMap::new).insert(id.clone(), (key.into(), tx));
+    ask(id.clone(), body["tool_name"].as_str().unwrap_or("").into(), body["input"].clone());
+    let answer = rx.recv_timeout(PERMISSION_WAIT).unwrap_or_else(|_| "deny".into());
+    if let Some(p) = PENDING.lock().unwrap().as_mut() {
+        p.remove(&id);
+    }
+    answer
+}
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -84,6 +143,8 @@ fn parse_event(key: &str, body: &[u8]) -> Option<AgentEvent> {
 
 /// Minimal HTTP/1.1: one POST per connection, always answered 200 with an
 /// empty body (no hook decision), so a bad request never blocks the agent.
+/// A PermissionRequest is the exception: held open until answered, the
+/// answer is the body, and it is not re-emitted as an event.
 fn read_event(stream: TcpStream, token: &str) -> Option<AgentEvent> {
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
     let mut reader = BufReader::new(stream.try_clone().ok()?);
@@ -108,15 +169,32 @@ fn read_event(stream: TcpStream, token: &str) -> Option<AgentEvent> {
     }
     let mut body = vec![0u8; len.min(1 << 20)];
     reader.read_exact(&mut body).ok()?;
+    let key = route(&path, token);
+    let request = serde_json::from_slice::<Value>(&body).ok().filter(|v| v["hook_event_name"] == "PermissionRequest");
+    let answer = match (key, &request) {
+        (Some(key), Some(v)) => ask_permission(key, v),
+        _ => String::new(),
+    };
     let mut out = stream;
-    let _ = out.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    let _ = write!(out, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}", answer.len());
     // Close gracefully: send FIN, then wait for the client to hang up. A bare
     // drop can make Windows reset the connection, and the client reading the
     // response then fails with "connection forcibly closed" (10054).
     let _ = out.shutdown(std::net::Shutdown::Write);
     let _ = out.set_read_timeout(Some(Duration::from_secs(1)));
     let _ = std::io::copy(&mut reader.take(64 * 1024), &mut std::io::sink());
-    parse_event(route(&path, token)?, &body)
+    if request.is_some() {
+        return None;
+    }
+    let ev = parse_event(key?, &body)?;
+    let viewer = VIEWERS.lock().unwrap().as_ref().and_then(|v| v.get(&ev.key).cloned());
+    match (ev.event.as_str(), viewer, ev.path.clone()) {
+        ("ShowImage", Some(show), Some(path)) => {
+            show(path, ev.message);
+            None
+        }
+        _ => Some(ev),
+    }
 }
 
 /// Settings JSON for one session: hooks posting here plus the status line
@@ -157,7 +235,7 @@ pub fn claude_args(key: &str) -> Vec<String> {
 }
 
 /// The session's hook route; `agent_mcp` posts its pictures there.
-fn hook_url(key: &str) -> Option<String> {
+pub(crate) fn hook_url(key: &str) -> Option<String> {
     let (port, token) = ADDR.get()?;
     valid_key(key).then(|| format!("http://127.0.0.1:{port}/hook/{token}/{key}"))
 }
@@ -172,16 +250,25 @@ Orbit shows your replies in a terminal pane. Write them for a fast read:
 - If something was skipped or is risky, end with it in one line.
 - To show the user an image (a screenshot, chart, rendered UI), call Orbit's show_image tool with its path.";
 
-fn reply_style() -> Option<String> {
+/// Added in chat mode, where Orbit renders the reply as markdown.
+pub const CHAT_STYLE: &str = "\
+Orbit renders your replies as markdown in a chat view. Structure them when it helps the reader:
+- Comparisons, options or results per item: a markdown table.
+- A multi-part answer: short `###` headings. Steps to follow: a numbered list; a checklist: `- [ ]` items.
+- Code, commands and output: fenced blocks with a language. A warning or caveat: a `> **Note:**` quote.
+- A short answer stays plain text: no structure for its own sake.";
+
+fn reply_style(chat: bool) -> Option<String> {
     let custom = crate::config::Config::load().ok().and_then(|c| c.ai.reply_style);
-    Some(custom.unwrap_or_else(|| REPLY_STYLE.into())).filter(|s| !s.trim().is_empty())
+    let style = Some(custom.unwrap_or_else(|| REPLY_STYLE.into())).filter(|s| !s.trim().is_empty())?;
+    Some(if chat { format!("{style}\n{CHAT_STYLE}") } else { style })
 }
 
 /// Argv and environment giving an agent session Orbit's MCP server and reply style (and claude its hooks).
 // shortcut: omp only reads MCP servers from files (no flag or env), so it gets the style alone.
-pub fn session_launch(cmd: &str, key: &str) -> (Vec<String>, Vec<(String, String)>) {
+pub fn session_launch(cmd: &str, key: &str, chat: bool) -> (Vec<String>, Vec<(String, String)>) {
     let name = std::path::Path::new(cmd.trim()).file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();
-    let style = reply_style();
+    let style = reply_style(chat);
     let server = hook_url(key).zip(std::env::current_exe().ok()).map(|(url, exe)| (exe.to_string_lossy().into_owned(), url));
     let mut args: Vec<String> = vec![];
     let mut env = vec![];
@@ -210,7 +297,7 @@ pub fn session_launch(cmd: &str, key: &str) -> (Vec<String>, Vec<(String, String
             if let Some((exe, url)) = &server {
                 config["mcp"] = json!({ "orbit": { "type": "local", "command": [exe, "--orbit-mcp", url] } });
             }
-            let file = crate::config::config_dir().map(|d| d.join("reply-style.md"));
+            let file = crate::config::config_dir().map(|d| d.join(if chat { "reply-style-chat.md" } else { "reply-style.md" }));
             if let (Some(s), Ok(file)) = (style, file) {
                 if std::fs::write(&file, s).is_ok() {
                     config["instructions"] = json!([file]);
@@ -249,6 +336,29 @@ fn statusline_command() -> Option<String> {
     Some(format!("{} --orbit-statusline {}", shell_arg(&exe), shell_arg(&file)))
 }
 
+fn write_rate_limits(file: &std::path::Path, limits: &Value) {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let tmp = file.with_extension("json.tmp");
+    if std::fs::write(&tmp, json!({ "rateLimits": limits, "updatedAt": now }).to_string()).is_ok() {
+        let _ = std::fs::rename(&tmp, file);
+    }
+}
+
+/// Saves the windows of a chat's `rate_limit_event` (`unifiedWindows`, utilization 0–1) in the
+/// status line's format, so the usage bar shows them too.
+pub fn save_rate_limits(windows: &Value) {
+    let Ok(file) = rate_limits_file() else { return };
+    let mut limits = serde_json::Map::new();
+    for (name, w) in windows.as_object().into_iter().flatten() {
+        if let (Some(u), Some(at)) = (w["utilization"].as_f64(), w["resetsAt"].as_u64()) {
+            limits.insert(name.clone(), json!({ "used_percentage": u * 100., "resets_at": at }));
+        }
+    }
+    if !limits.is_empty() {
+        write_rate_limits(&file, &Value::Object(limits));
+    }
+}
+
 /// Status line helper (`Orbit --orbit-statusline <file>`): saves the
 /// rate-limit windows Claude Code passes on stdin, then renders the user's
 /// own status line from the same input so it looks unchanged.
@@ -257,11 +367,7 @@ pub fn statusline_helper(file: Option<String>) {
     let _ = std::io::stdin().read_to_end(&mut input);
     if let (Some(file), Ok(v)) = (file, serde_json::from_slice::<Value>(&input)) {
         if let Some(limits) = v.get("rate_limits").filter(|l| l.is_object()) {
-            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-            let tmp = format!("{file}.tmp");
-            if std::fs::write(&tmp, json!({ "rateLimits": limits, "updatedAt": now }).to_string()).is_ok() {
-                let _ = std::fs::rename(&tmp, &file);
-            }
+            write_rate_limits(std::path::Path::new(&file), limits);
         }
     }
     if let Some(cmd) = user_statusline() {
@@ -373,12 +479,53 @@ mod tests {
     }
 
     #[test]
+    fn a_held_permission_request_gets_the_answer() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://127.0.0.1:{}/hook/tok/tm:perm", listener.local_addr().unwrap().port());
+        let (tx, rx) = channel();
+        on_permission("tm:perm", move |id, tool, input| tx.send((id, tool, input)).unwrap());
+        let client = std::thread::spawn(move || crate::agent_mcp::permission(&json!({"tool_name": "Bash", "input": {"command": "ls"}}), Some(&url)));
+        let (stream, _) = listener.accept().unwrap();
+        let server = std::thread::spawn(move || read_event(stream, "tok"));
+        let (id, tool, input) = rx.recv().unwrap();
+        assert_eq!((tool.as_str(), &input), ("Bash", &json!({"command": "ls"})));
+        assert!(answer_permission(&id, "allow"));
+        assert!(server.join().unwrap().is_none());
+        let reply: Value = serde_json::from_str(&client.join().unwrap()).unwrap();
+        assert_eq!(reply, json!({"behavior": "allow", "updatedInput": {"command": "ls"}}));
+        assert!(!answer_permission(&id, "allow"));
+        forget("tm:perm");
+    }
+
+    #[test]
+    fn a_routed_session_gets_its_pictures_instead_of_an_event() {
+        let post = |key: &str| {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://127.0.0.1:{}/hook/tok/{key}", listener.local_addr().unwrap().port());
+            let body = json!({"hook_event_name": "ShowImage", "path": "/a.png", "message": "A"}).to_string();
+            let client = std::thread::spawn(move || crate::agent_mcp::post(&url, &body, Duration::from_secs(5)));
+            let (stream, _) = listener.accept().unwrap();
+            let ev = read_event(stream, "tok");
+            client.join().unwrap().unwrap();
+            ev
+        };
+        let (tx, rx) = channel();
+        on_show_image("tm:img", move |path, title| tx.send((path, title)).unwrap());
+        assert!(post("tm:img").is_none());
+        assert_eq!(rx.recv().unwrap(), ("/a.png".into(), Some("A".into())));
+        forget("tm:img");
+        assert_eq!(post("tm:img").unwrap().path.as_deref(), Some("/a.png"));
+    }
+
+    #[test]
     fn wires_the_reply_style_into_each_agent() {
         let has = |a: &[String], p: &str| a.iter().any(|x| x.starts_with(p));
-        assert!(has(&session_launch("omp", "tm:1").0, "--append-system-prompt="));
-        assert!(has(&session_launch("/usr/bin/codex", "tm:1").0, "developer_instructions="));
-        assert_eq!(session_launch("opencode", "tm:1").1[0].0, "OPENCODE_CONFIG_CONTENT");
-        assert_eq!(session_launch("bash", "tm:1"), (vec![], vec![]));
+        assert!(has(&session_launch("omp", "tm:1", false).0, "--append-system-prompt="));
+        assert!(has(&session_launch("/usr/bin/codex", "tm:1", false).0, "developer_instructions="));
+        assert_eq!(session_launch("opencode", "tm:1", false).1[0].0, "OPENCODE_CONFIG_CONTENT");
+        assert_eq!(session_launch("bash", "tm:1", false), (vec![], vec![]));
+        let chat = session_launch("claude", "tm:1", true).0;
+        assert!(chat.iter().any(|a| a.starts_with("--append-system-prompt=") && a.contains("markdown table")));
     }
 
     #[test]

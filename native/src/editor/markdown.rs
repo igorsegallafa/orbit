@@ -274,7 +274,7 @@ impl EditorTab {
 }
 
 /// The preview's look, from the theme tokens (`.md-body` in `App.css`).
-fn preview_style() -> TextViewStyle {
+pub(crate) fn preview_style() -> TextViewStyle {
     let mut code = StyleRefinement::default().bg(c(theme::PANEL)).border_1().border_color(c(theme::BORDER)).px(px(16.)).py(px(14.));
     code.corner_radii.top_left = Some(px(8.).into());
     code.corner_radii.top_right = Some(px(8.).into());

@@ -441,12 +441,11 @@ impl PageTab {
     /// The New session menu: a shell or an agent in the clone.
     fn repo_session_menu(&mut self, position: gpui::Point<gpui::Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(name) = self.repo_view().map(|r| r.name.clone()) else { return };
-        let items = crate::sessions::AGENTS
-            .iter()
-            .map(|(label, _, cmd)| {
-                let (scope, cmd) = (format!("@{name}"), *cmd);
-                crate::overlay::MenuItem::new(*label, move |a: &mut crate::app::OrbitApp, w: &mut Window, cx: &mut Context<crate::app::OrbitApp>| {
-                    crate::sessions::new_session_in(a, scope.clone(), cmd, None, w, cx)
+        let items = crate::sessions::menu_entries()
+            .map(|(label, cmd, mode)| {
+                let scope = format!("@{name}");
+                crate::overlay::MenuItem::new(label, move |a: &mut crate::app::OrbitApp, w: &mut Window, cx: &mut Context<crate::app::OrbitApp>| {
+                    crate::sessions::new_session_as(a, scope.clone(), cmd, mode, None, w, cx)
                 })
             })
             .collect();

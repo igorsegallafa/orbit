@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+# Stand-in for codex in the self-tests (no login, no cost).
+# Terminal: prints its argv and, unless resuming (`codex resume <id>`) or
+# ORBIT_STUB_NO_SESSION is set, writes a rollout under $HOME/.codex/sessions
+# like the real one, so Orbit can find the conversation id; then echoes input.
+# `codex app-server`: answers the JSON-RPC subset Orbit's chat backend uses.
+import datetime, json, os, sys, time, uuid
+
+args = sys.argv[1:]
+
+if "app-server" not in args:
+    print("stub-codex args:", " ".join(args), flush=True)
+    if "resume" not in args and not os.environ.get("ORBIT_STUB_NO_SESSION"):
+        now = datetime.datetime.now(datetime.timezone.utc)
+        sid = str(uuid.uuid4())
+        day = os.path.join(os.environ["HOME"], ".codex/sessions", now.strftime("%Y/%m/%d"))
+        os.makedirs(day, exist_ok=True)
+        meta = {"type": "session_meta", "payload": {"id": sid, "cwd": os.getcwd(), "timestamp": now.strftime("%Y-%m-%dT%H:%M:%S.000Z")}}
+        with open(os.path.join(day, f"rollout-{now.strftime('%Y-%m-%dT%H-%M-%S')}-{sid}.jsonl"), "w") as f:
+            f.write(json.dumps(meta) + "\n")
+        print("stub-codex session:", sid, flush=True)
+    for line in sys.stdin:
+        print("got:", line.strip(), flush=True)
+    sys.exit(0)
+
+
+def send(msg):
+    sys.stdout.write(json.dumps(msg) + "\n")
+    sys.stdout.flush()
+
+
+thread = str(uuid.uuid4())
+for line in sys.stdin:
+    msg = json.loads(line)
+    method, rid, params = msg.get("method"), msg.get("id"), msg.get("params", {})
+    if rid is None:
+        continue
+    result = {}
+    if method in ("thread/start", "thread/resume"):
+        thread = params.get("threadId", thread)
+        result = {"thread": {"id": thread}}
+    elif method == "skills/list":
+        result = {"data": []}
+    elif method == "thread/read":
+        items = [
+            {"type": "userMessage", "id": "u0", "content": [{"type": "text", "text": "earlier prompt"}]},
+            {"type": "agentMessage", "id": "m0", "text": f"Earlier reply in thread {thread}"},
+        ]
+        result = {"thread": {"id": thread, "turns": [{"items": items}]}}
+    elif method == "turn/start":
+        text = " ".join(i.get("text", "") for i in params.get("input", []))
+        send({"jsonrpc": "2.0", "id": rid, "result": {"turn": {"id": "t1"}}})
+        send({"jsonrpc": "2.0", "method": "turn/started", "params": {"turn": {"id": "t1"}}})
+        for word in f"Stub codex reply to: {text} (thread {thread})".split(" "):
+            send({"jsonrpc": "2.0", "method": "item/agentMessage/delta", "params": {"itemId": "m1", "delta": word + " "}})
+            time.sleep(0.02)
+        send({"jsonrpc": "2.0", "method": "turn/completed", "params": {"turn": {"id": "t1", "status": "completed"}}})
+        continue
+    send({"jsonrpc": "2.0", "id": rid, "result": result})

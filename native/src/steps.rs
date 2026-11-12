@@ -17,6 +17,7 @@
 //! | `toast:<text>` | show an info toast |
 //! | `wait:<ms>` | wait |
 //! | `dump:<label>` | append the full state dump to the log |
+//! | `chat:<text>` | click the chat's prompt box, type `text` and press Enter |
 //! | `hover:cursor` `ctrl-click:cursor` | move the mouse over (or Ctrl+click) the word at the active editor's cursor |
 use crate::app::OrbitApp;
 use crate::commands;
@@ -254,6 +255,40 @@ pub async fn run(steps: &[String], window: AnyWindowHandle, app: &Entity<OrbitAp
                     }
                 }
             }
+            // drop:<probe>=<path>[,<path>…] drops files from outside onto that element.
+            "drop" => {
+                let (name, files) = arg.split_once('=').unwrap_or((arg, ""));
+                match locate(window, name, cx).await {
+                    Some(position) => {
+                        let paths = gpui::ExternalPaths(files.split(',').map(PathBuf::from).collect());
+                        send(window, PlatformInput::FileDrop(gpui::FileDropEvent::Entered { position, paths }), cx);
+                        // A frame in between, so the drop lands on a hitbox painted with the drag active.
+                        sleep(cx, 60).await;
+                        send(window, PlatformInput::FileDrop(gpui::FileDropEvent::Pending { position }), cx);
+                        sleep(cx, 60).await;
+                        send(window, PlatformInput::FileDrop(gpui::FileDropEvent::Submit { position }), cx);
+                        sleep(cx, 150).await;
+                    }
+                    None => {
+                        let _ = writeln!(log, "  no element {name:?} on screen");
+                    }
+                }
+            }
+            "chat" => match locate(window, "chat-prompt", cx).await {
+                Some(at) => {
+                    click(window, at, MouseButton::Left, 1, false, cx).await;
+                    for ch in arg.chars() {
+                        let ks = Keystroke { key: ch.to_lowercase().to_string(), key_char: Some(ch.to_string()), ..Default::default() };
+                        let _ = window.update(cx, |_, window, cx| window.dispatch_keystroke(ks, cx));
+                    }
+                    let enter = Keystroke { key: "enter".into(), ..Default::default() };
+                    let _ = window.update(cx, |_, window, cx| window.dispatch_keystroke(enter, cx));
+                    sleep(cx, 150).await;
+                }
+                None => {
+                    let _ = writeln!(log, "  no chat prompt on screen");
+                }
+            },
             // pr-review:<owner>/<repo>#<n> opens that PR's review tab.
             "pr-review" => {
                 let Some((or, n)) = arg.split_once('#').and_then(|(or, n)| Some((or.to_string(), n.parse::<u64>().ok()?))) else {

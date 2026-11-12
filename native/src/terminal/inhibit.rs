@@ -83,7 +83,7 @@ struct Inhibit {
     /// None: the default, `default_on()`.
     enabled: Option<bool>,
     terminals: Vec<WeakFocusHandle>,
-    alt_held: bool,
+    super_held: bool,
     /// Requested at least once in this run.
     requested: bool,
     /// The one-time toast about GNOME's permission prompt was shown (saved).
@@ -146,18 +146,13 @@ pub fn register(focus: &FocusHandle) {
     });
 }
 
-/// The inhibitor gives way while Alt is down.
-pub fn releases_for_alt() -> bool {
-    STATE.with(|s| s.borrow().granted)
-}
-
-/// Alt+Tab is a regular GNOME binding, so it is inhibited too: while Alt is
-/// down the inhibitor is dropped (once granted, so no permission prompt repeats).
-pub fn set_alt(held: bool, window: &Window, cx: &mut App) {
+/// Once granted, held only while Super (Toshy's physical Ctrl) is down: Toshy sends its combos
+/// (Cmd+Tab → Alt+Tab) in one burst, faster than a release could reach the compositor.
+pub fn set_super(held: bool, window: &Window, cx: &mut App) {
     let changed = STATE.with(|s| {
         let mut s = s.borrow_mut();
-        let changed = s.granted && s.alt_held != held;
-        s.alt_held = held && s.granted;
+        let changed = s.granted && s.super_held != held;
+        s.super_held = held && s.granted;
         changed
     });
     if changed {
@@ -174,8 +169,9 @@ pub fn sync(window: &Window, cx: &mut App) -> bool {
         // Not tied to window activation: the compositor applies it only while the
         // surface has keyboard focus, and GNOME's prompt takes that focus (dropping
         // the inhibitor then would dismiss the prompt unanswered).
-        s.alt_held &= focused;
-        let want = s.enabled.unwrap_or_else(default_on) && focused && !s.alt_held;
+        s.super_held &= focused;
+        // Before the first grant it is asked for on focus, so GNOME's prompt comes once.
+        let want = s.enabled.unwrap_or_else(default_on) && focused && (!s.granted || s.super_held);
         let first = s.apply(want, window);
         let explain = first && !s.explained;
         s.explained |= explain;

@@ -33,9 +33,14 @@ pub trait PageView: Render + Sized + 'static {
     fn dump(&self, out: &mut String, cx: &App);
     /// Called when its tab is opened again.
     fn reopen(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {}
+    /// A page listed with the sessions: the sidebar scope it sits under and its status.
+    fn sidebar(&self) -> Option<(String, crate::sessions::status::Status)> {
+        None
+    }
 }
 
 type DumpFn = Rc<dyn Fn(&mut String, &App)>;
+type SidebarFn = Rc<dyn Fn(&App) -> Option<(String, crate::sessions::status::Status)>>;
 /// A page action run on the root view's behalf (menu rows, reopen).
 pub type Action = Rc<dyn Fn(&mut Window, &mut App)>;
 
@@ -43,6 +48,7 @@ pub struct PageTab {
     pub key: String,
     view: AnyView,
     title: Rc<dyn Fn(&App) -> SharedString>,
+    sidebar: SidebarFn,
     dump: DumpFn,
     reopen: Action,
     focus: FocusHandle,
@@ -51,6 +57,10 @@ pub struct PageTab {
 impl PageTab {
     pub fn title(&self, cx: &App) -> SharedString {
         (self.title)(cx)
+    }
+
+    pub fn sidebar(&self, cx: &App) -> Option<(String, crate::sessions::status::Status)> {
+        (self.sidebar)(cx)
     }
 }
 
@@ -171,11 +181,12 @@ pub fn open<V: PageView>(
     let host = Host(cx.entity().downgrade());
     let view: Entity<V> = cx.new(|cx| make(host, window, cx));
     cx.observe(&view, |_, _, cx| cx.notify()).detach();
-    let (v1, v2, v3) = (view.clone(), view.clone(), view.downgrade());
+    let (v1, v2, v3, v4) = (view.clone(), view.clone(), view.downgrade(), view.clone());
     let tab = cx.new(|cx| PageTab {
         key,
         view: view.into(),
         title: Rc::new(move |cx| v1.read(cx).title()),
+        sidebar: Rc::new(move |cx| v4.read(cx).sidebar()),
         dump: Rc::new(move |out, cx| v2.read(cx).dump(out, cx)),
         reopen: Rc::new(move |window, cx| {
             let _ = v3.update(cx, |v, cx| v.reopen(window, cx));

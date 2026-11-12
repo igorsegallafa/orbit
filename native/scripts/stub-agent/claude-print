@@ -5,9 +5,127 @@
 # - the PRD writer: writes the markdown PRD and scripts/ralph/prd.json;
 # - a Ralph iteration (stream-json): ticks the next story, commits.
 # ORBIT_STUB_LOG, when set, records each call's kind and argv.
-import json, os, re, subprocess, sys, time
+import json, os, queue, re, subprocess, sys, threading, time, urllib.request
 
 args = sys.argv[1:]
+
+
+# Asked for "markdown", the chat reply shows every block the renderer handles.
+MARKDOWN = """## Markdown reply
+
+The entry point is native/src/main.rs:12 and the view is `native/src/chat/mod.rs:1`.
+
+- a **bold** item
+- a [link](https://example.com)
+
+| Agent | Mode |
+|-------|------|
+| claude | stream-json |
+
+```rust
+fn main() {
+    println!("hi");
+}
+```
+Done."""
+
+
+def show_image():
+    # What Orbit's show_image MCP tool does: POST ShowImage to the session's hook route.
+    icons = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "packaging", "icons")
+    config = next((a.split("=", 1)[1] for a in args if a.startswith("--mcp-config=")), None)
+    if config:
+        url = json.loads(config)["mcpServers"]["orbit"]["args"][1]
+        body = json.dumps({"hook_event_name": "ShowImage", "path": os.path.realpath(os.path.join(icons, "256x256.png")), "message": "The app icon"})
+        urllib.request.urlopen(urllib.request.Request(url, body.encode(), {"Content-Type": "application/json"}), timeout=5).read()
+    rel = os.path.relpath(os.path.join(icons, "64x64.png"))
+    return f"Here it is, and a smaller one inline:\n\n![small icon]({rel})\n\nDone."
+
+
+def ask_permission():
+    # What Orbit's permission MCP tool does: POST PermissionRequest and wait for the user's pick.
+    config = next((a.split("=", 1)[1] for a in args if a.startswith("--mcp-config=")), None)
+    if not config:
+        return "no hook route"
+    url = json.loads(config)["mcpServers"]["orbit"]["args"][1]
+    body = json.dumps({"hook_event_name": "PermissionRequest", "tool_name": "Bash", "input": {"command": "rm -rf build"}})
+    return urllib.request.urlopen(urllib.request.Request(url, body.encode(), {"Content-Type": "application/json"}), timeout=660).read().decode()
+
+
+def tools(out):
+    # Asked for "tools": three reads and a grep (one collapsed row), an edit with a diff,
+    # a long command output and a failing command, each finished after a short delay.
+    cwd = os.getcwd()
+    calls = [(f"r{i}", "Read", {"file_path": os.path.join(cwd, f)}, "1\tfn main() {}", False) for i, f in enumerate(["a.rs", "b.rs", "c.rs"])]
+    calls.append(("g", "Grep", {"pattern": "main"}, "a.rs\nb.rs", False))
+    calls.append(("e", "Edit", {"file_path": os.path.join(cwd, "a.rs"), "old_string": "fn main() {}\nlet a = 1;", "new_string": "fn main() {\n    hi();\n}\nlet a = 1;"}, "ok", False))
+    calls.append(("b", "Bash", {"command": "seq 250"}, "\n".join(str(i) for i in range(1, 251)), False))
+    calls.append(("x", "Bash", {"command": "false"}, "exit code 1", True))
+    for id, name, input, result, err in calls:
+        out({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": id, "name": name, "input": input}]}})
+        time.sleep(0.15)
+        out({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": id, "content": result, "is_error": err}]}})
+
+
+def chat():
+    # Orbit's chat mode (`--input-format stream-json`): one user message per stdin line,
+    # each answered with a streamed turn like the real claude's (thinking, text deltas, result).
+    out = lambda v: print(json.dumps(v), flush=True)
+    sid = args[args.index("--resume") + 1] if "--resume" in args else "00000000-0000-4000-8000-0000000c4a75"  # uuid-shaped like claude's, so restore finds its transcript
+    # A reader thread, so an interrupt control_request lands while a turn streams.
+    lines = queue.Queue()
+    threading.Thread(target=lambda: [lines.put(l) for l in sys.stdin] + [lines.put(None)], daemon=True).start()
+    interrupted = lambda: any(json.loads(l).get("type") == "control_request" for l in drain(lines))
+    n = 0
+    while (line := lines.get()) is not None:
+        msg = json.loads(line)
+        if msg.get("type") != "user":
+            continue
+        n += 1
+        text = " ".join(c.get("text", "") for c in msg["message"]["content"] if c.get("type") == "text")
+        out({"type": "system", "subtype": "init", "session_id": sid, "slash_commands": ["compact", "review", "init", "pr-comments", "security-review"]})
+        out({"type": "stream_event", "event": {"type": "message_start", "message": {"id": f"msg-{n}"}}})
+        out({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "thinking_delta", "thinking": "The user said hello."}}})
+        reply = MARKDOWN if "markdown" in text else f"Stub reply to: {text}. This line streams in word by word."
+        if "image" in text:
+            reply = show_image()
+        if "permission" in text:
+            reply = f"Permission answer: {ask_permission()}."
+        if "tools" in text:
+            tools(out)
+            reply = "Tools done."
+        if "crash" in text:
+            print("stub: crashed on purpose", file=sys.stderr, flush=True)
+            sys.exit(3)
+        # "slow" streams for a minute, until Orbit interrupts it (as claude: an error result, still alive).
+        delay = 0.5 if "slow" in text else 0.02
+        words = re.split(r"(?<= )", reply * (60 if "slow" in text else 1))
+        stopped = False
+        for word in words:
+            out({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": word}}})
+            time.sleep(delay)
+            if interrupted():
+                stopped = True
+                break
+        if stopped:
+            out({"type": "result", "subtype": "error_during_execution", "is_error": True, "result": "", "usage": {"input_tokens": 10, "output_tokens": 3}})
+        else:
+            out({"type": "result", "is_error": False, "result": "", "total_cost_usd": 0.001, "usage": {"input_tokens": 10, "output_tokens": 12}})
+
+
+def drain(q):
+    out = []
+    while not q.empty():
+        line = q.get()
+        if line is not None:
+            out.append(line)
+    return out
+
+
+if "--input-format" in args:
+    chat()
+    sys.exit(0)
+
 prompt = sys.stdin.read()
 
 
