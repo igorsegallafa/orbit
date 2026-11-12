@@ -67,6 +67,9 @@ struct Saved {
     /// REVIEW.md notes turned into drafts here, so none goes twice.
     #[serde(default)]
     sent: Vec<String>,
+    /// The head commit `viewed` was marked against.
+    #[serde(default)]
+    head: String,
 }
 
 fn store_path() -> Option<PathBuf> {
@@ -244,6 +247,9 @@ pub struct PrReviewPage {
     head_text: String,
     sending_notes: bool,
     _poll: Task<()>,
+    _head_poll: Task<()>,
+    /// Where the local checkout last saw `origin/<branch>`: a push from here moves it at once.
+    pushed: Option<String>,
     side_w: f32,
     side_scroll: ScrollHandle,
 }
@@ -292,10 +298,22 @@ impl PrReviewPage {
             show_done: false,
             head_text: String::new(),
             sending_notes: false,
+            pushed: None,
             // Follows REVIEW.md: an agent ticking a note shows up here.
-            _poll: cx.spawn(async move |this, cx| loop {
+            _poll: cx.spawn_in(window, async move |this, cx| loop {
                 cx.background_executor().timer(std::time::Duration::from_secs(2)).await;
-                if this.update(cx, |p, cx| p.poll_notes(cx)).is_err() {
+                if this.update_in(cx, |p, window, cx| {
+                    p.poll_notes(cx);
+                    p.poll_push(window, cx);
+                })
+                .is_err()
+                {
+                    break;
+                }
+            }),
+            _head_poll: cx.spawn_in(window, async move |this, cx| loop {
+                cx.background_executor().timer(std::time::Duration::from_secs(30)).await;
+                if this.update_in(cx, |p, window, cx| p.check_head(window, cx)).is_err() {
                     break;
                 }
             }),
@@ -343,6 +361,9 @@ impl PrReviewPage {
                 }
                 p.workspace = ws;
                 p.reload_notes(cx);
+                if let Ok(d) = &d {
+                    p.follow_head(&d.head_sha, false, cx);
+                }
                 p.detail = d.map_or_else(Load::Failed, Load::Ready);
                 cx.notify();
             });
@@ -350,6 +371,96 @@ impl PrReviewPage {
         .detach();
         self.load_review(true, window, cx);
         cx.notify();
+    }
+
+    /// Checks GitHub as soon as the local checkout of the PR's branch pushes.
+    fn poll_push(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(ws), Some(d)) = (&self.workspace, self.detail.ready()) else { return };
+        let (dir, name, head) = (ws.dir.join(&self.pr().repo), format!("refs/remotes/origin/{}", d.branch), d.head_sha.clone());
+        cx.spawn_in(window, async move |this, cx| {
+            let sha = cx.background_spawn(async move { orbit_core::git::ref_sha(&dir, &name) }).await;
+            let _ = this.update_in(cx, |p, window, cx| {
+                if sha.is_some() && sha != p.pushed {
+                    let moved = p.pushed.is_some() && sha.as_deref() != Some(head.as_str());
+                    p.pushed = sha;
+                    if moved {
+                        // GitHub can lag the push by a few seconds.
+                        cx.spawn_in(window, async move |this, cx| {
+                            for wait in [0, 3, 8] {
+                                cx.background_executor().timer(std::time::Duration::from_secs(wait)).await;
+                                if this.update_in(cx, |p, window, cx| p.check_head(window, cx)).is_err() {
+                                    break;
+                                }
+                            }
+                        })
+                        .detach();
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Reloads the PR when its head moved, keeping the open file.
+    fn check_head(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(head) = self.detail.ready().map(|d| d.head_sha.clone()) else { return };
+        let (or, n, key) = (self.pr().owner_repo.clone(), self.pr().number, self.key());
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(d) = cx.background_spawn(async move { orbit_core::github::pr_detail(&or, n) }).await else { return };
+            let _ = this.update_in(cx, |p, window, cx| {
+                if p.key() != key || d.head_sha == head {
+                    return;
+                }
+                p.follow_head(&d.head_sha, true, cx);
+                p.detail = Load::Ready(d);
+                p.load_review(true, window, cx);
+                if let Sel::File(path) = p.selected.clone() {
+                    p.select(Sel::File(path), window, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Unmarks viewed files that changed since the head they were viewed at.
+    fn follow_head(&mut self, head: &str, announce: bool, cx: &mut Context<Self>) {
+        let from = std::mem::replace(&mut self.saved.head, head.to_string());
+        if from == head {
+            return;
+        }
+        self.persist();
+        let n = self.pr().number;
+        if from.is_empty() || self.saved.viewed.is_empty() {
+            if announce {
+                self.host.toast(ToastKind::Info, format!("New commits on #{n}"), None, cx);
+            }
+            return;
+        }
+        let (or, to, key) = (self.pr().owner_repo.clone(), head.to_string(), self.key());
+        cx.spawn(async move |this, cx| {
+            let changed = cx.background_spawn(async move { orbit_core::github::changed_between(&or, &from, &to) }).await;
+            let _ = this.update(cx, |p, cx| {
+                if p.key() != key {
+                    return;
+                }
+                let before = p.saved.viewed.len();
+                match changed {
+                    Ok(files) => p.saved.viewed.retain(|f| !files.contains(f)),
+                    // A force-push can leave the old head unreachable: start over.
+                    Err(_) => p.saved.viewed.clear(),
+                }
+                let unmarked = before - p.saved.viewed.len();
+                p.persist();
+                if announce || unmarked > 0 {
+                    let s = if unmarked == 1 { "" } else { "s" };
+                    let desc = (unmarked > 0).then(|| format!("{unmarked} viewed file{s} changed and lost the mark"));
+                    p.host.toast(ToastKind::Info, format!("New commits on #{n}"), desc, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn load_review(&mut self, with_lines: bool, window: &mut Window, cx: &mut Context<Self>) {
