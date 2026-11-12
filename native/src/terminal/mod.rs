@@ -723,6 +723,17 @@ impl TerminalView {
         let _ = pty::write(self.shared.pty_id, bytes);
     }
 
+    /// Sends `text` as a prompt: through the chat when it is showing, else typed and entered.
+    pub fn send_prompt(&self, text: &str, window: &mut Window, cx: &mut App) {
+        match &self.chat {
+            Some(chat) => chat.update(cx, |c, cx| c.submit(text, window, cx)),
+            None => {
+                self.send(text.as_bytes());
+                self.send(b"\r");
+            }
+        }
+    }
+
     /// The visible grid as text, one line per row (self-test dumps).
     pub fn grid_text(&self) -> String {
         let term = self.shared.term.lock();

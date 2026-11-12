@@ -59,7 +59,7 @@ def tools(out):
     calls = [(f"r{i}", "Read", {"file_path": os.path.join(cwd, f)}, "1\tfn main() {}", False) for i, f in enumerate(["a.rs", "b.rs", "c.rs"])]
     calls.append(("g", "Grep", {"pattern": "main"}, "a.rs\nb.rs", False))
     calls.append(("e", "Edit", {"file_path": os.path.join(cwd, "a.rs"), "old_string": "fn main() {}\nlet a = 1;", "new_string": "fn main() {\n    hi();\n}\nlet a = 1;"}, "ok", False))
-    calls.append(("b", "Bash", {"command": "seq 250"}, "\n".join(str(i) for i in range(1, 251)), False))
+    calls.append(("b", "Bash", {"command": "seq 250", "description": "Count to 250"}, "\n".join(str(i) for i in range(1, 251)), False))
     calls.append(("x", "Bash", {"command": "false"}, "exit code 1", True))
     for id, name, input, result, err in calls:
         out({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": id, "name": name, "input": input}]}})
