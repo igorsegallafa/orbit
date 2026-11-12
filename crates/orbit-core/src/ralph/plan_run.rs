@@ -1,8 +1,8 @@
 // Ralph over the feature plan (PLAN.md at the workspace root): one run for
 // the whole feature, each iteration a fresh agent on the next open task, in
 // that task's repository. The plan is re-read every iteration (edits made
-// between iterations count); Orbit marks a task done once the agent says
-// so AND the task's repo got a commit, so the agent never edits the plan.
+// between iterations count); Orbit marks a task done once the task's
+// `feat: [Tn]` commit is on the branch, so the agent never edits the plan.
 use super::prd::{Prd, Story};
 use super::supervisor::{self, Iteration, RalphEnv};
 use super::{
@@ -246,16 +246,21 @@ impl RalphEnv for PlanEnv {
 
         let commits = self.commits_since(&repo, &head_before);
         if iteration == Iteration::Done {
-            if full.contains(DONE_MARK) && commits > 0 {
+            let reported = full.contains(DONE_MARK);
+            // The commit decides: an agent can forget the mark, or report a task an earlier iteration committed.
+            let committed = blocked_reason(&full).is_none()
+                && watchdog::story_on_branch(&dir, &task.id)
+                && watchdog::tree_clean(&dir, &[".orbit/"]);
+            if (reported && commits > 0) || committed {
                 match self.mark_done(task.index) {
                     Ok(()) => record(&self.app, &self.key, json!({"kind": "story_passed", "id": task.id}), |_| {}),
                     Err(e) => record(&self.app, &self.key, json!({"kind": "log", "text": format!("couldn't mark {} done in PLAN.md: {e}", task.id), "stderr": true}), |_| {}),
                 }
-            } else if full.contains(DONE_MARK) {
+            } else if reported {
                 record(
                     &self.app,
                     &self.key,
-                    json!({"kind": "log", "text": format!("{} was reported done, but {repo} has no new commit: it stays open", task.id), "stderr": true}),
+                    json!({"kind": "log", "text": format!("{} was reported done, but {repo} has no `feat: [{}]` commit: it stays open", task.id, task.id), "stderr": true}),
                     |_| {},
                 );
             }
@@ -601,6 +606,32 @@ mod tests {
             let ends: Vec<_> = fixture::events(&c.run_dir).into_iter().filter(|e| e["kind"] == "iteration_end").map(|e| e["outcome"].clone()).collect();
             assert_eq!(ends, ["Stalled", "Stalled"]);
             assert_eq!(c.event("reconcile")["committed"], false);
+            assert!(!c.ticked());
+        }
+
+        #[test]
+        fn a_committed_task_without_the_done_mark_is_closed() {
+            let result = r#"printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"Implemented it."}'"#;
+            let mut c = case("no-mark", quick(), &format!("{COMMIT_T1}\n{result}"));
+            assert_eq!(c.env.run_iteration(1), Iteration::Complete);
+            assert!(c.ticked());
+        }
+
+        #[test]
+        fn a_task_committed_by_an_earlier_iteration_is_closed() {
+            let mut c = case("earlier", quick(), RESULT_DONE);
+            git(&c.repo, &["commit", "--allow-empty", "-qm", "feat: [T1] - First task"]);
+            git(&c.repo, &["push", "-q", "origin", "HEAD"]);
+            assert_eq!(c.env.run_iteration(1), Iteration::Complete);
+            assert!(c.ticked());
+        }
+
+        #[test]
+        fn a_same_id_commit_from_another_branch_does_not_close_the_task() {
+            let mut c = case("other-branch", quick(), RESULT_DONE);
+            git(&c.repo, &["commit", "--allow-empty", "-qm", "feat: [T1] - Older feature"]);
+            git(&c.repo, &["push", "-q", "origin", "HEAD:refs/heads/main"]);
+            assert_eq!(c.env.run_iteration(1), Iteration::Done);
             assert!(!c.ticked());
         }
 
