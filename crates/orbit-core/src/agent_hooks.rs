@@ -9,12 +9,60 @@ use serde_json::{json, Value};
 use std::hash::{BuildHasher, Hasher};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{channel, Sender};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use crate::events::Events;
 
 static ADDR: OnceLock<(u16, String)> = OnceLock::new();
+
+const PERMISSION_WAIT: Duration = Duration::from_secs(600);
+
+type Asker = Arc<dyn Fn(String, String, Value) + Send + Sync>;
+/// Per session key: who to ask when its agent wants a permission (id, tool name, tool input).
+static ASKERS: Mutex<Option<HashMap<String, Asker>>> = Mutex::new(None);
+/// Open permission requests: id → (session key, where the answer goes).
+static PENDING: Mutex<Option<HashMap<String, Pending>>> = Mutex::new(None);
+type Pending = (String, Sender<String>);
+
+/// Routes the requests of `agent_mcp`'s permission tool for session `key` to `ask`.
+pub fn on_permission(key: &str, ask: impl Fn(String, String, Value) + Send + Sync + 'static) {
+    ASKERS.lock().unwrap().get_or_insert_with(HashMap::new).insert(key.into(), Arc::new(ask));
+}
+
+/// Stops routing `key`'s permission requests; its open ones are denied.
+pub fn forget_permissions(key: &str) {
+    if let Some(a) = ASKERS.lock().unwrap().as_mut() {
+        a.remove(key);
+    }
+    if let Some(p) = PENDING.lock().unwrap().as_mut() {
+        p.retain(|_, (k, _)| k != key);
+    }
+}
+
+/// Answers an open permission request with the chosen option id (`allow` allows, anything else denies).
+pub fn answer_permission(id: &str, option_id: &str) -> bool {
+    let tx = PENDING.lock().unwrap().as_mut().and_then(|p| p.remove(id));
+    tx.is_some_and(|(_, tx)| tx.send(option_id.into()).is_ok())
+}
+
+/// Blocks until the session answers a PermissionRequest body; `deny` when nobody asks or answers.
+fn ask_permission(key: &str, body: &Value) -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let Some(ask) = ASKERS.lock().unwrap().as_ref().and_then(|a| a.get(key).cloned()) else { return "deny".into() };
+    let id = format!("perm-{}", NEXT.fetch_add(1, Ordering::Relaxed));
+    let (tx, rx) = channel();
+    PENDING.lock().unwrap().get_or_insert_with(HashMap::new).insert(id.clone(), (key.into(), tx));
+    ask(id.clone(), body["tool_name"].as_str().unwrap_or("").into(), body["input"].clone());
+    let answer = rx.recv_timeout(PERMISSION_WAIT).unwrap_or_else(|_| "deny".into());
+    if let Some(p) = PENDING.lock().unwrap().as_mut() {
+        p.remove(&id);
+    }
+    answer
+}
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -84,6 +132,8 @@ fn parse_event(key: &str, body: &[u8]) -> Option<AgentEvent> {
 
 /// Minimal HTTP/1.1: one POST per connection, always answered 200 with an
 /// empty body (no hook decision), so a bad request never blocks the agent.
+/// A PermissionRequest is the exception: held open until answered, the
+/// answer is the body, and it is not re-emitted as an event.
 fn read_event(stream: TcpStream, token: &str) -> Option<AgentEvent> {
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
     let mut reader = BufReader::new(stream.try_clone().ok()?);
@@ -108,15 +158,24 @@ fn read_event(stream: TcpStream, token: &str) -> Option<AgentEvent> {
     }
     let mut body = vec![0u8; len.min(1 << 20)];
     reader.read_exact(&mut body).ok()?;
+    let key = route(&path, token);
+    let request = serde_json::from_slice::<Value>(&body).ok().filter(|v| v["hook_event_name"] == "PermissionRequest");
+    let answer = match (key, &request) {
+        (Some(key), Some(v)) => ask_permission(key, v),
+        _ => String::new(),
+    };
     let mut out = stream;
-    let _ = out.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    let _ = write!(out, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}", answer.len());
     // Close gracefully: send FIN, then wait for the client to hang up. A bare
     // drop can make Windows reset the connection, and the client reading the
     // response then fails with "connection forcibly closed" (10054).
     let _ = out.shutdown(std::net::Shutdown::Write);
     let _ = out.set_read_timeout(Some(Duration::from_secs(1)));
     let _ = std::io::copy(&mut reader.take(64 * 1024), &mut std::io::sink());
-    parse_event(route(&path, token)?, &body)
+    if request.is_some() {
+        return None;
+    }
+    parse_event(key?, &body)
 }
 
 /// Settings JSON for one session: hooks posting here plus the status line
@@ -370,6 +429,25 @@ mod tests {
         let ev = read_event(stream, "tok").unwrap();
         assert_eq!(ev, AgentEvent { key: "tm:9".into(), event: "Stop".into(), notification_type: None, message: None, path: None });
         assert!(client.join().unwrap().starts_with("HTTP/1.1 200"));
+    }
+
+    #[test]
+    fn a_held_permission_request_gets_the_answer() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://127.0.0.1:{}/hook/tok/tm:perm", listener.local_addr().unwrap().port());
+        let (tx, rx) = channel();
+        on_permission("tm:perm", move |id, tool, input| tx.send((id, tool, input)).unwrap());
+        let client = std::thread::spawn(move || crate::agent_mcp::permission(&json!({"tool_name": "Bash", "input": {"command": "ls"}}), Some(&url)));
+        let (stream, _) = listener.accept().unwrap();
+        let server = std::thread::spawn(move || read_event(stream, "tok"));
+        let (id, tool, input) = rx.recv().unwrap();
+        assert_eq!((tool.as_str(), &input), ("Bash", &json!({"command": "ls"})));
+        assert!(answer_permission(&id, "allow"));
+        assert!(server.join().unwrap().is_none());
+        let reply: Value = serde_json::from_str(&client.join().unwrap()).unwrap();
+        assert_eq!(reply, json!({"behavior": "allow", "updatedInput": {"command": "ls"}}));
+        assert!(!answer_permission(&id, "allow"));
+        forget_permissions("tm:perm");
     }
 
     #[test]

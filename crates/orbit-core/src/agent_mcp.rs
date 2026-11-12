@@ -1,7 +1,8 @@
 // `<orbit exe> --orbit-mcp <hook url>`: the stdio MCP server Orbit adds to
 // every agent session (`agent_hooks::session_launch`). Its `show_image` tool
 // posts the picture's path to the session's hook route, and Orbit shows it
-// beside the terminal. The picture never reaches the model.
+// beside the terminal. The picture never reaches the model. Its `permission`
+// tool is chat mode's `--permission-prompt-tool`: it asks Orbit and waits.
 use serde_json::{json, Value};
 use std::io::{BufRead, Read, Write};
 use std::net::TcpStream;
@@ -21,7 +22,23 @@ pub fn serve(url: Option<String>) {
     }
 }
 
-fn tool() -> Value {
+fn tools() -> Value {
+    json!([show_image_tool(), {
+        "name": "permission",
+        "description": "Claude Code's permission prompt in Orbit's chat. Not for direct use.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "tool_name": { "type": "string" },
+                "input": { "type": "object" },
+                "tool_use_id": { "type": "string" }
+            },
+            "required": ["tool_name", "input"]
+        }
+    }])
+}
+
+fn show_image_tool() -> Value {
     json!({
         "name": "show_image",
         "description": "Show an image file to the user in Orbit, in a viewer beside this session. \
@@ -49,7 +66,10 @@ fn handle(msg: &Value, url: Option<&str>) -> Option<Value> {
             "serverInfo": { "name": "orbit", "version": env!("CARGO_PKG_VERSION") },
         }),
         "ping" => json!({}),
-        "tools/list" => json!({ "tools": [tool()] }),
+        "tools/list" => json!({ "tools": tools() }),
+        "tools/call" if params["name"] == "permission" => {
+            json!({ "content": [{ "type": "text", "text": permission(&params["arguments"], url) }] })
+        }
         "tools/call" if params["name"] == "show_image" => {
             let (text, is_error) = match show(&params["arguments"], url) {
                 Ok(t) => (t, false),
@@ -71,20 +91,36 @@ fn show(args: &Value, url: Option<&str>) -> Result<String, String> {
     }
     let url = url.ok_or("this session was not started by Orbit")?;
     let body = json!({ "hook_event_name": "ShowImage", "path": path, "message": args["title"].as_str() }).to_string();
-    post(url, &body).map_err(|e| format!("Orbit did not answer: {e}"))?;
+    post(url, &body, Duration::from_secs(5)).map_err(|e| format!("Orbit did not answer: {e}"))?;
     Ok(format!("Shown to the user in Orbit: {}", path.display()))
 }
 
-/// One POST to Orbit's loopback listener (`agent_hooks`), answered 200.
-fn post(url: &str, body: &str) -> std::io::Result<()> {
+/// The `--permission-prompt-tool` decision JSON, once Orbit's user picks.
+pub(crate) fn permission(args: &Value, url: Option<&str>) -> String {
+    let body = json!({ "hook_event_name": "PermissionRequest", "tool_name": args["tool_name"], "input": args["input"] }).to_string();
+    // Orbit denies after 10 minutes; wait a little longer than that.
+    let answer = url.map(|u| post(u, &body, Duration::from_secs(660)));
+    match answer {
+        Some(Ok(a)) if a.trim() == "allow" => json!({ "behavior": "allow", "updatedInput": args["input"] }),
+        Some(Err(e)) => json!({ "behavior": "deny", "message": format!("Orbit did not answer: {e}") }),
+        _ => json!({ "behavior": "deny", "message": "The user denied this in Orbit." }),
+    }
+    .to_string()
+}
+
+/// One POST to Orbit's loopback listener (`agent_hooks`), answered 200; returns the body.
+fn post(url: &str, body: &str, timeout: Duration) -> std::io::Result<String> {
     let bad = || std::io::Error::other(format!("bad url {url}"));
     let (host, path) = url.strip_prefix("http://").and_then(|r| r.split_once('/')).ok_or_else(bad)?;
     let mut s = TcpStream::connect(host)?;
-    s.set_read_timeout(Some(Duration::from_secs(5)))?;
+    s.set_read_timeout(Some(timeout))?;
     write!(s, "POST /{path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())?;
     let mut resp = String::new();
     s.read_to_string(&mut resp)?;
-    (resp.split_whitespace().nth(1) == Some("200")).then_some(()).ok_or_else(|| std::io::Error::other("no 200"))
+    if resp.split_whitespace().nth(1) != Some("200") {
+        return Err(std::io::Error::other("no 200"));
+    }
+    Ok(resp.split_once("\r\n\r\n").map(|(_, b)| b.to_string()).unwrap_or_default())
 }
 
 #[cfg(test)]
@@ -98,6 +134,9 @@ mod tests {
         assert!(handle(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}), None).is_none());
         let list = handle(&json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}), None).unwrap();
         assert_eq!(list["result"]["tools"][0]["name"], "show_image");
+        assert_eq!(list["result"]["tools"][1]["name"], "permission");
+        let perm = handle(&json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"permission","arguments":{"tool_name":"Bash","input":{}}}}), None).unwrap();
+        assert!(perm["result"]["content"][0]["text"].as_str().unwrap().contains(r#""behavior":"deny""#));
         let call = |path: &str| handle(&json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"show_image","arguments":{"path":path}}}), None).unwrap();
         assert_eq!(call("/definitely/missing.png")["result"]["isError"], true);
         assert_eq!(call("Cargo.toml")["result"]["isError"], true);

@@ -1,6 +1,6 @@
 // Claude Code over stream-json: one long-lived `claude -p` process, user
 // messages in as NDJSON on stdin, partial-message stream events out.
-use super::{ChatBackend, ChatEvent, ChatInput, FileDiff, SlashCommand};
+use super::{ChatBackend, ChatEvent, ChatInput, FileDiff, PermissionOption, SlashCommand};
 use crate::agent::{runner, stream};
 use base64::Engine;
 use serde_json::{json, Value};
@@ -15,6 +15,7 @@ struct Claude {
     stdin: Mutex<ChildStdin>,
     child: Arc<Mutex<Child>>,
     stopped: Arc<AtomicBool>,
+    key: String,
 }
 
 pub fn start(cwd: &Path, resume: Option<String>, sink: impl Fn(ChatEvent) + Send + 'static) -> Result<Box<dyn ChatBackend>, String> {
@@ -26,6 +27,10 @@ pub fn start(cwd: &Path, resume: Option<String>, sink: impl Fn(ChatEvent) + Send
     if let Some(id) = &resume {
         cmd.args(["--resume", id]);
     }
+    // Only when Orbit's MCP server is configured (the hook listener is up).
+    if launch_args.iter().any(|a| a.starts_with("--mcp-config=")) {
+        cmd.args(["--permission-prompt-tool", "mcp__orbit__permission"]);
+    }
     cmd.args(launch_args).envs(launch_env).current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     // Own process group, so stop() takes the agent's shells and builds down with it.
     #[cfg(unix)]
@@ -36,6 +41,12 @@ pub fn start(cwd: &Path, resume: Option<String>, sink: impl Fn(ChatEvent) + Send
     let stderr = child.stderr.take().ok_or("claude has no stderr")?;
     let child = Arc::new(Mutex::new(child));
     let stopped = Arc::new(AtomicBool::new(false));
+    // Shared with the hook listener's threads, which deliver permission requests.
+    let sink = Arc::new(Mutex::new(sink));
+    let ask_sink = sink.clone();
+    crate::agent_hooks::on_permission(&key, move |id, tool, input| {
+        (ask_sink.lock().unwrap())(permission_asked(id, &tool, &input));
+    });
 
     let tail = Arc::new(Mutex::new(Vec::<String>::new()));
     let tail_w = tail.clone();
@@ -48,12 +59,13 @@ pub fn start(cwd: &Path, resume: Option<String>, sink: impl Fn(ChatEvent) + Send
             }
         }
     });
-    let (child_r, stopped_r) = (child.clone(), stopped.clone());
+    let (child_r, stopped_r, key_r) = (child.clone(), stopped.clone(), key.clone());
     std::thread::spawn(move || {
         let mut parser = Parser::default();
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            parser.line(&line).into_iter().for_each(&sink);
+            parser.line(&line).into_iter().for_each(|e| (sink.lock().unwrap())(e));
         }
+        crate::agent_hooks::forget_permissions(&key_r);
         let status = child_r.lock().unwrap().wait();
         let error = match status {
             _ if stopped_r.load(Ordering::Relaxed) => None,
@@ -61,9 +73,9 @@ pub fn start(cwd: &Path, resume: Option<String>, sink: impl Fn(ChatEvent) + Send
             Ok(s) => Some(Some(tail.lock().unwrap().join("\n")).filter(|t| !t.trim().is_empty()).unwrap_or_else(|| format!("claude exited with {s}"))),
             Err(e) => Some(e.to_string()),
         };
-        sink(ChatEvent::Exited { error });
+        (sink.lock().unwrap())(ChatEvent::Exited { error });
     });
-    Ok(Box::new(Claude { stdin: Mutex::new(stdin), child, stopped }))
+    Ok(Box::new(Claude { stdin: Mutex::new(stdin), child, stopped, key }))
 }
 
 impl ChatBackend for Claude {
@@ -72,7 +84,10 @@ impl ChatBackend for Claude {
             ChatInput::Prompt { text, images } => user_message(&text, &images),
             // SIGINT ends `claude -p` itself; the control request stops only the turn.
             ChatInput::Interrupt => json!({ "type": "control_request", "request_id": "interrupt", "request": { "subtype": "interrupt" } }),
-            ChatInput::AnswerPermission { .. } => return,
+            ChatInput::AnswerPermission { id, option_id } => {
+                crate::agent_hooks::answer_permission(&id, &option_id);
+                return;
+            }
         };
         // A failed write means the process is gone; the reader thread reports Exited.
         let _ = writeln!(self.stdin.lock().unwrap(), "{line}");
@@ -80,7 +95,18 @@ impl ChatBackend for Claude {
 
     fn stop(&self) {
         self.stopped.store(true, Ordering::Relaxed);
+        crate::agent_hooks::forget_permissions(&self.key);
         runner::kill_tree(&mut self.child.lock().unwrap());
+    }
+}
+
+fn permission_asked(id: String, tool: &str, input: &Value) -> ChatEvent {
+    let option = |id: &str, label: &str, kind: &str| PermissionOption { id: id.into(), label: label.into(), kind: kind.into() };
+    ChatEvent::PermissionAsked {
+        id,
+        title: format!("Allow {tool}?"),
+        detail: stream::summarize(tool, input),
+        options: vec![option("allow", "Allow", "allow_once"), option("deny", "Deny", "reject_once")],
     }
 }
 
