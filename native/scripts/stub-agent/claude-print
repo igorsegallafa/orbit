@@ -42,6 +42,16 @@ def show_image():
     return f"Here it is, and a smaller one inline:\n\n![small icon]({rel})\n\nDone."
 
 
+def ask_permission():
+    # What Orbit's permission MCP tool does: POST PermissionRequest and wait for the user's pick.
+    config = next((a.split("=", 1)[1] for a in args if a.startswith("--mcp-config=")), None)
+    if not config:
+        return "no hook route"
+    url = json.loads(config)["mcpServers"]["orbit"]["args"][1]
+    body = json.dumps({"hook_event_name": "PermissionRequest", "tool_name": "Bash", "input": {"command": "rm -rf build"}})
+    return urllib.request.urlopen(urllib.request.Request(url, body.encode(), {"Content-Type": "application/json"}), timeout=660).read().decode()
+
+
 def tools(out):
     # Asked for "tools": three reads and a grep (one collapsed row), an edit with a diff,
     # a long command output and a failing command, each finished after a short delay.
@@ -73,6 +83,8 @@ def chat():
         reply = MARKDOWN if "markdown" in text else f"Stub reply to: {text}. This line streams in word by word."
         if "image" in text:
             reply = show_image()
+        if "permission" in text:
+            reply = f"Permission answer: {ask_permission()}."
         if "tools" in text:
             tools(out)
             reply = "Tools done."

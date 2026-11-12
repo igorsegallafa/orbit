@@ -112,6 +112,9 @@ the thumbnails' remove buttons are `unattach:<ix>`).
 A prompt containing "tools" runs three Reads and a Grep (one collapsed row), an Edit with a diff,
 a 250-line Bash output and a failing Bash; tool rows are `tool:<ix>` (click expands) and the
 output's "Show all" link is `tool-all:<ix>`.
+A prompt containing "permission" posts a `PermissionRequest` for `rm -rf build` (as Orbit's
+`permission` MCP tool does), waits for the answer and replies with it. The card's buttons are
+`perm:<ix>:<n>`; `key:1` picks the first option and `key:escape` denies.
 
 `--do` runs shell steps last, separated by `;` (`src/steps.rs`). Mouse steps target elements that
 render a `probe("name")` (tabs `tab:<ix>`, menu items `menu:<label>`, dialog buttons

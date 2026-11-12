@@ -254,7 +254,7 @@ impl SessionStore {
         self.inbox.iter().find(|i| i.key == key && !i.read).map(|i| i.kind)
     }
 
-    fn settle(&mut self, key: &str, cx: &mut Context<Self>) {
+    pub fn settle(&mut self, key: &str, cx: &mut Context<Self>) {
         if self.inbox.iter().any(|i| i.key == key && !i.read) {
             self.inbox.iter_mut().filter(|i| i.key == key).for_each(|i| i.read = true);
             cx.notify();
@@ -607,7 +607,7 @@ pub fn focus_of(key: &str, cx: &mut App) -> (bool, bool) {
     let (app, window) = (g.app.clone(), g.window);
     let window_active = window.update(cx, |_, w, _| w.is_window_active()).unwrap_or(false);
     let tab_active = app.upgrade().is_some_and(|a| {
-        a.read(cx).active_tab().is_some_and(|t| t.saved_key(cx) == format!("session:{key}") || t.key(cx) == format!("page:{key}"))
+        a.read(cx).active_tab().is_some_and(|t| t.saved_key(cx) == format!("session:{key}") || t.key(cx) == format!("page:{key}") || t.key(cx) == key)
     });
     (window_active, tab_active)
 }
@@ -786,6 +786,10 @@ pub fn activate(app: &mut OrbitApp, key: &str, window: &mut Window, cx: &mut Con
         store(cx).update(cx, |s, cx| s.settle(key, cx));
     } else if let Some(scope) = key.strip_prefix("ralph:") {
         crate::pages::open_ralph(app, scope, window, cx);
+        store(cx).update(cx, |s, cx| s.settle(key, cx));
+    } else if let Some(ix) = app.tab_index(key, cx) {
+        // A chat tab, whose inbox key is its tab key.
+        app.activate(ix, window, cx);
         store(cx).update(cx, |s, cx| s.settle(key, cx));
     }
 }

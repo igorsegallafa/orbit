@@ -6,6 +6,7 @@ use crate::app::OrbitApp;
 use crate::commands::{self, Command};
 use crate::pages::{self, Host, PageView};
 use crate::probe::probe;
+use crate::sessions::status::Status;
 use crate::theme::{self, c};
 use futures::StreamExt as _;
 use gpui::{
@@ -15,7 +16,7 @@ use gpui::{
 use gpui_component::input::{InputEvent, Textarea, TextareaState};
 use gpui_component::text::{TextView, TextViewState};
 use gpui_component::diff::{Diff, DiffFile, DiffMode, DiffState};
-use orbit_core::chat::{ChatBackend, ChatEvent, ChatInput, FileDiff};
+use orbit_core::chat::{ChatBackend, ChatEvent, ChatInput, FileDiff, PermissionOption};
 use regex::Regex;
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -32,6 +33,8 @@ enum Item {
     Note(String),
     /// One tool call, or a run of consecutive read-only ones drawn as one row.
     Tool { calls: Vec<Call>, open: bool, all: bool, diff: Option<(Entity<DiffState>, usize)> },
+    /// A permission request; `answer` is the picked option's label once answered.
+    Permission { id: String, title: String, detail: String, options: Vec<PermissionOption>, answer: Option<String> },
 }
 
 struct Call {
@@ -94,6 +97,8 @@ fn is_image(path: &std::path::Path) -> bool {
 }
 
 pub struct ChatView {
+    /// The tab's key, which is also its inbox key.
+    key: String,
     agent: String,
     cwd: PathBuf,
     /// The last link or image clicked, for the self-test dump.
@@ -110,7 +115,7 @@ pub struct ChatView {
 }
 
 impl ChatView {
-    pub fn new(agent: &str, cwd: PathBuf, resume: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(key: String, agent: &str, cwd: PathBuf, resume: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let prompt = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 8).submit_on_enter(true).placeholder("Message the agent…"));
         let sub = cx.subscribe_in(&prompt, window, |this, _, ev: &InputEvent, window, cx| {
             if matches!(ev, InputEvent::PressEnter { shift: false, .. }) {
@@ -139,6 +144,7 @@ impl ChatView {
         let list = ListState::new(0, ListAlignment::Top, px(600.));
         list.set_follow_mode(FollowMode::Tail);
         let mut view = Self {
+            key,
             agent: agent.into(),
             cwd,
             opened: None,
@@ -163,6 +169,49 @@ impl ChatView {
     /// the JSON-RPC agents need their handshake (which ends with the id) first.
     fn ready(&self) -> bool {
         self.backend.is_some() && (self.session_id.is_some() || self.agent == "claude")
+    }
+
+    fn pending(&self) -> Option<usize> {
+        self.items.iter().rposition(|i| matches!(i, Item::Permission { answer: None, .. }))
+    }
+
+    fn status(&self) -> Status {
+        if self.pending().is_some() {
+            Status::Waiting
+        } else if self.backend.is_none() {
+            Status::Exited
+        } else {
+            Status::Idle
+        }
+    }
+
+    /// Answers card `ix` with option `n`, or with its first deny option when `n` is None.
+    fn answer(&mut self, ix: usize, n: Option<usize>, cx: &mut Context<Self>) {
+        let Some(Item::Permission { id, options, answer: answer @ None, .. }) = self.items.get_mut(ix) else { return };
+        let Some(option) = n.map_or_else(|| options.iter().find(|o| o.kind.starts_with("reject")), |n| options.get(n)) else { return };
+        if let Some(b) = &self.backend {
+            b.send(ChatInput::AnswerPermission { id: id.clone(), option_id: option.id.clone() });
+        }
+        *answer = Some(option.label.clone());
+        self.list.remeasure_items(ix..ix + 1);
+        if self.pending().is_none() {
+            let key = self.key.clone();
+            crate::sessions::store(cx).update(cx, |s, cx| s.settle(&key, cx));
+        }
+        cx.notify();
+    }
+
+    fn on_key(&mut self, ev: &gpui::KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(ix) = self.pending() else { return };
+        let n = match ev.keystroke.key.as_str() {
+            "escape" => None,
+            k => match k.parse::<usize>() {
+                Ok(d @ 1..=9) => Some(d - 1),
+                _ => return,
+            },
+        };
+        self.answer(ix, n, cx);
+        cx.stop_propagation();
     }
 
     fn push(&mut self, item: Item) {
@@ -278,8 +327,21 @@ impl ChatView {
                     self.list.remeasure_items(ix..ix + 1);
                 }
             }
+            ChatEvent::PermissionAsked { id, title, detail, options } => {
+                let (key, who) = (self.key.clone(), format!("{} chat needs your attention", self.agent));
+                let what = title.clone();
+                crate::sessions::store(cx).update(cx, |s, cx| s.notify(key, false, who, what, cx));
+                self.push(Item::Permission { id, title, detail, options, answer: None });
+            }
             ChatEvent::Exited { error } => {
                 self.backend = None;
+                for item in &mut self.items {
+                    if let Item::Permission { answer: answer @ None, .. } = item {
+                        *answer = Some("not answered".into());
+                    }
+                }
+                let key = self.key.clone();
+                crate::sessions::store(cx).update(cx, |s, cx| s.settle(&key, cx));
                 self.push(Item::Note(error.map_or("The session ended.".into(), |e| format!("The session ended: {e}"))));
             }
             _ => {}
@@ -379,6 +441,36 @@ impl ChatView {
             }
             Item::Note(text) => row.text_color(c(theme::DANGER)).child(text.clone()).into_any_element(),
             Item::Tool { .. } => self.render_tool(ix, row, cx),
+            Item::Permission { title, answer: Some(answer), .. } => {
+                row.gap_2()
+                    .items_center()
+                    .text_color(c(theme::TEXT_DIM))
+                    .child(crate::pages::kit::icon("bell", 13., c(theme::TEXT_DIM)))
+                    .child(format!("{title} — {answer}"))
+                    .into_any_element()
+            }
+            Item::Permission { title, detail, options, answer: None, .. } => {
+                use crate::pages::kit::{button, card, Kind};
+                let buttons = options.iter().enumerate().map(|(n, o)| {
+                    let kind = if o.kind.starts_with("reject") { Kind::DangerOutline } else if n == 0 { Kind::Primary } else { Kind::Secondary };
+                    button(format!("perm:{ix}:{}", n + 1), format!("{}  {}", n + 1, o.label), kind)
+                        .on_click(cx.listener(move |this, _, _, cx| this.answer(ix, Some(n), cx)))
+                });
+                row.child(
+                    card()
+                        .w_full()
+                        .p_3()
+                        .gap_2()
+                        .border_color(c(theme::WARN))
+                        .child(div().text_color(c(theme::TEXT)).font_weight(gpui::FontWeight::SEMIBOLD).child(title.clone()))
+                        .when(!detail.is_empty(), |d| {
+                            d.child(div().font_family(theme::MONO_FONT).text_size(px(12.)).text_color(c(theme::TEXT_DIM)).child(detail.clone()))
+                        })
+                        .child(div().flex().flex_wrap().gap_2().children(buttons))
+                        .child(div().text_size(px(11.5)).text_color(c(theme::TEXT_FAINT)).child("Press a number to choose, Esc to deny")),
+                )
+                .into_any_element()
+            }
         }
     }
 
@@ -519,6 +611,7 @@ impl Render for ChatView {
             .flex()
             .flex_col()
             .text_size(px(13.))
+            .capture_key_down(cx.listener(Self::on_key))
             .child(list(self.list.clone(), cx.processor(|this, ix, _, cx| this.render_item(ix, cx))).flex_1().py_2())
             .child(
                 div()
@@ -537,11 +630,14 @@ impl Render for ChatView {
 
 impl PageView for ChatView {
     fn title(&self) -> SharedString {
-        format!("{} (chat)", self.agent).into()
+        match self.status() {
+            Status::Waiting => format!("{} (chat) · waiting", self.agent).into(),
+            _ => format!("{} (chat)", self.agent).into(),
+        }
     }
 
     fn dump(&self, out: &mut String, _: &App) {
-        let _ = writeln!(out, "  chat {} session {:?} ready {} opened {:?}", self.agent, self.session_id, self.ready(), self.opened);
+        let _ = writeln!(out, "  chat {} session {:?} ready {} status {} opened {:?}", self.agent, self.session_id, self.ready(), self.status().label(), self.opened);
         for item in &self.items {
             let _ = match item {
                 Item::User(t) => writeln!(out, "    you: {t:?}"),
@@ -549,6 +645,10 @@ impl PageView for ChatView {
                 Item::Thinking { text, open, .. } => writeln!(out, "    thinking ({}): {text:?}", if *open { "open" } else { "collapsed" }),
                 Item::Image { path, title, size } => writeln!(out, "    image: {} {title:?} {size:?}", path.display()),
                 Item::Note(t) => writeln!(out, "    note: {t:?}"),
+                Item::Permission { title, options, answer, .. } => {
+                    let labels: Vec<&str> = options.iter().map(|o| o.label.as_str()).collect();
+                    writeln!(out, "    permission {title:?} {labels:?} answer {answer:?}")
+                }
                 Item::Tool { calls, open, all, diff } => {
                     let state = |c: &Call| match c.ok {
                         None => "running",
@@ -628,7 +728,8 @@ fn open(app: &mut OrbitApp, agent: &'static str, window: &mut Window, cx: &mut C
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let cwd = app.workspace().map(|w| w.dir.clone()).or_else(|| std::env::current_dir().ok()).unwrap_or_default();
-    pages::open(app, format!("chat:{n}"), move |_: Host, window, cx| ChatView::new(agent, cwd, None, window, cx), window, cx);
+    let key = format!("chat:{n}");
+    pages::open(app, key.clone(), move |_: Host, window, cx| ChatView::new(key, agent, cwd, None, window, cx), window, cx);
 }
 
 pub fn init(cx: &mut App) {
