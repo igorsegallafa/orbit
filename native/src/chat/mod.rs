@@ -13,13 +13,17 @@ use gpui::{
     Task, Window,
 };
 use gpui_component::input::{InputEvent, Textarea, TextareaState};
+use gpui_component::text::{TextView, TextViewState};
 use orbit_core::chat::{ChatBackend, ChatEvent, ChatInput};
+use regex::Regex;
 use std::fmt::Write as _;
 use std::path::PathBuf;
+use std::sync::LazyLock;
 
 enum Item {
     User(String),
-    Assistant { id: String, text: String },
+    /// `md` renders `text` with `path:line` mentions turned into links.
+    Assistant { id: String, text: String, md: Entity<TextViewState>, _parsed: Subscription },
     Thinking { id: String, text: String, open: bool },
     /// Errors and the session's end.
     Note(String),
@@ -27,6 +31,9 @@ enum Item {
 
 pub struct ChatView {
     agent: String,
+    cwd: PathBuf,
+    /// The last link clicked, for the self-test dump.
+    opened: Option<String>,
     backend: Option<Box<dyn ChatBackend>>,
     session_id: Option<String>,
     items: Vec<Item>,
@@ -45,7 +52,7 @@ impl ChatView {
             }
         });
         let (tx, mut rx) = futures::channel::mpsc::unbounded();
-        let backend = orbit_core::chat::start(agent, &cwd, resume, move |e| {
+        let backend = orbit_core::chat::start(agent, &cwd.clone(), resume, move |e| {
             let _ = tx.unbounded_send(e);
         });
         let events = cx.spawn_in(window, async move |this, cx| {
@@ -67,6 +74,8 @@ impl ChatView {
         list.set_follow_mode(FollowMode::Tail);
         let mut view = Self {
             agent: agent.into(),
+            cwd,
+            opened: None,
             backend: None,
             session_id: None,
             items: vec![],
@@ -96,7 +105,7 @@ impl ChatView {
     }
 
     /// Appends to the current turn's reply (or thinking) with this id, or starts one.
-    fn append(&mut self, thinking: bool, id: String, delta: &str) {
+    fn append(&mut self, thinking: bool, id: String, delta: &str, cx: &mut Context<Self>) {
         let at = self.items.iter().rposition(|i| match i {
             Item::Assistant { id: x, .. } if !thinking => *x == id,
             Item::Thinking { id: x, .. } if thinking => *x == id,
@@ -105,14 +114,45 @@ impl ChatView {
         let turn_start = self.items.iter().rposition(|i| matches!(i, Item::User(_)));
         match at.filter(|&ix| turn_start.is_none_or(|t| ix > t)) {
             Some(ix) => {
-                if let Item::Assistant { text, .. } | Item::Thinking { text, .. } = &mut self.items[ix] {
-                    text.push_str(delta);
+                match &mut self.items[ix] {
+                    Item::Assistant { text, md, .. } => {
+                        text.push_str(delta);
+                        let linked = linkify(text);
+                        md.update(cx, |s, cx| s.set_text(&linked, cx));
+                    }
+                    Item::Thinking { text, .. } => text.push_str(delta),
+                    _ => {}
                 }
-                self.list.splice(ix..ix + 1, 1);
+                self.list.remeasure_items(ix..ix + 1);
             }
             None if thinking => self.push(Item::Thinking { id, text: delta.into(), open: false }),
-            None => self.push(Item::Assistant { id, text: delta.into() }),
+            None => {
+                let md = cx.new(|cx| TextViewState::markdown(&linkify(delta), cx).selectable(true));
+                // The parse finishes in the background: only then is the reply's height known.
+                let ix = self.items.len();
+                let parsed = cx.observe(&md, move |this, _, cx| {
+                    this.list.remeasure_items(ix..ix + 1);
+                    cx.notify();
+                });
+                self.push(Item::Assistant { id, text: delta.into(), md, _parsed: parsed });
+            }
         }
+    }
+
+    fn open_link(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::editor::markdown::{resolve_link, Link};
+        // A stand-in file so relative links resolve against the session folder.
+        match resolve_link(url, &self.cwd.join("_"), None) {
+            Link::External(url) => {
+                if !crate::probe::ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
+                    cx.open_url(&url);
+                }
+            }
+            Link::Local { path, line } if path.is_file() => crate::run::open_location(path, line.unwrap_or(1), 1, cx),
+            Link::Local { path, .. } if path.is_dir() => crate::file_ops::reveal_in_tree(path, window, cx),
+            _ => {}
+        }
+        self.opened = Some(url.into());
     }
 
     fn on_event(&mut self, event: ChatEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -124,8 +164,8 @@ impl ChatView {
                     self.prompt.update(cx, |p, cx| p.focus(window, cx));
                 }
             }
-            ChatEvent::TextDelta { message_id, text } => self.append(false, message_id, &text),
-            ChatEvent::ThinkingDelta { message_id, text } => self.append(true, message_id, &text),
+            ChatEvent::TextDelta { message_id, text } => self.append(false, message_id, &text, cx),
+            ChatEvent::ThinkingDelta { message_id, text } => self.append(true, message_id, &text, cx),
             ChatEvent::TurnEnded { error: Some(e), .. } => self.push(Item::Note(e)),
             ChatEvent::Exited { error } => {
                 self.backend = None;
@@ -165,7 +205,17 @@ impl ChatView {
                         .child(text.clone()),
                 )
                 .into_any_element(),
-            Item::Assistant { text, .. } => row.text_color(c(theme::TEXT)).child(div().w_full().child(text.clone())).into_any_element(),
+            Item::Assistant { md, .. } => {
+                let this = cx.weak_entity();
+                let view = TextView::new(md)
+                    .style(crate::editor::markdown::preview_style())
+                    .selectable(true)
+                    .inline_code_style(gpui::StyleRefinement::default().bg(c(theme::PANEL_RAISED)))
+                    .on_link_click(move |url, _, window, cx| {
+                        let _ = this.update(cx, |v, cx| v.open_link(url, window, cx));
+                    });
+                row.relative().text_color(c(theme::TEXT)).child(div().w_full().child(view)).child(probe(format!("reply:{ix}"))).into_any_element()
+            }
             Item::Thinking { text, open, .. } => {
                 let label = if *open { format!("Thinking\n{text}") } else { "Thinking…".into() };
                 row.id(("thinking", ix))
@@ -179,7 +229,7 @@ impl ChatView {
                         if let Some(Item::Thinking { open, .. }) = this.items.get_mut(ix) {
                             *open = !*open;
                         }
-                        this.list.splice(ix..ix + 1, 1);
+                        this.list.remeasure_items(ix..ix + 1);
                         cx.notify();
                     }))
                     .into_any_element()
@@ -224,7 +274,7 @@ impl PageView for ChatView {
     }
 
     fn dump(&self, out: &mut String, _: &App) {
-        let _ = writeln!(out, "  chat {} session {:?} ready {}", self.agent, self.session_id, self.ready());
+        let _ = writeln!(out, "  chat {} session {:?} ready {} opened {:?}", self.agent, self.session_id, self.ready(), self.opened);
         for item in &self.items {
             let _ = match item {
                 Item::User(t) => writeln!(out, "    you: {t:?}"),
@@ -234,6 +284,39 @@ impl PageView for ChatView {
             };
         }
     }
+}
+
+/// `src/a.rs:42` (bare or as inline code, outside fenced blocks) becomes a link to that line.
+fn linkify(text: &str) -> String {
+    static LOC: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(^|\s)(/?(?:[\w.-]+/)*[\w.-]+\.[A-Za-z]\w*):(\d+)(:\d+)?\b").expect("valid regex"));
+    static WHOLE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^(/?(?:[\w.-]+/)*[\w.-]+\.[A-Za-z]\w*):(\d+)(:\d+)?$").expect("valid regex"));
+    let mut out = String::with_capacity(text.len() + 32);
+    let mut fenced = false;
+    for line in text.split_inclusive('\n') {
+        let fence = line.trim_start().starts_with("```") || line.trim_start().starts_with("~~~");
+        if fenced || fence {
+            fenced ^= fence;
+            out.push_str(line);
+            continue;
+        }
+        // Odd pieces are inline code spans; the last one is unclosed when the count is even.
+        let pieces: Vec<&str> = line.split('`').collect();
+        for (i, piece) in pieces.iter().enumerate() {
+            let closed = i + 1 < pieces.len();
+            match (i % 2 == 1, closed.then(|| WHOLE.captures(piece)).flatten()) {
+                (true, Some(m)) => {
+                    let _ = write!(out, "[`{piece}`]({}#L{})", &m[1], &m[2]);
+                }
+                (true, None) => {
+                    let _ = write!(out, "`{piece}{}", if closed { "`" } else { "" });
+                }
+                (false, _) => out.push_str(&LOC.replace_all(piece, "$1[$2:$3$4]($2#L$3)")),
+            }
+        }
+    }
+    out
 }
 
 /// Opens a new chat tab on the selected workspace's folder (or Orbit's own).
@@ -247,4 +330,18 @@ fn open(app: &mut OrbitApp, agent: &'static str, window: &mut Window, cx: &mut C
 pub fn init(cx: &mut App) {
     // shortcut: a palette entry for testing, until the New Session menu lists chat sessions.
     commands::register(cx, Command::new("chat.newClaude", "New Claude Chat").run(|a, w, cx| open(a, "claude", w, cx)));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::linkify;
+
+    #[test]
+    fn links_file_lines_outside_code() {
+        assert_eq!(linkify("see src/a.rs:42 now"), "see [src/a.rs:42](src/a.rs#L42) now");
+        assert_eq!(linkify("in `src/a.rs:4:2`."), "in [`src/a.rs:4:2`](src/a.rs#L4).");
+        assert_eq!(linkify("`let x = a.rs:1` and `b`"), "`let x = a.rs:1` and `b`");
+        assert_eq!(linkify("```\nsrc/a.rs:1\n```\nb.rs:2"), "```\nsrc/a.rs:1\n```\n[b.rs:2](b.rs#L2)");
+        assert_eq!(linkify("http://host.com:80 and [x](a.rs:3) and `a.rs:5"), "http://host.com:80 and [x](a.rs:3) and `a.rs:5");
+    }
 }

@@ -10,6 +10,26 @@ import json, os, re, subprocess, sys, time
 args = sys.argv[1:]
 
 
+# Asked for "markdown", the chat reply shows every block the renderer handles.
+MARKDOWN = """## Markdown reply
+
+The entry point is native/src/main.rs:12 and the view is `native/src/chat/mod.rs:1`.
+
+- a **bold** item
+- a [link](https://example.com)
+
+| Agent | Mode |
+|-------|------|
+| claude | stream-json |
+
+```rust
+fn main() {
+    println!("hi");
+}
+```
+Done."""
+
+
 def chat():
     # Orbit's chat mode (`--input-format stream-json`): one user message per stdin line,
     # each answered with a streamed turn like the real claude's (thinking, text deltas, result).
@@ -23,9 +43,10 @@ def chat():
         out({"type": "system", "subtype": "init", "session_id": sid, "slash_commands": ["compact"]})
         out({"type": "stream_event", "event": {"type": "message_start", "message": {"id": f"msg-{n}"}}})
         out({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "thinking_delta", "thinking": "The user said hello."}}})
-        for word in f"Stub reply to: {text}. This line streams in word by word.".split(" "):
-            out({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": word + " "}}})
-            time.sleep(0.05)
+        reply = MARKDOWN if "markdown" in text else f"Stub reply to: {text}. This line streams in word by word."
+        for word in re.split(r"(?<= )", reply):
+            out({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": word}}})
+            time.sleep(0.02)
         out({"type": "result", "is_error": False, "result": "", "total_cost_usd": 0.001, "usage": {"input_tokens": 10, "output_tokens": 12}})
 
 
