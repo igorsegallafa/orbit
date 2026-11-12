@@ -659,7 +659,7 @@ impl TerminalView {
             .id("shown-reopen")
             .absolute()
             .top(px(6.))
-            .right(px(if self.meta.cmd.as_deref().is_some_and(pty::is_claude) { 90. } else { 16. }))
+            .right(px(if crate::sessions::has_chat(&self.meta.label) { 90. } else { 16. }))
             .px_2()
             .py(px(2.))
             .rounded(px(4.))
@@ -1131,7 +1131,7 @@ impl EntityInputHandler for TerminalView {
 impl TerminalView {
     fn mode_chip(&self) -> Option<gpui::Stateful<gpui::Div>> {
         let label = if self.chat.is_some() { "Terminal" } else { "Chat" };
-        self.meta.cmd.as_deref().is_some_and(pty::is_claude).then(|| {
+        crate::sessions::has_chat(&self.meta.label).then(|| {
             div()
                 .id("mode-toggle")
                 .relative()

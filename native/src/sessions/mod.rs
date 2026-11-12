@@ -72,7 +72,7 @@ pub struct SessionMeta {
     pub args: Vec<String>,
     #[serde(default)]
     pub repo: Option<String>,
-    /// Claude conversation id (`--session-id`), so a restart can `--resume` it.
+    /// The agent's conversation id (claude's `--session-id`, or the one chat mode or a lookup found), to resume it.
     #[serde(default)]
     pub agent_session_id: Option<String>,
     /// A folder to start in instead of the repo or scope folder.
@@ -606,7 +606,7 @@ fn build(
     let view = match meta.mode {
         SessionMode::Terminal => cx.new(|cx| TerminalView::new(meta.clone(), Some(spec), replay, input, cx)),
         SessionMode::Chat => {
-            let resume = meta.agent_session_id.clone().filter(|id| pty::claude_session_exists(&spec.cwd, id));
+            let resume = meta.agent_session_id.clone().filter(|id| meta.label != "claude" || pty::claude_session_exists(&spec.cwd, id));
             let (key, scope, agent) = (meta.id.clone(), meta.workspace.clone(), meta.label.clone());
             let chat = cx.new(|cx| crate::chat::ChatView::new(key, scope, &agent, spec.cwd, resume, window, cx));
             cx.new(|cx| {
@@ -638,11 +638,25 @@ fn claude_args(dir: Option<&std::path::Path>, id: &str) -> Vec<String> {
     vec![if exists { "--resume" } else { "--session-id" }.to_string(), id.to_string()]
 }
 
-/// Switches the active claude session between terminal and chat; a running turn is interrupted only if the user agrees.
+fn resume_args(agent: &str, dir: Option<&std::path::Path>, id: &str) -> Vec<String> {
+    match agent {
+        "codex" => vec!["resume".into(), id.into()],
+        "opencode" => vec!["--session".into(), id.into()],
+        "omp" => vec!["--resume".into(), id.into()],
+        _ => claude_args(dir, id),
+    }
+}
+
+/// Keyed by `SessionMeta.label`: `cmd` may be a path.
+pub fn has_chat(label: &str) -> bool {
+    matches!(label, "claude" | "codex" | "opencode" | "omp")
+}
+
+/// Switches the active agent session between terminal and chat; a running turn is interrupted only if the user agrees.
 fn toggle_mode(app: &mut OrbitApp, window: &mut Window, cx: &mut Context<OrbitApp>) {
     let Some(view) = app.active_terminal() else { return };
-    if !view.read(cx).meta.cmd.as_deref().is_some_and(pty::is_claude) {
-        return app.toast(crate::toast::ToastKind::Info, "Only claude sessions switch to chat for now", None, cx);
+    if !has_chat(&view.read(cx).meta.label) {
+        return app.toast(crate::toast::ToastKind::Info, "Only agent sessions switch to chat", None, cx);
     }
     if !view.read(cx).busy(cx) {
         return switch_mode(view, window, cx);
@@ -673,19 +687,27 @@ fn switch_mode(view: Entity<TerminalView>, window: &mut Window, cx: &mut Context
             }
             cx.background_executor().timer(std::time::Duration::from_millis(50)).await;
         }
+        let key = view.read_with(cx, |v, _| v.meta.id.clone());
+        let Some(mut meta) = cx.update(|_, cx| store(cx).read(cx).open.iter().find(|(m, _)| m.id == key).map(|(m, _)| m.clone())).ok().flatten() else { return };
+        let dir = pty::session_dir(&meta.workspace, meta.repo.as_deref(), meta.cwd.as_deref()).ok();
+        // Only claude's id is fixed at launch; the others are found in the agent's own store.
+        if stopped && meta.agent_session_id.is_none() {
+            let (agent, dir, since) = (meta.label.clone(), dir.clone(), launched_ms(&meta.id).unwrap_or(0));
+            meta.agent_session_id = cx.background_spawn(async move { pty::agent_session_id(&agent, dir.as_deref()?, since) }).await;
+        }
         let _ = app.update_in(cx, |a, window, cx| {
             if !stopped {
                 return a.toast_error("The agent did not stop; the mode was not switched".to_string(), cx);
             }
             let Some(ix) = a.tabs.iter().position(|t| matches!(&t.kind, TabKind::Terminal(v) if *v == view)) else { return };
-            let key = view.read(cx).meta.id.clone();
-            let Some(mut meta) = store(cx).read(cx).open.iter().find(|(m, _)| m.id == key).map(|(m, _)| m.clone()) else { return };
+            if meta.agent_session_id.is_none() {
+                a.toast(crate::toast::ToastKind::Info, format!("No {} conversation found: starting a fresh one", meta.label), None, cx);
+            }
             meta.mode = match meta.mode {
                 SessionMode::Terminal => SessionMode::Chat,
                 SessionMode::Chat => SessionMode::Terminal,
             };
-            let dir = pty::session_dir(&meta.workspace, meta.repo.as_deref(), meta.cwd.as_deref()).ok();
-            let args = meta.agent_session_id.as_deref().map(|id| claude_args(dir.as_deref(), id)).unwrap_or_default();
+            let args = meta.agent_session_id.as_deref().map(|id| resume_args(&meta.label, dir.as_deref(), id)).unwrap_or_default();
             if let Some(new) = build(a, meta, args, None, None, window, cx) {
                 a.tabs[ix].kind = TabKind::Terminal(new);
                 a.activate(ix, window, cx);
@@ -772,9 +794,9 @@ pub fn closed(view: &Entity<TerminalView>, cx: &mut App) {
         }
         Some("opencode") => {
             // The key carries the launch time: the session opencode made after it.
-            let since = meta.id.strip_prefix("tm:").and_then(|r| r.split('-').next()).and_then(|ms| ms.parse().ok()).unwrap_or(0);
-            let (ws, repo) = (meta.workspace.clone(), meta.repo.clone());
-            let task = cx.background_spawn(async move { pty::opencode_session_id(&ws, repo.as_deref(), since) });
+            let since = launched_ms(&meta.id).unwrap_or(0);
+            let dir = pty::session_dir(&meta.workspace, meta.repo.as_deref(), meta.cwd.as_deref());
+            let task = cx.background_spawn(async move { pty::opencode_session_id(&dir?, since) });
             cx.spawn(async move |cx| {
                 if let Ok(Some(id)) = task.await {
                     store.update(cx, |s, cx| s.add_recent(recent(id), cx));

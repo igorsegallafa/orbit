@@ -135,6 +135,14 @@ scratch `HOME`, `--session claude --do "wait:2500;click:mode-toggle;wait:1500;ch
 shows the chat resuming the terminal's id (the stub `claude` touches a transcript for `--session-id`).
 Note `until:<text>` also matches the step text echoed into the dump, so prefer waits for text that is
 not in the `--do` string.
+codex, opencode and omp toggle too (resume with `codex resume <id>`, `opencode --session <id>`,
+`omp --resume <id>`). Their id is not fixed at launch: the first toggle of a terminal tab looks up the
+newest conversation created in the session folder since the tab opened (`pty::agent_session_id`), and
+says so in a toast when there is none and a fresh one starts. `scripts/stub-agent/codex` writes a rollout
+under `$HOME/.codex/sessions` (not with `ORBIT_STUB_NO_SESSION=1`) and its `app-server` mode answers the
+chat backend with a canned history turn naming the thread id: with a scratch `HOME`,
+`--session codex --do "wait:2500;click:mode-toggle;wait:2000;chat:hello;wait:2000;shot:chat;click:mode-toggle;wait:2500;dump:back"`
+shows the resumed thread in chat, then `resume <id>` in the terminal's argv.
 
 `--do` runs shell steps last, separated by `;` (`src/steps.rs`). Mouse steps target elements that
 render a `probe("name")` (tabs `tab:<ix>`, menu items `menu:<label>`, dialog buttons
