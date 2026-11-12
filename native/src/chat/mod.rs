@@ -21,6 +21,7 @@ use regex::Regex;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::LazyLock;
+use std::time::Instant;
 
 enum Item {
     User(String),
@@ -29,8 +30,12 @@ enum Item {
     Thinking { id: String, text: String, open: bool },
     /// `size` is the drawn size, at most `MAX_IMAGE_H` tall.
     Image { path: PathBuf, title: String, size: Option<(f32, f32)> },
-    /// Errors and the session's end.
+    /// Errors.
     Note(String),
+    /// The session ended, with its error if any; the last one offers Restart.
+    Exited(String),
+    /// A finished turn's duration, tokens and cost.
+    Footer(String),
     /// One tool call, or a run of consecutive read-only ones drawn as one row.
     Tool { calls: Vec<Call>, open: bool, all: bool, diff: Option<(Entity<DiffState>, usize)> },
     /// A permission request; `answer` is the picked option's label once answered.
@@ -99,6 +104,8 @@ fn is_image(path: &std::path::Path) -> bool {
 pub struct ChatView {
     /// The tab's key, which is also its inbox key.
     key: String,
+    /// The sidebar scope the chat was opened in.
+    scope: String,
     agent: String,
     cwd: PathBuf,
     /// The last link or image clicked, for the self-test dump.
@@ -110,23 +117,49 @@ pub struct ChatView {
     prompt: Entity<TextareaState>,
     /// Images pasted or dropped into the prompt, sent with the next message.
     attached: Vec<PathBuf>,
+    /// When the running turn started; None between turns.
+    turn: Option<Instant>,
     _events: Task<()>,
     _prompt: Subscription,
 }
 
 impl ChatView {
-    pub fn new(key: String, agent: &str, cwd: PathBuf, resume: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(key: String, scope: String, agent: &str, cwd: PathBuf, resume: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let prompt = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 8).submit_on_enter(true).placeholder("Message the agent…"));
         let sub = cx.subscribe_in(&prompt, window, |this, _, ev: &InputEvent, window, cx| {
             if matches!(ev, InputEvent::PressEnter { shift: false, .. }) {
                 this.send(window, cx);
             }
         });
+        let list = ListState::new(0, ListAlignment::Top, px(600.));
+        list.set_follow_mode(FollowMode::Tail);
+        let mut view = Self {
+            key,
+            scope,
+            agent: agent.into(),
+            cwd,
+            opened: None,
+            backend: None,
+            session_id: None,
+            items: vec![],
+            list,
+            prompt,
+            attached: vec![],
+            turn: None,
+            _events: Task::ready(()),
+            _prompt: sub,
+        };
+        view.start(resume, window, cx);
+        view.prompt.update(cx, |p, cx| p.focus(window, cx));
+        view
+    }
+
+    fn start(&mut self, resume: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         let (tx, mut rx) = futures::channel::mpsc::unbounded();
-        let backend = orbit_core::chat::start(agent, &cwd.clone(), resume, move |e| {
+        let backend = orbit_core::chat::start(&self.agent, &self.cwd, resume, move |e| {
             let _ = tx.unbounded_send(e);
         });
-        let events = cx.spawn_in(window, async move |this, cx| {
+        self._events = cx.spawn_in(window, async move |this, cx| {
             while let Some(first) = rx.next().await {
                 let mut batch = vec![first];
                 while let Ok(e) = rx.try_recv() {
@@ -141,28 +174,24 @@ impl ChatView {
                 }
             }
         });
-        let list = ListState::new(0, ListAlignment::Top, px(600.));
-        list.set_follow_mode(FollowMode::Tail);
-        let mut view = Self {
-            key,
-            agent: agent.into(),
-            cwd,
-            opened: None,
-            backend: None,
-            session_id: None,
-            items: vec![],
-            list,
-            prompt,
-            attached: vec![],
-            _events: events,
-            _prompt: sub,
-        };
         match backend {
-            Ok(b) => view.backend = Some(b),
-            Err(e) => view.push(Item::Note(e)),
+            Ok(b) => self.backend = Some(b),
+            Err(e) => self.push(Item::Exited(e)),
         }
-        view.prompt.update(cx, |p, cx| p.focus(window, cx));
-        view
+    }
+
+    fn restart(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.backend.is_none() {
+            self.start(self.session_id.clone(), window, cx);
+            cx.notify();
+        }
+    }
+
+    fn interrupt(&mut self, cx: &mut Context<Self>) {
+        if let (Some(b), Some(_)) = (&self.backend, self.turn) {
+            b.send(ChatInput::Interrupt);
+            cx.notify();
+        }
     }
 
     /// Claude takes a prompt as soon as it runs and reports its id only after the first one;
@@ -180,6 +209,8 @@ impl ChatView {
             Status::Waiting
         } else if self.backend.is_none() {
             Status::Exited
+        } else if self.turn.is_some() {
+            Status::Busy
         } else {
             Status::Idle
         }
@@ -201,8 +232,14 @@ impl ChatView {
         cx.notify();
     }
 
-    fn on_key(&mut self, ev: &gpui::KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(ix) = self.pending() else { return };
+    fn on_key(&mut self, ev: &gpui::KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ix) = self.pending() else {
+            if ev.keystroke.key == "escape" && self.turn.is_some() && gpui::Focusable::focus_handle(self.prompt.read(cx), cx).is_focused(window) {
+                self.interrupt(cx);
+                cx.stop_propagation();
+            }
+            return;
+        };
         let n = match ev.keystroke.key.as_str() {
             "escape" => None,
             k => match k.parse::<usize>() {
@@ -289,7 +326,22 @@ impl ChatView {
             }
             ChatEvent::TextDelta { message_id, text } => self.append(false, message_id, &text, cx),
             ChatEvent::ThinkingDelta { message_id, text } => self.append(true, message_id, &text, cx),
-            ChatEvent::TurnEnded { error: Some(e), .. } => self.push(Item::Note(e)),
+            ChatEvent::TurnEnded { cost_usd, tokens, error } => {
+                if let Some(e) = error {
+                    self.push(Item::Note(e));
+                }
+                let took = self.turn.take().map(|t| t.elapsed());
+                self.push(Item::Footer(footer(took, tokens, cost_usd)));
+                let (key, who) = (self.key.clone(), format!("{} chat finished", self.agent));
+                let what = crate::sessions::scope_label(&self.scope);
+                crate::sessions::store(cx).update(cx, |s, cx| s.notify(key.clone(), true, who, what, cx));
+                // Nothing to report when the user is looking at the chat.
+                cx.defer(move |cx| {
+                    if crate::sessions::focus_of(&key, cx) == (true, true) {
+                        crate::sessions::store(cx).update(cx, |s, cx| s.settle(&key, cx));
+                    }
+                });
+            }
             ChatEvent::Image { path, title } => {
                 let size = image_size(&path);
                 self.push(Item::Image { path, title, size });
@@ -335,6 +387,7 @@ impl ChatView {
             }
             ChatEvent::Exited { error } => {
                 self.backend = None;
+                self.turn = None;
                 for item in &mut self.items {
                     if let Item::Permission { answer: answer @ None, .. } = item {
                         *answer = Some("not answered".into());
@@ -342,7 +395,7 @@ impl ChatView {
                 }
                 let key = self.key.clone();
                 crate::sessions::store(cx).update(cx, |s, cx| s.settle(&key, cx));
-                self.push(Item::Note(error.map_or("The session ended.".into(), |e| format!("The session ended: {e}"))));
+                self.push(Item::Exited(error.map_or("The session ended.".into(), |e| format!("The session ended: {e}"))));
             }
             _ => {}
         }
@@ -350,13 +403,14 @@ impl ChatView {
 
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.prompt.read(cx).value().trim().to_string();
-        if (text.is_empty() && self.attached.is_empty()) || !self.ready() {
+        if (text.is_empty() && self.attached.is_empty()) || !self.ready() || self.turn.is_some() {
             return;
         }
         let images = std::mem::take(&mut self.attached);
         if let Some(b) = &self.backend {
             b.send(ChatInput::Prompt { text: text.clone(), images: images.clone() });
         }
+        self.turn = Some(Instant::now());
         self.push(Item::User(text));
         for path in images {
             let size = image_size(&path);
@@ -440,6 +494,19 @@ impl ChatView {
                     .into_any_element()
             }
             Item::Note(text) => row.text_color(c(theme::DANGER)).child(text.clone()).into_any_element(),
+            Item::Footer(text) => row.text_size(px(11.5)).text_color(c(theme::TEXT_FAINT)).child(text.clone()).into_any_element(),
+            Item::Exited(text) => {
+                let last = self.backend.is_none() && !self.items[ix + 1..].iter().any(|i| matches!(i, Item::Exited(_)));
+                row.flex_col()
+                    .gap_2()
+                    .child(div().text_color(c(theme::DANGER)).child(text.clone()))
+                    .when(last, |d| {
+                        let restart = crate::pages::kit::mini("chat-restart", "Restart", crate::pages::kit::Kind::Secondary)
+                            .on_click(cx.listener(|this, _, window, cx| this.restart(window, cx)));
+                        d.child(div().flex().child(restart))
+                    })
+                    .into_any_element()
+            }
             Item::Tool { .. } => self.render_tool(ix, row, cx),
             Item::Permission { title, answer: Some(answer), .. } => {
                 row.gap_2()
@@ -604,7 +671,13 @@ impl Drop for ChatView {
 
 impl Render for ChatView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        use crate::pages::kit::{button, Kind};
         let ready = self.ready();
+        let action = if self.turn.is_some() {
+            button("chat-stop", "Stop", Kind::DangerOutline).on_click(cx.listener(|this, _, _, cx| this.interrupt(cx)))
+        } else {
+            button("chat-send", "Send", Kind::Primary).when(!ready, |b| b.opacity(0.5)).on_click(cx.listener(|this, _, window, cx| this.send(window, cx)))
+        };
         let this = cx.weak_entity();
         div()
             .size_full()
@@ -621,9 +694,16 @@ impl Render for ChatView {
                     .border_color(c(theme::BORDER))
                     .on_drop(cx.listener(|this, paths: &gpui::ExternalPaths, _, cx| this.attach(paths.paths().to_vec(), cx)))
                     .when(!self.attached.is_empty(), |d| d.child(self.attachments(cx)))
-                    .child(div().relative().child(Textarea::new(&self.prompt).disabled(!ready).on_paste(move |item, _, cx| {
-                        paste_images(&this, item, cx)
-                    })).child(probe("chat-prompt"))),
+                    .child(
+                        div()
+                            .flex()
+                            .items_end()
+                            .gap_2()
+                            .child(div().flex_1().relative().child(Textarea::new(&self.prompt).disabled(!ready).on_paste(move |item, _, cx| {
+                                paste_images(&this, item, cx)
+                            })).child(probe("chat-prompt")))
+                            .child(action),
+                    ),
             )
     }
 }
@@ -632,8 +712,13 @@ impl PageView for ChatView {
     fn title(&self) -> SharedString {
         match self.status() {
             Status::Waiting => format!("{} (chat) · waiting", self.agent).into(),
+            Status::Busy => format!("{} (chat) · working", self.agent).into(),
             _ => format!("{} (chat)", self.agent).into(),
         }
+    }
+
+    fn sidebar(&self) -> Option<(String, Status)> {
+        Some((self.scope.clone(), self.status()))
     }
 
     fn dump(&self, out: &mut String, _: &App) {
@@ -645,6 +730,8 @@ impl PageView for ChatView {
                 Item::Thinking { text, open, .. } => writeln!(out, "    thinking ({}): {text:?}", if *open { "open" } else { "collapsed" }),
                 Item::Image { path, title, size } => writeln!(out, "    image: {} {title:?} {size:?}", path.display()),
                 Item::Note(t) => writeln!(out, "    note: {t:?}"),
+                Item::Exited(t) => writeln!(out, "    exited: {t:?}"),
+                Item::Footer(t) => writeln!(out, "    footer: {t:?}"),
                 Item::Permission { title, options, answer, .. } => {
                     let labels: Vec<&str> = options.iter().map(|o| o.label.as_str()).collect();
                     writeln!(out, "    permission {title:?} {labels:?} answer {answer:?}")
@@ -723,13 +810,32 @@ fn linkify(text: &str) -> String {
     out
 }
 
+/// "12.3s · 1,234 tokens · $0.0120", leaving out what the agent did not report.
+fn footer(took: Option<std::time::Duration>, tokens: Option<u64>, cost: Option<f64>) -> String {
+    let mut parts = vec![];
+    if let Some(d) = took {
+        let s = d.as_secs_f64();
+        parts.push(if s < 60. { format!("{s:.1}s") } else { format!("{}m {:02}s", s as u64 / 60, s as u64 % 60) });
+    }
+    if let Some(t) = tokens {
+        let digits = t.to_string();
+        let grouped: Vec<&str> = digits.as_bytes().rchunks(3).rev().map(|c| std::str::from_utf8(c).unwrap_or_default()).collect();
+        parts.push(format!("{} tokens", grouped.join(",")));
+    }
+    if let Some(c) = cost {
+        parts.push(format!("${c:.4}"));
+    }
+    parts.join(" · ")
+}
+
 /// Opens a new chat tab on the selected workspace's folder (or Orbit's own).
 fn open(app: &mut OrbitApp, agent: &'static str, window: &mut Window, cx: &mut Context<OrbitApp>) {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let cwd = app.workspace().map(|w| w.dir.clone()).or_else(|| std::env::current_dir().ok()).unwrap_or_default();
     let key = format!("chat:{n}");
-    pages::open(app, key.clone(), move |_: Host, window, cx| ChatView::new(key, agent, cwd, None, window, cx), window, cx);
+    let scope = crate::sessions::scope(app);
+    pages::open(app, key.clone(), move |_: Host, window, cx| ChatView::new(key, scope, agent, cwd, None, window, cx), window, cx);
 }
 
 pub fn init(cx: &mut App) {
@@ -739,7 +845,7 @@ pub fn init(cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::{file_patch, group_label, linkify, Call};
+    use super::{file_patch, footer, group_label, linkify, Call};
     use orbit_core::chat::FileDiff;
 
     #[test]
@@ -750,6 +856,14 @@ mod tests {
         let new = FileDiff { path: "n.rs".into(), old_text: String::new(), new_text: "x".into() };
         let new = &gpui_component::diff::DiffFile::parse(&file_patch(&new)).unwrap()[0];
         assert_eq!((new.additions(), new.deletions()), (1, 0));
+    }
+
+    #[test]
+    fn footer_leaves_out_unknowns() {
+        let d = std::time::Duration::from_millis(12_340);
+        assert_eq!(footer(Some(d), Some(1_234_567), Some(0.012)), "12.3s · 1,234,567 tokens · $0.0120");
+        assert_eq!(footer(Some(std::time::Duration::from_secs(125)), Some(42), None), "2m 05s · 42 tokens");
+        assert_eq!(footer(None, None, None), "");
     }
 
     #[test]

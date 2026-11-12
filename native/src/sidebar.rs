@@ -187,6 +187,22 @@ impl OrbitApp {
                             }
                         })
                     }
+                    TabKind::Tool(t) => {
+                        let t = t.read(cx);
+                        let (_, status) = t.sidebar(cx).filter(|(s, _)| s == scope)?;
+                        let label = t.title(cx);
+                        Some(SessionRow {
+                            unread: store.unread(&t.key),
+                            tab_key: key,
+                            session: None,
+                            label: label.clone(),
+                            status: Some(status),
+                            agent: false,
+                            minimized: false,
+                            active: active == Some(ix),
+                            tooltip: label,
+                        })
+                    }
                     _ => None,
                 }
             })
@@ -617,6 +633,10 @@ impl OrbitApp {
             .sessions()
             .map(|(m, _)| m.workspace.clone())
             .chain(store.recent.iter().map(|r| r.workspace.clone()))
+            .chain(self.tabs.iter().filter_map(|t| match &t.kind {
+                TabKind::Tool(p) => p.read(cx).sidebar(cx).map(|(scope, _)| scope),
+                _ => None,
+            }))
             .filter(|s| s.starts_with("dir:"))
             .collect();
         scopes.sort_by_key(|s| sessions::scope_label(s).to_lowercase());

@@ -5,7 +5,7 @@
 # - the PRD writer: writes the markdown PRD and scripts/ralph/prd.json;
 # - a Ralph iteration (stream-json): ticks the next story, commits.
 # ORBIT_STUB_LOG, when set, records each call's kind and argv.
-import json, os, re, subprocess, sys, time, urllib.request
+import json, os, queue, re, subprocess, sys, threading, time, urllib.request
 
 args = sys.argv[1:]
 
@@ -72,10 +72,16 @@ def chat():
     # each answered with a streamed turn like the real claude's (thinking, text deltas, result).
     out = lambda v: print(json.dumps(v), flush=True)
     sid = args[args.index("--resume") + 1] if "--resume" in args else "stub-chat-session"
-    for n, line in enumerate(sys.stdin, 1):
+    # A reader thread, so an interrupt control_request lands while a turn streams.
+    lines = queue.Queue()
+    threading.Thread(target=lambda: [lines.put(l) for l in sys.stdin] + [lines.put(None)], daemon=True).start()
+    interrupted = lambda: any(json.loads(l).get("type") == "control_request" for l in drain(lines))
+    n = 0
+    while (line := lines.get()) is not None:
         msg = json.loads(line)
         if msg.get("type") != "user":
             continue
+        n += 1
         text = " ".join(c.get("text", "") for c in msg["message"]["content"] if c.get("type") == "text")
         out({"type": "system", "subtype": "init", "session_id": sid, "slash_commands": ["compact"]})
         out({"type": "stream_event", "event": {"type": "message_start", "message": {"id": f"msg-{n}"}}})
@@ -88,10 +94,32 @@ def chat():
         if "tools" in text:
             tools(out)
             reply = "Tools done."
-        for word in re.split(r"(?<= )", reply):
+        if "crash" in text:
+            print("stub: crashed on purpose", file=sys.stderr, flush=True)
+            sys.exit(3)
+        # "slow" streams for a minute, until Orbit interrupts it (as claude: an error result, still alive).
+        delay = 0.5 if "slow" in text else 0.02
+        words = re.split(r"(?<= )", reply * (60 if "slow" in text else 1))
+        stopped = False
+        for word in words:
             out({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": word}}})
-            time.sleep(0.02)
-        out({"type": "result", "is_error": False, "result": "", "total_cost_usd": 0.001, "usage": {"input_tokens": 10, "output_tokens": 12}})
+            time.sleep(delay)
+            if interrupted():
+                stopped = True
+                break
+        if stopped:
+            out({"type": "result", "subtype": "error_during_execution", "is_error": True, "result": "", "usage": {"input_tokens": 10, "output_tokens": 3}})
+        else:
+            out({"type": "result", "is_error": False, "result": "", "total_cost_usd": 0.001, "usage": {"input_tokens": 10, "output_tokens": 12}})
+
+
+def drain(q):
+    out = []
+    while not q.empty():
+        line = q.get()
+        if line is not None:
+            out.append(line)
+    return out
 
 
 if "--input-format" in args:

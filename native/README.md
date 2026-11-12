@@ -115,6 +115,10 @@ output's "Show all" link is `tool-all:<ix>`.
 A prompt containing "permission" posts a `PermissionRequest` for `rm -rf build` (as Orbit's
 `permission` MCP tool does), waits for the answer and replies with it. The card's buttons are
 `perm:<ix>:<n>`; `key:1` picks the first option and `key:escape` denies.
+A prompt containing "slow" streams for a minute until interrupted (Stop is `chat-stop`, Send
+`chat-send`, or `key:escape` in the prompt); one containing "crash" exits with an error, and
+`chat-restart` starts the backend again resuming the session. Each turn ends with a `footer:` line
+in the dump; chat tabs list in the sidebar under the scope they were opened in (`session:<title>`).
 
 `--do` runs shell steps last, separated by `;` (`src/steps.rs`). Mouse steps target elements that
 render a `probe("name")` (tabs `tab:<ix>`, menu items `menu:<label>`, dialog buttons
