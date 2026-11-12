@@ -383,6 +383,17 @@ pub fn init(window: &mut Window, cx: &mut Context<OrbitApp>) {
 fn on_agent_event(ev: &serde_json::Value, cx: &mut App) {
     let s = |k: &str| ev.get(k).and_then(|v| v.as_str()).map(str::to_string);
     let (Some(key), Some(event)) = (s("key"), s("event")) else { return };
+    if let ("ShowImage", Some(path)) = (event.as_str(), s("path")) {
+        if let Some(view) = store(cx).read(cx).view(&key) {
+            view.update(cx, |v, cx| v.show_image(path, s("message"), cx));
+        }
+        return;
+    }
+    if let ("UserPromptSubmit", Some(prompt)) = (event.as_str(), s("message")) {
+        if let Some(view) = store(cx).read(cx).view(&key) {
+            view.read(cx).set_prompt(prompt);
+        }
+    }
     let Some(hook) = status::hook_of(&event, s("notificationType").as_deref()) else { return };
     let Some(view) = store(cx).read(cx).view(&key) else { return };
     view.update(cx, |v, cx| v.on_hook(hook, s("message"), cx));

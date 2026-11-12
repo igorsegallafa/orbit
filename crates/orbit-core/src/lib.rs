@@ -3,6 +3,7 @@
 //! here depends on GPUI; events go through [`events::EventSink`].
 pub mod agent;
 pub mod agent_hooks;
+pub mod agent_mcp;
 pub mod build;
 pub mod cargo;
 pub mod cmake_api;

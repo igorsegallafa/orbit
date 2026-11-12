@@ -146,6 +146,53 @@ impl Shared {
     }
 }
 
+/// A picture the agent showed: path, caption, the time it came (HH:MM).
+#[derive(Clone)]
+struct Shown {
+    path: std::path::PathBuf,
+    title: Option<String>,
+    at: String,
+    /// The prompt it answers.
+    prompt: Option<String>,
+}
+
+/// Follows the line typed into an agent's input; returns it on Enter. Escape sequences are skipped.
+// shortcut: history (Up) and mid-line edits aren't followed; claude's hook gives its prompt exactly.
+fn track_line(line: &mut String, bytes: &[u8]) -> Option<String> {
+    let mut sent = None;
+    let text = String::from_utf8_lossy(bytes);
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\x1b' => {
+                // CSI: ESC [ params final; SS3/Alt+key: ESC and one char.
+                if chars.next_if_eq(&'[').is_some() {
+                    while chars.next().is_some_and(|c| !('@'..='~').contains(&c)) {}
+                } else {
+                    chars.next();
+                }
+            }
+            '\r' => {
+                let done = std::mem::take(line).trim().to_string();
+                if !done.is_empty() {
+                    sent = Some(done);
+                }
+            }
+            '\x7f' | '\x08' => {
+                line.pop();
+            }
+            '\x15' | '\x03' => line.clear(),
+            '\n' | '\t' => line.push(' '),
+            c if !c.is_control() => line.push(c),
+            _ => {}
+        }
+    }
+    sent
+}
+
+/// Screen cells a link covers: (row, columns).
+type LinkCells = Vec<(usize, Range<usize>)>;
+
 /// The size the last painted terminal had: new sessions start at it, since
 /// TUIs size their canvas from the first PTY size.
 static LAST_SIZE: Mutex<Option<pty::Size>> = Mutex::new(None);
@@ -249,6 +296,18 @@ pub struct TerminalView {
     _pump: Task<()>,
     _status_poll: Task<()>,
     _free_images: Subscription,
+    /// Pictures the agent showed through Orbit's MCP `show_image`.
+    shown: Vec<Shown>,
+    /// The one in the viewer; none while it's closed.
+    shown_ix: Option<usize>,
+    /// The line being typed and the last one sent (Enter), for the viewer's caption.
+    prompt: std::cell::RefCell<(String, Option<String>)>,
+    /// The cell under the mouse, for the link underline.
+    hover: Option<(usize, usize)>,
+    /// Ctrl or Super is down: a click opens the link under the mouse.
+    link_mod: bool,
+    /// The press opened a link; its release goes nowhere.
+    link_click: bool,
 }
 
 impl EventEmitter<TerminalEvent> for TerminalView {}
@@ -263,6 +322,22 @@ impl Drop for TerminalView {
     fn drop(&mut self) {
         let _ = pty::kill(self.shared.pty_id);
     }
+}
+
+/// The http(s) or file URL that the character at `at` belongs to, if any,
+/// and its char range. One char per cell, so a TUI's box borders and brackets end it too.
+fn url_at(text: &[char], at: usize) -> Option<(String, Range<usize>)> {
+    let stop = |c: char| c.is_whitespace() || "\"'<>`()[]{}│┃|".contains(c);
+    if text.get(at).is_none_or(|&c| stop(c)) {
+        return None;
+    }
+    let start = text[..at].iter().rposition(|&c| stop(c)).map_or(0, |i| i + 1);
+    let end = text[at..].iter().position(|&c| stop(c)).map_or(text.len(), |i| at + i);
+    let word: String = text[start..end].iter().collect();
+    let scheme = ["https://", "http://", "file://"].iter().filter_map(|s| word.find(s)).min()?;
+    let url = word[scheme..].trim_end_matches(['.', ',', ';', ':', '!', '?']);
+    let (from, to) = (start + word[..scheme].chars().count(), start + word[..scheme].chars().count() + url.chars().count());
+    (url.len() > "https://".len() && (from..to).contains(&at)).then(|| (url.to_string(), from..to))
 }
 
 /// Saved output made safe to replay above a new session: screen clears become
@@ -399,6 +474,12 @@ impl TerminalView {
             _pump: pump,
             _status_poll: status_poll,
             _free_images: free_images,
+            shown: vec![],
+            shown_ix: None,
+            prompt: Default::default(),
+            hover: None,
+            link_mod: false,
+            link_click: false,
         }
     }
 
@@ -443,6 +524,127 @@ impl TerminalView {
     }
 
     /// An `agent-event` from this session's Claude Code hooks.
+    /// Opens the viewer on a picture the agent showed.
+    pub fn show_image(&mut self, path: String, title: Option<String>, cx: &mut Context<Self>) {
+        let at = chrono::Local::now().format("%H:%M").to_string();
+        let prompt = self.prompt.borrow().1.clone();
+        self.shown.push(Shown { path: path.into(), title, at, prompt });
+        self.shown_ix = Some(self.shown.len() - 1);
+        cx.notify();
+    }
+
+    /// The picture viewer, a panel beside the terminal (which narrows for it).
+    fn viewer(&self, ix: usize, cx: &mut Context<Self>) -> impl IntoElement {
+        use crate::pages::kit;
+        let shown = self.shown[ix].clone();
+        let caption = shown.title.clone().unwrap_or_else(|| shown.path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default());
+        let path = shown.path.clone();
+        div()
+            .id("shown-image")
+            .w(gpui::relative(0.4))
+            .flex_none()
+            .h_full()
+            .flex()
+            .flex_col()
+            .bg(c(theme::PANEL))
+            .border_l_1()
+            .border_color(c(theme::BORDER))
+            .cursor_default()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .text_size(px(12.))
+                    .child(div().flex_1().truncate().text_color(c(theme::TEXT)).child(caption))
+                    .child(div().text_color(c(theme::TEXT_DIM)).child(shown.at))
+                    .child(div().id("shown-close").cursor_pointer().p_1().child(kit::icon("x", 12., c(theme::TEXT_DIM))).on_click(cx.listener(
+                        |this, _, _, cx| {
+                            this.shown_ix = None;
+                            cx.notify();
+                        },
+                    ))),
+            )
+            .when_some(shown.prompt.clone(), |d, prompt| {
+                d.child(
+                    div()
+                        .px_2()
+                        .pb_1()
+                        .text_size(px(11.))
+                        .text_color(c(theme::TEXT_DIM))
+                        .line_clamp(2)
+                        .child(format!("↳ {prompt}")),
+                )
+            })
+            .child(
+                div()
+                    .id("shown-open")
+                    .flex_1()
+                    .min_h_0()
+                    .p_2()
+                    .cursor_pointer()
+                    .on_click(move |_, _, cx| cx.open_with_system(&path))
+                    .child(gpui::img(shown.path).size_full()),
+            )
+            .when(self.shown.len() > 1, |d| {
+                d.child(
+                    div()
+                        .id("shown-strip")
+                        .flex()
+                        .gap_1()
+                        .p_2()
+                        .border_t_1()
+                        .border_color(c(theme::BORDER))
+                        .overflow_x_scroll()
+                        .children(self.shown.iter().enumerate().map(|(i, s)| {
+                            div()
+                                .id(("shown-thumb", i))
+                                .flex_none()
+                                .w(px(72.))
+                                .h(px(48.))
+                                .p(px(2.))
+                                .rounded(px(4.))
+                                .border_1()
+                                .border_color(c(if i == ix { theme::ACCENT } else { theme::BORDER }))
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.shown_ix = Some(i);
+                                    cx.notify();
+                                }))
+                                .child(gpui::img(s.path.clone()).size_full())
+                        })),
+                )
+            })
+    }
+
+    /// Reopens a closed viewer: a small chip at the terminal's top right.
+    fn viewer_chip(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("shown-reopen")
+            .absolute()
+            .top(px(6.))
+            .right(px(16.))
+            .px_2()
+            .py(px(2.))
+            .rounded(px(4.))
+            .bg(c(theme::PANEL_RAISED))
+            .border_1()
+            .border_color(c(theme::BORDER_STRONG))
+            .text_size(px(11.))
+            .text_color(c(theme::TEXT_DIM))
+            .cursor_pointer()
+            .occlude()
+            .hover(|s| s.text_color(c(theme::TEXT)))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.shown_ix = Some(this.shown.len() - 1);
+                cx.notify();
+            }))
+            .child(format!("Images ({})", self.shown.len()))
+    }
+
     pub fn on_hook(&mut self, hook: Hook, message: Option<String>, cx: &mut Context<Self>) {
         self.tracker.lock().unwrap().set_hook(hook);
         self.publish_status(cx);
@@ -535,7 +737,18 @@ impl TerminalView {
     }
 
     fn write(&self, bytes: &[u8]) {
+        if self.meta.cmd.is_some() {
+            let mut p = self.prompt.borrow_mut();
+            if let Some(line) = track_line(&mut p.0, bytes) {
+                p.1 = Some(line);
+            }
+        }
         self.send(bytes);
+    }
+
+    /// The prompt claude's `UserPromptSubmit` hook reports, over the typed one.
+    pub fn set_prompt(&self, prompt: String) {
+        self.prompt.borrow_mut().1 = Some(prompt);
     }
 
     fn paste_text(&self, text: &str) {
@@ -664,9 +877,57 @@ impl TerminalView {
         GridPoint::new(Line(row as i32 - offset), Column(col))
     }
 
+    /// The link under a screen cell and the cells it covers: an OSC 8 hyperlink, else a URL in its wrapped line.
+    fn link_at(&self, col: usize, row: usize) -> Option<(String, LinkCells)> {
+        let term = self.shared.term.lock();
+        let grid = term.grid();
+        let offset = grid.display_offset() as i32;
+        let line = Line(row as i32 - offset);
+        let cols = grid.columns();
+        if line < grid.topmost_line() || line > grid.bottommost_line() || col >= cols {
+            return None;
+        }
+        if let Some(link) = grid[line][Column(col)].hyperlink() {
+            let same = |c: usize| grid[line][Column(c)].hyperlink().as_ref() == Some(&link);
+            let start = (0..col).rev().take_while(|&c| same(c)).last().unwrap_or(col);
+            let end = (col..cols).take_while(|&c| same(c)).last().unwrap_or(col) + 1;
+            return Some((link.uri().to_string(), vec![(row, start..end)]));
+        }
+        let wraps = |l: Line| grid[l][Column(cols - 1)].flags.contains(Flags::WRAPLINE);
+        let (mut start, mut end) = (line, line);
+        while start > grid.topmost_line() && wraps(start - 1) {
+            start -= 1;
+        }
+        while end < grid.bottommost_line() && wraps(end) {
+            end += 1;
+        }
+        let text: Vec<char> = (start.0..=end.0).flat_map(|l| (0..cols).map(move |c| grid[Line(l)][Column(c)].c)).collect();
+        let (url, chars) = url_at(&text, (line.0 - start.0) as usize * cols + col)?;
+        // Chars back to screen rows; rows scrolled out of view are left out.
+        let first = start.0 + offset;
+        let cells = (chars.start / cols..=(chars.end - 1) / cols)
+            .filter_map(|r| {
+                let screen = usize::try_from(first + r as i32).ok()?;
+                let from = if r == chars.start / cols { chars.start % cols } else { 0 };
+                let to = if r == (chars.end - 1) / cols { (chars.end - 1) % cols + 1 } else { cols };
+                Some((screen, from..to))
+            })
+            .collect();
+        Some((url, cells))
+    }
+
     fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
         let Some((col, row, right_half)) = self.cell_at(ev.position) else { return };
+        // Ctrl+click opens a link; Super too, which is Ctrl under Toshy and Cmd on macOS.
+        if ev.button == MouseButton::Left && (ev.modifiers.control || ev.modifiers.platform) {
+            if let Some((url, _)) = self.link_at(col, row) {
+                cx.open_url(&url);
+                // Its release isn't reported either: a TUI that opens links itself would open it again.
+                self.link_click = true;
+                return;
+            }
+        }
         if let Some(mode) = self.reporting(ev.modifiers.shift) {
             if let Some(bytes) = mouse_report(mode, MouseReport::Press(ev.button), col, row, ev.modifiers) {
                 self.write(&bytes);
@@ -699,6 +960,11 @@ impl TerminalView {
 
     fn on_mouse_move(&mut self, ev: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         let Some((col, row, right_half)) = self.cell_at(ev.position) else { return };
+        let link_mod = ev.modifiers.control || ev.modifiers.platform;
+        if self.hover != Some((col, row)) || self.link_mod != link_mod {
+            (self.hover, self.link_mod) = (Some((col, row)), link_mod);
+            cx.notify();
+        }
         // A Shift+drag selection keeps selecting once Shift is let go.
         if self.selecting && ev.pressed_button == Some(MouseButton::Left) {
             let side = if right_half { Side::Right } else { Side::Left };
@@ -720,6 +986,9 @@ impl TerminalView {
     }
 
     fn on_mouse_up(&mut self, ev: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.link_click) {
+            return;
+        }
         if let Some(mode) = self.reporting(ev.modifiers.shift).filter(|_| !self.selecting) {
             if let Some((col, row, _)) = self.cell_at(ev.position) {
                 if let Some(bytes) = mouse_report(mode, MouseReport::Release(ev.button), col, row, ev.modifiers) {
@@ -831,16 +1100,34 @@ impl Render for TerminalView {
         let focused = self.focus.is_focused(window);
         let viewport = self.scrollbar.bounds.clone();
         let (focus, view, marked, painted) = (self.focus.clone(), cx.entity(), self.marked.clone(), self.shared.clone());
-        div()
+        let link = self.hover.and_then(|(col, row)| self.link_at(col, row)).map(|(_, cells)| cells);
+        let pointer = link.is_some() && self.link_mod;
+        let terminal = div()
             .id("terminal")
             .track_focus(&self.focus)
             .relative()
-            .size_full()
+            .flex_1()
+            .min_w_0()
+            .h_full()
             .bg(c(theme::BG))
-            .cursor_text()
+            .when(pointer, |d| d.cursor_pointer())
+            .when(!pointer, |d| d.cursor_text())
             .on_key_down(cx.listener(Self::on_key_down))
-            .on_modifiers_changed(|ev: &gpui::ModifiersChangedEvent, window, cx| inhibit::set_alt(ev.modifiers.alt, window, cx))
+            .on_modifiers_changed(cx.listener(|this, ev: &gpui::ModifiersChangedEvent, window, cx| {
+                let m = ev.modifiers;
+                // Cmd+Shift (Ctrl+Shift under Toshy) also lets go: Toshy's Cmd+Shift+3/4/5 become GNOME's Print screenshots.
+                inhibit::set_alt(m.alt || m.control && m.shift, window, cx);
+                if this.link_mod != (m.control || m.platform) {
+                    this.link_mod = m.control || m.platform;
+                    cx.notify();
+                }
+            }))
             .on_scroll(cx.listener(Self::on_scroll))
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                if !hovered && this.hover.take().is_some() {
+                    cx.notify();
+                }
+            }))
             .capture_any_mouse_down(cx.listener(|this, ev: &MouseDownEvent, _, cx| {
                 if ev.button == MouseButton::Left && scrollbar::page(&this.scrollbar, ev.position) {
                     cx.stop_propagation();
@@ -887,6 +1174,13 @@ impl Render for TerminalView {
                             if let Some(text) = &marked {
                                 grid::paint_marked(&painted, text, window, cx);
                             }
+                            // The link under the mouse is underlined.
+                            if let (Some(cells), Some(g)) = (&link, *painted.geometry.lock().unwrap()) {
+                                for (row, cols) in cells {
+                                    let at = g.origin + point(g.cell_w * cols.start as f32, g.line_h * (*row as f32 + 1.) - px(1.));
+                                    window.paint_quad(fill(Bounds::new(at, size(g.cell_w * cols.len() as f32, px(1.))), hsla(theme::ACCENT)));
+                                }
+                            }
                         });
                         window.handle_input(&focus, ElementInputHandler::new(bounds, view), cx);
                         grid::record_frame(started.elapsed().as_micros() as u64);
@@ -895,5 +1189,42 @@ impl Render for TerminalView {
                 .size_full(),
             )
             .child(scrollbar::vertical("term", &self.scrollbar))
+            .when(self.shown_ix.is_none() && !self.shown.is_empty(), |d| d.child(self.viewer_chip(cx)));
+        div()
+            .flex()
+            .size_full()
+            .child(terminal)
+            .when_some(self.shown_ix, |d, ix| d.child(self.viewer(ix, cx)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{track_line, url_at};
+
+    fn at(text: &str, needle: &str) -> Option<String> {
+        let chars: Vec<char> = text.chars().collect();
+        url_at(&chars, text[..text.find(needle).unwrap()].chars().count()).map(|(url, _)| url)
+    }
+
+    #[test]
+    fn follows_the_typed_prompt() {
+        let mut line = String::new();
+        assert_eq!(track_line(&mut line, b"me mostra\x7f\x7f\x7f\x7fstra"), None);
+        assert_eq!(track_line(&mut line, b" um print\x1b[D\x1b[C"), None);
+        assert_eq!(track_line(&mut line, b"\r"), Some("me mostra um print".into()));
+        assert_eq!(track_line(&mut line, b"\x1b[200~colado\naqui\x1b[201~\r"), Some("colado aqui".into()));
+        assert_eq!(track_line(&mut line, b"lixo\x15ok\r"), Some("ok".into()));
+        assert_eq!(track_line(&mut line, b"\r"), None);
+    }
+
+    #[test]
+    fn finds_the_url_under_the_click() {
+        assert_eq!(at("see https://x.dev/a?b=1. done", "x.dev"), Some("https://x.dev/a?b=1".into()));
+        assert_eq!(at("│ [docs](https://x.dev/p) │", "dev"), Some("https://x.dev/p".into()));
+        assert_eq!(at("open file:///tmp/a.png now", "tmp"), Some("file:///tmp/a.png".into()));
+        assert_eq!(at("see https://x.dev now", "see"), None);
+        assert_eq!(at("PR:https://x.dev/1", "PR"), None);
+        assert_eq!(at("just https:// alone", "https"), None);
     }
 }
