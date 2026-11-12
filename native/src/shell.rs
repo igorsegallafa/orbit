@@ -9,7 +9,7 @@ use crate::icons::orbit_icon;
 use crate::overlay::MenuItem;
 use crate::probe::probe;
 use crate::scope::{self, Scope};
-use crate::sessions::{self, InboxKind, AGENTS};
+use crate::sessions::{self, InboxKind};
 use crate::state::SIDEBAR;
 use crate::theme::{self, c, size};
 use crate::toast::ToastKind;
@@ -862,12 +862,11 @@ impl OrbitApp {
                 })
                 .detach();
             }));
-        let agents = AGENTS.iter().map(|(label, _, cmd)| {
+        let agents = sessions::menu_entries().map(|(label, cmd, mode)| {
             let target = target.clone();
-            let cmd = *cmd;
-            item(format!("nsm:{label}").into(), false).child(*label).on_click(cx.listener(move |a, _, w, cx| {
+            item(format!("nsm:{label}").into(), false).child(label).on_click(cx.listener(move |a, _, w, cx| {
                 a.chrome.new_session = None;
-                sessions::new_session_in(a, target.clone(), cmd, None, w, cx);
+                sessions::new_session_as(a, target.clone(), cmd, mode, None, w, cx);
                 cx.notify();
             }))
         });

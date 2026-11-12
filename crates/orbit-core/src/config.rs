@@ -186,6 +186,9 @@ pub struct AiSettings {
     /// system prompt (`agent_hooks::REPLY_STYLE`); empty turns it off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_style: Option<String>,
+    /// What New Agent Session opens: "terminal" (default) or "chat".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_mode: Option<String>,
 }
 
 fn default_agent() -> String {
@@ -222,6 +225,7 @@ impl Default for AiSettings {
             fast_model: None,
             remote_control: false,
             reply_style: None,
+            session_mode: None,
         }
     }
 }

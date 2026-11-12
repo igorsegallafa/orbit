@@ -120,7 +120,7 @@ A prompt containing "slow" streams for a minute until interrupted (Stop is `chat
 `chat-restart` starts the backend again resuming the session. Each turn ends with a `footer:` line
 in the dump; chat tabs list in the sidebar under the scope they were opened in (`session:<title>`).
 History on resume: claude reads its transcript from `$HOME/.claude/projects/<cwd, non-alphanumerics as
-dashes>/<id>.jsonl`, so run with a scratch `HOME` holding one for `stub-chat-session` (e.g. a copy of
+dashes>/<id>.jsonl`, so run with a scratch `HOME` holding one for `00000000-0000-4000-8000-0000000c4a75` (e.g. a copy of
 `crates/orbit-core/tests/fixtures/chat/claude/history.jsonl`), crash the stub and click `chat-restart`:
 the history replaces the shown items, all but the last turn folded (`turn:<ix>` toggles; the dump marks
 `you (history, folded)`).
@@ -143,6 +143,11 @@ under `$HOME/.codex/sessions` (not with `ORBIT_STUB_NO_SESSION=1`) and its `app-
 chat backend with a canned history turn naming the thread id: with a scratch `HOME`,
 `--session codex --do "wait:2500;click:mode-toggle;wait:2000;chat:hello;wait:2000;shot:chat;click:mode-toggle;wait:2500;dump:back"`
 shows the resumed thread in chat, then `resume <id>` in the terminal's argv.
+The New Session menu (`sessions-add`, rows `nsm:<label>`) lists a `<agent> (chat)` entry after each
+agent, and config `ai.session_mode: chat` makes New Agent Session (`cmd:sessions.newAgent`) open the
+configured agent in chat. With a scratch `HOME` and `ORBIT_CONFIG_DIR`, a run that opens
+`nsm:Claude Code (chat)` and sends a prompt, then a second run with `--do "wait:3000;click:tab:0;shot:claude"`,
+shows the session restored in chat with its history (the stub's transcript must exist, as above).
 
 `--do` runs shell steps last, separated by `;` (`src/steps.rs`). Mouse steps target elements that
 render a `probe("name")` (tabs `tab:<ix>`, menu items `menu:<label>`, dialog buttons

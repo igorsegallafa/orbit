@@ -71,7 +71,7 @@ def chat():
     # Orbit's chat mode (`--input-format stream-json`): one user message per stdin line,
     # each answered with a streamed turn like the real claude's (thinking, text deltas, result).
     out = lambda v: print(json.dumps(v), flush=True)
-    sid = args[args.index("--resume") + 1] if "--resume" in args else "stub-chat-session"
+    sid = args[args.index("--resume") + 1] if "--resume" in args else "00000000-0000-4000-8000-0000000c4a75"  # uuid-shaped like claude's, so restore finds its transcript
     # A reader thread, so an interrupt control_request lands while a turn streams.
     lines = queue.Queue()
     threading.Thread(target=lambda: [lines.put(l) for l in sys.stdin] + [lines.put(None)], daemon=True).start()

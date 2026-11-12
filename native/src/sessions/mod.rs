@@ -52,6 +52,14 @@ pub const AGENTS: [(&str, &str, Option<&str>); 5] = [
     ("Codex", "codex", Some("codex")),
 ];
 
+/// The New Session menu: each agent's terminal entry followed by its chat entry.
+pub fn menu_entries() -> impl Iterator<Item = (String, Option<&'static str>, SessionMode)> {
+    AGENTS.iter().flat_map(|&(label, _, cmd)| {
+        let chat = cmd.map(|c| (format!("{label} (chat)"), Some(c), SessionMode::Chat));
+        std::iter::once((label.to_string(), cmd, SessionMode::Terminal)).chain(chat)
+    })
+}
+
 /// One session tab, as saved (field names follow the React app's `TerminalTab`).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -437,8 +445,13 @@ fn with_app(cx: &mut App, f: impl FnOnce(&mut OrbitApp, &mut Window, &mut Contex
 fn register_actions(cx: &mut App) {
     rename::bind_keys(cx);
     cx.on_action(|_: &NewAgentSession, cx| {
-        let bin = orbit_core::config::Config::load().map(|c| c.ai.agent_bin()).unwrap_or_else(|_| "claude".into());
-        with_app(cx, move |a, w, cx| new_session(a, Some(&bin), None, w, cx));
+        let ai = orbit_core::config::Config::load().map(|c| c.ai).unwrap_or_default();
+        let bin = ai.agent_bin();
+        let mode = if ai.session_mode.as_deref() == Some("chat") { SessionMode::Chat } else { SessionMode::Terminal };
+        with_app(cx, move |a, w, cx| {
+            let scope = scope(a);
+            new_session_as(a, scope, Some(&bin), mode, None, w, cx)
+        });
     });
     cx.on_action(|_: &NewClaudeSession, cx| with_app(cx, |a, w, cx| new_session(a, Some("claude"), None, w, cx)));
     cx.on_action(|_: &NewOpencodeSession, cx| with_app(cx, |a, w, cx| new_session(a, Some("opencode"), None, w, cx)));
@@ -475,7 +488,21 @@ pub fn new_session(app: &mut OrbitApp, cmd: Option<&str>, input: Option<String>,
 
 /// A new session in `scope` (a workspace name, `@repo` or `dir:<path>`): the New Session menu's pick.
 pub fn new_session_in(app: &mut OrbitApp, scope: String, cmd: Option<&str>, input: Option<String>, window: &mut Window, cx: &mut Context<OrbitApp>) {
+    new_session_as(app, scope, cmd, SessionMode::Terminal, input, window, cx);
+}
+
+/// A new session in `scope` opened in `mode` (chat only for agents that have one).
+pub fn new_session_as(
+    app: &mut OrbitApp,
+    scope: String,
+    cmd: Option<&str>,
+    mode: SessionMode,
+    input: Option<String>,
+    window: &mut Window,
+    cx: &mut Context<OrbitApp>,
+) {
     let label = AGENTS.iter().find(|a| a.2 == cmd).map_or_else(|| cmd.unwrap_or("shell").to_string(), |a| a.1.to_string());
+    let mode = if has_chat(&label) { mode } else { SessionMode::Terminal };
     let taken: Vec<String> = store(cx).read(cx).open.iter().map(|(m, _)| m.session_name.clone()).collect();
     let agent_session_id = (cmd == Some("claude")).then(new_uuid);
     let meta = SessionMeta {
@@ -490,7 +517,7 @@ pub fn new_session_in(app: &mut OrbitApp, scope: String, cmd: Option<&str>, inpu
         repo: None,
         agent_session_id,
         cwd: None,
-        mode: SessionMode::Terminal,
+        mode,
     };
     let args = meta.args.clone();
     open(app, meta, args, None, input, window, cx);
