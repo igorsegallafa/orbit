@@ -18,7 +18,7 @@ use gpui_component::{ActiveTheme, IconName};
 use orbit_core::git::ChangeEntry;
 use orbit_core::notes::{Note, NotesFile};
 use orbit_core::workspace::PrRef;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
@@ -69,16 +69,29 @@ fn viewed_path() -> Option<PathBuf> {
     orbit_core::config::config_dir().ok().map(|d| d.join("review-viewed.json"))
 }
 
-fn load_viewed(ws: &str) -> BTreeSet<String> {
-    let all: BTreeMap<String, BTreeSet<String>> =
-        viewed_path().and_then(|p| std::fs::read(p).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-    all.get(ws).cloned().unwrap_or_default()
+/// Viewed file -> hash of its patch when marked; 0 takes the patch it has next.
+type Viewed = BTreeMap<String, u64>;
+
+fn read_viewed(path: &Path) -> BTreeMap<String, Viewed> {
+    let all: BTreeMap<String, serde_json::Value> = std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    all.into_iter()
+        .map(|(ws, v)| {
+            // Older files hold a plain list of keys.
+            let keys = serde_json::from_value::<Viewed>(v.clone())
+                .or_else(|_| serde_json::from_value::<Vec<String>>(v).map(|k| k.into_iter().map(|k| (k, 0)).collect()))
+                .unwrap_or_default();
+            (ws, keys)
+        })
+        .collect()
 }
 
-fn save_viewed(ws: &str, keys: &BTreeSet<String>) {
+fn load_viewed(ws: &str) -> Viewed {
+    viewed_path().map(|p| read_viewed(&p)).and_then(|mut all| all.remove(ws)).unwrap_or_default()
+}
+
+fn save_viewed(ws: &str, keys: &Viewed) {
     let Some(path) = viewed_path() else { return };
-    let mut all: BTreeMap<String, BTreeSet<String>> =
-        std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let mut all = read_viewed(&path);
     all.insert(ws.to_string(), keys.clone());
     if let Ok(json) = serde_json::to_vec(&all) {
         let _ = std::fs::write(path, json);
@@ -101,7 +114,9 @@ pub struct Composer {
 pub struct ChangesView {
     pub diff: Entity<DiffState>,
     sig: u64,
-    pub viewed: BTreeSet<String>,
+    pub viewed: Viewed,
+    /// Hash of each changed file's patch, to notice a viewed file changing.
+    hashes: HashMap<String, u64>,
     texts: HashMap<String, String>,
     /// First added line per file: where a note goes without a selection.
     first_added: HashMap<String, u32>,
@@ -125,7 +140,7 @@ impl ChangesView {
                     highlighter.styles(&(0..text.len()), &*highlight_theme)
                 })
         });
-        Self { diff, sig: 0, viewed: load_viewed(ws), texts: HashMap::new(), first_added: HashMap::new(), shape: vec![], composer: None, sel: crate::diff_select::new() }
+        Self { diff, sig: 0, viewed: load_viewed(ws), hashes: HashMap::new(), texts: HashMap::new(), first_added: HashMap::new(), shape: vec![], composer: None, sel: crate::diff_select::new() }
     }
 }
 
@@ -167,6 +182,37 @@ impl ReviewTab {
             return;
         }
         self.chg.sig = sig;
+        self.chg.hashes = snap
+            .patches
+            .iter()
+            .map(|(k, p)| {
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                p.hash(&mut h);
+                (k.clone(), h.finish())
+            })
+            .collect();
+        let hashes = &self.chg.hashes;
+        let before = self.chg.viewed.clone();
+        self.chg.viewed.retain(|k, h| match hashes.get(k) {
+            Some(now) if *h == 0 => {
+                *h = *now;
+                true
+            }
+            Some(now) => now == h,
+            None => true,
+        });
+        let unmarked: Vec<String> = before.keys().filter(|k| !self.chg.viewed.contains_key(*k)).cloned().collect();
+        let changed = unmarked.len();
+        if before != self.chg.viewed {
+            save_viewed(&self.workspace, &self.chg.viewed);
+        }
+        if changed > 0 {
+            let s = if changed == 1 { "" } else { "s" };
+            let msg = format!("{changed} viewed file{s} changed and {} unmarked", if changed == 1 { "was" } else { "were" });
+            if let Some(app) = self.app.upgrade() {
+                app.update(cx, |a, cx| a.toast(crate::toast::ToastKind::Info, msg, None, cx));
+            }
+        }
         self.chg.first_added =
             snap.patches.iter().filter_map(|(k, p)| crate::diff_view::first_added_line(p).map(|l| (k.clone(), l))).collect();
         let parsed: Vec<(Vec<DiffFile>, &str)> = snap
@@ -188,11 +234,14 @@ impl ReviewTab {
                 shape
             })
             .collect();
-        let viewed = self.chg.viewed.clone();
+        let viewed: Vec<String> = self.chg.viewed.keys().cloned().collect();
         self.chg.diff.update(cx, |s, cx| {
             s.set_files(files, cx);
             for key in &viewed {
                 s.set_file_collapsed(key, true, cx);
+            }
+            for key in &unmarked {
+                s.set_file_collapsed(key, false, cx);
             }
         });
     }
@@ -237,7 +286,7 @@ impl ReviewTab {
 
     fn set_viewed(&mut self, key: &str, on: bool, cx: &mut Context<Self>) {
         if on {
-            self.chg.viewed.insert(key.to_string());
+            self.chg.viewed.insert(key.to_string(), self.chg.hashes.get(key).copied().unwrap_or(0));
         } else {
             self.chg.viewed.remove(key);
         }
@@ -248,7 +297,7 @@ impl ReviewTab {
 
     /// The chevron: un-views a viewed file, else folds it.
     fn toggle_file(&mut self, key: &str, cx: &mut Context<Self>) {
-        if self.chg.viewed.contains(key) {
+        if self.chg.viewed.contains_key(key) {
             return self.set_viewed(key, false, cx);
         }
         self.chg.diff.update(cx, |s, cx| {
@@ -452,7 +501,7 @@ impl ReviewTab {
             Some((dir, name)) => (dir.to_string(), name.to_string()),
             None => (String::new(), e.path.clone()),
         };
-        let viewed = self.chg.viewed.contains(&key);
+        let viewed = self.chg.viewed.contains_key(&key);
         ui::row(format!("review-file:{key}"))
             .h(px(19.))
             .px_0()
@@ -539,7 +588,7 @@ impl ReviewTab {
             self.changes.iter().flat_map(|(r, l)| l.ready().into_iter().flatten().map(move |e| (file_key(r, &e.path), e))).collect();
         let loading = self.changes.iter().any(|(_, l)| matches!(l, Load::Loading | Load::Idle));
         let (add, del) = entries.iter().fold((0, 0), |(a, d), (_, e)| (a + e.added, d + e.deleted));
-        let viewed = entries.iter().filter(|(k, _)| self.chg.viewed.contains(k)).count();
+        let viewed = entries.iter().filter(|(k, _)| self.chg.viewed.contains_key(k)).count();
         let open = self.open_notes().len();
         let pr_notes = self.pr_refs.iter().any(|p| self.open_notes().iter().any(|n| n.repo == p.repo));
         let s = |n: usize| if n == 1 { "" } else { "s" };
@@ -781,7 +830,7 @@ fn file_head(entity: &Entity<ReviewTab>, key: &str, first: bool, cx: &mut App) -
     let t = entity.read(cx);
     let (repo, rel) = split_key(key);
     let entry = t.changes.iter().find(|(r, _)| r == repo).and_then(|(_, l)| l.ready()).and_then(|l| l.iter().find(|e| e.path == rel)).cloned();
-    let viewed = t.chg.viewed.contains(key);
+    let viewed = t.chg.viewed.contains_key(key);
     let collapsed = viewed || t.chg.diff.read(cx).is_file_collapsed(key);
     let (dir, name) = match rel.rsplit_once('/') {
         Some((d, n)) => (format!("{d}/"), n.to_string()),
@@ -921,4 +970,17 @@ fn composer_box(tab: &WeakEntity<ReviewTab>, composer: &Composer, submit: &'stat
                     let _ = t1.update(cx, |t, cx| t.submit_composer(window, cx));
                 })),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn viewed_files_read_both_formats() {
+        let path = std::env::temp_dir().join(format!("orbit-viewed-{}.json", std::process::id()));
+        std::fs::write(&path, r#"{"old":["r/a.rs"],"new":{"r/b.rs":7}}"#).unwrap();
+        let all = super::read_viewed(&path);
+        assert_eq!(all["old"].get("r/a.rs"), Some(&0));
+        assert_eq!(all["new"].get("r/b.rs"), Some(&7));
+        let _ = std::fs::remove_file(path);
+    }
 }

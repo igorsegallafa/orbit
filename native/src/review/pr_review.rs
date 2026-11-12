@@ -67,6 +67,9 @@ struct Saved {
     /// REVIEW.md notes turned into drafts here, so none goes twice.
     #[serde(default)]
     sent: Vec<String>,
+    /// The head commit `viewed` was marked against.
+    #[serde(default)]
+    head: String,
 }
 
 fn store_path() -> Option<PathBuf> {
@@ -244,6 +247,7 @@ pub struct PrReviewPage {
     head_text: String,
     sending_notes: bool,
     _poll: Task<()>,
+    _head_poll: Task<()>,
     side_w: f32,
     side_scroll: ScrollHandle,
 }
@@ -299,6 +303,12 @@ impl PrReviewPage {
                     break;
                 }
             }),
+            _head_poll: cx.spawn_in(window, async move |this, cx| loop {
+                cx.background_executor().timer(std::time::Duration::from_secs(60)).await;
+                if this.update_in(cx, |p, window, cx| p.check_head(window, cx)).is_err() {
+                    break;
+                }
+            }),
             side_w: match f32::from_bits(SIDE_WIDTH.load(std::sync::atomic::Ordering::Relaxed)) {
                 w if w > 0. => w,
                 _ => SIDE_W,
@@ -343,6 +353,9 @@ impl PrReviewPage {
                 }
                 p.workspace = ws;
                 p.reload_notes(cx);
+                if let Ok(d) = &d {
+                    p.follow_head(&d.head_sha, false, cx);
+                }
                 p.detail = d.map_or_else(Load::Failed, Load::Ready);
                 cx.notify();
             });
@@ -350,6 +363,68 @@ impl PrReviewPage {
         .detach();
         self.load_review(true, window, cx);
         cx.notify();
+    }
+
+    /// Reloads the PR when its head moved, keeping the open file.
+    fn check_head(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(head) = self.detail.ready().map(|d| d.head_sha.clone()) else { return };
+        let (or, n, key) = (self.pr().owner_repo.clone(), self.pr().number, self.key());
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(d) = cx.background_spawn(async move { orbit_core::github::pr_detail(&or, n) }).await else { return };
+            let _ = this.update_in(cx, |p, window, cx| {
+                if p.key() != key || d.head_sha == head {
+                    return;
+                }
+                p.follow_head(&d.head_sha, true, cx);
+                p.detail = Load::Ready(d);
+                p.load_review(true, window, cx);
+                if let Sel::File(path) = p.selected.clone() {
+                    p.select(Sel::File(path), window, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Unmarks viewed files that changed since the head they were viewed at.
+    fn follow_head(&mut self, head: &str, announce: bool, cx: &mut Context<Self>) {
+        let from = std::mem::replace(&mut self.saved.head, head.to_string());
+        if from == head {
+            return;
+        }
+        self.persist();
+        let n = self.pr().number;
+        if from.is_empty() || self.saved.viewed.is_empty() {
+            if announce {
+                self.host.toast(ToastKind::Info, format!("New commits on #{n}"), None, cx);
+            }
+            return;
+        }
+        let (or, to, key) = (self.pr().owner_repo.clone(), head.to_string(), self.key());
+        cx.spawn(async move |this, cx| {
+            let changed = cx.background_spawn(async move { orbit_core::github::changed_between(&or, &from, &to) }).await;
+            let _ = this.update(cx, |p, cx| {
+                if p.key() != key {
+                    return;
+                }
+                let before = p.saved.viewed.len();
+                match changed {
+                    Ok(files) => p.saved.viewed.retain(|f| !files.contains(f)),
+                    // A force-push can leave the old head unreachable: start over.
+                    Err(_) => p.saved.viewed.clear(),
+                }
+                let unmarked = before - p.saved.viewed.len();
+                p.persist();
+                if announce || unmarked > 0 {
+                    let s = if unmarked == 1 { "" } else { "s" };
+                    let desc = (unmarked > 0).then(|| format!("{unmarked} viewed file{s} changed and lost the mark"));
+                    p.host.toast(ToastKind::Info, format!("New commits on #{n}"), desc, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn load_review(&mut self, with_lines: bool, window: &mut Window, cx: &mut Context<Self>) {

@@ -859,6 +859,13 @@ fn parse_pr_files(out: &[u8]) -> Result<Vec<PrFile>, String> {
         .collect()
 }
 
+/// Files that differ between two commits of `owner_repo`.
+pub fn changed_between(owner_repo: &str, from: &str, to: &str) -> Result<Vec<String>, String> {
+    let endpoint = format!("repos/{owner_repo}/compare/{from}...{to}");
+    let out = run_gh(&["api", &endpoint, "--jq", ".files[].filename"])?;
+    Ok(String::from_utf8_lossy(&out).lines().filter(|l| !l.is_empty()).map(str::to_string).collect())
+}
+
 /// PR metadata + changed files list.
 pub fn pr_detail(owner_repo: &str, number: u64) -> Result<PrDetail, String> {
     let out = run_gh(&[
