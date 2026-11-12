@@ -168,12 +168,24 @@ pub fn work_done(dir: &Path, head_before: &Option<String>, id: &str, ignore: &[&
 
 fn story_committed(dir: &Path, from: &Option<String>, id: &str) -> bool {
     let range = from.as_ref().map(|f| format!("{f}..HEAD")).unwrap_or_else(|| "HEAD".into());
-    let prefix = format!("feat: [{id}]");
-    crate::proc::run("git", &["log", "--format=%s", &range], Some(dir))
-        .is_ok_and(|out| out.lines().any(|l| l.trim_start().starts_with(&prefix)))
+    story_in(dir, &[&range], id)
 }
 
-fn tree_clean(dir: &Path, ignore: &[&str]) -> bool {
+/// A `feat: [<id>]` commit on this branch that no other remote branch has, from any iteration or run.
+pub fn story_on_branch(dir: &Path, id: &str) -> bool {
+    let Ok(branch) = crate::proc::run("git", &["rev-parse", "--abbrev-ref", "HEAD"], Some(dir)) else { return false };
+    let exclude = format!("--exclude=*/{}", branch.trim());
+    story_in(dir, &["HEAD", "--not", &exclude, "--remotes"], id)
+}
+
+fn story_in(dir: &Path, revs: &[&str], id: &str) -> bool {
+    let prefix = format!("feat: [{id}]");
+    let mut args = vec!["log", "--format=%s"];
+    args.extend_from_slice(revs);
+    crate::proc::run("git", &args, Some(dir)).is_ok_and(|out| out.lines().any(|l| l.trim_start().starts_with(&prefix)))
+}
+
+pub fn tree_clean(dir: &Path, ignore: &[&str]) -> bool {
     let mut args: Vec<String> = ["status", "--porcelain", "--", "."].map(String::from).to_vec();
     args.extend(ignore.iter().map(|p| format!(":(exclude){p}")));
     let args: Vec<&str> = args.iter().map(String::as_str).collect();

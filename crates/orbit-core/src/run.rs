@@ -99,12 +99,16 @@ pub fn outside_repos<'a>(compounds: impl IntoIterator<Item = &'a RunConfig>, in_
     let mut out: Vec<String> = vec![];
     for entry in compounds.into_iter().filter(|c| c.is_compound()).flat_map(|c| &c.configs) {
         let Some((repo, _)) = entry.split_once('/') else { continue };
-        let known = services.iter().any(|s| s.name == repo && !s.worktree);
-        if known && !in_ws.iter().any(|r| r == repo) && !out.iter().any(|r| r == repo) {
+        if clone_service(repo, services).is_some() && !in_ws.iter().any(|r| r == repo) && !out.iter().any(|r| r == repo) {
             out.push(repo.to_string());
         }
     }
     out
+}
+
+/// The service of a repo configured without worktrees: its one clone is the checkout every workspace runs it from.
+pub fn clone_service<'a>(repo: &str, services: &'a [crate::config::Service]) -> Option<&'a crate::config::Service> {
+    services.iter().find(|s| s.name == repo && !s.worktree)
 }
 
 /// A compound's environment under one of its configurations': the configuration's own keys win.
@@ -461,14 +465,23 @@ fn normalize(p: &str) -> String {
     out.to_string_lossy().to_string()
 }
 
+/// The repo's folder in the workspace or, for a repo the workspace doesn't hold, its clone when it runs from one.
+fn repo_dir(workspace: &str, repo: &str) -> Result<PathBuf, String> {
+    let dir = crate::workspace::repo_path(workspace, repo)?;
+    if dir.is_dir() {
+        return Ok(dir);
+    }
+    let services = crate::config::Config::load().map(|c| c.services).unwrap_or_default();
+    clone_service(repo, &services)
+        .and_then(|svc| crate::workspace::clone_dir(svc).ok())
+        .filter(|d| d.is_dir())
+        .ok_or_else(|| format!("'{repo}' folder not found"))
+}
+
 /// The repo folder builds run in: links resolved, so CMake sees the same
 /// source path its cache was made with.
 fn repo_root(workspace: &str, repo: &str) -> Result<PathBuf, String> {
-    let root = crate::workspace::repo_path(workspace, repo)?;
-    if !root.is_dir() {
-        return Err(format!("'{repo}' folder not found"));
-    }
-    Ok(crate::lsp::real_path(&root))
+    Ok(crate::lsp::real_path(&repo_dir(workspace, repo)?))
 }
 
 /// Everything a repo's configurations resolve against.
@@ -516,7 +529,7 @@ fn reconfigure(root: &Path, dir: &Path) -> bool {
 
 pub fn setup(workspace: &str, repo: &str, preset: Option<&str>) -> Result<RunSetup, String> {
     let root = repo_root(workspace, repo)?;
-    let linked_root = crate::workspace::repo_path(workspace, repo)?.to_string_lossy().to_string();
+    let linked_root = repo_dir(workspace, repo)?.to_string_lossy().to_string();
     let l = load(&root, preset)?;
     let x = Ctx { root: &root, chosen: preset, presets: &l.presets, defs: &l.defs, targets: &l.targets, cargo_root: l.cargo_root.as_deref() };
     Ok(RunSetup {
@@ -821,6 +834,29 @@ pub fn cancel(key: &str) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_repo_outside_the_workspace_builds_from_its_clone() {
+        let _g = crate::workspace::tests::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = std::env::temp_dir().join(format!("orbit-run-outside-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::env::set_var("ORBIT_WORKSPACE_ROOT", root.join("ws-root"));
+        std::env::set_var("ORBIT_CONFIG_DIR", root.join("cfg"));
+        let svc = |name: &str, worktree: bool| crate::config::Service { worktree, ..crate::config::Service::new(name.into(), String::new()) };
+        let config = crate::config::Config { services: vec![svc("dataserver", false), svc("web", true)], ..Default::default() };
+        config.save().unwrap();
+        let repos = root.join("ws-root/repos");
+        for repo in ["dataserver", "web"] {
+            std::fs::create_dir_all(repos.join(repo)).unwrap();
+        }
+        std::fs::create_dir_all(root.join("ws-root/workspaces/feat-x/game")).unwrap();
+
+        assert_eq!(repo_dir("feat-x", "game").unwrap(), root.join("ws-root/workspaces/feat-x/game"));
+        assert_eq!(repo_dir("feat-x", "dataserver").unwrap(), repos.join("dataserver"));
+        assert_eq!(repo_dir("feat-x", "web").unwrap_err(), "'web' folder not found");
+        assert_eq!(repo_dir("feat-x", "unknown").unwrap_err(), "'unknown' folder not found");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn a_configurations_env_overrides_its_compounds() {

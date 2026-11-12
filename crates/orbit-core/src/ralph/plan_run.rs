@@ -1,8 +1,8 @@
 // Ralph over the feature plan (PLAN.md at the workspace root): one run for
 // the whole feature, each iteration a fresh agent on the next open task, in
 // that task's repository. The plan is re-read every iteration (edits made
-// between iterations count); Orbit marks a task done once the agent says
-// so AND the task's repo got a commit, so the agent never edits the plan.
+// between iterations count); Orbit marks a task done once the task's
+// `feat: [Tn]` commit is on the branch, so the agent never edits the plan.
 use super::prd::{Prd, Story};
 use super::supervisor::{self, Iteration, RalphEnv};
 use super::{
@@ -102,6 +102,28 @@ fn as_prd(title: &str, context: &str, branch: &str, items: &[PlanItem]) -> Prd {
     }
 }
 
+fn task_body(task: &PlanItem, retry: bool) -> String {
+    let mut body = String::new();
+    if !task.description.is_empty() {
+        body.push_str(&task.description);
+        body.push_str("\n\n");
+    }
+    body.push_str("Acceptance criteria:\n");
+    if task.accept.is_empty() {
+        body.push_str("- (none listed) the change works, and the repo's typecheck/lint/tests pass\n");
+    } else {
+        for c in &task.accept {
+            body.push_str(&format!("- {c}\n"));
+        }
+    }
+    if retry {
+        body.push('\n');
+        body.push_str(&prompts::PLAN_RETRY.replace("{task_id}", &task.id));
+        body.push('\n');
+    }
+    body
+}
+
 fn plan_title(ws_dir: &std::path::Path) -> String {
     std::fs::read_to_string(plan_path(ws_dir))
         .ok()
@@ -124,6 +146,8 @@ struct PlanEnv {
     dirs: HashMap<String, PathBuf>,
     /// Tests: a script run instead of the agent.
     stub: Option<PathBuf>,
+    /// The task whose last iteration ended without closing it.
+    unclosed: Option<String>,
 }
 
 impl PlanEnv {
@@ -198,19 +222,7 @@ impl RalphEnv for PlanEnv {
             },
         );
 
-        let mut body = String::new();
-        if !task.description.is_empty() {
-            body.push_str(&task.description);
-            body.push_str("\n\n");
-        }
-        body.push_str("Acceptance criteria:\n");
-        if task.accept.is_empty() {
-            body.push_str("- (none listed) the change works, and the repo's typecheck/lint/tests pass\n");
-        } else {
-            for c in &task.accept {
-                body.push_str(&format!("- {c}\n"));
-            }
-        }
+        let body = task_body(&task, self.unclosed.as_deref() == Some(task.id.as_str()));
         let prompt = prompts::render_plan_iteration(
             &repo,
             &self.branch,
@@ -246,16 +258,21 @@ impl RalphEnv for PlanEnv {
 
         let commits = self.commits_since(&repo, &head_before);
         if iteration == Iteration::Done {
-            if full.contains(DONE_MARK) && commits > 0 {
+            let reported = full.contains(DONE_MARK);
+            // The commit decides: an agent can forget the mark, or report a task an earlier iteration committed.
+            let committed = blocked_reason(&full).is_none()
+                && watchdog::story_on_branch(&dir, &task.id)
+                && watchdog::tree_clean(&dir, &[".orbit/"]);
+            if (reported && commits > 0) || committed {
                 match self.mark_done(task.index) {
                     Ok(()) => record(&self.app, &self.key, json!({"kind": "story_passed", "id": task.id}), |_| {}),
                     Err(e) => record(&self.app, &self.key, json!({"kind": "log", "text": format!("couldn't mark {} done in PLAN.md: {e}", task.id), "stderr": true}), |_| {}),
                 }
-            } else if full.contains(DONE_MARK) {
+            } else if reported {
                 record(
                     &self.app,
                     &self.key,
-                    json!({"kind": "log", "text": format!("{} was reported done, but {repo} has no new commit: it stays open", task.id), "stderr": true}),
+                    json!({"kind": "log", "text": format!("{} was reported done, but {repo} has no `feat: [{}]` commit: it stays open", task.id, task.id), "stderr": true}),
                     |_| {},
                 );
             }
@@ -269,6 +286,8 @@ impl RalphEnv for PlanEnv {
                 iteration = Iteration::Blocked(format!("{}: {why}", task.id));
             }
         }
+        let closed = read_items(&self.ws_dir).1.get(task.index).is_some_and(|i| i.done);
+        self.unclosed = (!closed && matches!(iteration, Iteration::Done | Iteration::Stalled)).then(|| task.id.clone());
         record(
             &self.app,
             &self.key,
@@ -429,6 +448,7 @@ pub fn start(app: Events, workspace: String, config: RunConfig) -> Result<(), St
         last_pushed: HashMap::new(),
         dirs,
         stub: None,
+        unclosed: None,
         branch: meta.branch.clone(),
         repos: meta.repos.clone(),
         ws_dir,
@@ -526,6 +546,7 @@ mod tests {
                 last_pushed: HashMap::from([("app".to_string(), Some(head))]),
                 dirs: HashMap::from([("app".to_string(), repo.clone())]),
                 stub: Some(fixture::stub(&root, agent)),
+                unclosed: None,
             };
             Case { root, repo, run_dir, env }
         }
@@ -605,6 +626,42 @@ mod tests {
         }
 
         #[test]
+        fn a_committed_task_without_the_done_mark_is_closed() {
+            let result = r#"printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"Implemented it."}'"#;
+            let mut c = case("no-mark", quick(), &format!("{COMMIT_T1}\n{result}"));
+            assert_eq!(c.env.run_iteration(1), Iteration::Complete);
+            assert!(c.ticked());
+        }
+
+        #[test]
+        fn a_task_committed_by_an_earlier_iteration_is_closed() {
+            let mut c = case("earlier", quick(), RESULT_DONE);
+            git(&c.repo, &["commit", "--allow-empty", "-qm", "feat: [T1] - First task"]);
+            git(&c.repo, &["push", "-q", "origin", "HEAD"]);
+            assert_eq!(c.env.run_iteration(1), Iteration::Complete);
+            assert!(c.ticked());
+        }
+
+        #[test]
+        fn a_same_id_commit_from_another_branch_does_not_close_the_task() {
+            let mut c = case("other-branch", quick(), RESULT_DONE);
+            git(&c.repo, &["commit", "--allow-empty", "-qm", "feat: [T1] - Older feature"]);
+            git(&c.repo, &["push", "-q", "origin", "HEAD:refs/heads/main"]);
+            assert_eq!(c.env.run_iteration(1), Iteration::Done);
+            assert!(!c.ticked());
+        }
+
+        #[test]
+        fn a_task_left_without_its_commit_is_retried_with_the_note() {
+            let mut c = case("retry", quick(), RESULT_DONE);
+            assert_eq!(c.env.run_iteration(1), Iteration::Done);
+            assert_eq!(c.env.unclosed.as_deref(), Some("T1"));
+            let task = &read_items(&c.env.ws_dir).1[0];
+            assert!(task_body(task, true).contains("ended without its `feat: [T1]` commit"));
+            assert!(!task_body(task, false).contains("previous attempt"));
+        }
+
+        #[test]
         fn a_normal_iteration_is_unchanged() {
             let mut c = case("normal", quick(), &format!("{COMMIT_T1}\n{RESULT_DONE}"));
             assert_eq!(c.env.run_iteration(1), Iteration::Complete);
@@ -614,6 +671,7 @@ mod tests {
             }
             assert!(c.ticked());
             assert!(c.pushed());
+            assert_eq!(c.env.unclosed, None);
         }
     }
 }
