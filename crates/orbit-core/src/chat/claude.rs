@@ -165,11 +165,13 @@ impl Parser {
             }
             "assistant" => blocks(&v)
                 .filter(|b| b["type"] == "tool_use")
-                .map(|b| {
-                    let (id, name) = (s(&b["id"]), s(&b["name"]));
-                    let summary = stream::summarize(&name, &b["input"]);
-                    self.tools.insert(id.clone(), (name.clone(), b["input"].clone()));
-                    ChatEvent::ToolStarted { id, name, summary }
+                .flat_map(|b| {
+                    let (id, name, input) = (s(&b["id"]), s(&b["name"]), &b["input"]);
+                    let described = (name == "Bash").then(|| s(&input["description"])).filter(|d| !d.is_empty());
+                    let command = described.is_some().then(|| ChatEvent::ToolOutput { id: id.clone(), text: format!("$ {}\n", s(&input["command"])) });
+                    let summary = described.unwrap_or_else(|| stream::summarize(&name, input));
+                    self.tools.insert(id.clone(), (name.clone(), input.clone()));
+                    [ChatEvent::ToolStarted { id, name, summary }].into_iter().chain(command)
                 })
                 .collect(),
             "user" => blocks(&v)
@@ -285,6 +287,13 @@ mod tests {
         let line = r#"{"type":"rate_limit_event","rate_limit_info":{"unifiedWindows":{"five_hour":{"utilization":0.22,"resetsAt":10},"seven_day":{"utilization":0.39,"resetsAt":20}}}}"#;
         let Some(ChatEvent::Limits(l)) = Parser::default().line(line).pop() else { panic!("no limits") };
         assert_eq!((l[0].label.as_str(), l[0].used_percent.round(), l[1].resets_at), ("5h", 22., Some(20)));
+    }
+
+    #[test]
+    fn bash_is_titled_by_its_description() {
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t","name":"Bash","input":{"command":"cargo test","description":"Run the tests"}}]}}"#;
+        let events = Parser::default().line(line);
+        assert!(matches!(&events[..], [ChatEvent::ToolStarted { summary, .. }, ChatEvent::ToolOutput { text, .. }] if summary == "Run the tests" && text == "$ cargo test\n"));
     }
 
     #[test]

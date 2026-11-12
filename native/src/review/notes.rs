@@ -112,10 +112,9 @@ pub fn fix_menu(ws: &str, file: &Path, count: usize, cx: &App) -> Vec<MenuItem> 
         .filter(|(m, v)| m.workspace == ws && m.cmd.is_some() && v.is_some())
         .map(|(m, _)| {
             let (id, name, prompt) = (m.id.clone(), m.session_name.clone(), prompt.clone());
-            MenuItem::new(format!("Send to {name}"), move |a, _, cx| {
+            MenuItem::new(format!("Send to {name}"), move |a, w, cx| {
                 let Some(view) = sessions::store(cx).read(cx).view(&id) else { return };
-                view.read(cx).send(prompt.as_bytes());
-                view.read(cx).send(b"\r");
+                view.update(cx, |v, cx| v.send_prompt(&prompt, w, cx));
                 let s = if count == 1 { "" } else { "s" };
                 a.toast(crate::toast::ToastKind::Success, format!("Sent {count} note{s} to {name}"), None, cx);
             })

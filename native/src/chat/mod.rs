@@ -18,7 +18,7 @@ use gpui_component::diff::{Diff, DiffFile, DiffMode, DiffState};
 use orbit_core::chat::{ChatBackend, ChatEvent, ChatInput, FileDiff, PermissionOption, SlashCommand};
 use regex::Regex;
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::Instant;
 
@@ -478,6 +478,11 @@ impl ChatView {
             }
             Link::Local { path, line } if path.is_file() => crate::run::open_location(path, line.unwrap_or(1), 1, cx),
             Link::Local { path, .. } if path.is_dir() => crate::file_ops::reveal_in_tree(path, window, cx),
+            Link::Local { path, line } => {
+                if let Some(found) = find_under(&self.cwd, path.strip_prefix(&self.cwd).unwrap_or(&path)) {
+                    crate::run::open_location(found, line.unwrap_or(1), 1, cx);
+                }
+            }
             _ => {}
         }
         self.opened = Some(url.into());
@@ -615,6 +620,12 @@ impl ChatView {
                 self.push(Item::Exited(error.map_or("The session ended.".into(), |e| format!("The session ended: {e}"))));
             }
         }
+    }
+
+    /// Sends `text` as if typed; while a turn runs it waits in the composer.
+    pub fn submit(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.prompt.update(cx, |p, cx| p.set_value(text, window, cx));
+        self.send(window, cx);
     }
 
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1726,6 +1737,11 @@ fn filter_commands(commands: &[SlashCommand], text: &str) -> Vec<usize> {
     prefix
 }
 
+/// The first file under `root` whose path ends with `rel`, for mentions like `Foo.cpp:36` that leave out the folders.
+fn find_under(root: &Path, rel: &Path) -> Option<PathBuf> {
+    ignore::WalkBuilder::new(root).build().flatten().map(|e| e.into_path()).find(|p| p.ends_with(rel) && p.is_file())
+}
+
 /// `src/a.rs:42` (bare or as inline code, outside fenced blocks) becomes a link to that line.
 fn linkify(text: &str) -> String {
     static LOC: LazyLock<Regex> =
@@ -1837,6 +1853,17 @@ mod tests {
         assert_eq!(group_label(&[call("Read"), call("Read")]), "Read 2 files");
         assert_eq!(group_label(&[call("Read"), call("Grep")]), "Read 1 file, 1 search");
         assert_eq!(group_label(&[call("Glob"), call("Grep")]), "Searched 2 times");
+    }
+
+    #[test]
+    fn bare_file_names_are_found_under_the_folder() {
+        let dir = std::env::temp_dir().join(format!("orbit-find-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("repo/src/game")).unwrap();
+        std::fs::write(dir.join("repo/src/game/Foo.cpp"), "").unwrap();
+        assert_eq!(super::find_under(&dir, std::path::Path::new("Foo.cpp")), Some(dir.join("repo/src/game/Foo.cpp")));
+        assert_eq!(super::find_under(&dir, std::path::Path::new("game/Foo.cpp")), Some(dir.join("repo/src/game/Foo.cpp")));
+        assert_eq!(super::find_under(&dir, std::path::Path::new("Bar.cpp")), None);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
