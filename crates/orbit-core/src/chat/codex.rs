@@ -4,7 +4,7 @@ use crate::agent::stream;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 struct Codex {
     agent: Arc<Agent>,
@@ -16,28 +16,7 @@ pub fn start(cwd: &Path, resume: Option<String>, sink: impl Fn(ChatEvent) + Send
     let mut cmd = crate::proc::cmd("codex");
     cmd.arg("app-server").args(launch_args).envs(launch_env).current_dir(cwd);
     let parser = Arc::new(Mutex::new(Parser { cwd: cwd.to_path_buf(), resume, ..Parser::default() }));
-    // The reader answers some lines itself (initialize → thread/start), so it writes to stdin too.
-    let writer = Arc::new(OnceLock::<Arc<Agent>>::new());
-    let (parser_r, writer_r) = (parser.clone(), writer.clone());
-    let sink = Arc::new(Mutex::new(sink));
-    let exit_sink = sink.clone();
-    let agent = Arc::new(Agent::spawn(
-        cmd,
-        "codex",
-        move |line| {
-            let (events, outbox) = {
-                let mut p = parser_r.lock().unwrap();
-                let events = p.line(line);
-                (events, std::mem::take(&mut p.outbox))
-            };
-            if let Some(agent) = writer_r.get() {
-                outbox.iter().for_each(|m| agent.write(m));
-            }
-            events.into_iter().for_each(|e| (sink.lock().unwrap())(e));
-        },
-        move |error| (exit_sink.lock().unwrap())(ChatEvent::Exited { error }),
-    )?);
-    let _ = writer.set(agent.clone());
+    let agent = super::spawn_rpc(cmd, "codex", parser.clone(), sink)?;
     let init = parser.lock().unwrap().request("initialize", json!({ "clientInfo": { "name": "orbit", "title": "Orbit", "version": env!("CARGO_PKG_VERSION") } }));
     agent.write(&init);
     Ok(Box::new(Codex { agent, parser }))
@@ -89,6 +68,15 @@ struct Parser {
     turn_tokens: u64,
     /// Approval requests waiting for the user: PermissionAsked id → the server's request.
     approvals: HashMap<String, Value>,
+}
+
+impl super::RpcParser for Parser {
+    fn line(&mut self, line: &str) -> Vec<ChatEvent> {
+        Parser::line(self, line)
+    }
+    fn take_outbox(&mut self) -> Vec<Value> {
+        std::mem::take(&mut self.outbox)
+    }
 }
 
 impl Parser {

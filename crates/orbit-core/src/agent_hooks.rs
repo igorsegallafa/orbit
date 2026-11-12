@@ -216,7 +216,7 @@ pub fn claude_args(key: &str) -> Vec<String> {
 }
 
 /// The session's hook route; `agent_mcp` posts its pictures there.
-fn hook_url(key: &str) -> Option<String> {
+pub(crate) fn hook_url(key: &str) -> Option<String> {
     let (port, token) = ADDR.get()?;
     valid_key(key).then(|| format!("http://127.0.0.1:{port}/hook/{token}/{key}"))
 }

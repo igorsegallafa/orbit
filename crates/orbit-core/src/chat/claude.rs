@@ -2,7 +2,6 @@
 // messages in as NDJSON on stdin, partial-message stream events out.
 use super::{Agent, ChatBackend, ChatEvent, ChatInput, FileDiff, PermissionOption, SlashCommand};
 use crate::agent::stream;
-use base64::Engine;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -78,17 +77,8 @@ fn permission_asked(id: String, tool: &str, input: &Value) -> ChatEvent {
 
 fn user_message(text: &str, images: &[PathBuf]) -> Value {
     let mut content = vec![json!({ "type": "text", "text": text })];
-    for path in images {
-        let media = match path.extension().and_then(|e| e.to_str()).map(str::to_lowercase).as_deref() {
-            Some("jpg" | "jpeg") => "image/jpeg",
-            Some("gif") => "image/gif",
-            Some("webp") => "image/webp",
-            _ => "image/png",
-        };
-        if let Ok(bytes) = std::fs::read(path) {
-            let data = base64::engine::general_purpose::STANDARD.encode(bytes);
-            content.push(json!({ "type": "image", "source": { "type": "base64", "media_type": media, "data": data } }));
-        }
+    for (media, data) in images.iter().filter_map(|p| super::encode_image(p)) {
+        content.push(json!({ "type": "image", "source": { "type": "base64", "media_type": media, "data": data } }));
     }
     json!({ "type": "user", "message": { "role": "user", "content": content } })
 }

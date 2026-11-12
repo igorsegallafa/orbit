@@ -6,6 +6,7 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+mod acp;
 mod claude;
 mod codex;
 
@@ -99,13 +100,57 @@ pub fn start(
     match agent {
         "claude" => claude::start(cwd, resume, sink),
         "codex" => codex::start(cwd, resume, sink),
+        "opencode" | "omp" => acp::start(agent, cwd, resume, sink),
         _ => Err(format!("chat mode is not available for {agent} yet")),
     }
+}
+
+/// An image file as (media type, base64 data); None when it can't be read.
+fn encode_image(path: &Path) -> Option<(&'static str, String)> {
+    use base64::Engine;
+    let media = match path.extension().and_then(|e| e.to_str()).map(str::to_lowercase).as_deref() {
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        _ => "image/png",
+    };
+    let bytes = std::fs::read(path).ok()?;
+    Some((media, base64::engine::general_purpose::STANDARD.encode(bytes)))
 }
 
 fn session_key() -> String {
     static NEXT: AtomicU64 = AtomicU64::new(1);
     format!("chat:{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed))
+}
+
+trait RpcParser: Send + 'static {
+    fn line(&mut self, line: &str) -> Vec<ChatEvent>;
+    fn take_outbox(&mut self) -> Vec<serde_json::Value>;
+}
+
+/// Spawns a JSON-RPC agent whose reader also writes, since some replies (handshake, refusals) come from the parser.
+fn spawn_rpc<P: RpcParser>(cmd: Command, name: &str, parser: Arc<Mutex<P>>, sink: impl Fn(ChatEvent) + Send + 'static) -> Result<Arc<Agent>, String> {
+    let writer = Arc::new(std::sync::OnceLock::<Arc<Agent>>::new());
+    let writer_r = writer.clone();
+    let sink = Arc::new(Mutex::new(sink));
+    let exit_sink = sink.clone();
+    let agent = Arc::new(Agent::spawn(
+        cmd,
+        name,
+        move |line| {
+            let (events, outbox) = {
+                let mut p = parser.lock().unwrap();
+                (p.line(line), p.take_outbox())
+            };
+            if let Some(agent) = writer_r.get() {
+                outbox.iter().for_each(|m| agent.write(m));
+            }
+            events.into_iter().for_each(|e| (sink.lock().unwrap())(e));
+        },
+        move |error| (exit_sink.lock().unwrap())(ChatEvent::Exited { error }),
+    )?);
+    let _ = writer.set(agent.clone());
+    Ok(agent)
 }
 
 struct Agent {
