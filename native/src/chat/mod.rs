@@ -41,6 +41,13 @@ enum Item {
     Permission { id: String, title: String, detail: String, options: Vec<PermissionOption>, answer: Option<String> },
 }
 
+struct Queued {
+    /// As typed (shown); `full` has the pastes expanded (sent).
+    text: String,
+    full: String,
+    attached: Vec<(String, PathBuf)>,
+}
+
 struct Call {
     id: String,
     name: String,
@@ -172,6 +179,8 @@ pub struct ChatView {
     /// Tokens in context, and the window size once the agent reports it.
     context: Option<(u64, Option<u64>)>,
     lightbox: Option<usize>,
+    /// Messages sent while a turn ran, each going out when the one before ends.
+    queue: Vec<Queued>,
     /// A multiSelect question's ticked options, by permission id.
     ticked: HashMap<String, Vec<usize>>,
     /// The question card being answered in its own words ("Other…"): its index and input.
@@ -224,6 +233,7 @@ impl ChatView {
             model_menu: false,
             context: None,
             lightbox: None,
+            queue: vec![],
             ticked: HashMap::new(),
             other: None,
             modes: vec![],
@@ -602,6 +612,12 @@ impl ChatView {
                 self.spent.1 += cost_usd.unwrap_or(0.);
                 self.push(Item::Footer(footer(took, tokens, cost_usd)));
                 self.refresh_limits(cx);
+                // A queued message goes out next; "finished" waits for the last one.
+                if self.backend.is_some() && !self.queue.is_empty() {
+                    let next = self.queue.remove(0);
+                    self.dispatch(next, cx);
+                    return;
+                }
                 let (key, who) = (self.key.clone(), format!("{} chat finished", self.agent));
                 let what = crate::sessions::scope_label(&self.scope);
                 crate::sessions::store(cx).update(cx, |s, cx| s.notify(key.clone(), true, who, what, cx));
@@ -721,13 +737,23 @@ impl ChatView {
 
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.prompt.read(cx).value().trim().to_string();
-        if (text.is_empty() && self.attached.is_empty() && self.pasted.is_empty()) || !self.ready() || self.turn.is_some() {
+        if (text.is_empty() && self.attached.is_empty() && self.pasted.is_empty()) || !self.ready() {
             return;
         }
         let attached = std::mem::take(&mut self.attached);
-        let images: Vec<PathBuf> = attached.iter().map(|(_, p)| p.clone()).collect();
         let full = expand_pastes(&text, &std::mem::take(&mut self.pasted));
         self.refs = (0, 0);
+        self.prompt.update(cx, |p, cx| p.set_value("", window, cx));
+        let queued = Queued { text, full, attached };
+        if self.turn.is_some() {
+            self.queue.push(queued);
+            return cx.notify();
+        }
+        self.dispatch(queued, cx);
+    }
+
+    fn dispatch(&mut self, Queued { text, full, attached }: Queued, cx: &mut Context<Self>) {
+        let images: Vec<PathBuf> = attached.iter().map(|(_, p)| p.clone()).collect();
         if let Some(b) = &self.backend {
             b.send(ChatInput::Prompt { text: full, images: images.clone() });
         }
@@ -745,7 +771,6 @@ impl ChatView {
             self.push(Item::Image { path, title: label, size, user: true });
         }
         self.list.set_follow_mode(FollowMode::Tail);
-        self.prompt.update(cx, |p, cx| p.set_value("", window, cx));
         cx.notify();
     }
 
@@ -1523,6 +1548,68 @@ impl ChatView {
         )
     }
 
+    /// Moves queued message `i` to the front and stops the turn, whose end sends it.
+    fn send_now(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if i >= self.queue.len() {
+            return;
+        }
+        let q = self.queue.remove(i);
+        self.queue.insert(0, q);
+        self.prompt.update(cx, |p, cx| p.focus(window, cx));
+        if self.turn.is_some() {
+            self.interrupt(cx);
+        } else {
+            let next = self.queue.remove(0);
+            self.dispatch(next, cx);
+        }
+    }
+
+    /// The messages waiting for the turn to end, oldest first, each removable.
+    fn queued_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let rows = self.queue.iter().enumerate().map(|(i, q)| {
+            let images = q.attached.len();
+            let text = if q.text.is_empty() { format!("{images} image{}", if images == 1 { "" } else { "s" }) } else { q.text.clone() };
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_2p5()
+                .py_1p5()
+                .rounded(px(8.))
+                .border_1()
+                .border_color(c(theme::BORDER))
+                .bg(c(theme::PANEL))
+                .text_size(px(12.5))
+                .child(div().text_color(c(theme::TEXT_FAINT)).child("Queued"))
+                .child(div().flex_1().min_w_0().truncate().text_color(c(theme::TEXT)).child(text.replace('\n', " ")))
+                .when(images > 0 && !q.text.is_empty(), |d| d.child(div().text_color(c(theme::TEXT_FAINT)).child(format!("+{images} image{}", if images == 1 { "" } else { "s" }))))
+                .child(
+                    crate::pages::kit::mini(format!("send-now:{i}"), "Send now", crate::pages::kit::Kind::Secondary)
+                        .tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("Stop the current turn and send this one").build(window, cx))
+                        .on_click(cx.listener(move |this, _, window, cx| this.send_now(i, window, cx))),
+                )
+                .child(
+                    div()
+                        .id(SharedString::from(format!("unqueue:{i}")))
+                        .relative()
+                        .p_0p5()
+                        .rounded(px(4.))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(c(theme::PANEL_HOVER)))
+                        .child(crate::pages::kit::icon("x", 12., c(theme::TEXT_DIM)))
+                        .child(probe(format!("unqueue:{i}")))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            if i < this.queue.len() {
+                                this.queue.remove(i);
+                            }
+                            this.prompt.update(cx, |p, cx| p.focus(window, cx));
+                            cx.notify();
+                        })),
+                )
+        });
+        div().flex().flex_col().gap_1().pb_1p5().children(rows)
+    }
+
     fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let this = cx.weak_entity();
         let modes: Vec<(String, &str)> = self.modes.iter().map(|m| (m.value.clone(), m.label.as_str())).collect();
@@ -1673,6 +1760,7 @@ impl Render for ChatView {
             .relative()
             .child(self.slash_list(cx))
             .children(self.model_list(cx))
+            .when(!self.queue.is_empty(), |d| d.child(self.queued_list(cx)))
             .child(
                 div()
                     .flex()
@@ -1764,6 +1852,9 @@ impl PageView for ChatView {
 
     fn dump(&self, out: &mut String, cx: &App) {
         let _ = writeln!(out, "  chat {} session {:?} ready {} status {} opened {:?}", self.agent, self.session_id, self.ready(), self.status().label(), self.opened);
+        if !self.queue.is_empty() {
+            let _ = writeln!(out, "    queued: {:?}", self.queue.iter().map(|q| q.text.as_str()).collect::<Vec<_>>());
+        }
         for (ix, item) in self.items.iter().enumerate() {
             let _ = match item {
                 Item::User { text } => writeln!(out, "    you: {text:?}"),
