@@ -705,6 +705,12 @@ pub struct BuildExit {
     pub cancelled: bool,
 }
 
+/// The build folder has a CMakeCache.txt written for this very path.
+fn configured_at(dir: &Path) -> bool {
+    let cache = std::fs::read_to_string(dir.join("CMakeCache.txt")).unwrap_or_default();
+    cache.lines().find_map(|l| l.strip_prefix("CMAKE_CACHEFILE_DIR:INTERNAL=")).is_some_and(|d| Path::new(d.trim()) == dir)
+}
+
 /// `cmake <args>`, inside the Visual Studio environment on Windows.
 fn cmake(args: &[String]) -> Command {
     #[cfg(windows)]
@@ -784,7 +790,8 @@ pub fn build(app: &Events, workspace: &str, repo: &str, what: BuildWhat, preset:
     if kind == "cmake" {
         let preset = r.preset.clone().ok_or("no CMake preset available for this platform")?;
         let dir = r.build_dir.clone().ok_or_else(|| format!("preset '{preset}' has no binaryDir"))?;
-        if !Path::new(&dir).join("CMakeCache.txt").is_file() {
+        // Also when configured through a workspace link: its path sticks in every regenerate.
+        if !configured_at(Path::new(&dir)) {
             // Before the first configure, so its reply lists the targets.
             cmake_api::ensure_query(Path::new(&dir));
             let args = vec!["--preset".to_string(), preset.clone()];
@@ -834,6 +841,19 @@ pub fn cancel(key: &str) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_cache_counts_only_when_written_for_its_own_folder() {
+        let d = std::env::temp_dir().join(format!("orbit-cachefile-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        assert!(!configured_at(&d));
+        let write = |at: &Path| std::fs::write(d.join("CMakeCache.txt"), format!("X:BOOL=ON\nCMAKE_CACHEFILE_DIR:INTERNAL={}\n", at.display())).unwrap();
+        write(&d);
+        assert!(configured_at(&d));
+        write(Path::new("/ws/feat/engine/build/p"));
+        assert!(!configured_at(&d));
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     #[test]
     fn a_repo_outside_the_workspace_builds_from_its_clone() {
