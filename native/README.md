@@ -989,7 +989,8 @@ not run (it needs GitHub).
   variant.
 - **Bottom panel** (`layout.panel_height`, resizable from an 8 px handle on its top edge, saved):
   Build output, Run (the program on `orbit_core::pty` with the configuration's cwd, args and env),
-  Problems (grouped by file, errors first, every build's), Debug. A compound's Build, Run or Debug
+  Problems (grouped by file, errors first, every build's), Debug. On a page (workspace home,
+  dashboard) or with no tab open it shows once something builds, runs or debugs. A compound's Build, Run or Debug
   builds its configurations one after another, in order; the Build tab then lists them beside the
   output (status, errors, time) and a click shows one's output (`build-item:<name>`). A build opens it; a failed build with problems
   switches to Problems. Build output and the Debug Console are log views (`src/logview.rs`): ANSI

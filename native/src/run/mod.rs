@@ -168,6 +168,12 @@ pub fn store(cx: &App) -> Entity<RunStore> {
     cx.global::<GlobalRun>().0.clone()
 }
 
+/// A build, program or debug session the panel has to show.
+pub fn has_activity(cx: &App) -> bool {
+    let s = store(cx).read(cx);
+    !s.builds.is_empty() || !s.runs.is_empty() || !debug::store(cx).read(cx).sessions.is_empty()
+}
+
 fn building(cx: &App) -> bool {
     store(cx).read(cx).is_building()
 }

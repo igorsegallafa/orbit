@@ -1522,8 +1522,9 @@ impl Render for OrbitApp {
         let sidebar_anim = self.pane_animating(0);
         let show_sidebar = (!self.layout.sidebar_hidden || sidebar_anim) && !on_settings;
         let show_strip = !on_settings && !self.strip_tabs(cx).is_empty();
-        // Collapsed to its tab strip unless open; pages (workspace home, dashboard…) have none.
-        let show_panel = self.active_tab().is_some_and(|t| !matches!(t.kind, TabKind::Page(_) | TabKind::Tool(_)));
+        // Collapsed to its tab strip unless open; pages and no tab get it once something builds or runs.
+        let on_page = self.active_tab().is_none_or(|t| matches!(t.kind, TabKind::Page(_) | TabKind::Tool(_)));
+        let show_panel = !on_settings && (!on_page || self.layout.panel_open || crate::run::has_activity(cx));
         let main = div()
             .flex_1()
             .min_w_0()
