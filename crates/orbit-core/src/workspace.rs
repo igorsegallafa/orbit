@@ -42,6 +42,11 @@ impl Workspace {
     pub fn branch_of(&self, repo: &str) -> &str {
         self.repo_branches.get(repo).map(String::as_str).unwrap_or(&self.branch)
     }
+
+    /// `repo` may sit on `branch`: its own, or one of its stacked PRs'.
+    pub fn owns_branch(&self, repo: &str, branch: &str) -> bool {
+        branch == self.branch_of(repo) || self.stack_branches.get(repo).is_some_and(|s| s.iter().any(|b| b == branch))
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -882,14 +887,13 @@ pub fn status(name: &str) -> Result<Vec<RepoStatus>, String> {
             let branch = git::current_branch(&wt);
             let operation = git::operation(&wt);
             // A paused rebase detaches HEAD; that's not being off-branch.
-            let on_stack = branch.as_ref().is_some_and(|b| ws.stack_branches.get(repo).is_some_and(|s| s.contains(b)));
-            let off_branch = operation.is_none() && branch.as_deref() != Some(expected_branch.as_str()) && !on_stack;
+            let off_branch = operation.is_none() && !branch.as_ref().is_some_and(|b| ws.owns_branch(repo, b));
             let branch_only = links::is_link(&wt);
             let held_by = match (&branch, off_branch && branch_only) {
                 (Some(b), true) => others
                     .get_or_insert_with(|| list().unwrap_or_default())
                     .iter()
-                    .find(|o| o.name != ws.name && o.repos.contains(repo) && o.branch_of(repo) == b)
+                    .find(|o| o.name != ws.name && o.repos.contains(repo) && o.owns_branch(repo, b))
                     .map(|o| o.name.clone()),
                 _ => None,
             };
@@ -983,7 +987,7 @@ pub fn ensure_on_branch(workspace: &str, repo: &str) -> Result<(), String> {
     let ws = load_meta(&ws_dir(workspace)?)?;
     let expected = ws.branch_of(repo);
     match git::current_branch(&repo_path(workspace, repo)?) {
-        Some(b) if b == expected => Ok(()),
+        Some(b) if ws.owns_branch(repo, &b) => Ok(()),
         current => Err(format!(
             "{repo} is on {}, not this workspace's branch '{expected}'. Switch it back from the workspace page first.",
             current.map(|b| format!("'{b}'")).unwrap_or_else(|| "a detached HEAD".into())
@@ -1120,6 +1124,12 @@ dist
         assert!(!status("b").unwrap()[0].off_branch);
         assert!(ensure_on_branch("a", "web").unwrap_err().contains("feat/b"));
         assert!(ensure_on_branch("b", "web").is_ok());
+
+        // A branch of the workspace's stacked PRs is its own: no flag, writes allowed, and it holds the clone.
+        save_stack_branches("a", BTreeMap::from([("web".into(), vec!["feat/a".into(), "feat/b".into()])])).unwrap();
+        assert!(!status("a").unwrap()[0].off_branch);
+        assert!(ensure_on_branch("a", "web").is_ok());
+        save_stack_branches("a", BTreeMap::new()).unwrap();
 
         // b's uncommitted work blocks the switch unless it's shelved.
         let clone = clone_dir_of("web").unwrap();
