@@ -708,7 +708,17 @@ pub struct BuildExit {
 /// The build folder has a CMakeCache.txt written for this very path.
 fn configured_at(dir: &Path) -> bool {
     let cache = std::fs::read_to_string(dir.join("CMakeCache.txt")).unwrap_or_default();
-    cache.lines().find_map(|l| l.strip_prefix("CMAKE_CACHEFILE_DIR:INTERNAL=")).is_some_and(|d| Path::new(d.trim()) == dir)
+    cache.lines().find_map(|l| l.strip_prefix("CMAKE_CACHEFILE_DIR:INTERNAL=")).is_some_and(|d| same_dir(d.trim(), &dir.to_string_lossy()))
+}
+
+/// CMake writes forward slashes on Windows too, and Windows paths ignore case.
+fn same_dir(a: &str, b: &str) -> bool {
+    let norm = |s: &str| {
+        let s = s.replace('\\', "/");
+        let s = s.trim_end_matches('/');
+        if cfg!(windows) { s.to_lowercase() } else { s.to_string() }
+    };
+    norm(a) == norm(b)
 }
 
 /// `cmake <args>`, inside the Visual Studio environment on Windows.
@@ -847,11 +857,41 @@ mod tests {
         let d = std::env::temp_dir().join(format!("orbit-cachefile-{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         assert!(!configured_at(&d));
-        let write = |at: &Path| std::fs::write(d.join("CMakeCache.txt"), format!("X:BOOL=ON\nCMAKE_CACHEFILE_DIR:INTERNAL={}\n", at.display())).unwrap();
-        write(&d);
+        let write = |at: &str| std::fs::write(d.join("CMakeCache.txt"), format!("X:BOOL=ON\nCMAKE_CACHEFILE_DIR:INTERNAL={at}\n")).unwrap();
+        write(&d.to_string_lossy());
         assert!(configured_at(&d));
-        write(Path::new("/ws/feat/engine/build/p"));
+        write("/ws/feat/engine/build/p");
         assert!(!configured_at(&d));
+        let _ = std::fs::remove_dir_all(&d);
+        assert!(same_dir(r"C:\src\engine\build\p", "C:/src/engine/build/p/"));
+        assert!(!same_dir("/src/engine/build/p", "/ws/feat/engine/build/p"));
+        assert_eq!(same_dir("c:/src/build", "C:/src/build"), cfg!(windows));
+    }
+
+    /// Against the CMakeCache.txt a real CMake writes, configured both ways.
+    #[cfg(unix)]
+    #[test]
+    fn a_configure_through_a_link_is_caught() {
+        if crate::proc::run("cmake", &["--version"], None).is_err() {
+            return;
+        }
+        let d = std::env::temp_dir().join(format!("orbit-cmake-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("real")).unwrap();
+        std::fs::write(d.join("real/CMakeLists.txt"), "cmake_minimum_required(VERSION 3.20)\nproject(t NONE)\n").unwrap();
+        std::fs::write(d.join("real/CMakePresets.json"), r#"{"version":3,"configurePresets":[{"name":"p","binaryDir":"${sourceDir}/build/p"}]}"#).unwrap();
+        std::os::unix::fs::symlink(d.join("real"), d.join("link")).unwrap();
+        let configure = |from: &Path| {
+            let ok = std::process::Command::new("cmake").args(["--preset", "p"]).current_dir(from).env("PWD", from).output().unwrap().status.success();
+            assert!(ok);
+        };
+        let build = d.join("real/build/p");
+        configure(&d.join("real"));
+        assert!(configured_at(&build));
+        configure(&d.join("link"));
+        assert!(!configured_at(&build));
+        configure(&d.join("real"));
+        assert!(configured_at(&build));
         let _ = std::fs::remove_dir_all(&d);
     }
 
