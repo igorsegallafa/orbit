@@ -147,6 +147,7 @@ pub struct PermissionOption {
     pub label: String,
     /// The agent's kind for the option, e.g. `allow_once` or `reject_once`.
     pub kind: String,
+    pub description: String,
 }
 
 pub trait ChatBackend: Send {
@@ -357,6 +358,7 @@ mod tests {
                     id: s("allow"),
                     label: s("Allow"),
                     kind: s("allow_once"),
+                    description: String::new(),
                 }],
             },
             ChatEvent::Commands(vec![SlashCommand {

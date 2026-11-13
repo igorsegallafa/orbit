@@ -82,7 +82,7 @@ impl ChatBackend for Claude {
 }
 
 fn permission_asked(id: String, tool: &str, input: &Value, questions: &Questions) -> Vec<ChatEvent> {
-    let option = |id: &str, label: &str, kind: &str| PermissionOption { id: id.into(), label: label.into(), kind: kind.into() };
+    let option = |id: &str, label: &str, kind: &str| PermissionOption { id: id.into(), label: label.into(), kind: kind.into(), description: String::new() };
     let asked = input["questions"].as_array().filter(|q| tool == "AskUserQuestion" && !q.is_empty());
     let Some(asked) = asked else {
         return vec![ChatEvent::PermissionAsked {
@@ -92,7 +92,6 @@ fn permission_asked(id: String, tool: &str, input: &Value, questions: &Questions
             options: vec![option("allow", "Allow", "allow_once"), option("deny", "Deny", "reject_once")],
         }];
     };
-    // shortcut: a multiSelect question takes one option and there is no free-text "Other"; Skip lets the user reply in chat.
     let text = |q: &Value| q["question"].as_str().unwrap_or("").to_string();
     questions.lock().unwrap().insert(id.clone(), (asked.iter().map(text).collect(), Default::default()));
     asked
@@ -101,10 +100,16 @@ fn permission_asked(id: String, tool: &str, input: &Value, questions: &Questions
         .map(|(n, q)| {
             let opts = q["options"].as_array().cloned().unwrap_or_default();
             let label = |o: &Value| o["label"].as_str().unwrap_or("").to_string();
-            let detail = opts.iter().filter(|o| o["description"].as_str().is_some_and(|d| !d.is_empty())).map(|o| format!("{}: {}", label(o), o["description"].as_str().unwrap_or(""))).collect::<Vec<_>>().join("\n");
-            let mut options: Vec<PermissionOption> = opts.iter().map(|o| option(&format!("pick:{}", label(o)), &label(o), "allow_once")).collect();
+            // The chat ticks "pick_many" options until "submit"; "other" opens a text field.
+            let many = q["multiSelect"].as_bool().unwrap_or(false);
+            let pick = |o: &Value| PermissionOption { description: o["description"].as_str().unwrap_or("").into(), ..option(&format!("pick:{}", label(o)), &label(o), if many { "pick_many" } else { "allow_once" }) };
+            let mut options: Vec<PermissionOption> = opts.iter().map(pick).collect();
+            if many {
+                options.push(option("submit", "Submit", "submit"));
+            }
+            options.push(option("other", "Other…", "other"));
             options.push(option("deny", "Skip", "reject_once"));
-            ChatEvent::PermissionAsked { id: format!("{id}#{n}"), title: text(q), detail, options }
+            ChatEvent::PermissionAsked { id: format!("{id}#{n}"), title: text(q), detail: String::new(), options }
         })
         .collect()
 }
@@ -328,18 +333,20 @@ mod tests {
         let questions = Questions::default();
         let input = json!({"questions": [
             {"question": "Which layout?", "header": "Layout", "multiSelect": false, "options": [{"label": "Tabs", "description": "One per file"}, {"label": "Split", "description": ""}]},
-            {"question": "Ship it?", "header": "Ship", "multiSelect": false, "options": [{"label": "Yes"}, {"label": "No"}]},
+            {"question": "Ship it?", "header": "Ship", "multiSelect": true, "options": [{"label": "Yes"}, {"label": "No"}]},
         ]});
         let cards = permission_asked("perm-1".into(), "AskUserQuestion", &input, &questions);
         let ChatEvent::PermissionAsked { id, title, detail, options } = &cards[0] else { panic!() };
-        assert_eq!((id.as_str(), title.as_str(), detail.as_str()), ("perm-1#0", "Which layout?", "Tabs: One per file"));
-        assert_eq!(options.iter().map(|o| o.label.as_str()).collect::<Vec<_>>(), ["Tabs", "Split", "Skip"]);
+        assert_eq!((id.as_str(), title.as_str(), detail.as_str(), options[0].description.as_str()), ("perm-1#0", "Which layout?", "", "One per file"));
+        assert_eq!(options.iter().map(|o| o.label.as_str()).collect::<Vec<_>>(), ["Tabs", "Split", "Other…", "Skip"]);
         assert_eq!(cards.len(), 2);
+        let ChatEvent::PermissionAsked { options, .. } = &cards[1] else { panic!() };
+        assert_eq!(options.iter().map(|o| (o.label.as_str(), o.kind.as_str())).collect::<Vec<_>>(), [("Yes", "pick_many"), ("No", "pick_many"), ("Submit", "submit"), ("Other…", "other"), ("Skip", "reject_once")]);
 
-        assert_eq!(answer_question(&questions, "perm-1#1", "pick:Yes"), None);
+        assert_eq!(answer_question(&questions, "perm-1#1", "pick:Yes, No"), None);
         let (id, answer) = answer_question(&questions, "perm-1#0", "pick:Split").unwrap();
         assert_eq!(id, "perm-1");
-        assert_eq!(serde_json::from_str::<Value>(&answer).unwrap(), json!({"answers": {"Which layout?": "Split", "Ship it?": "Yes"}}));
+        assert_eq!(serde_json::from_str::<Value>(&answer).unwrap(), json!({"answers": {"Which layout?": "Split", "Ship it?": "Yes, No"}}));
         assert!(questions.lock().unwrap().is_empty());
 
         permission_asked("perm-2".into(), "AskUserQuestion", &input, &questions);

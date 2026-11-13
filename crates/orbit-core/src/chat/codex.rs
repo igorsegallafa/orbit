@@ -292,7 +292,7 @@ impl Parser {
         // A command approval may list `cancel` but not `decline`, so offer only what the server lists.
         let all = [("accept", "Allow", "allow_once"), ("acceptForSession", "Allow for this session", "allow_always"), ("decline", "Deny", "reject_once"), ("cancel", "Deny and stop", "reject_once")];
         let offered = |d: &str| p["availableDecisions"].as_array().map_or(d != "cancel", |a| a.iter().any(|x| x == d));
-        let options = all.into_iter().filter(|(id, ..)| offered(id)).map(|(id, label, kind)| PermissionOption { id: id.into(), label: label.into(), kind: kind.into() }).collect();
+        let options = all.into_iter().filter(|(id, ..)| offered(id)).map(|(id, label, kind)| PermissionOption { id: id.into(), label: label.into(), kind: kind.into(), description: String::new() }).collect();
         let id = v["id"].to_string();
         self.approvals.insert(id.clone(), v.clone());
         Some(ChatEvent::PermissionAsked { id, title: title.into(), detail: detail.trim().into(), options })

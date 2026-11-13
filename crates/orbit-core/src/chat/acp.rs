@@ -181,7 +181,7 @@ impl Parser {
                 let call = &p["toolCall"];
                 let detail: Vec<String> = call["content"].as_array().into_iter().flatten().filter_map(|c| text(&c["content"])).collect();
                 let s = |v: &Value| v.as_str().unwrap_or("").to_string();
-                let options = p["options"].as_array().into_iter().flatten().map(|o| PermissionOption { id: s(&o["optionId"]), label: s(&o["name"]), kind: s(&o["kind"]) }).collect();
+                let options = p["options"].as_array().into_iter().flatten().map(|o| PermissionOption { id: s(&o["optionId"]), label: s(&o["name"]), kind: s(&o["kind"]), description: String::new() }).collect();
                 let id = v["id"].to_string();
                 self.approvals.insert(id.clone(), v["id"].clone());
                 return vec![ChatEvent::PermissionAsked { id, title: s(&call["title"]), detail: detail.join("\n"), options }];
@@ -519,7 +519,7 @@ mod tests {
         let mut p = Parser::default();
         let [ChatEvent::PermissionAsked { id, title, detail, options }] = &p.line(&line)[..] else { panic!() };
         assert_eq!((title.as_str(), detail.as_str()), ("ls", "$ ls"));
-        assert_eq!(options[1], PermissionOption { id: "allow_always".into(), label: "Always allow".into(), kind: "allow_always".into() });
+        assert_eq!(options[1], PermissionOption { id: "allow_always".into(), label: "Always allow".into(), kind: "allow_always".into(), description: String::new() });
         assert!(p.outbox.is_empty());
         let reply = p.answer(id, "allow_once").unwrap();
         assert_eq!(reply.to_string(), r#"{"jsonrpc":"2.0","id":2,"result":{"outcome":{"outcome":"selected","optionId":"allow_once"}}}"#);
