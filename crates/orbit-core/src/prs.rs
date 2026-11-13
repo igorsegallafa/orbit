@@ -358,11 +358,49 @@ pub fn status(workspace: &str) -> Result<Vec<WsPrStatus>, String> {
         };
         handles.into_iter().filter_map(|h| h.join().ok()).flatten().collect()
     });
-    if scan && !rows.is_empty() {
+    // An agent may stack its PRs on several branches: follow them from the workspace's own.
+    let rows: Vec<WsPrStatus> = std::thread::scope(|scope| {
+        let handles: Vec<_> = meta
+            .repos
+            .iter()
+            .map(|repo| {
+                let (dir, meta, mut mine) = (ws_dir.join(repo), &meta, rows.iter().filter(|r| &r.repo == repo).cloned().collect::<Vec<_>>());
+                scope.spawn(move || {
+                    if let Some(owner_repo) = dir.exists().then(|| remote_of(&dir)).flatten() {
+                        let seeds: Vec<String> = [Some(meta.branch_of(repo).to_string()), git::current_branch(&dir)].into_iter().flatten().collect();
+                        crate::stack::grow(&owner_repo, repo, &meta.base, &seeds, &mut mine);
+                    }
+                    for r in mine.iter_mut().filter(|r| r.state == "OPEN") {
+                        r.local_behind = crate::stack::local_behind(&dir, &r.branch).unwrap_or(0);
+                    }
+                    mine
+                })
+            })
+            .collect();
+        let mut out: Vec<WsPrStatus> = handles.into_iter().filter_map(|h| h.join().ok()).flatten().collect();
+        // Rows of repos no longer in the workspace stay as they were.
+        out.extend(rows.iter().filter(|r| !meta.repos.contains(&r.repo)).cloned());
+        out
+    });
+    if !rows.is_empty() {
         let refs: Vec<PrRef> = rows.iter().map(|r| PrRef { repo: r.repo.clone(), number: r.number, url: r.url.clone() }).collect();
         let _ = workspace::save_pr_refs(workspace, &refs);
     }
+    let mut stacks: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    for r in rows.iter().filter(|r| r.state == "OPEN" && rows.iter().any(|o| o.repo == r.repo && (o.base == r.branch || r.base == o.branch))) {
+        stacks.entry(r.repo.clone()).or_default().push(r.branch.clone());
+    }
+    let _ = workspace::save_stack_branches(workspace, stacks);
     Ok(rows)
+}
+
+/// Fast-forwards a workspace repo's local `branch` to origin (a stacked branch GitHub updated).
+pub fn sync_branch(workspace: &str, repo: &str, branch: &str) -> Result<(), String> {
+    crate::stack::sync_local(&worktree_of(workspace, repo)?, branch).map_err(|e| format!("{repo} {branch}: {e}"))
+}
+
+pub fn wait_checks(workspace: &str, repo: &str, number: u64) -> Result<(), String> {
+    crate::stack::wait_checks(&owner_repo(workspace, repo)?, number)
 }
 
 // ---------- checks ----------
@@ -453,12 +491,12 @@ pub fn push(workspace: &str, repo: &str, force: bool) -> Result<(), String> {
 
 /// Squash-merges one of the workspace's PRs on GitHub (its remote branch is
 /// deleted; the worktree stays until the workspace is removed).
-pub fn merge(workspace: &str, repo: &str, number: u64) -> Result<(), String> {
+pub fn merge(workspace: &str, repo: &str, number: u64) -> Result<Vec<String>, String> {
     github::squash_merge(&owner_repo(workspace, repo)?, number).map_err(|e| format!("{repo} #{number}: {e}"))
 }
 
 /// Squash-merges a PR addressed on GitHub alone (never checked out).
-pub fn merge_remote(owner_repo: &str, number: u64) -> Result<(), String> {
+pub fn merge_remote(owner_repo: &str, number: u64) -> Result<Vec<String>, String> {
     github::squash_merge(owner_repo, number).map_err(|e| format!("{owner_repo} #{number}: {e}"))
 }
 

@@ -21,6 +21,8 @@ pub struct MergeItem {
     pub repo: String,
     pub number: u64,
     pub title: String,
+    /// The stacked-on PR merged just before this one: wait for this one's checks (re-run by the restack) first.
+    pub after: Option<u64>,
 }
 
 pub struct MergeFlow {
@@ -72,13 +74,23 @@ impl PageTab {
             return self.reload(true, window, cx);
         };
         *state = MergeState::Merging;
-        let (scope, repo, number) = (f.scope.clone(), item.repo.clone(), item.number);
-        spawn(window, cx, move || orbit_core::prs::merge(&scope, &repo, number), move |t, res, window, cx| {
+        let (scope, repo, number, wait) = (f.scope.clone(), item.repo.clone(), item.number, item.after.is_some());
+        let job = move || {
+            if wait {
+                orbit_core::prs::wait_checks(&scope, &repo, number)?;
+            }
+            orbit_core::prs::merge(&scope, &repo, number)
+        };
+        spawn(window, cx, job, move |t, res, window, cx| {
             let Some(f) = t.merge_flow() else { return };
             let Some((item, state)) = f.prs.get_mut(ix) else { return };
             match res {
-                Ok(()) => {
+                Ok(notes) => {
+                    let title = format!("Moved the PRs stacked on {} #{}", item.repo, item.number);
                     *state = MergeState::Merged;
+                    if !notes.is_empty() {
+                        t.toast(ToastKind::Info, title, Some(notes.join("\n")), window, cx);
+                    }
                     t.merge_next(ix + 1, window, cx);
                 }
                 Err(e) => {
@@ -97,7 +109,8 @@ impl PageTab {
         let mut list = div().flex().flex_col().gap(px(6.));
         for (p, s) in &f.prs {
             let (mark, detail) = match s {
-                MergeState::Idle => (Mark::Pending, p.title.clone()),
+                MergeState::Idle => (Mark::Pending, p.after.map_or_else(|| p.title.clone(), |n| format!("After #{n}, once its checks pass · {}", p.title))),
+                MergeState::Merging if p.after.is_some() => (Mark::Working, "Waiting for checks, then merging…".into()),
                 MergeState::Merging => (Mark::Working, "Merging…".into()),
                 MergeState::Merged => (Mark::Ok, format!("Squashed into {}", f.base)),
                 MergeState::Error(e) => (Mark::Error, e.clone()),

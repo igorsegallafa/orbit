@@ -488,7 +488,7 @@ impl PageTab {
         let Some(r) = self.repo_view() else { return };
         let base = r.overview.ready().and_then(|o| o.default_branch.clone()).unwrap_or_else(|| "main".into());
         let scope = format!("@{}", r.name);
-        let item = crate::git::merge::MergeItem { repo: pr.repo, number: pr.number, title: pr.title };
+        let item = crate::git::merge::MergeItem { repo: pr.repo, number: pr.number, title: pr.title, after: None };
         self.open_merge(scope, base, vec![item], cx);
     }
 

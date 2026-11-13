@@ -212,6 +212,20 @@ pub fn section_head(label: &str) -> Div {
         .child(label.to_uppercase())
 }
 
+/// A stack's rail: a node, with the line running up to the row above and down to the row below.
+pub fn rail(up: bool, down: bool, color: Rgba, filled: bool) -> Div {
+    let line = |on: bool| div().flex_1().w(px(2.)).when(on, |d| d.bg(c(theme::BORDER_STRONG)));
+    div()
+        .w(px(20.))
+        .flex_none()
+        .flex()
+        .flex_col()
+        .items_center()
+        .child(line(up))
+        .child(div().size(px(10.)).flex_none().rounded_full().border_2().border_color(color).when(filled, |d| d.bg(color)))
+        .child(line(down))
+}
+
 /// `.section-count`.
 pub fn section_count(n: usize) -> Div {
     div()

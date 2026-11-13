@@ -25,6 +25,7 @@ pub mod prs;
 pub mod pty;
 pub mod ralph;
 pub mod repo;
+pub mod stack;
 pub mod review;
 pub mod run;
 pub mod search;

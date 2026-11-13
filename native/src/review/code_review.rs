@@ -174,16 +174,43 @@ pub fn with_app(host: &Host, window: &mut Window, cx: &mut App, f: impl FnOnce(&
 /// "Check out as workspace": one worktree per repo on the PRs' branch.
 pub fn checkout(host: &Host, prs: Vec<PullRequest>, window: &mut Window, cx: &mut App) {
     let Some(first) = prs.first().cloned() else { return };
+    checkout_named(host, prs, first.branch.clone(), first.base.clone(), 1, window, cx);
+}
+
+/// One workspace for a stack, on its top branch (which holds every level) and the bottom's base.
+pub fn checkout_stack(host: &Host, stack: &[PrGroup], window: &mut Window, cx: &mut App) {
+    let (Some(bottom), Some(top)) = (stack.first(), stack.last()) else { return };
+    let branches: Vec<&str> = stack.iter().map(|g| g.branch.as_str()).collect();
+    checkout_named(host, top.prs.clone(), stack_name(&branches), bottom.prs[0].base.clone(), stack.len(), window, cx);
+}
+
+/// The branches' common prefix up to a word boundary (`feat/spawn-1-model`, `feat/spawn-3-client` → `feat/spawn`), else the last.
+fn stack_name(branches: &[&str]) -> String {
+    let last = branches.last().copied().unwrap_or_default();
+    let common = branches.iter().fold(last, |acc, b| &acc[..acc.chars().zip(b.chars()).take_while(|(x, y)| x == y).map(|(x, _)| x.len_utf8()).sum::<usize>()]);
+    let trimmed = common.trim_end_matches(|ch: char| ch.is_ascii_digit() || !ch.is_ascii_alphanumeric());
+    if trimmed.rsplit('/').next().unwrap_or_default().len() >= 3 { trimmed.to_string() } else { last.to_string() }
+}
+
+fn checkout_named(host: &Host, prs: Vec<PullRequest>, label: String, base: String, levels: usize, window: &mut Window, cx: &mut App) {
+    let Some(first) = prs.first().cloned() else { return };
     let taken: Vec<String> = crate::workspace::list_workspaces().into_iter().map(|w| w.meta.name).collect();
-    let name = suggest_name(&first.branch, &taken);
+    let name = suggest_name(&label, &taken);
     let h = host.clone();
-    let message = format!("Creates workspace {name} with a worktree on {} in {}.", first.branch, prs.iter().map(|p| p.repo.as_str()).collect::<Vec<_>>().join(", "));
+    let repos = prs.iter().map(|p| p.repo.as_str()).collect::<Vec<_>>().join(", ");
+    let (title, message) = match levels {
+        1 => (format!("Check out {}", first.branch), format!("Creates workspace {name} with a worktree on {} in {repos}.", first.branch)),
+        n => (
+            format!("Check out the stack of {n}"),
+            format!("Creates one workspace {name} for every level, with a worktree in {repos} on {}: the top branch holds the levels below it.", first.branch),
+        ),
+    };
     host.confirm(
-        format!("Check out {}", first.branch),
+        title,
         message,
         "Check out",
         move |window, cx| {
-            let (h, name, prs, base) = (h.clone(), name.clone(), prs.clone(), first.base.clone());
+            let (h, name, prs, base) = (h.clone(), name.clone(), prs.clone(), base.clone());
             h.toast(ToastKind::Info, format!("Checking out {}…", prs[0].branch), Some(format!("Workspace {name}")), cx);
             let specs: Vec<_> = prs
                 .iter()
@@ -303,9 +330,33 @@ impl CodeReviewPage {
         with_app(&self.host, window, cx, move |a, w, cx| super::feature::open(a, host, prs, w, cx));
     }
 
+    fn stack_of(&self, g: &PrGroup) -> Vec<PrGroup> {
+        let all = self.groups.ready().map(Vec::as_slice).unwrap_or_default();
+        match all.iter().position(|a| a.branch == g.branch) {
+            Some(at) => orbit_core::stack::stack(all, at).into_iter().map(|i| all[i].clone()).collect(),
+            None => vec![g.clone()],
+        }
+    }
+
+    /// The workspace holding `g`, or any level of its stack: one workspace per stack.
+    fn workspace_of(&self, g: &PrGroup) -> Option<Workspace> {
+        let prs: Vec<PullRequest> = g.prs.iter().cloned().chain(self.stack_of(g).into_iter().flat_map(|s| s.prs)).collect();
+        workspace_for(&prs, &self.workspaces)
+    }
+
+    /// Check out `g`: its whole stack when it's in one.
+    fn checkout_group(&self, g: &PrGroup, window: &mut Window, cx: &mut App) {
+        match self.stack_of(g) {
+            stack if stack.len() > 1 => checkout_stack(&self.host, &stack, window, cx),
+            _ => checkout(&self.host, g.prs.clone(), window, cx),
+        }
+    }
+
     fn row_menu(&self, g: &PrGroup, window: &mut Window, cx: &mut Context<Self>) {
-        let ws = workspace_for(&g.prs, &self.workspaces);
-        let (prs, prs2, url, branch) = (g.prs.clone(), g.prs.clone(), g.prs[0].url.clone(), g.branch.clone());
+        let ws = self.workspace_of(g);
+        let (prs, url, branch) = (g.prs.clone(), g.prs[0].url.clone(), g.branch.clone());
+        let stack = self.stack_of(g);
+        let (stacked, single) = (stack.len() > 1, g.prs.clone());
         let (h1, h2, h3) = (self.host.clone(), self.host.clone(), self.host.clone());
         let mut items: Vec<(String, crate::pages::Action)> = vec![(
             "Review".into(),
@@ -327,7 +378,13 @@ impl CodeReviewPage {
                     }),
                 )
             }
-            None => ("Check out as workspace…".into(), std::rc::Rc::new(move |w: &mut Window, cx: &mut App| checkout(&h2, prs2.clone(), w, cx))),
+            None => (
+                if stacked { "Check out stack as workspace…" } else { "Check out as workspace…" }.into(),
+                std::rc::Rc::new(move |w: &mut Window, cx: &mut App| match stacked {
+                    true => checkout_stack(&h2, &stack, w, cx),
+                    false => checkout(&h2, single.clone(), w, cx),
+                }),
+            ),
         });
         items.push(("Open on GitHub ↗".into(), std::rc::Rc::new(move |_: &mut Window, cx: &mut App| cx.open_url(&url))));
         items.push((
@@ -346,7 +403,7 @@ impl CodeReviewPage {
         let status = group_status(&g.prs);
         let state = status.as_ref().and_then(primary_state);
         let draft = g.prs.iter().all(|p| p.is_draft);
-        let ws = workspace_for(&g.prs, &self.workspaces);
+        let ws = self.workspace_of(g);
         let name = format!("cr-row:{ix}");
         let sep = || div().mx(px(7.)).text_color(c(theme::BORDER_STRONG)).child("·");
         let repo = |p: &PullRequest| {
@@ -377,7 +434,7 @@ impl CodeReviewPage {
         let icon_tip = if draft { "Draft".to_string() } else if multi { format!("Feature across {} repos", g.prs.len()) } else { "Open".into() };
         let checks = status.as_ref().and_then(|s| s.checks);
         let group = format!("cr-row-{ix}");
-        let (prs, prs_menu, prs_co) = (g.prs.clone(), g.clone(), g.prs.clone());
+        let (prs, prs_menu, g_co) = (g.prs.clone(), g.clone(), g.clone());
         div()
             .id(SharedString::from(name.clone()))
             .group(SharedString::from(group.clone()))
@@ -517,13 +574,62 @@ impl CodeReviewPage {
                                                     crate::workspace_ui::open(a, crate::workspace_ui::PageId::Workspace(name), w, cx);
                                                 });
                                             }
-                                            None => checkout(&p.host, prs_co.clone(), window, cx),
+                                            None => p.checkout_group(&g_co, window, cx),
                                         }
                                     },
                                 )),
                             ),
                     ),
             )
+    }
+
+    /// A stack's groups as one card, top first, on a rail down to the one that merges first.
+    fn render_stack(&self, ix: usize, all: &[PrGroup], stack: &[usize], now: i64, cx: &mut Context<Self>) -> gpui::Div {
+        let n = stack.len();
+        let head = div()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .px(px(14.))
+            .pt(px(8.))
+            .pb(px(2.))
+            .text_size(px(11.))
+            .text_color(c(theme::TEXT_FAINT))
+            .when(ix > 0, |d| d.border_t_1().border_color(c(theme::BORDER)))
+            .child(lucide("layers", 12., c(theme::ACCENT)))
+            .child(div().font_weight(FontWeight::SEMIBOLD).text_color(c(theme::TEXT_DIM)).child(format!("Stack of {n}")))
+            .child(div().flex_1().child("· merges from the bottom up"))
+            .child({
+                let top = all[stack[n - 1]].clone();
+                let ws = self.workspace_of(&top);
+                let label = if ws.is_some() { "Open workspace" } else { "Check out stack" };
+                let tip = match &ws {
+                    Some(w) => format!("Every level of the stack is in workspace {}", w.meta.name),
+                    None => format!("One workspace on {}, the top branch: it holds every level", top.branch),
+                };
+                pr_ui::tip(
+                    pr_ui::btn_mini(format!("cr-stack-checkout:{ix}"), label).on_click(cx.listener(move |p, _: &ClickEvent, window, cx| match &ws {
+                        Some(ws) => {
+                            let name = ws.meta.name.clone();
+                            with_app(&p.host, window, cx, move |a, w, cx| {
+                                crate::workspace_ui::open(a, crate::workspace_ui::PageId::Workspace(name), w, cx);
+                            });
+                        }
+                        None => p.checkout_group(&top, window, cx),
+                    })),
+                    tip,
+                )
+            });
+        let rows = stack.iter().enumerate().rev().map(|(level, &g)| {
+            let bottom = level == 0;
+            let row = self.render_row(ix + n - level, &all[g], now, cx).flex_1().min_w_0().pl(px(4.));
+            div()
+                .flex()
+                .pl(px(10.))
+                .child(pr_ui::rail(level + 1 < n, !bottom, c(if bottom { theme::OK } else { theme::TEXT_FAINT }), bottom))
+                .child(row)
+        });
+        div().flex().flex_col().child(head).children(rows)
     }
 
     fn render_toolbar(&self, show_segments: bool, cx: &mut Context<Self>) -> impl IntoElement {
@@ -663,12 +769,29 @@ impl Render for CodeReviewPage {
                 .into_any_element(),
             Some(list) if list.is_empty() => self.render_empty(searching).into_any_element(),
             // `card-in`, delayed `min(i, 12) * 18ms`.
-            Some(list) => rows_card()
-                .children(list.iter().enumerate().map(|(i, g)| {
-                    let key = format!("cr-in:{}:{}:{}", g.branch, g.prs[0].repo, g.prs[0].number);
-                    motion::card_in(self.render_row(i, g, now, cx), SharedString::from(key), Duration::from_millis(i.min(12) as u64 * 18))
-                }))
-                .into_any_element(),
+            Some(list) => {
+                // Stacks are found among every open PR, so a filtered-in level still shows its whole stack.
+                let all = if searching { list.clone() } else { self.groups.ready().cloned().unwrap_or_default() };
+                let (mut shown, mut cards, mut ix) = (std::collections::HashSet::new(), vec![], 0);
+                for g in &list {
+                    if shown.contains(&g.branch) {
+                        continue;
+                    }
+                    let key = SharedString::from(format!("cr-in:{}:{}:{}", g.branch, g.prs[0].repo, g.prs[0].number));
+                    let delay = Duration::from_millis(cards.len().min(12) as u64 * 18);
+                    let stack = all.iter().position(|a| a.branch == g.branch).map_or_else(Vec::new, |at| orbit_core::stack::stack(&all, at));
+                    if stack.len() > 1 {
+                        shown.extend(stack.iter().map(|&i| all[i].branch.clone()));
+                        cards.push(motion::card_in(self.render_stack(ix, &all, &stack, now, cx), key, delay));
+                        ix += stack.len() + 1;
+                    } else {
+                        shown.insert(g.branch.clone());
+                        cards.push(motion::card_in(self.render_row(ix, g, now, cx), key, delay));
+                        ix += 1;
+                    }
+                }
+                rows_card().children(cards).into_any_element()
+            }
         };
         let refreshing = self.refreshing;
         let page = div()
@@ -773,5 +896,7 @@ mod tests {
         assert_eq!(suggest_name("feat/EX-186 spawn", &[]), "ex-186-spawn");
         assert_eq!(suggest_name("x", &["x".into(), "x-2".into()]), "x-3");
         assert_eq!(suggest_name("feat/--", &[]), "review");
+        assert_eq!(stack_name(&["feat/spawn-1-model", "feat/spawn-2-server", "feat/spawn-3-client"]), "feat/spawn");
+        assert_eq!(stack_name(&["a/x", "b/y"]), "b/y");
     }
 }

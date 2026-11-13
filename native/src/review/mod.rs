@@ -8,7 +8,7 @@ mod commit;
 pub mod code_review;
 mod feature;
 mod pr_review;
-mod pr_ui;
+pub mod pr_ui;
 pub mod notes;
 mod prs;
 mod send;
