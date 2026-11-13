@@ -705,6 +705,22 @@ pub struct BuildExit {
     pub cancelled: bool,
 }
 
+/// The build folder has a CMakeCache.txt written for this very path.
+fn configured_at(dir: &Path) -> bool {
+    let cache = std::fs::read_to_string(dir.join("CMakeCache.txt")).unwrap_or_default();
+    cache.lines().find_map(|l| l.strip_prefix("CMAKE_CACHEFILE_DIR:INTERNAL=")).is_some_and(|d| same_dir(d.trim(), &dir.to_string_lossy()))
+}
+
+/// CMake writes forward slashes on Windows too, and Windows paths ignore case.
+fn same_dir(a: &str, b: &str) -> bool {
+    let norm = |s: &str| {
+        let s = s.replace('\\', "/");
+        let s = s.trim_end_matches('/');
+        if cfg!(windows) { s.to_lowercase() } else { s.to_string() }
+    };
+    norm(a) == norm(b)
+}
+
 /// `cmake <args>`, inside the Visual Studio environment on Windows.
 fn cmake(args: &[String]) -> Command {
     #[cfg(windows)]
@@ -784,7 +800,8 @@ pub fn build(app: &Events, workspace: &str, repo: &str, what: BuildWhat, preset:
     if kind == "cmake" {
         let preset = r.preset.clone().ok_or("no CMake preset available for this platform")?;
         let dir = r.build_dir.clone().ok_or_else(|| format!("preset '{preset}' has no binaryDir"))?;
-        if !Path::new(&dir).join("CMakeCache.txt").is_file() {
+        // Also when configured through a workspace link: its path sticks in every regenerate.
+        if !configured_at(Path::new(&dir)) {
             // Before the first configure, so its reply lists the targets.
             cmake_api::ensure_query(Path::new(&dir));
             let args = vec!["--preset".to_string(), preset.clone()];
@@ -834,6 +851,49 @@ pub fn cancel(key: &str) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_cache_counts_only_when_written_for_its_own_folder() {
+        let d = std::env::temp_dir().join(format!("orbit-cachefile-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        assert!(!configured_at(&d));
+        let write = |at: &str| std::fs::write(d.join("CMakeCache.txt"), format!("X:BOOL=ON\nCMAKE_CACHEFILE_DIR:INTERNAL={at}\n")).unwrap();
+        write(&d.to_string_lossy());
+        assert!(configured_at(&d));
+        write("/ws/feat/engine/build/p");
+        assert!(!configured_at(&d));
+        let _ = std::fs::remove_dir_all(&d);
+        assert!(same_dir(r"C:\src\engine\build\p", "C:/src/engine/build/p/"));
+        assert!(!same_dir("/src/engine/build/p", "/ws/feat/engine/build/p"));
+        assert_eq!(same_dir("c:/src/build", "C:/src/build"), cfg!(windows));
+    }
+
+    /// Against the CMakeCache.txt a real CMake writes, configured both ways.
+    #[cfg(unix)]
+    #[test]
+    fn a_configure_through_a_link_is_caught() {
+        if crate::proc::run("cmake", &["--version"], None).is_err() {
+            return;
+        }
+        let d = std::env::temp_dir().join(format!("orbit-cmake-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("real")).unwrap();
+        std::fs::write(d.join("real/CMakeLists.txt"), "cmake_minimum_required(VERSION 3.20)\nproject(t NONE)\n").unwrap();
+        std::fs::write(d.join("real/CMakePresets.json"), r#"{"version":3,"configurePresets":[{"name":"p","binaryDir":"${sourceDir}/build/p"}]}"#).unwrap();
+        std::os::unix::fs::symlink(d.join("real"), d.join("link")).unwrap();
+        let configure = |from: &Path| {
+            let ok = std::process::Command::new("cmake").args(["--preset", "p"]).current_dir(from).env("PWD", from).output().unwrap().status.success();
+            assert!(ok);
+        };
+        let build = d.join("real/build/p");
+        configure(&d.join("real"));
+        assert!(configured_at(&build));
+        configure(&d.join("link"));
+        assert!(!configured_at(&build));
+        configure(&d.join("real"));
+        assert!(configured_at(&build));
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     #[test]
     fn a_repo_outside_the_workspace_builds_from_its_clone() {

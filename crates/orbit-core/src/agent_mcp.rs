@@ -102,6 +102,13 @@ pub(crate) fn permission(args: &Value, url: Option<&str>) -> String {
     let answer = url.map(|u| post(u, &body, Duration::from_secs(660)));
     match answer {
         Some(Ok(a)) if a.trim() == "allow" => json!({ "behavior": "allow", "updatedInput": args["input"] }),
+        // AskUserQuestion's picks: Claude reads them from the input it gets back.
+        Some(Ok(a)) if a.trim_start().starts_with('{') => {
+            let mut input = args["input"].clone();
+            let answers = serde_json::from_str::<Value>(&a).map(|v| v["answers"].clone()).unwrap_or_default();
+            input["answers"] = answers;
+            json!({ "behavior": "allow", "updatedInput": input })
+        }
         Some(Err(e)) => json!({ "behavior": "deny", "message": format!("Orbit did not answer: {e}") }),
         _ => json!({ "behavior": "deny", "message": "The user denied this in Orbit." }),
     }

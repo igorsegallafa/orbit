@@ -191,7 +191,7 @@ fn command(spec: &Spawn) -> CommandBuilder {
         if is_claude(c) && crate::config::Config::load().is_ok_and(|cfg| cfg.ai.remote_control) {
             b.arg("--remote-control");
         }
-        let (args, env) = crate::agent_hooks::session_launch(c, k, false);
+        let (args, env) = crate::agent_hooks::session_launch(c, k, false, &spec.cwd);
         b.args(args);
         launch_env = env;
     }

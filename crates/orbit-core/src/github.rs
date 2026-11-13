@@ -797,6 +797,8 @@ pub struct PrFile {
     pub path: String,
     pub additions: u64,
     pub deletions: u64,
+    /// The file's blob at the PR's head: a different one means its content changed.
+    pub sha: String,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -838,13 +840,14 @@ struct GhViewFile {
     path: String,
     additions: Option<u64>,
     deletions: Option<u64>,
+    sha: Option<String>,
 }
 
 /// Every changed file of a PR: `gh pr view --json files` stops at 100, the REST listing pages through
 /// all of them (GitHub itself stops at 3000).
 fn pr_files(owner_repo: &str, number: u64) -> Result<Vec<PrFile>, String> {
     let endpoint = format!("repos/{owner_repo}/pulls/{number}/files?per_page=100");
-    let out = run_gh(&["api", "--paginate", &endpoint, "--jq", ".[] | {path: .filename, additions, deletions}"])?;
+    let out = run_gh(&["api", "--paginate", &endpoint, "--jq", ".[] | {path: .filename, additions, deletions, sha}"])?;
     parse_pr_files(&out)
 }
 
@@ -854,16 +857,9 @@ fn parse_pr_files(out: &[u8]) -> Result<Vec<PrFile>, String> {
         .filter(|l| !l.trim().is_empty())
         .map(|l| {
             let f: GhViewFile = serde_json::from_str(l).map_err(|e| format!("failed to parse pr files: {e}"))?;
-            Ok(PrFile { path: f.path, additions: f.additions.unwrap_or(0), deletions: f.deletions.unwrap_or(0) })
+            Ok(PrFile { path: f.path, additions: f.additions.unwrap_or(0), deletions: f.deletions.unwrap_or(0), sha: f.sha.unwrap_or_default() })
         })
         .collect()
-}
-
-/// Files that differ between two commits of `owner_repo`.
-pub fn changed_between(owner_repo: &str, from: &str, to: &str) -> Result<Vec<String>, String> {
-    let endpoint = format!("repos/{owner_repo}/compare/{from}...{to}");
-    let out = run_gh(&["api", &endpoint, "--jq", ".files[].filename"])?;
-    Ok(String::from_utf8_lossy(&out).lines().filter(|l| !l.is_empty()).map(str::to_string).collect())
 }
 
 /// PR metadata + changed files list.
@@ -1046,11 +1042,12 @@ mod tests {
 
     #[test]
     fn pr_files_parse_one_json_line_per_file() {
-        let out = b"{\"path\":\"go.mod\",\"additions\":3,\"deletions\":9}\n{\"path\":\"a.rs\",\"additions\":null,\"deletions\":1}\n";
+        let out = b"{\"path\":\"go.mod\",\"additions\":3,\"deletions\":9,\"sha\":\"b1\"}\n{\"path\":\"a.rs\",\"additions\":null,\"deletions\":1}\n";
         let files = parse_pr_files(out).expect("should parse jq lines");
         assert_eq!(files.len(), 2);
         assert_eq!(files[0].path, "go.mod");
         assert_eq!(files[1].additions, 0);
+        assert_eq!((files[0].sha.as_str(), files[1].sha.as_str()), ("b1", ""));
     }
 
     #[test]

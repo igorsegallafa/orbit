@@ -112,6 +112,8 @@ the thumbnails' remove buttons are `unattach:<ix>`).
 A prompt containing "tools" runs three Reads and a Grep (one collapsed row), an Edit with a diff,
 a 250-line Bash output and a failing Bash; tool rows are `tool:<ix>` (click expands) and the
 output's "Show all" link is `tool-all:<ix>`.
+A prompt containing "question" posts an `AskUserQuestion` request (one single-choice question, one
+multiSelect) and replies with the answer it gets back.
 A prompt containing "permission" posts a `PermissionRequest` for `rm -rf build` (as Orbit's
 `permission` MCP tool does), waits for the answer and replies with it. The card's buttons are
 `perm:<ix>:<n>`; `key:1` picks the first option and `key:escape` denies.
@@ -989,7 +991,8 @@ not run (it needs GitHub).
   variant.
 - **Bottom panel** (`layout.panel_height`, resizable from an 8 px handle on its top edge, saved):
   Build output, Run (the program on `orbit_core::pty` with the configuration's cwd, args and env),
-  Problems (grouped by file, errors first, every build's), Debug. A compound's Build, Run or Debug
+  Problems (grouped by file, errors first, every build's), Debug. On a page (workspace home,
+  dashboard) or with no tab open it shows once something builds, runs or debugs. A compound's Build, Run or Debug
   builds its configurations one after another, in order; the Build tab then lists them beside the
   output (status, errors, time) and a click shows one's output (`build-item:<name>`). A build opens it; a failed build with problems
   switches to Problems. Build output and the Debug Console are log views (`src/logview.rs`): ANSI

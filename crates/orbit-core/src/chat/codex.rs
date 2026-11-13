@@ -12,7 +12,7 @@ struct Codex {
 }
 
 pub fn start(cwd: &Path, resume: Option<String>, key: &str, sink: impl Fn(ChatEvent) + Send + 'static) -> Result<Box<dyn ChatBackend>, String> {
-    let (launch_args, launch_env) = crate::agent_hooks::session_launch("codex", key, true);
+    let (launch_args, launch_env) = crate::agent_hooks::session_launch("codex", key, true, cwd);
     let mut cmd = crate::proc::cmd("codex");
     cmd.arg("app-server").args(launch_args).envs(launch_env).current_dir(cwd);
     let parser = Arc::new(Mutex::new(Parser { cwd: cwd.to_path_buf(), resume, ..Parser::default() }));
@@ -292,7 +292,7 @@ impl Parser {
         // A command approval may list `cancel` but not `decline`, so offer only what the server lists.
         let all = [("accept", "Allow", "allow_once"), ("acceptForSession", "Allow for this session", "allow_always"), ("decline", "Deny", "reject_once"), ("cancel", "Deny and stop", "reject_once")];
         let offered = |d: &str| p["availableDecisions"].as_array().map_or(d != "cancel", |a| a.iter().any(|x| x == d));
-        let options = all.into_iter().filter(|(id, ..)| offered(id)).map(|(id, label, kind)| PermissionOption { id: id.into(), label: label.into(), kind: kind.into() }).collect();
+        let options = all.into_iter().filter(|(id, ..)| offered(id)).map(|(id, label, kind)| PermissionOption { id: id.into(), label: label.into(), kind: kind.into(), description: String::new() }).collect();
         let id = v["id"].to_string();
         self.approvals.insert(id.clone(), v.clone());
         Some(ChatEvent::PermissionAsked { id, title: title.into(), detail: detail.trim().into(), options })

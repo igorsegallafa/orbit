@@ -28,7 +28,7 @@ use orbit_core::github::{PrDetail, PullRequest};
 use orbit_core::notes::NotesFile;
 use orbit_core::review::{DraftComment, ReviewData, ReviewThread};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -67,9 +67,50 @@ struct Saved {
     /// REVIEW.md notes turned into drafts here, so none goes twice.
     #[serde(default)]
     sent: Vec<String>,
-    /// The head commit `viewed` was marked against.
+    /// The head commit last seen, to announce new commits.
     #[serde(default)]
     head: String,
+    /// Each viewed file's blob when it was marked (or first seen marked): another one unmarks it.
+    #[serde(default)]
+    seen: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Local {
+    Uncommitted,
+    Unpushed,
+}
+
+/// Whether `path` in the checkout `dir` of `branch` differs from what was pushed: uncommitted edits first,
+/// then commits not on `origin/<branch>`. None when the checkout is on another branch.
+fn local_state(dir: &Path, branch: &str, path: &str) -> Option<Local> {
+    let git = |args: &[&str]| orbit_core::proc::run("git", args, Some(dir)).ok();
+    if orbit_core::git::current_branch(dir)? != branch {
+        return None;
+    }
+    if !git(&["status", "--porcelain", "--", path])?.trim().is_empty() {
+        return Some(Local::Uncommitted);
+    }
+    let range = format!("origin/{branch}..HEAD");
+    (!git(&["log", "--format=%h", &range, "--", path])?.trim().is_empty()).then_some(Local::Unpushed)
+}
+
+/// Unmarks the viewed files whose content (blob) differs from when they were marked, and records the blob of
+/// those marked without one; returns how many lost the mark. Files GitHub no longer lists keep theirs.
+fn reconcile_viewed(viewed: &mut Vec<String>, seen: &mut BTreeMap<String, String>, files: &[orbit_core::github::PrFile]) -> usize {
+    let now: HashMap<&str, &str> = files.iter().filter(|f| !f.sha.is_empty()).map(|f| (f.path.as_str(), f.sha.as_str())).collect();
+    let before = viewed.len();
+    viewed.retain(|p| match (seen.get(p), now.get(p.as_str())) {
+        (Some(was), Some(sha)) => was == sha,
+        _ => true,
+    });
+    seen.retain(|p, _| viewed.contains(p));
+    for p in viewed.iter() {
+        if let Some(sha) = now.get(p.as_str()) {
+            seen.entry(p.clone()).or_insert_with(|| sha.to_string());
+        }
+    }
+    before - viewed.len()
 }
 
 fn store_path() -> Option<PathBuf> {
@@ -250,6 +291,8 @@ pub struct PrReviewPage {
     _head_poll: Task<()>,
     /// Where the local checkout last saw `origin/<branch>`: a push from here moves it at once.
     pushed: Option<String>,
+    /// The shown file's local state in the PR's workspace, when GitHub doesn't have it yet.
+    local: Option<(String, Local)>,
     side_w: f32,
     side_scroll: ScrollHandle,
 }
@@ -299,6 +342,7 @@ impl PrReviewPage {
             head_text: String::new(),
             sending_notes: false,
             pushed: None,
+            local: None,
             // Follows REVIEW.md: an agent ticking a note shows up here.
             _poll: cx.spawn_in(window, async move |this, cx| loop {
                 cx.background_executor().timer(std::time::Duration::from_secs(2)).await;
@@ -362,7 +406,7 @@ impl PrReviewPage {
                 p.workspace = ws;
                 p.reload_notes(cx);
                 if let Ok(d) = &d {
-                    p.follow_head(&d.head_sha, false, cx);
+                    p.follow_head(d, false, cx);
                 }
                 p.detail = d.map_or_else(Load::Failed, Load::Ready);
                 cx.notify();
@@ -373,8 +417,30 @@ impl PrReviewPage {
         cx.notify();
     }
 
+    /// Re-reads whether the shown file has local changes GitHub doesn't have yet.
+    fn refresh_local(&mut self, cx: &mut Context<Self>) {
+        let (Some(ws), Some(d), Sel::File(path)) = (&self.workspace, self.detail.ready(), self.selected.clone()) else {
+            self.local = None;
+            return;
+        };
+        let (dir, branch) = (ws.dir.join(&self.pr().repo), d.branch.clone());
+        cx.spawn(async move |this, cx| {
+            let p = path.clone();
+            let state = cx.background_spawn(async move { local_state(&dir, &branch, &p) }).await;
+            let _ = this.update(cx, |page, cx| {
+                let next = state.map(|s| (path, s));
+                if page.local != next {
+                    page.local = next;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     /// Checks GitHub as soon as the local checkout of the PR's branch pushes.
     fn poll_push(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.refresh_local(cx);
         let (Some(ws), Some(d)) = (&self.workspace, self.detail.ready()) else { return };
         let (dir, name, head) = (ws.dir.join(&self.pr().repo), format!("refs/remotes/origin/{}", d.branch), d.head_sha.clone());
         cx.spawn_in(window, async move |this, cx| {
@@ -411,7 +477,7 @@ impl PrReviewPage {
                 if p.key() != key || d.head_sha == head {
                     return;
                 }
-                p.follow_head(&d.head_sha, true, cx);
+                p.follow_head(&d, true, cx);
                 p.detail = Load::Ready(d);
                 p.load_review(true, window, cx);
                 if let Sel::File(path) = p.selected.clone() {
@@ -423,44 +489,17 @@ impl PrReviewPage {
         .detach();
     }
 
-    /// Unmarks viewed files that changed since the head they were viewed at.
-    fn follow_head(&mut self, head: &str, announce: bool, cx: &mut Context<Self>) {
-        let from = std::mem::replace(&mut self.saved.head, head.to_string());
-        if from == head {
-            return;
-        }
+    /// Unmarks the viewed files `d` changed; with `announce`, says when the head moved.
+    fn follow_head(&mut self, d: &orbit_core::github::PrDetail, announce: bool, cx: &mut Context<Self>) {
+        let moved = !self.saved.head.is_empty() && self.saved.head != d.head_sha;
+        self.saved.head = d.head_sha.clone();
+        let unmarked = reconcile_viewed(&mut self.saved.viewed, &mut self.saved.seen, &d.files);
         self.persist();
-        let n = self.pr().number;
-        if from.is_empty() || self.saved.viewed.is_empty() {
-            if announce {
-                self.host.toast(ToastKind::Info, format!("New commits on #{n}"), None, cx);
-            }
-            return;
+        if (announce && moved) || unmarked > 0 {
+            let s = if unmarked == 1 { "" } else { "s" };
+            let desc = (unmarked > 0).then(|| format!("{unmarked} viewed file{s} changed and lost the mark"));
+            self.host.toast(ToastKind::Info, format!("New commits on #{}", self.pr().number), desc, cx);
         }
-        let (or, to, key) = (self.pr().owner_repo.clone(), head.to_string(), self.key());
-        cx.spawn(async move |this, cx| {
-            let changed = cx.background_spawn(async move { orbit_core::github::changed_between(&or, &from, &to) }).await;
-            let _ = this.update(cx, |p, cx| {
-                if p.key() != key {
-                    return;
-                }
-                let before = p.saved.viewed.len();
-                match changed {
-                    Ok(files) => p.saved.viewed.retain(|f| !files.contains(f)),
-                    // A force-push can leave the old head unreachable: start over.
-                    Err(_) => p.saved.viewed.clear(),
-                }
-                let unmarked = before - p.saved.viewed.len();
-                p.persist();
-                if announce || unmarked > 0 {
-                    let s = if unmarked == 1 { "" } else { "s" };
-                    let desc = (unmarked > 0).then(|| format!("{unmarked} viewed file{s} changed and lost the mark"));
-                    p.host.toast(ToastKind::Info, format!("New commits on #{n}"), desc, cx);
-                }
-                cx.notify();
-            });
-        })
-        .detach();
     }
 
     fn load_review(&mut self, with_lines: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -493,7 +532,11 @@ impl PrReviewPage {
             return cx.notify();
         };
         self.diff = Load::Loading;
+        if self.local.as_ref().is_some_and(|(p, _)| *p != path) {
+            self.local = None;
+        }
         let (or, head, base) = (self.pr().owner_repo.clone(), detail.head_sha.clone(), detail.base_sha.clone());
+        self.refresh_local(cx);
         let highlight_theme = cx.theme().highlight_theme.clone();
         let split = self.split;
         cx.spawn_in(window, async move |this, cx| {
@@ -554,8 +597,13 @@ impl PrReviewPage {
 
     fn mark_viewed(&mut self, path: &str, on: bool, advance: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.saved.viewed.retain(|p| p != path);
+        self.saved.seen.remove(path);
         if on {
             self.saved.viewed.push(path.to_string());
+            let sha = self.detail.ready().and_then(|d| d.files.iter().find(|f| f.path == path)).map(|f| f.sha.clone()).filter(|s| !s.is_empty());
+            if let Some(sha) = sha {
+                self.saved.seen.insert(path.to_string(), sha);
+            }
         }
         self.persist();
         if on && advance {
@@ -2253,6 +2301,7 @@ impl Render for PrReviewPage {
                     .flex()
                     .flex_col()
                     .child(self.render_filebar(cx))
+                    .when_some(self.render_local(cx), |d, b| d.child(b))
                     .when_some(self.render_address(cx), |d, b| d.child(b))
                     .child(main),
             )
@@ -2260,6 +2309,39 @@ impl Render for PrReviewPage {
 }
 
 impl PrReviewPage {
+    /// A strip under the file bar when the shown file has local changes the PR doesn't show yet.
+    fn render_local(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (path, state) = self.local.clone()?;
+        if self.selected != Sel::File(path.clone()) {
+            return None;
+        }
+        let text = match state {
+            Local::Uncommitted => "This file has uncommitted changes in the workspace that the PR doesn't show yet.",
+            Local::Unpushed => "This file has local commits that aren't pushed yet: the PR doesn't show them.",
+        };
+        Some(
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap_2()
+                .px_3()
+                .py_1p5()
+                .border_b_1()
+                .border_color(c(theme::BORDER))
+                .bg(crate::pages::kit::alpha(theme::WARN, 0.1))
+                .text_size(px(12.))
+                .text_color(c(theme::TEXT))
+                .child(lucide("info", 13., c(theme::WARN)))
+                .child(div().flex_1().min_w_0().child(text))
+                .child(
+                    crate::pages::kit::mini("pr-local-open", "Open local file", crate::pages::kit::Kind::Secondary)
+                        .on_click(cx.listener(move |p, _, window, cx| p.open_in_editor(&path, window, cx))),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// The agent run's banner: its latest step, then what's left to do.
     fn render_address(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let a = self.address.as_ref()?;
@@ -2415,6 +2497,51 @@ mod tests {
 
     fn ids(list: &[&ReviewThread]) -> Vec<String> {
         list.iter().map(|t| t.id.trim_start_matches("PRRT_kwDONx2Hfc5h1a").to_string()).collect()
+    }
+
+    #[test]
+    fn local_state_follows_edit_commit_and_push() {
+        let d = std::env::temp_dir().join(format!("orbit-pr-local-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let git = |dir: &Path, args: &[&str]| {
+            let mut full = vec!["-c", "user.name=t", "-c", "user.email=t@t"];
+            full.extend_from_slice(args);
+            orbit_core::proc::run("git", &full, Some(dir)).unwrap();
+        };
+        git(&d, &["init", "-q", "--bare", "origin.git"]);
+        git(&d, &["clone", "-q", "origin.git", "work"]);
+        let w = d.join("work");
+        git(&w, &["checkout", "-q", "-b", "feat"]);
+        std::fs::write(w.join("a.h"), "1").unwrap();
+        git(&w, &["add", "-A"]);
+        git(&w, &["commit", "-qm", "a"]);
+        git(&w, &["push", "-q", "-u", "origin", "feat"]);
+        assert_eq!(local_state(&w, "feat", "a.h"), None);
+        std::fs::write(w.join("a.h"), "2").unwrap();
+        assert_eq!(local_state(&w, "feat", "a.h"), Some(Local::Uncommitted));
+        git(&w, &["commit", "-qam", "b"]);
+        assert_eq!(local_state(&w, "feat", "a.h"), Some(Local::Unpushed));
+        assert_eq!(local_state(&w, "other", "a.h"), None);
+        git(&w, &["push", "-q"]);
+        assert_eq!(local_state(&w, "feat", "a.h"), None);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn only_files_whose_content_changed_lose_the_mark() {
+        let file = |path: &str, sha: &str| orbit_core::github::PrFile { path: path.into(), additions: 0, deletions: 0, sha: sha.into() };
+        let mut viewed: Vec<String> = ["a", "b", "old", "gone"].map(String::from).to_vec();
+        let mut seen: BTreeMap<String, String> = [("a", "1"), ("b", "2"), ("gone", "9")].map(|(k, v)| (k.into(), v.into())).into();
+        // A push changes `b`, leaves `a` alone, `old` was marked before blobs were kept, `gone` left the PR.
+        let files = [file("a", "1"), file("b", "3"), file("old", "5")];
+        assert_eq!(reconcile_viewed(&mut viewed, &mut seen, &files), 1);
+        assert_eq!(viewed, ["a", "old", "gone"]);
+        assert_eq!(seen.get("old").map(String::as_str), Some("5"));
+        assert!(!seen.contains_key("b"));
+        // A failed or partial listing unmarks nothing.
+        assert_eq!(reconcile_viewed(&mut viewed, &mut seen, &[]), 0);
+        assert_eq!(viewed.len(), 3);
     }
 
     #[test]

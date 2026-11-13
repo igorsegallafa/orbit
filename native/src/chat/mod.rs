@@ -17,6 +17,7 @@ use gpui_component::text::{TextView, TextViewState};
 use gpui_component::diff::{Diff, DiffFile, DiffMode, DiffState};
 use orbit_core::chat::{ChatBackend, ChatEvent, ChatInput, FileDiff, PermissionOption, SlashCommand};
 use regex::Regex;
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -38,6 +39,13 @@ enum Item {
     Tool { calls: Vec<Call>, open: bool, all: bool, diff: Option<(Entity<DiffState>, usize)> },
     /// A permission request; `answer` is the picked option's label once answered.
     Permission { id: String, title: String, detail: String, options: Vec<PermissionOption>, answer: Option<String> },
+}
+
+struct Queued {
+    /// As typed (shown); `full` has the pastes expanded (sent).
+    text: String,
+    full: String,
+    attached: Vec<(String, PathBuf)>,
 }
 
 struct Call {
@@ -171,6 +179,12 @@ pub struct ChatView {
     /// Tokens in context, and the window size once the agent reports it.
     context: Option<(u64, Option<u64>)>,
     lightbox: Option<usize>,
+    /// Messages sent while a turn ran, each going out when the one before ends.
+    queue: Vec<Queued>,
+    /// A multiSelect question's ticked options, by permission id.
+    ticked: HashMap<String, Vec<usize>>,
+    /// The question card being answered in its own words ("Other…"): its index and input.
+    other: Option<(usize, Entity<TextareaState>, Subscription)>,
     modes: Vec<orbit_core::chat::Choice>,
     mode: Option<String>,
     spent: (u64, f64),
@@ -219,6 +233,9 @@ impl ChatView {
             model_menu: false,
             context: None,
             lightbox: None,
+            queue: vec![],
+            ticked: HashMap::new(),
+            other: None,
             modes: vec![],
             mode: None,
             spent: (0, 0.),
@@ -338,13 +355,90 @@ impl ChatView {
     }
 
     /// Answers card `ix` with option `n`, or with its first deny option when `n` is None.
-    fn answer(&mut self, ix: usize, n: Option<usize>, cx: &mut Context<Self>) {
-        let Some(Item::Permission { id, options, answer: answer @ None, .. }) = self.items.get_mut(ix) else { return };
+    fn answer(&mut self, ix: usize, n: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Item::Permission { id, options, answer: None, .. }) = self.items.get(ix) else { return };
         let Some(option) = n.map_or_else(|| options.iter().find(|o| o.kind.starts_with("reject")), |n| options.get(n)) else { return };
-        if let Some(b) = &self.backend {
-            b.send(ChatInput::AnswerPermission { id: id.clone(), option_id: option.id.clone() });
+        let (id, kind) = (id.clone(), option.kind.clone());
+        // A click moves focus off the chat; give it back so the next card's number keys still work.
+        if kind != "other" {
+            self.prompt.update(cx, |p, cx| p.focus(window, cx));
         }
-        *answer = Some(option.label.clone());
+        let (option_id, label) = match kind.as_str() {
+            "pick_many" => {
+                let ticked = self.ticked.entry(id).or_default();
+                let n = n.unwrap_or_default();
+                match ticked.iter().position(|&t| t == n) {
+                    Some(at) => _ = ticked.remove(at),
+                    None => ticked.push(n),
+                }
+                self.list.remeasure_items(ix..ix + 1);
+                return cx.notify();
+            }
+            "submit" => {
+                let mut ticked = self.ticked.get(&id).cloned().unwrap_or_default();
+                ticked.sort_unstable();
+                let mut labels: Vec<String> = ticked.iter().filter_map(|&t| options.get(t)).map(|o| o.label.clone()).collect();
+                let typed = self.other.as_ref().filter(|o| o.0 == ix).map(|o| o.1.read(cx).value().trim().to_string());
+                labels.extend(typed.filter(|t| !t.is_empty()));
+                if labels.is_empty() {
+                    return;
+                }
+                let joined = labels.join(", ");
+                (format!("pick:{joined}"), joined)
+            }
+            "other" => {
+                let input = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 4).submit_on_enter(true).placeholder("Your answer…"));
+                let submit = options.iter().position(|o| o.kind == "submit");
+                let sub = cx.subscribe_in(&input, window, move |this, input, ev: &InputEvent, window, cx| {
+                    let text = input.read(cx).value().trim().to_string();
+                    if !matches!(ev, InputEvent::PressEnter { shift: false, .. }) {
+                        return;
+                    }
+                    match submit {
+                        Some(n) => this.answer(ix, Some(n), window, cx),
+                        None if !text.is_empty() => this.settle_card(ix, format!("pick:{text}"), text, cx),
+                        None => {}
+                    }
+                });
+                input.update(cx, |i, cx| i.focus(window, cx));
+                self.other = Some((ix, input, sub));
+                self.list.remeasure_items(ix..ix + 1);
+                return cx.notify();
+            }
+            _ => (option.id.clone(), option.label.clone()),
+        };
+        self.settle_card(ix, option_id, label, cx);
+    }
+
+    /// Options in number order: a question's rows (its Submit and Skip stay unnumbered), else every option.
+    fn numbered(options: &[PermissionOption]) -> Vec<usize> {
+        let question = options.iter().any(|o| o.kind == "other");
+        (0..options.len()).filter(|&n| !question || matches!(options[n].kind.as_str(), "allow_once" | "pick_many" | "other")).collect()
+    }
+
+    /// Sends card `ix`'s answer and marks it answered.
+    fn settle_card(&mut self, ix: usize, option_id: String, label: String, cx: &mut Context<Self>) {
+        let Some(Item::Permission { id, answer: answer @ None, .. }) = self.items.get_mut(ix) else { return };
+        // Skipping one question denies the whole AskUserQuestion: its sibling cards go with it.
+        let siblings = (option_id == "deny").then(|| id.split_once('#').map(|(base, _)| format!("{base}#"))).flatten();
+        if let Some(b) = &self.backend {
+            b.send(ChatInput::AnswerPermission { id: id.clone(), option_id });
+        }
+        self.ticked.remove(id.as_str());
+        *answer = Some(label);
+        if let Some(prefix) = siblings {
+            for item in &mut self.items {
+                if let Item::Permission { id, answer: answer @ None, .. } = item {
+                    if id.starts_with(&prefix) {
+                        *answer = Some("Skip".into());
+                    }
+                }
+            }
+            self.list.remeasure_items(0..self.items.len());
+        }
+        if self.other.as_ref().is_some_and(|o| o.0 == ix) {
+            self.other = None;
+        }
         self.list.remeasure_items(ix..ix + 1);
         if self.pending().is_none() {
             let key = self.key.clone();
@@ -412,12 +506,16 @@ impl ChatView {
         };
         let n = match ev.keystroke.key.as_str() {
             "escape" => None,
-            k => match k.parse::<usize>() {
-                Ok(d @ 1..=9) => Some(d - 1),
+            _ if self.other.is_some() => return,
+            k => match (k.parse::<usize>(), self.items.get(ix)) {
+                (Ok(d @ 1..=9), Some(Item::Permission { options, .. })) => match Self::numbered(options).get(d - 1) {
+                    Some(&n) => Some(n),
+                    None => return,
+                },
                 _ => return,
             },
         };
-        self.answer(ix, n, cx);
+        self.answer(ix, n, window, cx);
         cx.stop_propagation();
     }
 
@@ -514,6 +612,12 @@ impl ChatView {
                 self.spent.1 += cost_usd.unwrap_or(0.);
                 self.push(Item::Footer(footer(took, tokens, cost_usd)));
                 self.refresh_limits(cx);
+                // A queued message goes out next; "finished" waits for the last one.
+                if self.backend.is_some() && !self.queue.is_empty() {
+                    let next = self.queue.remove(0);
+                    self.dispatch(next, cx);
+                    return;
+                }
                 let (key, who) = (self.key.clone(), format!("{} chat finished", self.agent));
                 let what = crate::sessions::scope_label(&self.scope);
                 crate::sessions::store(cx).update(cx, |s, cx| s.notify(key.clone(), true, who, what, cx));
@@ -633,13 +737,23 @@ impl ChatView {
 
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.prompt.read(cx).value().trim().to_string();
-        if (text.is_empty() && self.attached.is_empty() && self.pasted.is_empty()) || !self.ready() || self.turn.is_some() {
+        if (text.is_empty() && self.attached.is_empty() && self.pasted.is_empty()) || !self.ready() {
             return;
         }
         let attached = std::mem::take(&mut self.attached);
-        let images: Vec<PathBuf> = attached.iter().map(|(_, p)| p.clone()).collect();
         let full = expand_pastes(&text, &std::mem::take(&mut self.pasted));
         self.refs = (0, 0);
+        self.prompt.update(cx, |p, cx| p.set_value("", window, cx));
+        let queued = Queued { text, full, attached };
+        if self.turn.is_some() {
+            self.queue.push(queued);
+            return cx.notify();
+        }
+        self.dispatch(queued, cx);
+    }
+
+    fn dispatch(&mut self, Queued { text, full, attached }: Queued, cx: &mut Context<Self>) {
+        let images: Vec<PathBuf> = attached.iter().map(|(_, p)| p.clone()).collect();
         if let Some(b) = &self.backend {
             b.send(ChatInput::Prompt { text: full, images: images.clone() });
         }
@@ -657,7 +771,6 @@ impl ChatView {
             self.push(Item::Image { path, title: label, size, user: true });
         }
         self.list.set_follow_mode(FollowMode::Tail);
-        self.prompt.update(cx, |p, cx| p.set_value("", window, cx));
         cx.notify();
     }
 
@@ -876,7 +989,7 @@ impl ChatView {
             }
             Item::Tool { .. } => self.render_tool(ix, row, cx),
             Item::Permission { title, answer: Some(answer), .. } => {
-                let denied = answer.starts_with("Deny") || answer.starts_with("Reject") || answer == "not answered";
+                let denied = answer.starts_with("Deny") || answer.starts_with("Reject") || answer == "Skip" || answer == "not answered";
                 let tone = if denied { theme::DANGER } else { theme::OK };
                 row.gap_2()
                     .items_center()
@@ -887,13 +1000,74 @@ impl ChatView {
                     .child(div().px_1p5().rounded(px(4.)).bg(crate::pages::kit::alpha(tone, 0.15)).text_color(c(tone)).child(answer.clone()))
                     .into_any_element()
             }
-            Item::Permission { title, detail, options, answer: None, .. } => {
-                use crate::pages::kit::{button, card, Kind};
-                let buttons = options.iter().enumerate().map(|(n, o)| {
-                    let kind = if o.kind.starts_with("reject") { Kind::DangerOutline } else if n == 0 { Kind::Primary } else { Kind::Secondary };
-                    button(format!("perm:{ix}:{}", n + 1), format!("{}  {}", n + 1, o.label), kind)
-                        .on_click(cx.listener(move |this, _, _, cx| this.answer(ix, Some(n), cx)))
-                });
+            Item::Permission { id, title, detail, options, answer: None, .. } => {
+                use crate::pages::kit::{alpha, button, card, Kind};
+                let ticked = self.ticked.get(id).cloned().unwrap_or_default();
+                let typing = self.other.as_ref().filter(|o| o.0 == ix).map(|o| o.1.clone());
+                // A question lists its options one per row, like Claude's own; a permission keeps a row of buttons.
+                let question = options.iter().any(|o| o.kind == "other");
+                let order = Self::numbered(options);
+                let number = |n: usize| order.iter().position(|&o| o == n).map_or(String::new(), |p| (p + 1).to_string());
+                let numbered = |n: usize, o: &PermissionOption| if question { number(n) } else { format!("{}  {}", number(n), o.label) };
+                let choice = |n: usize, o: &PermissionOption, cx: &mut Context<Self>| {
+                    let on = ticked.contains(&n) || (typing.is_some() && o.kind == "other");
+                    let body = match (&typing, o.kind.as_str()) {
+                        (Some(input), "other") => div().flex_1().min_w_0().child(Textarea::new(input).appearance(false)).into_any_element(),
+                        _ => div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(div().text_color(c(theme::TEXT)).font_weight(gpui::FontWeight::MEDIUM).child(o.label.clone()))
+                            .when(!o.description.is_empty(), |d| d.child(div().text_size(px(12.)).text_color(c(theme::TEXT_DIM)).child(o.description.clone())))
+                            .into_any_element(),
+                    };
+                    let name = format!("perm:{ix}:{}", n + 1);
+                    div()
+                        .id(SharedString::from(name.clone()))
+                        .relative()
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap_2p5()
+                        .px_3()
+                        .py_2()
+                        .rounded(px(6.))
+                        .border_1()
+                        .border_color(c(if on { theme::ACCENT } else { theme::BORDER }))
+                        .bg(if on { alpha(theme::ACCENT, 0.12) } else { c(theme::PANEL_RAISED) })
+                        .hover(|s| s.bg(c(theme::PANEL_HOVER)))
+                        .cursor_pointer()
+                        .child(div().w(px(12.)).text_color(c(theme::TEXT_FAINT)).child(numbered(n, o)))
+                        .when(o.kind == "pick_many", |d| {
+                            let tick = div().size(px(14.)).flex_none().flex().items_center().justify_center().rounded(px(3.)).border_1();
+                            d.child(if on { tick.bg(c(theme::ACCENT)).border_color(c(theme::ACCENT)).child(crate::pages::kit::icon("check", 11., c(theme::ON_ACCENT))) } else { tick.border_color(c(theme::TEXT_FAINT)) })
+                        })
+                        .child(body)
+                        .child(probe(name))
+                        .on_click(cx.listener(move |this, _, window, cx| this.answer(ix, Some(n), window, cx)))
+                        .into_any_element()
+                };
+                let mut rows = vec![];
+                let mut buttons = vec![];
+                for (n, o) in options.iter().enumerate() {
+                    if question && matches!(o.kind.as_str(), "allow_once" | "pick_many" | "other") {
+                        rows.push(choice(n, o, cx));
+                        continue;
+                    }
+                    let kind = match o.kind.as_str() {
+                        k if k.starts_with("reject") => Kind::DangerOutline,
+                        _ if n == 0 || o.kind == "submit" => Kind::Primary,
+                        _ => Kind::Secondary,
+                    };
+                    let label = if question { o.label.clone() } else { numbered(n, o) };
+                    buttons.push(button(format!("perm:{ix}:{}", n + 1), label, kind).on_click(cx.listener(move |this, _, window, cx| this.answer(ix, Some(n), window, cx))));
+                }
+                let hint = match (typing.is_some(), question) {
+                    (true, _) => "Enter to send, Esc to skip",
+                    (false, true) => "Press a number to choose, Esc to skip",
+                    (false, false) => "Press a number to choose, Esc to deny",
+                };
                 row.child(
                     card()
                         .w_full()
@@ -912,8 +1086,9 @@ impl ChatView {
                         .when(!detail.is_empty(), |d| {
                             d.child(div().p_2().rounded(px(4.)).bg(c(theme::BG)).font_family(theme::MONO_FONT).text_size(px(12.)).text_color(c(theme::TEXT_DIM)).child(detail.clone()))
                         })
+                        .when(!rows.is_empty(), |d| d.child(div().flex().flex_col().gap_1p5().children(rows)))
                         .child(div().flex().flex_wrap().gap_2().children(buttons))
-                        .child(div().text_size(px(11.5)).text_color(c(theme::TEXT_FAINT)).child("Press a number to choose, Esc to deny")),
+                        .child(div().text_size(px(11.5)).text_color(c(theme::TEXT_FAINT)).child(hint)),
                 )
                 .into_any_element()
             }
@@ -1373,6 +1548,68 @@ impl ChatView {
         )
     }
 
+    /// Moves queued message `i` to the front and stops the turn, whose end sends it.
+    fn send_now(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if i >= self.queue.len() {
+            return;
+        }
+        let q = self.queue.remove(i);
+        self.queue.insert(0, q);
+        self.prompt.update(cx, |p, cx| p.focus(window, cx));
+        if self.turn.is_some() {
+            self.interrupt(cx);
+        } else {
+            let next = self.queue.remove(0);
+            self.dispatch(next, cx);
+        }
+    }
+
+    /// The messages waiting for the turn to end, oldest first, each removable.
+    fn queued_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let rows = self.queue.iter().enumerate().map(|(i, q)| {
+            let images = q.attached.len();
+            let text = if q.text.is_empty() { format!("{images} image{}", if images == 1 { "" } else { "s" }) } else { q.text.clone() };
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_2p5()
+                .py_1p5()
+                .rounded(px(8.))
+                .border_1()
+                .border_color(c(theme::BORDER))
+                .bg(c(theme::PANEL))
+                .text_size(px(12.5))
+                .child(div().text_color(c(theme::TEXT_FAINT)).child("Queued"))
+                .child(div().flex_1().min_w_0().truncate().text_color(c(theme::TEXT)).child(text.replace('\n', " ")))
+                .when(images > 0 && !q.text.is_empty(), |d| d.child(div().text_color(c(theme::TEXT_FAINT)).child(format!("+{images} image{}", if images == 1 { "" } else { "s" }))))
+                .child(
+                    crate::pages::kit::mini(format!("send-now:{i}"), "Send now", crate::pages::kit::Kind::Secondary)
+                        .tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("Stop the current turn and send this one").build(window, cx))
+                        .on_click(cx.listener(move |this, _, window, cx| this.send_now(i, window, cx))),
+                )
+                .child(
+                    div()
+                        .id(SharedString::from(format!("unqueue:{i}")))
+                        .relative()
+                        .p_0p5()
+                        .rounded(px(4.))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(c(theme::PANEL_HOVER)))
+                        .child(crate::pages::kit::icon("x", 12., c(theme::TEXT_DIM)))
+                        .child(probe(format!("unqueue:{i}")))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            if i < this.queue.len() {
+                                this.queue.remove(i);
+                            }
+                            this.prompt.update(cx, |p, cx| p.focus(window, cx));
+                            cx.notify();
+                        })),
+                )
+        });
+        div().flex().flex_col().gap_1().pb_1p5().children(rows)
+    }
+
     fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let this = cx.weak_entity();
         let modes: Vec<(String, &str)> = self.modes.iter().map(|m| (m.value.clone(), m.label.as_str())).collect();
@@ -1523,6 +1760,7 @@ impl Render for ChatView {
             .relative()
             .child(self.slash_list(cx))
             .children(self.model_list(cx))
+            .when(!self.queue.is_empty(), |d| d.child(self.queued_list(cx)))
             .child(
                 div()
                     .flex()
@@ -1612,9 +1850,12 @@ impl PageView for ChatView {
         Some((self.scope.clone(), self.status()))
     }
 
-    fn dump(&self, out: &mut String, _: &App) {
+    fn dump(&self, out: &mut String, cx: &App) {
         let _ = writeln!(out, "  chat {} session {:?} ready {} status {} opened {:?}", self.agent, self.session_id, self.ready(), self.status().label(), self.opened);
-        for item in &self.items {
+        if !self.queue.is_empty() {
+            let _ = writeln!(out, "    queued: {:?}", self.queue.iter().map(|q| q.text.as_str()).collect::<Vec<_>>());
+        }
+        for (ix, item) in self.items.iter().enumerate() {
             let _ = match item {
                 Item::User { text } => writeln!(out, "    you: {text:?}"),
                 Item::Assistant { text, .. } => writeln!(out, "    agent: {text:?}"),
@@ -1623,9 +1864,11 @@ impl PageView for ChatView {
                 Item::Note(t) => writeln!(out, "    note: {t:?}"),
                 Item::Exited(t) => writeln!(out, "    exited: {t:?}"),
                 Item::Footer(t) => writeln!(out, "    footer: {t:?}"),
-                Item::Permission { title, options, answer, .. } => {
+                Item::Permission { id, title, options, answer, .. } => {
                     let labels: Vec<&str> = options.iter().map(|o| o.label.as_str()).collect();
-                    writeln!(out, "    permission {title:?} {labels:?} answer {answer:?}")
+                    let ticked = self.ticked.get(id).map(|t| format!(" ticked {t:?}")).unwrap_or_default();
+                    let typing = self.other.as_ref().filter(|o| o.0 == ix).map(|o| format!(" typing {:?}", o.1.read(cx).value())).unwrap_or_default();
+                    writeln!(out, "    permission {title:?} {labels:?} answer {answer:?}{ticked}{typing}")
                 }
                 Item::Tool { calls, open, all, diff } => {
                     let state = |c: &Call| match c.ok {
