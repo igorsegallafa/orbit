@@ -48,6 +48,17 @@ struct Queued {
     attached: Vec<(String, PathBuf)>,
 }
 
+/// The queued messages as one, oldest first, so the agent reads them all in one turn.
+fn merge_queue(queue: Vec<Queued>) -> Option<Queued> {
+    let join = |x: String, y: String| if x.is_empty() || y.is_empty() { x + &y } else { format!("{x}\n\n{y}") };
+    queue.into_iter().reduce(|mut a, b| {
+        a.text = join(a.text, b.text);
+        a.full = join(a.full, b.full);
+        a.attached.extend(b.attached);
+        a
+    })
+}
+
 struct Call {
     id: String,
     name: String,
@@ -612,11 +623,12 @@ impl ChatView {
                 self.spent.1 += cost_usd.unwrap_or(0.);
                 self.push(Item::Footer(footer(took, tokens, cost_usd)));
                 self.refresh_limits(cx);
-                // A queued message goes out next; "finished" waits for the last one.
-                if self.backend.is_some() && !self.queue.is_empty() {
-                    let next = self.queue.remove(0);
-                    self.dispatch(next, cx);
-                    return;
+                // The queued messages go out next, together; "finished" waits for their turn.
+                if self.backend.is_some() {
+                    if let Some(next) = merge_queue(std::mem::take(&mut self.queue)) {
+                        self.dispatch(next, cx);
+                        return;
+                    }
                 }
                 let (key, who) = (self.key.clone(), format!("{} chat finished", self.agent));
                 let what = crate::sessions::scope_label(&self.scope);
@@ -1558,8 +1570,7 @@ impl ChatView {
         self.prompt.update(cx, |p, cx| p.focus(window, cx));
         if self.turn.is_some() {
             self.interrupt(cx);
-        } else {
-            let next = self.queue.remove(0);
+        } else if let Some(next) = merge_queue(std::mem::take(&mut self.queue)) {
             self.dispatch(next, cx);
         }
     }
@@ -2068,7 +2079,7 @@ pub fn init(cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::{file_patch, filter_commands, footer, group_label, linkify, Call};
+    use super::{file_patch, filter_commands, footer, group_label, linkify, merge_queue, Call, Queued};
     use orbit_core::chat::{FileDiff, SlashCommand};
 
     #[test]
@@ -2082,6 +2093,14 @@ mod tests {
         assert_eq!(filter_commands(&cmds, "a\nb /in"), vec![3]);
         assert!(filter_commands(&cmds, "hi/re").is_empty());
         assert!(filter_commands(&cmds, "see /usr/re").is_empty());
+    }
+
+    #[test]
+    fn queued_messages_merge_in_order() {
+        let q = |t: &str, img: &[&str]| Queued { text: t.into(), full: format!("{t}!"), attached: img.iter().map(|i| ((*i).into(), (*i).into())).collect() };
+        let m = merge_queue(vec![q("a", &["x"]), q("", &["y"]), q("b", &[])]).unwrap();
+        assert_eq!((m.text.as_str(), m.full.as_str(), m.attached.len()), ("a\n\nb", "a!\n\n!\n\nb!", 2));
+        assert!(merge_queue(vec![]).is_none());
     }
 
     #[test]
