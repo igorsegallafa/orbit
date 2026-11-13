@@ -360,11 +360,13 @@ impl ChatView {
     }
 
     fn complete(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let text = format!("/{name} ");
-        let end = text.chars().count() as u32;
         self.prompt.update(cx, |p, cx| {
+            let value = p.value();
+            let text = format!("{}/{name} ", &value[..slash_start(&value).unwrap_or(0)]);
+            let (line, last) = (text.matches('\n').count() as u32, text.rsplit('\n').next().unwrap_or_default());
+            let end = last.chars().count() as u32;
             p.set_value(text, window, cx);
-            p.set_cursor_position(lsp_types::Position::new(0, end), window, cx);
+            p.set_cursor_position(lsp_types::Position::new(line, end), window, cx);
         });
         cx.notify();
     }
@@ -1720,9 +1722,17 @@ fn paste_chip(label: String) -> gpui::Div {
         .child(label)
 }
 
-/// Commands matching a bare `/word` prompt: name prefix matches first, then names containing it.
+/// Byte offset of the `/word` being typed at the end of the prompt, at its start or after whitespace.
+/// shortcut: only the word at the end of the text, not at the cursor; upgrade if mid-text completion is wanted.
+fn slash_start(text: &str) -> Option<usize> {
+    let start = text.rfind(char::is_whitespace).map_or(0, |i| i + text[i..].chars().next().map_or(1, char::len_utf8));
+    (text[start..].starts_with('/') && !text[start + 1..].contains('/')).then_some(start)
+}
+
+/// Commands matching the `/word` being typed: name prefix matches first, then names containing it.
 fn filter_commands(commands: &[SlashCommand], text: &str) -> Vec<usize> {
-    let Some(q) = text.strip_prefix('/').filter(|q| !q.contains(char::is_whitespace)) else { return vec![] };
+    let Some(start) = slash_start(text) else { return vec![] };
+    let q = &text[start + 1..];
     let q = q.to_lowercase();
     let (mut prefix, mut inner): (Vec<usize>, Vec<usize>) = (vec![], vec![]);
     for (i, cmd) in commands.iter().enumerate() {
@@ -1820,7 +1830,10 @@ mod tests {
         assert_eq!(filter_commands(&cmds, "/CO"), vec![0, 2]);
         assert_eq!(filter_commands(&cmds, "/re"), vec![1]);
         assert!(filter_commands(&cmds, "/review now").is_empty());
-        assert!(filter_commands(&cmds, "hi /re").is_empty());
+        assert_eq!(filter_commands(&cmds, "hi /re"), vec![1]);
+        assert_eq!(filter_commands(&cmds, "a\nb /in"), vec![3]);
+        assert!(filter_commands(&cmds, "hi/re").is_empty());
+        assert!(filter_commands(&cmds, "see /usr/re").is_empty());
     }
 
     #[test]
