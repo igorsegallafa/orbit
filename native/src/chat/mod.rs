@@ -34,7 +34,7 @@ enum Item {
     /// The session ended, with its error if any; the last one offers Restart.
     Exited(String),
     Footer(String),
-    /// One tool call, or a run of consecutive read-only ones drawn as one row.
+    /// One edit, or a run of consecutive other tool calls drawn as one row.
     Tool { calls: Vec<Call>, open: bool, all: bool, diff: Option<(Entity<DiffState>, usize)> },
     /// A permission request; `answer` is the picked option's label once answered.
     Permission { id: String, title: String, detail: String, options: Vec<PermissionOption>, answer: Option<String> },
@@ -49,7 +49,8 @@ struct Call {
     ok: Option<bool>,
 }
 
-const READ_ONLY: [&str; 5] = ["Read", "Grep", "Glob", "LS", "list"];
+/// Tools drawn alone, for their diff; every other run of consecutive calls shares one row.
+const EDITS: [&str; 3] = ["Edit", "MultiEdit", "Write"];
 const MAX_OUTPUT_LINES: usize = 200;
 /// The diff view's row height at the chat's mono size, and the most rows shown before it scrolls.
 const DIFF_ROW_H: f32 = 21.;
@@ -103,14 +104,14 @@ fn tool_icon(name: &str) -> &'static str {
 }
 
 fn group_label(calls: &[Call]) -> String {
-    let reads = calls.iter().filter(|c| c.name == "Read").count();
-    let other = calls.len() - reads;
-    let plural = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
-    match (reads, other) {
-        (0, n) => format!("Searched {}", plural(n, "time", "times")),
-        (r, 0) => format!("Read {}", plural(r, "file", "files")),
-        (r, n) => format!("Read {}, {}", plural(r, "file", "files"), plural(n, "search", "searches")),
-    }
+    let count = |f: &dyn Fn(&str) -> bool| calls.iter().filter(|c| f(&c.name)).count();
+    let bash = count(&|n| n == "Bash");
+    let reads = count(&|n| n == "Read");
+    let searches = count(&|n| matches!(n, "Grep" | "Glob" | "LS" | "list"));
+    let kinds = [(bash, "ran", "command", "commands"), (reads, "read", "file", "files"), (searches, "searched", "time", "times"), (calls.len() - bash - reads - searches, "used", "tool", "tools")];
+    let label = kinds.iter().filter(|k| k.0 > 0).map(|&(n, verb, one, many)| format!("{verb} {n} {}", if n == 1 { one } else { many })).collect::<Vec<_>>().join(", ");
+    let mut chars = label.chars();
+    chars.next().map_or_else(String::new, |f| f.to_uppercase().chain(chars).collect())
 }
 
 fn file_patch(d: &FileDiff) -> String {
@@ -360,11 +361,13 @@ impl ChatView {
     }
 
     fn complete(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let text = format!("/{name} ");
-        let end = text.chars().count() as u32;
         self.prompt.update(cx, |p, cx| {
+            let value = p.value();
+            let text = format!("{}/{name} ", &value[..slash_start(&value).unwrap_or(0)]);
+            let (line, last) = (text.matches('\n').count() as u32, text.rsplit('\n').next().unwrap_or_default());
+            let end = last.chars().count() as u32;
             p.set_value(text, window, cx);
-            p.set_cursor_position(lsp_types::Position::new(0, end), window, cx);
+            p.set_cursor_position(lsp_types::Position::new(line, end), window, cx);
         });
         cx.notify();
     }
@@ -527,9 +530,9 @@ impl ChatView {
             }
             ChatEvent::ToolStarted { id, name, summary } => {
                 let call = Call { id, name, summary, output: String::new(), ok: None };
-                let read_only = READ_ONLY.contains(&call.name.as_str());
+                let groups = !EDITS.contains(&call.name.as_str());
                 match self.items.last_mut() {
-                    Some(Item::Tool { calls, .. }) if read_only && calls.iter().all(|c| READ_ONLY.contains(&c.name.as_str())) => {
+                    Some(Item::Tool { calls, .. }) if groups && calls.iter().all(|c| !EDITS.contains(&c.name.as_str())) => {
                         calls.push(call);
                         let n = self.items.len();
                         self.list.remeasure_items(n - 1..n);
@@ -1082,7 +1085,11 @@ impl ChatView {
                 let h = (*rows).clamp(1, MAX_DIFF_ROWS) as f32 * DIFF_ROW_H + 8.;
                 inside = inside.child(div().w_full().h(px(h)).rounded(px(4.)).overflow_hidden().border_1().border_color(c(theme::BORDER)).child(Diff::new(state).size_full().header_visible(false)));
             }
-            let output: String = calls.iter().map(|c| c.output.as_str()).filter(|o| !o.is_empty()).collect::<Vec<_>>().join("\n");
+            let output: String = if calls.len() > 1 {
+                calls.iter().map(|c| format!("▸ {} {}\n{}", c.name, c.summary, c.output.trim_end())).collect::<Vec<_>>().join("\n\n")
+            } else {
+                first.output.clone()
+            };
             if !output.is_empty() && diff.is_none() {
                 let total = output.lines().count();
                 let shown = if all || total <= MAX_OUTPUT_LINES { output } else { output.lines().take(MAX_OUTPUT_LINES).collect::<Vec<_>>().join("\n") };
@@ -1720,9 +1727,17 @@ fn paste_chip(label: String) -> gpui::Div {
         .child(label)
 }
 
-/// Commands matching a bare `/word` prompt: name prefix matches first, then names containing it.
+/// Byte offset of the `/word` being typed at the end of the prompt, at its start or after whitespace.
+/// shortcut: only the word at the end of the text, not at the cursor; upgrade if mid-text completion is wanted.
+fn slash_start(text: &str) -> Option<usize> {
+    let start = text.rfind(char::is_whitespace).map_or(0, |i| i + text[i..].chars().next().map_or(1, char::len_utf8));
+    (text[start..].starts_with('/') && !text[start + 1..].contains('/')).then_some(start)
+}
+
+/// Commands matching the `/word` being typed: name prefix matches first, then names containing it.
 fn filter_commands(commands: &[SlashCommand], text: &str) -> Vec<usize> {
-    let Some(q) = text.strip_prefix('/').filter(|q| !q.contains(char::is_whitespace)) else { return vec![] };
+    let Some(start) = slash_start(text) else { return vec![] };
+    let q = &text[start + 1..];
     let q = q.to_lowercase();
     let (mut prefix, mut inner): (Vec<usize>, Vec<usize>) = (vec![], vec![]);
     for (i, cmd) in commands.iter().enumerate() {
@@ -1820,7 +1835,10 @@ mod tests {
         assert_eq!(filter_commands(&cmds, "/CO"), vec![0, 2]);
         assert_eq!(filter_commands(&cmds, "/re"), vec![1]);
         assert!(filter_commands(&cmds, "/review now").is_empty());
-        assert!(filter_commands(&cmds, "hi /re").is_empty());
+        assert_eq!(filter_commands(&cmds, "hi /re"), vec![1]);
+        assert_eq!(filter_commands(&cmds, "a\nb /in"), vec![3]);
+        assert!(filter_commands(&cmds, "hi/re").is_empty());
+        assert!(filter_commands(&cmds, "see /usr/re").is_empty());
     }
 
     #[test]
@@ -1848,11 +1866,12 @@ mod tests {
     }
 
     #[test]
-    fn read_only_runs_are_labelled_by_kind() {
+    fn tool_runs_are_labelled_by_kind() {
         let call = |name: &str| Call { id: String::new(), name: name.into(), summary: String::new(), output: String::new(), ok: None };
         assert_eq!(group_label(&[call("Read"), call("Read")]), "Read 2 files");
-        assert_eq!(group_label(&[call("Read"), call("Grep")]), "Read 1 file, 1 search");
+        assert_eq!(group_label(&[call("Read"), call("Grep")]), "Read 1 file, searched 1 time");
         assert_eq!(group_label(&[call("Glob"), call("Grep")]), "Searched 2 times");
+        assert_eq!(group_label(&[call("Bash"), call("Skill"), call("Bash"), call("Read")]), "Ran 2 commands, read 1 file, used 1 tool");
     }
 
     #[test]
