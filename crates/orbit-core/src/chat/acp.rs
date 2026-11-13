@@ -12,7 +12,7 @@ struct Acp {
 }
 
 pub fn start(name: &str, cwd: &Path, resume: Option<String>, key: &str, sink: impl Fn(ChatEvent) + Send + 'static) -> Result<Box<dyn ChatBackend>, String> {
-    let (launch_args, launch_env) = crate::agent_hooks::session_launch(name, key, true);
+    let (launch_args, launch_env) = crate::agent_hooks::session_launch(name, key, true, cwd);
     let mut cmd = crate::proc::cmd(name);
     cmd.arg("acp").args(launch_args).envs(launch_env).current_dir(cwd);
     let mcp_servers = match (crate::agent_hooks::hook_url(key), std::env::current_exe()) {

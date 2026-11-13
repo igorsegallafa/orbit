@@ -10,7 +10,7 @@ use std::hash::{BuildHasher, Hasher};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -264,11 +264,27 @@ fn reply_style(chat: bool) -> Option<String> {
     Some(if chat { format!("{style}\n{CHAT_STYLE}") } else { style })
 }
 
+/// The repos in `cwd` (or `cwd` itself) that are links to a base clone.
+fn link_note(cwd: &Path) -> Option<String> {
+    let entries = std::fs::read_dir(cwd).into_iter().flatten().flatten().map(|e| e.path());
+    let links: Vec<String> = std::iter::once(cwd.to_path_buf())
+        .chain(entries)
+        .filter(|p| crate::links::is_link(p) && p.is_dir())
+        .map(|p| format!("- `{}` -> `{}`", p.display(), crate::lsp::real_path(&p).display()))
+        .collect();
+    (!links.is_empty()).then(|| {
+        format!(
+            "These repo folders are links to a base clone shared with other workspaces:\n{}\nRun builds and CMake configures from the real path on the right (e.g. `cd -P`), never through the link: CMake records the path it was configured from, and a different one makes the next build recompile everything.",
+            links.join("\n")
+        )
+    })
+}
+
 /// Argv and environment giving an agent session Orbit's MCP server and reply style (and claude its hooks).
 // shortcut: omp only reads MCP servers from files (no flag or env), so it gets the style alone.
-pub fn session_launch(cmd: &str, key: &str, chat: bool) -> (Vec<String>, Vec<(String, String)>) {
+pub fn session_launch(cmd: &str, key: &str, chat: bool, cwd: &Path) -> (Vec<String>, Vec<(String, String)>) {
     let name = std::path::Path::new(cmd.trim()).file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();
-    let style = reply_style(chat);
+    let style = [reply_style(chat), link_note(cwd)].into_iter().flatten().reduce(|a, b| format!("{a}\n\n{b}"));
     let server = hook_url(key).zip(std::env::current_exe().ok()).map(|(url, exe)| (exe.to_string_lossy().into_owned(), url));
     let mut args: Vec<String> = vec![];
     let mut env = vec![];
@@ -520,12 +536,27 @@ mod tests {
     #[test]
     fn wires_the_reply_style_into_each_agent() {
         let has = |a: &[String], p: &str| a.iter().any(|x| x.starts_with(p));
-        assert!(has(&session_launch("omp", "tm:1", false).0, "--append-system-prompt="));
-        assert!(has(&session_launch("/usr/bin/codex", "tm:1", false).0, "developer_instructions="));
-        assert_eq!(session_launch("opencode", "tm:1", false).1[0].0, "OPENCODE_CONFIG_CONTENT");
-        assert_eq!(session_launch("bash", "tm:1", false), (vec![], vec![]));
-        let chat = session_launch("claude", "tm:1", true).0;
+        assert!(has(&session_launch("omp", "tm:1", false, Path::new(".")).0, "--append-system-prompt="));
+        assert!(has(&session_launch("/usr/bin/codex", "tm:1", false, Path::new(".")).0, "developer_instructions="));
+        assert_eq!(session_launch("opencode", "tm:1", false, Path::new(".")).1[0].0, "OPENCODE_CONFIG_CONTENT");
+        assert_eq!(session_launch("bash", "tm:1", false, Path::new(".")), (vec![], vec![]));
+        let chat = session_launch("claude", "tm:1", true, Path::new(".")).0;
         assert!(chat.iter().any(|a| a.starts_with("--append-system-prompt=") && a.contains("markdown table")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn notes_repos_that_link_to_a_base_clone() {
+        let d = std::env::temp_dir().join(format!("orbit-link-note-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("clone")).unwrap();
+        std::fs::create_dir_all(d.join("ws/own")).unwrap();
+        std::os::unix::fs::symlink(d.join("clone"), d.join("ws/engine")).unwrap();
+        let note = link_note(&d.join("ws")).unwrap();
+        assert!(note.contains("ws/engine` -> `") && note.contains("clone`") && !note.contains("own"));
+        assert!(link_note(&d.join("ws/engine")).is_some());
+        assert!(link_note(&d.join("ws/own")).is_none());
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

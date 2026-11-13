@@ -14,7 +14,7 @@ struct Claude {
 
 pub fn start(cwd: &Path, resume: Option<String>, key: &str, sink: impl Fn(ChatEvent) + Send + 'static) -> Result<Box<dyn ChatBackend>, String> {
     let key = key.to_string();
-    let (launch_args, launch_env) = crate::agent_hooks::session_launch("claude", &key, true);
+    let (launch_args, launch_env) = crate::agent_hooks::session_launch("claude", &key, true, cwd);
     let mut cmd = crate::proc::cmd("claude");
     cmd.args(["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages"]);
     if let Some(id) = &resume {
