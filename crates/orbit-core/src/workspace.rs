@@ -32,6 +32,9 @@ pub struct Workspace {
     /// with different branches, or a fork's read-only `pr-<n>`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub repo_branches: BTreeMap<String, String>,
+    /// Per repo, the branches of the workspace's open stacked PRs (an agent's): being on one isn't off-branch.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub stack_branches: BTreeMap<String, Vec<String>>,
 }
 
 impl Workspace {
@@ -615,6 +618,7 @@ fn finish_create(
         variant_of: None,
         agent: None,
         repo_branches: BTreeMap::new(),
+        stack_branches: BTreeMap::new(),
     };
     let raw = serde_yaml::to_string(&ws).map_err(|e| e.to_string())?;
     std::fs::write(meta_path(&ws_dir), raw).map_err(|e| e.to_string())?;
@@ -763,6 +767,16 @@ pub fn save_pr_refs(name: &str, new_refs: &[PrRef]) -> Result<(), String> {
     Ok(())
 }
 
+pub fn save_stack_branches(name: &str, stacks: BTreeMap<String, Vec<String>>) -> Result<(), String> {
+    let ws_dir = ws_dir(name)?;
+    let mut ws = load_meta(&ws_dir)?;
+    if ws.stack_branches != stacks {
+        ws.stack_branches = stacks;
+        save_meta(&ws_dir, &ws)?;
+    }
+    Ok(())
+}
+
 /// Removes a workspace: deletes each worktree and its branch, then the
 /// workspace directory. Refuses when any worktree is dirty unless forced.
 /// Branches holding commits no remote has are kept (never silently lose
@@ -868,7 +882,8 @@ pub fn status(name: &str) -> Result<Vec<RepoStatus>, String> {
             let branch = git::current_branch(&wt);
             let operation = git::operation(&wt);
             // A paused rebase detaches HEAD; that's not being off-branch.
-            let off_branch = operation.is_none() && branch.as_deref() != Some(expected_branch.as_str());
+            let on_stack = branch.as_ref().is_some_and(|b| ws.stack_branches.get(repo).is_some_and(|s| s.contains(b)));
+            let off_branch = operation.is_none() && branch.as_deref() != Some(expected_branch.as_str()) && !on_stack;
             let branch_only = links::is_link(&wt);
             let held_by = match (&branch, off_branch && branch_only) {
                 (Some(b), true) => others

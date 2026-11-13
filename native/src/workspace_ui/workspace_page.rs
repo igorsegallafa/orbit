@@ -93,8 +93,19 @@ impl WsPage {
         let checks: Vec<&str> = self.checks.ready().into_iter().flatten().map(|c| c.status.as_str()).collect();
         let failing = checks.contains(&"fail");
         let running = checks.contains(&"running");
-        let mergeable: Vec<MergeItem> =
-            open.iter().filter(|p| !p.is_draft).map(|p| MergeItem { repo: p.repo.clone(), number: p.number, title: p.title.clone() }).collect();
+        let levels = stack_levels(&prs);
+        let item = |p: &WsPrStatus, level: usize| MergeItem {
+            repo: p.repo.clone(),
+            number: p.number,
+            title: p.title.clone(),
+            after: (level > 0).then(|| below(&prs, p).map(|b| b.number)).flatten(),
+        };
+        let stack: Vec<MergeItem> = levels.iter().enumerate().flat_map(|(l, ixs)| ixs.iter().map(move |&i| (l, i))).map(|(l, i)| item(&prs[i], l)).collect();
+        let mergeable: Vec<MergeItem> = stack
+            .iter()
+            .cloned()
+            .chain(open.iter().filter(|p| !p.is_draft && !stack.iter().any(|s| s.repo == p.repo && s.number == p.number)).map(|p| item(p, 0)))
+            .collect();
         Derived {
             dirty: statuses.iter().filter(|s| s.dirty).map(|s| s.repo.clone()).collect(),
             push: push_repos.iter().filter(|s| s.ahead > 0).map(|s| s.repo.clone()).collect(),
@@ -109,6 +120,7 @@ impl WsPage {
             passing: !checks.is_empty() && checks.iter().all(|s| *s == "pass"),
             can_merge: !mergeable.is_empty() && !failing && !running,
             mergeable,
+            stack,
             dropped,
         }
     }
@@ -142,6 +154,11 @@ impl WsPage {
             let _ = writeln!(out, "    {} #{} {} {}", p.repo, p.number, p.state, p.title);
         }
         let _ = writeln!(out, "  checks: {}", super::load_text(&self.checks));
+        let prs = self.prs.ready().cloned().unwrap_or_default();
+        for (l, level) in stack_levels(&prs).iter().enumerate() {
+            let row = |&i: &usize| format!("{} #{} {} → {} local_behind {}", prs[i].repo, prs[i].number, prs[i].branch, prs[i].base, prs[i].local_behind);
+            let _ = writeln!(out, "  stack {l}: {}", level.iter().map(row).collect::<Vec<_>>().join(", "));
+        }
         let d = self.derived();
         let _ = writeln!(
             out,
@@ -168,7 +185,35 @@ pub struct Derived {
     pub passing: bool,
     pub can_merge: bool,
     pub mergeable: Vec<MergeItem>,
+    /// The stack's PRs in merge order (bottom first); empty without a stack.
+    pub stack: Vec<MergeItem>,
     pub dropped: Vec<(String, u64)>,
+}
+
+/// The open PRs stacked one on another, as levels (one branch each) bottom first; empty without a stack.
+pub fn stack_levels(prs: &[WsPrStatus]) -> Vec<Vec<usize>> {
+    use orbit_core::github::{PrGroup, PullRequest};
+    let (mut groups, mut rows): (Vec<PrGroup>, Vec<Vec<usize>>) = (vec![], vec![]);
+    for (i, p) in prs.iter().enumerate().filter(|(_, p)| p.state == "OPEN") {
+        let pr = PullRequest { repo: p.repo.clone(), branch: p.branch.clone(), base: p.base.clone(), number: p.number, ..Default::default() };
+        match groups.iter().position(|g| g.branch == p.branch) {
+            Some(g) => {
+                groups[g].prs.push(pr);
+                rows[g].push(i);
+            }
+            None => {
+                groups.push(PrGroup { branch: p.branch.clone(), prs: vec![pr] });
+                rows.push(vec![i]);
+            }
+        }
+    }
+    // shortcut: shows the tallest stack only; list several if a workspace ever holds two.
+    let tallest = (0..groups.len()).map(|g| orbit_core::stack::stack(&groups, g)).max_by_key(Vec::len).filter(|s| s.len() > 1);
+    tallest.map(|s| s.into_iter().map(|g| rows[g].clone()).collect()).unwrap_or_default()
+}
+
+fn below<'a>(prs: &'a [WsPrStatus], pr: &WsPrStatus) -> Option<&'a WsPrStatus> {
+    prs.iter().find(|q| q.state == "OPEN" && q.repo == pr.repo && q.branch == pr.base)
 }
 
 impl PageTab {
@@ -293,6 +338,32 @@ impl PageTab {
             return self.toast(ToastKind::Info, "No open pull request ready to merge", None, window, cx);
         }
         self.open_merge(name, base, d.mergeable, cx);
+    }
+
+    fn start_merge_stack(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(p) = self.ws_page() else { return };
+        let (name, base, stack) = (p.name.clone(), p.meta.as_ref().map(|m| m.base.clone()).unwrap_or_else(|| "main".into()), p.derived().stack);
+        let _ = window;
+        self.open_merge(name, base, stack, cx);
+    }
+
+    /// Fast-forwards a stacked branch the restack updated on GitHub.
+    fn ws_sync_branch(&mut self, repo: String, branch: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(p) = self.ws_page() else { return };
+        p.pulling = Some(format!("{repo}:{branch}"));
+        let name = p.name.clone();
+        let (r, b) = (repo.clone(), branch.clone());
+        spawn(window, cx, move || orbit_core::prs::sync_branch(&name, &r, &b), move |t, res, window, cx| {
+            if let Some(p) = t.ws_page() {
+                p.pulling = None;
+            }
+            match res {
+                Ok(()) => t.toast(ToastKind::Success, format!("Synced {branch}"), Some(format!("{repo}: up to date with origin")), window, cx),
+                Err(e) => t.toast(ToastKind::Error, format!("Couldn't sync {branch}"), Some(e), window, cx),
+            }
+            t.reload(true, window, cx);
+        });
+        cx.notify();
     }
 
     /// One PR's Squash and merge (its row's button).
@@ -558,6 +629,7 @@ impl PageTab {
             .children(super::plan::progress(p, cx))
             .child(section_head("Repositories", None))
             .child(repo_rows(p, &d, cx))
+            .children(stack_section(p, &statuses, cx))
             .child(div().mt(px(22.)).child(section_head("Pull requests", p.prs.ready().map(Vec::len).filter(|n| *n > 0))))
             .child(pr_section(p, &d, cx));
         crate::motion::page_in(page, gpui::ElementId::Name(format!("ws-page-in:{}", p.name).into()))
@@ -1172,6 +1244,108 @@ fn pr_section(p: &WsPage, d: &Derived, cx: &mut Context<PageTab>) -> gpui::AnyEl
     }
 }
 
+fn stack_section(p: &WsPage, statuses: &[RepoStatus], cx: &mut Context<PageTab>) -> Option<gpui::AnyElement> {
+    use crate::review::pr_ui::{self, Tone};
+    let prs = p.prs.ready()?;
+    let levels = stack_levels(prs);
+    if levels.is_empty() {
+        return None;
+    }
+    let n = levels.len();
+    let checks = |pr: &WsPrStatus| p.checks.ready().and_then(|cs| cs.iter().find(|c| c.repo == pr.repo && c.pr_number == pr.number)).map(|c| c.status.clone());
+    let bottom_block = levels[0].iter().map(|&i| &prs[i]).find_map(|pr| match checks(pr).as_deref() {
+        Some("fail") => Some(format!("Checks are failing on #{}", pr.number)),
+        Some("running") => Some(format!("Checks are still running on #{}", pr.number)),
+        _ => None,
+    });
+    let block = levels.iter().flatten().map(|&i| &prs[i]).find(|pr| pr.is_draft).map(|d| format!("#{} is a draft", d.number)).or(bottom_block);
+    let button = kit::hint(kit::disabled(kit::button("ws-merge-stack", "Merge stack", Kind::Secondary, kit::MINI), block.is_some()), block.clone().unwrap_or_else(|| "Merge every level bottom-up, waiting for each one's checks".into()))
+        .when(block.is_none(), |b| b.on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.start_merge_stack(w, cx))));
+    let rows = levels.iter().enumerate().rev().map(|(level, ixs)| {
+        let level_prs: Vec<&WsPrStatus> = ixs.iter().map(|&i| &prs[i]).collect();
+        let first = level_prs[0];
+        let (top, bottom) = (level + 1 == n, level == 0);
+        let here = statuses.iter().any(|s| s.branch.as_deref() == Some(first.branch.as_str()));
+        let behind = level_prs.iter().find(|pr| pr.local_behind > 0).copied();
+        let (label, tone) = match below(prs, first) {
+            None => ("Next to merge".to_string(), Tone::Ok),
+            Some(b) => (format!("After #{}", b.number), Tone::Muted),
+        };
+        let syncing = behind.is_some_and(|b| p.pulling.as_deref() == Some(format!("{}:{}", b.repo, b.branch).as_str()));
+        div()
+            .flex()
+            .gap(px(10.))
+            .px(px(14.))
+            .when(!bottom, |d| d.border_b_1().border_color(c(theme::BORDER)))
+            .when(here, |d| d.bg(kit::alpha(c(theme::ACCENT), 0.07)))
+            .child(pr_ui::rail(!top, !bottom, c(if bottom { theme::OK } else { theme::TEXT_FAINT }), bottom))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .py(px(10.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.))
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(6.))
+                            .min_w_0()
+                            .text_size(px(13.))
+                            .child(div().min_w_0().truncate().font_weight(FontWeight::SEMIBOLD).text_color(c(theme::TEXT)).child(first.title.clone()))
+                            .child(div().flex_none().text_color(c(theme::TEXT_FAINT)).child(level_prs.iter().map(|pr| format!("{} #{}", pr.repo, pr.number)).collect::<Vec<_>>().join(" · "))),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(5.))
+                            .font_family(theme::MONO_FONT)
+                            .text_size(px(11.))
+                            .text_color(c(theme::TEXT_FAINT))
+                            .child(div().text_color(c(theme::TEXT_DIM)).child(first.branch.clone()))
+                            .child("→")
+                            .child(first.base.clone()),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .when(here, |d| d.child(kit::badge(c(theme::TEXT_DIM)).child(kit::dot(c(theme::ACCENT))).child("Checked out")))
+                    .when_some(behind, |d, b| {
+                        let (repo, branch) = (b.repo.clone(), b.branch.clone());
+                        d.child(kit::badge(c(theme::WARN)).child(format!("Local {} behind", plural(b.local_behind, "commit"))))
+                            .child(
+                                kit::hint(kit::disabled(kit::button(format!("ws-stack-sync:{level}"), if syncing { "Syncing…" } else { "Sync" }, Kind::Secondary, kit::MINI), syncing), "Fast-forward the local branch to what GitHub has (the restack merged into it)")
+                                    .when(!syncing, |btn| btn.on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.ws_sync_branch(repo.clone(), branch.clone(), w, cx)))),
+                            )
+                    })
+                    .child(pr_ui::status_pill(label, tone)),
+            )
+            .child(probe(format!("ws-stack:{level}")))
+            .into_any_element()
+    });
+    Some(
+        div()
+            .child(
+                div()
+                    .mt(px(22.))
+                    .mb(px(10.))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(kit::section_title("Stack"))
+                    .child(kit::count(n))
+                    .child(div().flex_1().text_size(px(12.)).text_color(c(theme::TEXT_FAINT)).child("merges from the bottom up"))
+                    .child(button),
+            )
+            .child(div().flex().flex_col().rounded(px(10.)).border_1().border_color(c(theme::BORDER)).bg(c(theme::PANEL)).overflow_hidden().children(rows))
+            .into_any_element(),
+    )
+}
+
 fn pr_row(p: &WsPage, pr: &WsPrStatus, i: usize, base: &str, cx: &mut Context<PageTab>) -> gpui::AnyElement {
     let check = p.checks.ready().and_then(|cs| cs.iter().find(|c| c.repo == pr.repo && c.pr_number == pr.number)).cloned();
     let key = format!("{}#{}", pr.repo, pr.number);
@@ -1205,8 +1379,10 @@ fn pr_row(p: &WsPage, pr: &WsPrStatus, i: usize, base: &str, cx: &mut Context<Pa
     };
     let url = pr.url.clone();
     let toggle_key = key.clone();
-    let blocked = matches!(status.as_str(), "fail" | "running");
-    let merge_item = MergeItem { repo: pr.repo.clone(), number: pr.number, title: pr.title.clone() };
+    let prs = p.prs.ready().map(Vec::as_slice).unwrap_or_default();
+    let stacked_on = below(prs, pr).map(|b| b.number);
+    let blocked = matches!(status.as_str(), "fail" | "running") || stacked_on.is_some();
+    let merge_item = MergeItem { repo: pr.repo.clone(), number: pr.number, title: pr.title.clone(), after: None };
     let base = base.to_string();
     div()
         .when(i > 0, |d| d.border_t_1().border_color(c(theme::BORDER)))
@@ -1273,6 +1449,7 @@ fn pr_row(p: &WsPage, pr: &WsPrStatus, i: usize, base: &str, cx: &mut Context<Pa
                 )
                 .when(state == "open", |d| {
                     let tip = match status.as_str() {
+                        _ if stacked_on.is_some() => format!("Stacked on #{}: merge it first, or use Merge stack", stacked_on.unwrap_or_default()),
                         "fail" => "Checks are failing".to_string(),
                         "running" => "Checks are still running".to_string(),
                         _ => format!("Squash into {base} and delete the branch on GitHub"),
@@ -1360,4 +1537,35 @@ fn checks_list(p: &WsPage, check: Option<&WsCheck>, key: &str, cx: &mut Context<
             })
             .when(rerunning, |d| d.child(div().text_size(px(11.)).text_color(c(theme::TEXT_FAINT)).child("re-running…")))
     }))
+}
+
+#[cfg(test)]
+mod stack_tests {
+    use super::*;
+
+    fn row(n: u64, branch: &str, base: &str, state: &str) -> WsPrStatus {
+        WsPrStatus {
+            repo: "web".into(),
+            number: n,
+            title: String::new(),
+            url: String::new(),
+            author: String::new(),
+            state: state.into(),
+            is_draft: false,
+            commits: 1,
+            updated_at: String::new(),
+            branch: branch.into(),
+            base: base.into(),
+            local_behind: 0,
+        }
+    }
+
+    #[test]
+    fn levels_go_bottom_up_and_skip_merged() {
+        let prs = [row(43, "c", "b", "OPEN"), row(41, "a", "main", "OPEN"), row(42, "b", "a", "OPEN"), row(40, "x", "main", "OPEN")];
+        assert_eq!(stack_levels(&prs), vec![vec![1], vec![2], vec![0]]);
+        assert_eq!(below(&prs, &prs[0]).map(|p| p.number), Some(42));
+        let merged = [row(41, "a", "main", "MERGED"), row(42, "b", "main", "OPEN")];
+        assert!(stack_levels(&merged).is_empty());
+    }
 }

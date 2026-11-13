@@ -10,7 +10,7 @@ use crate::toast::ToastKind;
 use crate::workspace::Workspace;
 use crate::workspace_ui::kit;
 use gpui::{div, prelude::*, px, AnyElement, App, Context, FontWeight, SharedString, Task, Window};
-use orbit_core::github::{PrDetail, PullRequest};
+use orbit_core::github::{PrDetail, PrGroup, PullRequest};
 use orbit_core::prs::{RemotePr, WsCheck};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -45,6 +45,12 @@ pub struct FeaturePage {
     pub details: HashMap<String, Option<PrDetail>>,
     expanded: Option<String>,
     merged: HashSet<String>,
+    /// The stack this feature sits in, bottom first; just this feature when it stands alone.
+    stack: Vec<PrGroup>,
+    /// Commits each stacked PR lacks from the PR below it, by `key`.
+    behind: HashMap<String, u64>,
+    /// What "Merge stack" is doing, while it runs.
+    stacking: Option<String>,
     _poll: Task<()>,
 }
 
@@ -61,6 +67,7 @@ impl FeaturePage {
             }
         });
         let workspace = code_review::workspace_for(&prs, &crate::workspace::list_workspaces());
+        let stack = prs.first().map(|p| PrGroup { branch: p.branch.clone(), prs: prs.clone() }).into_iter().collect();
         let mut page = Self {
             host,
             prs,
@@ -70,8 +77,12 @@ impl FeaturePage {
             details: HashMap::new(),
             expanded: None,
             merged: HashSet::new(),
+            stack,
+            behind: HashMap::new(),
+            stacking: None,
             _poll: poll,
         };
+        page.load_stack(false, window, cx);
         page.load_checks(window, cx);
         page.load_details(window, cx);
         page
@@ -110,26 +121,193 @@ impl FeaturePage {
         }
     }
 
+    fn load_stack(&mut self, force: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(mine) = self.prs.first().map(|p| PrGroup { branch: p.branch.clone(), prs: self.prs.clone() }) else { return };
+        cx.spawn_in(window, async move |this, cx| {
+            let (fresh, stack) = cx
+                .background_spawn(async move {
+                    // shortcut: finds only stack levels in the Code Review list (updated in the last 7 days); the merge guard still asks GitHub.
+                    let mut groups = orbit_core::github::list_prs(force).unwrap_or_default();
+                    let at = groups.iter().position(|g| g.branch == mine.branch);
+                    let fresh = at.map(|g| groups[g].prs.clone());
+                    let g = at.unwrap_or_else(|| {
+                        groups.push(mine);
+                        groups.len() - 1
+                    });
+                    (fresh, orbit_core::stack::stack(&groups, g).into_iter().map(|i| groups[i].clone()).collect::<Vec<_>>())
+                })
+                .await;
+            let _ = this.update_in(cx, |p, window, cx| {
+                // A merge below retargets this feature's PRs: take their new base.
+                if let Some(prs) = fresh {
+                    p.prs = prs;
+                }
+                if p.workspace.is_none() {
+                    let all: Vec<PullRequest> = stack.iter().flat_map(|g| g.prs.clone()).collect();
+                    p.workspace = code_review::workspace_for(&all, &crate::workspace::list_workspaces());
+                }
+                p.stack = stack;
+                p.load_behind(window, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn load_behind(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for p in self.stack.iter().flat_map(|g| &g.prs) {
+            let Some(below) = self.below(p).cloned() else { continue };
+            let (k, or, branch) = (key(p), p.owner_repo.clone(), p.branch.clone());
+            cx.spawn_in(window, async move |this, cx| {
+                let Ok(n) = cx.background_spawn(async move { orbit_core::stack::behind(&or, &branch, &below.branch) }).await else { return };
+                let _ = this.update(cx, |page, cx| {
+                    page.behind.insert(k, n);
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
+    }
+
+    /// The open PR `p` is stacked on.
+    fn below(&self, p: &PullRequest) -> Option<&PullRequest> {
+        self.stack.iter().flat_map(|g| &g.prs).find(|a| a.repo == p.repo && a.branch == p.base && !self.merged.contains(&key(a)))
+    }
+
+    fn update_branch(&mut self, p: PullRequest, window: &mut Window, cx: &mut Context<Self>) {
+        let host = self.host.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let (or, n) = (p.owner_repo.clone(), p.number);
+            let r = cx.background_spawn(async move { orbit_core::stack::update_branch(&or, n) }).await;
+            let _ = this.update_in(cx, |page, window, cx| match r {
+                Ok(()) => {
+                    host.toast(ToastKind::Success, format!("Updated {} #{} with the PR below", p.repo, p.number), None, cx);
+                    page.behind.remove(&key(&p));
+                    page.load_checks(window, cx);
+                }
+                Err(e) => host.error(format!("Couldn't update #{}: likely a conflict, check it out to resolve", p.number), e, cx),
+            });
+        })
+        .detach();
+    }
+
     fn check_of(&self, p: &PullRequest) -> Option<&WsCheck> {
         self.checks.as_ref()?.iter().find(|c| c.repo == p.repo && c.pr_number == p.number)
     }
 
     /// Why a PR can't be merged now (`mergeBlock`).
-    fn merge_block(&self, p: &PullRequest) -> Option<&'static str> {
+    fn merge_block(&self, p: &PullRequest) -> Option<String> {
         if self.merged.contains(&key(p)) {
-            return Some("Already merged");
+            return Some("Already merged".into());
+        }
+        if let Some(b) = self.below(p) {
+            return Some(format!("Stacked on #{}: merge it first, or this lands in {} instead of the default branch", b.number, b.branch));
+        }
+        if self.stacking.is_some() {
+            return Some("Merging the stack…".into());
         }
         if p.is_draft {
-            return Some("Draft: mark it ready for review on GitHub first");
+            return Some("Draft: mark it ready for review on GitHub first".into());
         }
         if self.checks.is_none() {
-            return Some("Checking CI…");
+            return Some("Checking CI…".into());
         }
         match self.check_of(p).map(|c| c.status.as_str()) {
-            Some("fail") => Some("Checks are failing"),
-            Some("running") => Some("Checks are still running"),
+            Some("fail") => Some("Checks are failing".into()),
+            Some("running") => Some("Checks are still running".into()),
             _ => None,
         }
+    }
+
+    /// Why "Merge stack" can't start: the bottom must be mergeable now, and no level a draft.
+    fn stack_block(&self) -> Option<String> {
+        let open = |p: &&PullRequest| !self.merged.contains(&key(p));
+        if let Some(d) = self.stack.iter().flat_map(|g| &g.prs).filter(open).find(|p| p.is_draft) {
+            return Some(format!("#{} is a draft", d.number));
+        }
+        let bottom = self.stack.iter().find(|g| g.prs.iter().any(|p| open(&p)))?;
+        let block = bottom.prs.iter().filter(open).find_map(|p| self.merge_block_any(p));
+        block.map(|b| format!("Bottom of the stack: {b}"))
+    }
+
+    /// `merge_block` for any stack level: CI is known only for this feature's own PRs.
+    fn merge_block_any(&self, p: &PullRequest) -> Option<String> {
+        if self.prs.iter().any(|m| key(m) == key(p)) {
+            return self.merge_block(p);
+        }
+        match p.status.as_ref().and_then(|s| s.checks.as_deref()) {
+            Some("fail") => Some(format!("checks are failing on #{}", p.number)),
+            Some("pending") => Some(format!("checks are still running on #{}", p.number)),
+            _ => None,
+        }
+    }
+
+    /// Bottom-up; each level above the first waits for the checks its restack re-ran. Stops at the first failure.
+    fn merge_stack(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let levels: Vec<Vec<PullRequest>> = self
+            .stack
+            .iter()
+            .map(|g| g.prs.iter().filter(|p| !self.merged.contains(&key(p))).cloned().collect::<Vec<_>>())
+            .filter(|l| !l.is_empty())
+            .collect();
+        let order = levels.iter().map(|l| l.iter().map(|p| format!("#{}", p.number)).collect::<Vec<_>>().join(" + ")).collect::<Vec<_>>().join(" → ");
+        let weak = cx.entity().downgrade();
+        let host = self.host.clone();
+        self.host.confirm(
+            "Merge stack",
+            format!("Squash-merges {order}, bottom first. After each merge the next PR is moved onto the default branch and updated, then merged once its checks pass. Stops at the first failure."),
+            "Merge stack",
+            move |window, cx| {
+                let (levels, host, weak) = (levels.clone(), host.clone(), weak.clone());
+                window
+                    .spawn(cx, async move |cx| {
+                        let status = |cx: &mut gpui::AsyncWindowContext, s: Option<String>| {
+                            let _ = cx.update(|_, cx| {
+                                let _ = weak.update(cx, |page, cx| {
+                                    page.stacking = s;
+                                    cx.notify();
+                                });
+                            });
+                        };
+                        'levels: for (i, level) in levels.into_iter().enumerate() {
+                            for p in level {
+                                let (or, n) = (p.owner_repo.clone(), p.number);
+                                if i > 0 {
+                                    status(cx, Some(format!("Waiting for checks on #{n}…")));
+                                    let or = or.clone();
+                                    if let Err(e) = cx.background_spawn(async move { orbit_core::stack::wait_checks(&or, n) }).await {
+                                        let _ = cx.update(|_, cx| host.error(format!("Merge stack stopped at {} #{n}", p.repo), e, cx));
+                                        break 'levels;
+                                    }
+                                }
+                                status(cx, Some(format!("Merging #{n}…")));
+                                let r = cx.background_spawn(async move { orbit_core::prs::merge_remote(&or, n) }).await;
+                                let ok = r.is_ok();
+                                let _ = cx.update(|_, cx| match r {
+                                    Ok(_) => {
+                                        host.toast(ToastKind::Success, format!("Merged {} #{n}", p.repo), None, cx);
+                                        let _ = weak.update(cx, |page, _| page.merged.insert(key(&p)));
+                                    }
+                                    Err(e) => host.error(format!("Merge stack stopped at {} #{n}", p.repo), e, cx),
+                                });
+                                if !ok {
+                                    break 'levels;
+                                }
+                            }
+                        }
+                        status(cx, None);
+                        let _ = cx.update(|window, cx| {
+                            let _ = weak.update(cx, |page, cx| {
+                                page.load_stack(true, window, cx);
+                                page.load_checks(window, cx);
+                            });
+                        });
+                    })
+                    .detach();
+            },
+            window,
+            cx,
+        );
     }
 
     fn open_review(&self, window: &mut Window, cx: &mut App) {
@@ -154,11 +332,13 @@ impl FeaturePage {
                             let (or, n) = (p.owner_repo.clone(), p.number);
                             let r = cx.background_spawn(async move { orbit_core::prs::merge_remote(&or, n) }).await;
                             let _ = cx.update(|window, cx| match r {
-                                Ok(()) => {
-                                    host.toast(ToastKind::Success, format!("Merged {} #{}", p.repo, p.number), None, cx);
+                                Ok(notes) => {
+                                    let desc = (!notes.is_empty()).then(|| notes.join("\n"));
+                                    host.toast(ToastKind::Success, format!("Merged {} #{}", p.repo, p.number), desc, cx);
                                     let _ = weak.update(cx, |page, cx| {
                                         page.merged.insert(key(&p));
                                         page.load_checks(window, cx);
+                                        page.load_stack(true, window, cx);
                                     });
                                 }
                                 Err(e) => host.error(format!("Couldn't merge {} #{}", p.repo, p.number), e, cx),
@@ -508,8 +688,9 @@ impl FeaturePage {
                     .when_some(decision, |d, (label, tone)| d.child(pr_ui::status_pill(label, tone)))
                     .child(div().flex().items_center().gap(px(7.)).text_size(px(12.)).text_color(c(theme::TEXT_DIM)).child(dot).child(checks_label))
                     .when(!draft && !merged, |d| {
-                        let hint = block.map(str::to_string).unwrap_or_else(|| format!("Squash into {base} and delete the branch on GitHub"));
+                        let hint = block.clone().unwrap_or_else(|| format!("Squash into {base} and delete the branch on GitHub"));
                         let b = pr_ui::btn_mini(format!("ft-merge:{ix}"), "Squash and merge").bg(c(theme::PANEL_RAISED));
+                        let b = if block.is_some() { b.child(lucide("lock", 11., c(theme::TEXT_FAINT))).gap(px(5.)) } else { b };
                         let b = if block.is_some() {
                             b.opacity(0.5).cursor_default()
                         } else {
@@ -532,6 +713,114 @@ impl FeaturePage {
                     .child(probe(format!("ft-pr:{ix}"))),
             )
             .when(open, |d| d.child(self.render_checks(check, cx)))
+    }
+
+    fn render_stack(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let n = self.stack.len();
+        let here = self.prs.first().map(|p| p.branch.clone()).unwrap_or_default();
+        let rows = self.stack.iter().enumerate().rev().map(|(level, g)| {
+            let first = &g.prs[0];
+            let (top, bottom, current) = (level + 1 == n, level == 0, g.branch == here);
+            let merged = g.prs.iter().all(|p| self.merged.contains(&key(p)));
+            let below = g.prs.iter().find_map(|p| self.below(p)).map(|b| b.number);
+            let stale = g.prs.iter().find(|p| self.behind.get(&key(p)).is_some_and(|&b| b > 0)).cloned();
+            let (label, tone) = match (merged, below) {
+                (true, _) => ("Merged".to_string(), Tone::Muted),
+                (_, None) => ("Next to merge".into(), Tone::Ok),
+                (_, Some(b)) if stale.is_some() => (format!("Behind #{b}"), Tone::Warn),
+                (_, Some(b)) => (format!("After #{b}"), Tone::Muted),
+            };
+            let node = match (merged, below) {
+                (true, _) => theme::PURPLE,
+                (_, None) => theme::OK,
+                _ => theme::TEXT_FAINT,
+            };
+            let prs = g.prs.clone();
+            div()
+                .id(SharedString::from(format!("ft-stack:{level}")))
+                .relative()
+                .flex()
+                .gap(px(10.))
+                .px(px(14.))
+                .when(!bottom, |d| d.border_b_1().border_color(c(theme::BORDER)))
+                .when(current, |d| d.bg(tint(theme::ACCENT, 0.07)))
+                .when(!current, |d| {
+                    d.cursor_pointer().hover(|s| s.bg(c(theme::PANEL_RAISED))).on_click(cx.listener(move |p, _, window, cx| {
+                        let (host, prs) = (p.host.clone(), prs.clone());
+                        with_app(&p.host, window, cx, move |a, w, cx| open(a, host, prs, w, cx));
+                    }))
+                })
+                .child(probe(format!("ft-stack:{level}")))
+                .child(pr_ui::rail(!top, !bottom, c(node), below.is_none() || merged))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .py(px(10.))
+                        .flex()
+                        .flex_col()
+                        .gap(px(3.))
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(6.))
+                                .min_w_0()
+                                .text_size(px(13.))
+                                .child(div().min_w_0().truncate().font_weight(FontWeight::SEMIBOLD).child(first.title.clone()))
+                                .child(div().flex_none().text_color(c(theme::TEXT_FAINT)).child(g.prs.iter().map(|p| format!("#{}", p.number)).collect::<Vec<_>>().join(" ")))
+                                .when(current, |d| d.child(div().flex_none().text_size(px(11.)).text_color(c(theme::ACCENT)).child("· this feature"))),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(5.))
+                                .font_family(theme::MONO_FONT)
+                                .text_size(px(11.))
+                                .text_color(c(theme::TEXT_FAINT))
+                                .child(div().text_color(c(theme::TEXT_DIM)).child(g.branch.clone()))
+                                .child("→")
+                                .child(first.base.clone()),
+                        ),
+                )
+                .child(div().flex().items_center().gap(px(8.)).child(pr_ui::status_pill(label, tone)).when_some(stale.filter(|_| !merged), |d, p| {
+                    d.child(pr_ui::tip(
+                        pr_ui::btn_mini(format!("ft-stack-update:{level}"), "Update").on_click(cx.listener(move |page, _, window, cx| {
+                            cx.stop_propagation();
+                            page.update_branch(p.clone(), window, cx);
+                        })),
+                        "Merge the PR below into this one on GitHub (no force-push)",
+                    ))
+                }))
+        });
+        let block = self.stack_block();
+        let button = match (&self.stacking, block) {
+            (Some(s), _) => div().flex().items_center().gap(px(6.)).text_size(px(11.5)).text_color(c(theme::TEXT_DIM)).child(kit::spinner("ft-stacking", 12., c(theme::ACCENT))).child(s.clone()).into_any_element(),
+            (None, Some(why)) => pr_ui::tip(pr_ui::btn_mini("ft-merge-stack", "Merge stack").opacity(0.5).cursor_default(), why).into_any_element(),
+            (None, None) => pr_ui::tip(
+                pr_ui::btn_mini("ft-merge-stack", "Merge stack").on_click(cx.listener(|p, _, window, cx| p.merge_stack(window, cx))),
+                "Merge every level bottom-up, waiting for each one's checks",
+            )
+            .into_any_element(),
+        };
+        div()
+            .mb(px(22.))
+            .child(
+                pr_ui::section_head("Stack")
+                    .child(pr_ui::section_count(n))
+                    .child(div().flex_1().font_weight(FontWeight::NORMAL).text_color(c(theme::TEXT_FAINT)).child("merges from the bottom up"))
+                    .child(button),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .border_1()
+                    .border_color(c(theme::BORDER))
+                    .rounded(px(theme::size::RADIUS))
+                    .bg(c(theme::PANEL))
+                    .overflow_hidden()
+                    .children(rows.map(|r| r.into_any_element()).collect::<Vec<_>>()),
+            )
     }
 
     fn render_checks(&self, check: Option<&WsCheck>, cx: &mut Context<Self>) -> impl IntoElement {
@@ -705,8 +994,11 @@ impl Render for FeaturePage {
                                 }
                                 None => pr_ui::tip(
                                     pr_ui::button("ft-checkout", "Check out", true, 32.)
-                                        .on_click(cx.listener(|p, _, window, cx| code_review::checkout(&p.host, p.prs.clone(), window, cx))),
-                                    "Create a local workspace on this branch to build, run and fix it",
+                                        .on_click(cx.listener(|p, _, window, cx| match p.stack.len() {
+                                            1 => code_review::checkout(&p.host, p.prs.clone(), window, cx),
+                                            _ => code_review::checkout_stack(&p.host, &p.stack, window, cx),
+                                        })),
+                                    if self.stack.len() > 1 { "Create one workspace for the whole stack, on its top branch" } else { "Create a local workspace on this branch to build, run and fix it" },
                                 ),
                             })
                             .child(div().w(px(1.)).h(px(22.)).mx(px(4.)).bg(c(theme::BORDER)))
@@ -738,6 +1030,7 @@ impl Render for FeaturePage {
                 )
             })
             .child(flow)
+            .when(self.stack.len() > 1, |d| d.child(self.render_stack(cx)))
             .child(div().mb(px(22.)).child(pr_ui::section_head("Repositories")).child(repos))
             .child(div().mb(px(22.)).child(pr_ui::section_head("Pull requests").child(pr_ui::section_count(self.prs.len()))).child(prs))
             .map(|page| crate::motion::page_in(page, "feature-in"))
@@ -759,6 +1052,9 @@ impl PageView for FeaturePage {
             Some(c) => c.iter().map(|c| format!("{}#{} {}", c.repo, c.pr_number, c.status)).collect::<Vec<_>>().join(", "),
         };
         let _ = writeln!(out, "  feature {} ({} prs) checks: {checks}", self.prs.first().map_or("", |p| p.branch.as_str()), self.prs.len());
+        if self.stack.len() > 1 {
+            let _ = writeln!(out, "    stack: {}", self.stack.iter().map(|g| g.branch.as_str()).collect::<Vec<_>>().join(" → "));
+        }
         for (repo, d) in &self.details {
             match d {
                 Some(d) => {

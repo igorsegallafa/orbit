@@ -185,52 +185,60 @@ pub struct WsPrStatus {
     pub is_draft: bool,
     pub commits: u64,
     pub updated_at: String,
+    /// Head and base branches: a base that is another row's branch makes a stack.
+    pub branch: String,
+    pub base: String,
+    /// Commits origin has on `branch` that the workspace's local branch lacks (set by `prs::status`).
+    pub local_behind: usize,
 }
 
 /// Squash-merges a PR and deletes its branch on GitHub. The deletion goes
 /// through the API rather than `--delete-branch`, which would also delete
 /// and switch local branches in whatever checkout gh runs from.
-pub fn squash_merge(owner_repo: &str, number: u64) -> Result<(), String> {
+/// Refuses a PR stacked on another open one, and moves the PRs on top of it onto its base.
+pub fn squash_merge(owner_repo: &str, number: u64) -> Result<Vec<String>, String> {
     let n = number.to_string();
-    let head = run_gh(&["pr", "view", &n, "-R", owner_repo, "--json", "headRefName", "--jq", ".headRefName"])?;
-    let head = String::from_utf8_lossy(&head).trim().to_string();
+    let refs = run_gh(&["pr", "view", &n, "-R", owner_repo, "--json", "headRefName,baseRefName", "--jq", ".headRefName + \" \" + .baseRefName"])?;
+    let refs = String::from_utf8_lossy(&refs).trim().to_string();
+    let (head, base) = refs.split_once(' ').ok_or_else(|| format!("unexpected pr view output: {refs}"))?;
+    crate::stack::merge_guard(owner_repo, base)?;
     run_gh(&["pr", "merge", &n, "-R", owner_repo, "--squash"])?;
+    let notes = crate::stack::restack(owner_repo, head, base);
     // Already gone when the repo auto-deletes merged branches: fine.
     let _ = run_gh(&["api", "-X", "DELETE", &format!("repos/{owner_repo}/git/refs/heads/{head}")]);
-    Ok(())
+    Ok(notes)
+}
+
+const PR_STATUS_FIELDS: &str = "number,title,author,isDraft,url,state,updatedAt,commits,headRefName,baseRefName";
+
+fn ws_row(repo: String, p: GhPrStatus) -> WsPrStatus {
+    WsPrStatus {
+        repo,
+        number: p.number,
+        title: p.title,
+        url: p.url,
+        author: p.author.map(|a| a.login).unwrap_or_default(),
+        state: p.state,
+        is_draft: p.is_draft,
+        commits: p.commits.len() as u64,
+        updated_at: p.updated_at,
+        branch: p.head_ref,
+        base: p.base_ref,
+        local_behind: 0,
+    }
 }
 
 /// Status of the workspace branch's PRs (any state) in one repo.
 pub fn pr_status_for_branch(owner_repo: &str, branch: &str) -> Result<Vec<WsPrStatus>, String> {
-    let out = run_gh(&[
-        "pr",
-        "list",
-        "-R",
-        owner_repo,
-        "--head",
-        branch,
-        "--state",
-        "all",
-        "--limit",
-        "10",
-        "--json",
-        "number,title,author,isDraft,url,state,updatedAt,commits",
-    ])?;
+    pr_status_list(owner_repo, "--head", branch, "all")
+}
+
+/// PR status rows whose `--head` or `--base` is `branch`, in `state` (open | all).
+pub fn pr_status_list(owner_repo: &str, side: &str, branch: &str, state: &str) -> Result<Vec<WsPrStatus>, String> {
+    let out = run_gh(&["pr", "list", "-R", owner_repo, side, branch, "--state", state, "--limit", "10", "--json", PR_STATUS_FIELDS])?;
     let v: Vec<GhPrStatus> =
         serde_json::from_slice(&out).map_err(|e| format!("failed to parse pr status: {e}"))?;
-    Ok(v.into_iter()
-        .map(|p| WsPrStatus {
-            repo: owner_repo.split('/').next_back().unwrap_or(owner_repo).to_string(),
-            number: p.number,
-            title: p.title,
-            url: p.url,
-            author: p.author.map(|a| a.login).unwrap_or_default(),
-            state: p.state,
-            is_draft: p.is_draft,
-            commits: p.commits.len() as u64,
-            updated_at: p.updated_at,
-        })
-        .collect())
+    Ok(v.into_iter().map(|p| ws_row(owner_repo.split('/').next_back().unwrap_or(owner_repo).to_string(), p)).collect())
 }
 
 #[derive(Deserialize)]
@@ -246,6 +254,10 @@ struct GhPrStatus {
     updated_at: String,
     #[serde(default)]
     commits: Vec<serde_json::Value>,
+    #[serde(default, rename = "headRefName")]
+    head_ref: String,
+    #[serde(default, rename = "baseRefName")]
+    base_ref: String,
 }
 
 /// Live state of ONE known PR (direct view — no branch scan).
@@ -260,21 +272,11 @@ pub fn pr_status_by_number(
         owner_repo,
         &pr.number.to_string(),
         "--json",
-        "number,title,author,isDraft,url,state,updatedAt,commits",
+        PR_STATUS_FIELDS,
     ])?;
     let p: GhPrStatus =
         serde_json::from_slice(&out).map_err(|e| format!("failed to parse pr view: {e}"))?;
-    Ok(vec![WsPrStatus {
-        repo: pr.repo.clone(),
-        number: p.number,
-        title: p.title,
-        url: p.url,
-        author: p.author.map(|a| a.login).unwrap_or_default(),
-        state: p.state,
-        is_draft: p.is_draft,
-        commits: p.commits.len() as u64,
-        updated_at: p.updated_at,
-    }])
+    Ok(vec![ws_row(pr.repo.clone(), p)])
 }
 
 const PR_CACHE_TTL: Duration = Duration::from_secs(60);
