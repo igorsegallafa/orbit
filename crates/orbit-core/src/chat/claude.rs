@@ -10,7 +10,11 @@ use std::sync::{Arc, Mutex};
 struct Claude {
     agent: Agent,
     key: String,
+    questions: Questions,
 }
+
+/// AskUserQuestion requests waiting for every answer: permission id → (questions, answers so far).
+type Questions = Arc<Mutex<HashMap<String, (Vec<String>, serde_json::Map<String, Value>)>>>;
 
 pub fn start(cwd: &Path, resume: Option<String>, key: &str, sink: impl Fn(ChatEvent) + Send + 'static) -> Result<Box<dyn ChatBackend>, String> {
     let key = key.to_string();
@@ -33,8 +37,12 @@ pub fn start(cwd: &Path, resume: Option<String>, key: &str, sink: impl Fn(ChatEv
     // Shared with the hook listener's threads, which deliver permission requests.
     let sink = Arc::new(Mutex::new(sink));
     let ask_sink = sink.clone();
+    let questions = Questions::default();
+    let asked = questions.clone();
     crate::agent_hooks::on_permission(&key, move |id, tool, input| {
-        (ask_sink.lock().unwrap())(permission_asked(id, &tool, &input));
+        for e in permission_asked(id, &tool, &input, &asked) {
+            (ask_sink.lock().unwrap())(e);
+        }
     });
     let line_sink = sink.clone();
     let mut parser = Parser::default();
@@ -46,7 +54,7 @@ pub fn start(cwd: &Path, resume: Option<String>, key: &str, sink: impl Fn(ChatEv
     )?;
     // Answered with the slash commands (with descriptions), the models and the permission mode, before any prompt.
     agent.write(&json!({ "type": "control_request", "request_id": "init", "request": { "subtype": "initialize" } }));
-    Ok(Box::new(Claude { agent, key }))
+    Ok(Box::new(Claude { agent, key, questions }))
 }
 
 impl ChatBackend for Claude {
@@ -58,7 +66,9 @@ impl ChatBackend for Claude {
             ChatInput::SetModel(model) => json!({ "type": "control_request", "request_id": format!("model-{model}"), "request": { "subtype": "set_model", "model": model } }),
             ChatInput::SetMode(mode) => json!({ "type": "control_request", "request_id": format!("mode-{mode}"), "request": { "subtype": "set_permission_mode", "mode": mode } }),
             ChatInput::AnswerPermission { id, option_id } => {
-                crate::agent_hooks::answer_permission(&id, &option_id);
+                if let Some((id, answer)) = answer_question(&self.questions, &id, &option_id) {
+                    crate::agent_hooks::answer_permission(&id, &answer);
+                }
                 return;
             }
         };
@@ -71,14 +81,51 @@ impl ChatBackend for Claude {
     }
 }
 
-fn permission_asked(id: String, tool: &str, input: &Value) -> ChatEvent {
+fn permission_asked(id: String, tool: &str, input: &Value, questions: &Questions) -> Vec<ChatEvent> {
     let option = |id: &str, label: &str, kind: &str| PermissionOption { id: id.into(), label: label.into(), kind: kind.into() };
-    ChatEvent::PermissionAsked {
-        id,
-        title: format!("Allow {tool}?"),
-        detail: stream::summarize(tool, input),
-        options: vec![option("allow", "Allow", "allow_once"), option("deny", "Deny", "reject_once")],
+    let asked = input["questions"].as_array().filter(|q| tool == "AskUserQuestion" && !q.is_empty());
+    let Some(asked) = asked else {
+        return vec![ChatEvent::PermissionAsked {
+            id,
+            title: format!("Allow {tool}?"),
+            detail: stream::summarize(tool, input),
+            options: vec![option("allow", "Allow", "allow_once"), option("deny", "Deny", "reject_once")],
+        }];
+    };
+    // shortcut: a multiSelect question takes one option and there is no free-text "Other"; Skip lets the user reply in chat.
+    let text = |q: &Value| q["question"].as_str().unwrap_or("").to_string();
+    questions.lock().unwrap().insert(id.clone(), (asked.iter().map(text).collect(), Default::default()));
+    asked
+        .iter()
+        .enumerate()
+        .map(|(n, q)| {
+            let opts = q["options"].as_array().cloned().unwrap_or_default();
+            let label = |o: &Value| o["label"].as_str().unwrap_or("").to_string();
+            let detail = opts.iter().filter(|o| o["description"].as_str().is_some_and(|d| !d.is_empty())).map(|o| format!("{}: {}", label(o), o["description"].as_str().unwrap_or(""))).collect::<Vec<_>>().join("\n");
+            let mut options: Vec<PermissionOption> = opts.iter().map(|o| option(&format!("pick:{}", label(o)), &label(o), "allow_once")).collect();
+            options.push(option("deny", "Skip", "reject_once"));
+            ChatEvent::PermissionAsked { id: format!("{id}#{n}"), title: text(q), detail, options }
+        })
+        .collect()
+}
+
+/// The permission answer once `option_id` settles it: every question picked (as JSON), or one skipped (deny).
+fn answer_question(questions: &Questions, id: &str, option_id: &str) -> Option<(String, String)> {
+    let Some((base, n)) = id.split_once('#').and_then(|(b, n)| Some((b, n.parse::<usize>().ok()?))) else {
+        return Some((id.into(), option_id.into()));
+    };
+    let mut all = questions.lock().unwrap();
+    let Some(label) = option_id.strip_prefix("pick:") else {
+        all.remove(base);
+        return Some((base.into(), "deny".into()));
+    };
+    let (asked, answers) = all.get_mut(base)?;
+    answers.insert(asked.get(n)?.clone(), Value::String(label.into()));
+    if answers.len() < asked.len() {
+        return None;
     }
+    let (_, answers) = all.remove(base)?;
+    Some((base.into(), json!({ "answers": answers }).to_string()))
 }
 
 fn user_message(text: &str, images: &[PathBuf]) -> Value {
@@ -275,6 +322,32 @@ fn diff(name: &str, input: &Value) -> Option<FileDiff> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn asks_each_question_and_answers_them_together() {
+        let questions = Questions::default();
+        let input = json!({"questions": [
+            {"question": "Which layout?", "header": "Layout", "multiSelect": false, "options": [{"label": "Tabs", "description": "One per file"}, {"label": "Split", "description": ""}]},
+            {"question": "Ship it?", "header": "Ship", "multiSelect": false, "options": [{"label": "Yes"}, {"label": "No"}]},
+        ]});
+        let cards = permission_asked("perm-1".into(), "AskUserQuestion", &input, &questions);
+        let ChatEvent::PermissionAsked { id, title, detail, options } = &cards[0] else { panic!() };
+        assert_eq!((id.as_str(), title.as_str(), detail.as_str()), ("perm-1#0", "Which layout?", "Tabs: One per file"));
+        assert_eq!(options.iter().map(|o| o.label.as_str()).collect::<Vec<_>>(), ["Tabs", "Split", "Skip"]);
+        assert_eq!(cards.len(), 2);
+
+        assert_eq!(answer_question(&questions, "perm-1#1", "pick:Yes"), None);
+        let (id, answer) = answer_question(&questions, "perm-1#0", "pick:Split").unwrap();
+        assert_eq!(id, "perm-1");
+        assert_eq!(serde_json::from_str::<Value>(&answer).unwrap(), json!({"answers": {"Which layout?": "Split", "Ship it?": "Yes"}}));
+        assert!(questions.lock().unwrap().is_empty());
+
+        permission_asked("perm-2".into(), "AskUserQuestion", &input, &questions);
+        assert_eq!(answer_question(&questions, "perm-2#0", "deny"), Some(("perm-2".into(), "deny".into())));
+        assert_eq!(answer_question(&questions, "perm-2#1", "pick:Yes"), None);
+        assert_eq!(answer_question(&questions, "perm-3", "allow"), Some(("perm-3".into(), "allow".into())));
+        assert!(matches!(&permission_asked("perm-4".into(), "Bash", &json!({"command": "ls"}), &questions)[..], [ChatEvent::PermissionAsked { title, .. }] if title == "Allow Bash?"));
+    }
 
     fn replay(name: &str) -> Vec<ChatEvent> {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/chat/claude").join(name);

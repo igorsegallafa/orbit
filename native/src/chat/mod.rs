@@ -876,7 +876,7 @@ impl ChatView {
             }
             Item::Tool { .. } => self.render_tool(ix, row, cx),
             Item::Permission { title, answer: Some(answer), .. } => {
-                let denied = answer.starts_with("Deny") || answer.starts_with("Reject") || answer == "not answered";
+                let denied = answer.starts_with("Deny") || answer.starts_with("Reject") || answer == "Skip" || answer == "not answered";
                 let tone = if denied { theme::DANGER } else { theme::OK };
                 row.gap_2()
                     .items_center()

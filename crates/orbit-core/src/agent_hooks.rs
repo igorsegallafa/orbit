@@ -495,6 +495,24 @@ mod tests {
     }
 
     #[test]
+    fn question_answers_go_back_in_the_input() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://127.0.0.1:{}/hook/tok/tm:ask", listener.local_addr().unwrap().port());
+        let (tx, rx) = channel();
+        on_permission("tm:ask", move |id, _, _| tx.send(id).unwrap());
+        let input = json!({"questions": [{"question": "Ship it?"}]});
+        let args = json!({"tool_name": "AskUserQuestion", "input": input});
+        let client = std::thread::spawn(move || crate::agent_mcp::permission(&args, Some(&url)));
+        let (stream, _) = listener.accept().unwrap();
+        let server = std::thread::spawn(move || read_event(stream, "tok"));
+        assert!(answer_permission(&rx.recv().unwrap(), r#"{"answers":{"Ship it?":"Yes"}}"#));
+        server.join().unwrap();
+        let reply: Value = serde_json::from_str(&client.join().unwrap()).unwrap();
+        assert_eq!(reply, json!({"behavior": "allow", "updatedInput": {"questions": [{"question": "Ship it?"}], "answers": {"Ship it?": "Yes"}}}));
+        forget("tm:ask");
+    }
+
+    #[test]
     fn a_held_permission_request_gets_the_answer() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://127.0.0.1:{}/hook/tok/tm:perm", listener.local_addr().unwrap().port());
