@@ -181,6 +181,8 @@ pub struct ChatView {
     lightbox: Option<usize>,
     /// Messages sent while a turn ran, each going out when the one before ends.
     queue: Vec<Queued>,
+    /// The sent message Up recalled into the prompt, counted back from the latest.
+    recalled: Option<usize>,
     /// A multiSelect question's ticked options, by permission id.
     ticked: HashMap<String, Vec<usize>>,
     /// The question card being answered in its own words ("Other…"): its index and input.
@@ -234,6 +236,7 @@ impl ChatView {
             context: None,
             lightbox: None,
             queue: vec![],
+            recalled: None,
             ticked: HashMap::new(),
             other: None,
             modes: vec![],
@@ -470,6 +473,9 @@ impl ChatView {
     fn on_slash_key(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
         let matches = self.slash_matches(cx);
         if matches.is_empty() {
+            if let "up" | "down" = key {
+                self.on_history_key(key == "up", window, cx);
+            }
             return;
         }
         match key {
@@ -481,6 +487,37 @@ impl ChatView {
             }
             _ => self.slash_closed = true,
         }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    /// Up/Down through sent messages, like a shell, while the prompt is empty or holds an untouched recall.
+    /// shortcut: a recalled `[Pasted text #N]` goes out as the bare reference; keep `full` on `Item::User` if that bites.
+    fn on_history_key(&mut self, up: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let sent: Vec<String> = self.queue.iter().rev().map(|q| q.text.clone())
+            .chain(self.items.iter().rev().filter_map(|i| match i {
+                Item::User { text } if !text.is_empty() => Some(text.clone()),
+                _ => None,
+            }))
+            .collect();
+        let value = self.prompt.read(cx).value().to_string();
+        let at = self.recalled.filter(|&n| sent.get(n).is_some_and(|t| *t == value));
+        if (!value.is_empty() && at.is_none()) || sent.is_empty() {
+            return;
+        }
+        self.recalled = match (at, up) {
+            (None, false) => return,
+            (None, true) => Some(0),
+            (Some(n), true) => Some((n + 1).min(sent.len() - 1)),
+            (Some(n), false) => n.checked_sub(1),
+        };
+        let text = self.recalled.map_or_else(String::new, |n| sent[n].clone());
+        self.prompt.update(cx, |p, cx| {
+            let (line, last) = (text.matches('\n').count() as u32, text.rsplit('\n').next().unwrap_or_default());
+            let end = last.chars().count() as u32;
+            p.set_value(text, window, cx);
+            p.set_cursor_position(lsp_types::Position::new(line, end), window, cx);
+        });
         cx.stop_propagation();
         cx.notify();
     }
@@ -822,7 +859,9 @@ impl ChatView {
                         .flex_col()
                         .items_end()
                         .gap_1()
+                        .group("user-msg")
                         .when(!text.is_empty(), |d| {
+                            let copy = text.clone();
                             d.child(
                                 div()
                                     .px_3p5()
@@ -834,6 +873,20 @@ impl ChatView {
                                     .border_color(crate::pages::kit::alpha(theme::ACCENT, 0.35))
                                     .text_color(c(theme::TEXT))
                                     .child(text.clone()),
+                            )
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("user-copy:{ix}")))
+                                    .p_1()
+                                    .rounded(px(4.))
+                                    .cursor_pointer()
+                                    .invisible()
+                                    .group_hover("user-msg", |s| s.visible())
+                                    .hover(|s| s.bg(c(theme::PANEL_HOVER)))
+                                    .tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("Copy").build(window, cx))
+                                    .child(crate::pages::kit::icon("copy", 13., c(theme::TEXT_DIM)))
+                                    .child(probe(format!("user-copy:{ix}")))
+                                    .on_click(move |_, _, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy.clone()))),
                             )
                         }),
                 )
