@@ -326,6 +326,12 @@ pub fn list(workspace: &str) -> Result<Vec<PullRequest>, String> {
     }))
 }
 
+/// A branch-only repo links the shared base clone, whose checked-out branch may be another workspace's.
+fn stack_seeds(branch: &str, dir: &Path) -> Vec<String> {
+    let current = if crate::links::is_link(dir) { None } else { git::current_branch(dir) };
+    [Some(branch.to_string()), current].into_iter().flatten().collect()
+}
+
 /// Live state of the workspace's PRs. The saved refs are the source; with
 /// none saved the branch is scanned, and what it finds is saved.
 pub fn status(workspace: &str) -> Result<Vec<WsPrStatus>, String> {
@@ -367,8 +373,7 @@ pub fn status(workspace: &str) -> Result<Vec<WsPrStatus>, String> {
                 let (dir, meta, mut mine) = (ws_dir.join(repo), &meta, rows.iter().filter(|r| &r.repo == repo).cloned().collect::<Vec<_>>());
                 scope.spawn(move || {
                     if let Some(owner_repo) = dir.exists().then(|| remote_of(&dir)).flatten() {
-                        let seeds: Vec<String> = [Some(meta.branch_of(repo).to_string()), git::current_branch(&dir)].into_iter().flatten().collect();
-                        crate::stack::grow(&owner_repo, repo, &meta.base, &seeds, &mut mine);
+                        crate::stack::grow(&owner_repo, repo, &meta.base, &stack_seeds(meta.branch_of(repo), &dir), &mut mine);
                     }
                     for r in mine.iter_mut().filter(|r| r.state == "OPEN") {
                         r.local_behind = crate::stack::local_behind(&dir, &r.branch).unwrap_or(0);
@@ -587,6 +592,23 @@ mod tests {
         let mut full = vec!["-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main"];
         full.extend_from_slice(args);
         crate::proc::run("git", &full, Some(dir)).unwrap_or_else(|e| panic!("git {args:?}: {e}"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stack_seeds_skip_a_shared_clones_branch() {
+        let root = std::env::temp_dir().join(format!("orbit-stack-seeds-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let clone = root.join("clone");
+        std::fs::create_dir_all(&clone).unwrap();
+        git(&clone, &["init", "-q"]);
+        git(&clone, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        git(&clone, &["checkout", "-q", "-b", "feat/other-workspace"]);
+        std::os::unix::fs::symlink(&clone, root.join("linked")).unwrap();
+
+        assert_eq!(stack_seeds("feat/mine", &root.join("linked")), ["feat/mine"]);
+        assert_eq!(stack_seeds("feat/mine", &clone), ["feat/mine", "feat/other-workspace"]);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A stub `gh` first on PATH: `pr create` answers per repo, `pr list` and
