@@ -285,7 +285,7 @@ fn link_note(cwd: &Path) -> Option<String> {
 pub fn session_launch(cmd: &str, key: &str, chat: bool, cwd: &Path) -> (Vec<String>, Vec<(String, String)>) {
     let name = std::path::Path::new(cmd.trim()).file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();
     let style = [reply_style(chat), link_note(cwd)].into_iter().flatten().reduce(|a, b| format!("{a}\n\n{b}"));
-    let server = hook_url(key).zip(std::env::current_exe().ok()).map(|(url, exe)| (exe.to_string_lossy().into_owned(), url));
+    let server = hook_url(key).zip(exe()).map(|(url, exe)| (exe.to_string_lossy().into_owned(), url));
     let mut args: Vec<String> = vec![];
     let mut env = vec![];
     match name.as_str() {
@@ -346,8 +346,16 @@ fn shell_arg(p: &std::path::Path) -> String {
     }
 }
 
-fn statusline_command() -> Option<String> {
+/// Orbit's executable, for agents to launch. Linux reports a binary replaced on disk (a rebuild or
+/// an update) as `<path> (deleted)`; the new one at `<path>` serves just as well.
+pub fn exe() -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?;
+    let s = exe.to_string_lossy();
+    Some(s.strip_suffix(" (deleted)").map(Into::into).unwrap_or(exe))
+}
+
+fn statusline_command() -> Option<String> {
+    let exe = exe()?;
     let file = rate_limits_file().ok()?;
     Some(format!("{} --orbit-statusline {}", shell_arg(&exe), shell_arg(&file)))
 }
