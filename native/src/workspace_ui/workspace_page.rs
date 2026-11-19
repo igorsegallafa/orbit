@@ -1531,7 +1531,7 @@ fn checks_list(p: &WsPage, check: Option<&WsCheck>, key: &str, cx: &mut Context<
             )
             .when(failed && !rerunning, |d| {
                 d.child(
-                    kit::hint(kit::button(format!("check-rerun:{key}:{i}"), "↻ Re-run", Kind::Primary, kit::MINI), "Re-run the failed jobs (fixes intermittent failures)")
+                    kit::hint(kit::button_icon(format!("check-rerun:{key}:{i}"), Some(("refresh", 11.)), "Re-run", Kind::Primary, kit::MINI), "Re-run the failed jobs (fixes intermittent failures)")
                         .on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.rerun_check(rerun.clone(), w, cx))),
                 )
             })

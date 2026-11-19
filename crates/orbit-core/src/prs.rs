@@ -362,8 +362,10 @@ pub fn status(workspace: &str) -> Result<Vec<WsPrStatus>, String> {
                 })
                 .collect()
         };
-        handles.into_iter().filter_map(|h| h.join().ok()).flatten().collect()
+        handles.into_iter().filter_map(|h| h.join().ok()).flatten().collect::<Vec<WsPrStatus>>()
     });
+    // A review checkout holds the PRs on its own branches only.
+    let rows: Vec<WsPrStatus> = rows.into_iter().filter(|r| !meta.from_prs || r.branch == meta.branch_of(&r.repo)).collect();
     // An agent may stack its PRs on several branches: follow them from the workspace's own.
     let rows: Vec<WsPrStatus> = std::thread::scope(|scope| {
         let handles: Vec<_> = meta
@@ -372,7 +374,7 @@ pub fn status(workspace: &str) -> Result<Vec<WsPrStatus>, String> {
             .map(|repo| {
                 let (dir, meta, mut mine) = (ws_dir.join(repo), &meta, rows.iter().filter(|r| &r.repo == repo).cloned().collect::<Vec<_>>());
                 scope.spawn(move || {
-                    if let Some(owner_repo) = dir.exists().then(|| remote_of(&dir)).flatten() {
+                    if let Some(owner_repo) = dir.exists().then(|| remote_of(&dir)).flatten().filter(|_| !meta.from_prs) {
                         crate::stack::grow(&owner_repo, repo, &meta.base, &stack_seeds(meta.branch_of(repo), &dir), &mut mine);
                     }
                     for r in mine.iter_mut().filter(|r| r.state == "OPEN") {

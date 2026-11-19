@@ -330,33 +330,15 @@ impl CodeReviewPage {
         with_app(&self.host, window, cx, move |a, w, cx| super::feature::open(a, host, prs, w, cx));
     }
 
-    fn stack_of(&self, g: &PrGroup) -> Vec<PrGroup> {
-        let all = self.groups.ready().map(Vec::as_slice).unwrap_or_default();
-        match all.iter().position(|a| a.branch == g.branch) {
-            Some(at) => orbit_core::stack::stack(all, at).into_iter().map(|i| all[i].clone()).collect(),
-            None => vec![g.clone()],
-        }
-    }
-
-    /// The workspace holding `g`, or any level of its stack: one workspace per stack.
+    /// The workspace on `g`'s branch.
     fn workspace_of(&self, g: &PrGroup) -> Option<Workspace> {
-        let prs: Vec<PullRequest> = g.prs.iter().cloned().chain(self.stack_of(g).into_iter().flat_map(|s| s.prs)).collect();
-        workspace_for(&prs, &self.workspaces)
-    }
-
-    /// Check out `g`: its whole stack when it's in one.
-    fn checkout_group(&self, g: &PrGroup, window: &mut Window, cx: &mut App) {
-        match self.stack_of(g) {
-            stack if stack.len() > 1 => checkout_stack(&self.host, &stack, window, cx),
-            _ => checkout(&self.host, g.prs.clone(), window, cx),
-        }
+        workspace_for(&g.prs, &self.workspaces)
     }
 
     fn row_menu(&self, g: &PrGroup, window: &mut Window, cx: &mut Context<Self>) {
         let ws = self.workspace_of(g);
         let (prs, url, branch) = (g.prs.clone(), g.prs[0].url.clone(), g.branch.clone());
-        let stack = self.stack_of(g);
-        let (stacked, single) = (stack.len() > 1, g.prs.clone());
+        let single = g.prs.clone();
         let (h1, h2, h3) = (self.host.clone(), self.host.clone(), self.host.clone());
         let mut items: Vec<(String, crate::pages::Action)> = vec![(
             "Review".into(),
@@ -379,11 +361,8 @@ impl CodeReviewPage {
                 )
             }
             None => (
-                if stacked { "Check out stack as workspace…" } else { "Check out as workspace…" }.into(),
-                std::rc::Rc::new(move |w: &mut Window, cx: &mut App| match stacked {
-                    true => checkout_stack(&h2, &stack, w, cx),
-                    false => checkout(&h2, single.clone(), w, cx),
-                }),
+                "Check out as workspace…".into(),
+                std::rc::Rc::new(move |w: &mut Window, cx: &mut App| checkout(&h2, single.clone(), w, cx)),
             ),
         });
         items.push(("Open on GitHub ↗".into(), std::rc::Rc::new(move |_: &mut Window, cx: &mut App| cx.open_url(&url))));
@@ -574,7 +553,7 @@ impl CodeReviewPage {
                                                     crate::workspace_ui::open(a, crate::workspace_ui::PageId::Workspace(name), w, cx);
                                                 });
                                             }
-                                            None => p.checkout_group(&g_co, window, cx),
+                                            None => checkout(&p.host, g_co.prs.clone(), window, cx),
                                         }
                                     },
                                 )),
@@ -601,10 +580,11 @@ impl CodeReviewPage {
             .child(div().flex_1().child("· merges from the bottom up"))
             .child({
                 let top = all[stack[n - 1]].clone();
+                let levels: Vec<PrGroup> = stack.iter().map(|&i| all[i].clone()).collect();
                 let ws = self.workspace_of(&top);
                 let label = if ws.is_some() { "Open workspace" } else { "Check out stack" };
                 let tip = match &ws {
-                    Some(w) => format!("Every level of the stack is in workspace {}", w.meta.name),
+                    Some(w) => format!("Workspace {} is on the top branch, with every level", w.meta.name),
                     None => format!("One workspace on {}, the top branch: it holds every level", top.branch),
                 };
                 pr_ui::tip(
@@ -615,13 +595,14 @@ impl CodeReviewPage {
                                 crate::workspace_ui::open(a, crate::workspace_ui::PageId::Workspace(name), w, cx);
                             });
                         }
-                        None => p.checkout_group(&top, window, cx),
+                        None => checkout_stack(&p.host, &levels, window, cx),
                     })),
                     tip,
                 )
             });
         let rows = stack.iter().enumerate().rev().map(|(level, &g)| {
-            let bottom = level == 0;
+            // Every level that sits on no other one can be reviewed and merged first.
+            let bottom = orbit_core::stack::parent(all, g).is_none();
             let row = self.render_row(ix + n - level, &all[g], now, cx).flex_1().min_w_0().pl(px(4.));
             div()
                 .flex()

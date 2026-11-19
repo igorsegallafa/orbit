@@ -91,7 +91,7 @@ pub fn editor_actions() -> Vec<EditorCommand> {
         cmd("orbit_editor::CodeActions", "Quick Fix…", &["ctrl-.", "alt-enter"], "Input"),
         cmd("orbit_editor::RenameSymbol", "Rename Symbol", &["f2"], "OrbitEditor"),
         cmd("orbit_editor::FormatDocument", "Format Document", &["ctrl-shift-i", "shift-alt-f"], "OrbitEditor"),
-        cmd("orbit_editor::DeleteLine", "Delete Line", &[DELETE_LINE_KEY], "OrbitEditor > Input"),
+        cmd("orbit_editor::DeleteLine", "Delete Line", DELETE_LINE_KEYS, "OrbitEditor > Input"),
         cmd("orbit_editor::RestartLanguageServer", "Restart Language Server", &[], "OrbitEditor"),
         cmd("orbit_editor::GenerateCompileCommands", "Generate compile_commands.json (CMake)", &[], "OrbitEditor"),
     ]
@@ -108,9 +108,8 @@ pub fn register_languages() {
     }
 }
 
-/// Rider's and Xcode's Delete Line on macOS; VS Code's elsewhere. Bound on the
-/// editor's input so it wins over the component's Cmd+Backspace (delete to line start).
-const DELETE_LINE_KEY: &str = if cfg!(target_os = "macos") { "cmd-backspace" } else { "ctrl-shift-k" };
+/// Bound on the editor's input so it wins over the component's Cmd+Backspace (delete to line start).
+const DELETE_LINE_KEYS: &[&str] = if cfg!(target_os = "macos") { &["cmd-backspace"] } else { &["cmd-backspace", "ctrl-shift-k"] };
 
 pub fn bind_keys(cx: &mut App) {
     let editor = Some("OrbitEditor");
@@ -133,9 +132,9 @@ pub fn bind_keys(cx: &mut App) {
         // its Enter also reached the text as a newline.
         crate::commands::binding("ctrl-.", CodeActions, Some("Input")),
         KeyBinding::new("alt-enter", CodeActions, Some("Input")),
-        KeyBinding::new(DELETE_LINE_KEY, DeleteLine, Some("OrbitEditor > Input")),
         crate::commands::binding("ctrl-v", SmartPaste, Some("OrbitEditor > Input")),
     ]);
+    cx.bind_keys(DELETE_LINE_KEYS.iter().map(|k| KeyBinding::new(k, DeleteLine, Some("OrbitEditor > Input"))));
     markdown::register(cx);
 }
 

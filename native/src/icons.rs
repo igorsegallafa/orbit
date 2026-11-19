@@ -40,7 +40,7 @@ impl AssetSource for Assets {
 }
 
 // Lucide icons beyond gpui-kit's default bundle (tools views, the run list's pins, PR stacks).
-gpui_kit_assets::icon_assets!(ToolIcons, [Pencil, Trash, Pin, PinOff, Reply, FileCode, Layers, Lock]);
+gpui_kit_assets::icon_assets!(ToolIcons, [Pencil, Trash, Pin, PinOff, Reply, FileCode, Layers, Lock, X]);
 
 #[path = "orbit_icons.rs"]
 mod orbit_icons;

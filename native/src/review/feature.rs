@@ -142,10 +142,6 @@ impl FeaturePage {
                 if let Some(prs) = fresh {
                     p.prs = prs;
                 }
-                if p.workspace.is_none() {
-                    let all: Vec<PullRequest> = stack.iter().flat_map(|g| g.prs.clone()).collect();
-                    p.workspace = code_review::workspace_for(&all, &crate::workspace::list_workspaces());
-                }
                 p.stack = stack;
                 p.load_behind(window, cx);
                 cx.notify();
@@ -767,8 +763,20 @@ impl FeaturePage {
                                 .min_w_0()
                                 .text_size(px(13.))
                                 .child(div().min_w_0().truncate().font_weight(FontWeight::SEMIBOLD).child(first.title.clone()))
-                                .child(div().flex_none().text_color(c(theme::TEXT_FAINT)).child(g.prs.iter().map(|p| format!("#{}", p.number)).collect::<Vec<_>>().join(" ")))
-                                .when(current, |d| d.child(div().flex_none().text_size(px(11.)).text_color(c(theme::ACCENT)).child("· this feature"))),
+                                .items_center()
+                                .child(pr_ui::tip(
+                                    pr_ui::status_pill(if g.prs.len() == 1 { "1 PR".to_string() } else { format!("{} PRs", g.prs.len()) }, Tone::Muted)
+                                        .id(SharedString::from(format!("ft-stack-prs:{level}"))),
+                                    g.prs.iter().map(|p| format!("{} #{}", p.repo, p.number)).collect::<Vec<_>>().join(" · "),
+                                ))
+                                .when(current, |d| {
+                                    d.child(
+                                        pr_ui::status_pill("This feature", Tone::Info)
+                                            .bg(c(theme::ACCENT))
+                                            .text_color(c(theme::ON_ACCENT))
+                                            .font_weight(FontWeight::SEMIBOLD),
+                                    )
+                                }),
                         )
                         .child(
                             div()
@@ -779,16 +787,23 @@ impl FeaturePage {
                                 .text_color(c(theme::TEXT_FAINT))
                                 .child(div().text_color(c(theme::TEXT_DIM)).child(g.branch.clone()))
                                 .child("→")
-                                .child(first.base.clone()),
+                                // A level can sit on a different PR in each repo.
+                                .child({
+                                    let mut bases: Vec<&str> = g.prs.iter().map(|p| p.base.as_str()).collect();
+                                    bases.sort();
+                                    bases.dedup();
+                                    bases.join(", ")
+                                }),
                         ),
                 )
                 .child(div().flex().items_center().gap(px(8.)).child(pr_ui::status_pill(label, tone)).when_some(stale.filter(|_| !merged), |d, p| {
+                    let tip = format!("Merges #{}'s branch into this one on GitHub: a merge commit, no force-push", below.unwrap_or_default());
                     d.child(pr_ui::tip(
-                        pr_ui::btn_mini(format!("ft-stack-update:{level}"), "Update").on_click(cx.listener(move |page, _, window, cx| {
+                        pr_ui::btn_mini(format!("ft-stack-update:{level}"), "Update branch").on_click(cx.listener(move |page, _, window, cx| {
                             cx.stop_propagation();
                             page.update_branch(p.clone(), window, cx);
                         })),
-                        "Merge the PR below into this one on GitHub (no force-push)",
+                        tip,
                     ))
                 }))
         });
@@ -994,11 +1009,8 @@ impl Render for FeaturePage {
                                 }
                                 None => pr_ui::tip(
                                     pr_ui::button("ft-checkout", "Check out", true, 32.)
-                                        .on_click(cx.listener(|p, _, window, cx| match p.stack.len() {
-                                            1 => code_review::checkout(&p.host, p.prs.clone(), window, cx),
-                                            _ => code_review::checkout_stack(&p.host, &p.stack, window, cx),
-                                        })),
-                                    if self.stack.len() > 1 { "Create one workspace for the whole stack, on its top branch" } else { "Create a local workspace on this branch to build, run and fix it" },
+                                        .on_click(cx.listener(|p, _, window, cx| code_review::checkout(&p.host, p.prs.clone(), window, cx))),
+                                    "Create a local workspace on this branch to build, run and fix it",
                                 ),
                             })
                             .child(div().w(px(1.)).h(px(22.)).mx(px(4.)).bg(c(theme::BORDER)))

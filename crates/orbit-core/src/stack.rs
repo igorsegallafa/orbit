@@ -12,15 +12,23 @@ pub fn parent(groups: &[PrGroup], g: usize) -> Option<usize> {
     (0..groups.len()).find(|&p| on_top(groups, g, p))
 }
 
-/// The stack holding group `g`, bottom first; `[g]` when it stands alone.
-/// shortcut: a branch with two PRs on top follows the first only; walk a tree if agents start forking stacks.
+/// The stack holding group `g`, bottom first, each group after those it sits on. A feature can sit
+/// on a different PR in each repo, so it's a graph, not a chain.
 pub fn stack(groups: &[PrGroup], g: usize) -> Vec<usize> {
-    let mut out = vec![g];
-    while let Some(p) = parent(groups, out[0]).filter(|p| !out.contains(p)) {
-        out.insert(0, p);
+    let mut members = vec![g];
+    let mut i = 0;
+    while i < members.len() {
+        let m = members[i];
+        members.extend((0..groups.len()).filter(|&o| (on_top(groups, o, m) || on_top(groups, m, o)) && !members.contains(&o)).collect::<Vec<_>>());
+        i += 1;
     }
-    while let Some(c) = (0..groups.len()).find(|&c| on_top(groups, c, out[out.len() - 1]) && !out.contains(&c)) {
-        out.push(c);
+    members.sort();
+    let mut out: Vec<usize> = Vec::with_capacity(members.len());
+    while out.len() < members.len() {
+        let rest = members.iter().copied().filter(|m| !out.contains(m));
+        let ready = rest.clone().find(|&m| members.iter().all(|&p| !on_top(groups, m, p) || out.contains(&p)));
+        // A cycle has no ready group: take the rest as found.
+        out.push(ready.or_else(|| rest.clone().next()).unwrap());
     }
     out
 }
@@ -151,5 +159,16 @@ mod tests {
         assert_eq!(stack(&g, 4), vec![4]);
         let cycle = vec![group("web", "a", "b"), group("web", "b", "a")];
         assert_eq!(stack(&cycle, 0).len(), 2);
+    }
+
+    #[test]
+    fn one_stack_when_a_feature_sits_on_several() {
+        let mut top = group("engine", "rarity", "loot");
+        top.prs.push(PullRequest { repo: "backend".into(), branch: "rarity".into(), base: "loot-api".into(), ..Default::default() });
+        top.prs.push(PullRequest { repo: "admin".into(), branch: "rarity".into(), base: "loot-panel".into(), ..Default::default() });
+        let g = vec![top, group("engine", "loot", "main"), group("backend", "loot-api", "main"), group("admin", "loot-panel", "main")];
+        for at in 0..4 {
+            assert_eq!(stack(&g, at), vec![1, 2, 3, 0]);
+        }
     }
 }

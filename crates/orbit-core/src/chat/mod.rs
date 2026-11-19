@@ -67,6 +67,8 @@ pub enum ChatEvent {
     Limits(Vec<Limit>),
     /// Tokens in the context window, and the window's size when the agent reports it.
     Context { used: u64, window: Option<u64> },
+    /// What the agent still runs in the background (commands, subagents) by description, replacing the last report.
+    Background(Vec<String>),
 }
 
 #[derive(Debug, Clone, PartialEq)]

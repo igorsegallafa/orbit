@@ -262,6 +262,8 @@ pub struct PrReviewPage {
     pub review: Option<ReviewData>,
     selected: Sel,
     pub diff: Load<Entity<DiffState>>,
+    /// An image file's base and head, shown instead of a text diff.
+    image: Option<Load<(Option<PathBuf>, Option<PathBuf>)>>,
     shape: Vec<crate::marker_track::FileShape>,
     pub sel: crate::diff_select::Handle,
     split: bool,
@@ -322,6 +324,7 @@ impl PrReviewPage {
             review: None,
             selected: Sel::Overview,
             diff: Load::Idle,
+            image: None,
             shape: vec![],
             sel: crate::diff_select::new(),
             split: false,
@@ -532,10 +535,33 @@ impl PrReviewPage {
             return cx.notify();
         };
         self.diff = Load::Loading;
+        self.image = None;
         if self.local.as_ref().is_some_and(|(p, _)| *p != path) {
             self.local = None;
         }
         let (or, head, base) = (self.pr().owner_repo.clone(), detail.head_sha.clone(), detail.base_sha.clone());
+        if is_image(&path) {
+            self.image = Some(Load::Loading);
+            let clone = orbit_core::workspace::clone_dir_of(&self.pr().repo).ok();
+            cx.spawn_in(window, async move |this, cx| {
+                let p2 = path.clone();
+                let r = cx
+                    .background_spawn(async move {
+                        let side = |sha: &str| orbit_core::github::pr_image(&or, sha, &p2, clone.as_deref());
+                        Ok::<_, String>((side(&base)?, side(&head)?))
+                    })
+                    .await;
+                let _ = this.update(cx, |page, cx| {
+                    if page.selected == Sel::File(path) {
+                        page.image = Some(r.map_or_else(Load::Failed, Load::Ready));
+                        page.diff = Load::Idle;
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+            return cx.notify();
+        }
         self.refresh_local(cx);
         let highlight_theme = cx.theme().highlight_theme.clone();
         let split = self.split;
@@ -1669,8 +1695,51 @@ impl PrReviewPage {
             .into_any_element()
     }
 
+    /// An image's before and after, side by side.
+    fn render_image(&self, image: &Load<(Option<PathBuf>, Option<PathBuf>)>) -> AnyElement {
+        let (before, after) = match image {
+            Load::Ready(pair) => pair.clone(),
+            Load::Failed(e) => return div().p(px(20.)).text_size(px(12.5)).text_color(c(theme::DANGER)).child(format!("Couldn't load the image: {e}")).into_any_element(),
+            _ => return table_loading("pr-image-spin", "Loading image…"),
+        };
+        let pane = |label: &'static str, tone: u32, file: Option<PathBuf>| {
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .child(div().text_size(px(11.5)).font_weight(FontWeight::SEMIBOLD).text_color(c(tone)).child(label))
+                .child(
+                    div()
+                        .h(px(360.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(6.))
+                        .border_1()
+                        .border_color(c(theme::BORDER))
+                        .bg(c(theme::BG))
+                        .child(match file {
+                            Some(f) => gpui::img(f).max_w_full().max_h_full().object_fit(gpui::ObjectFit::ScaleDown).into_any_element(),
+                            None => div().text_size(px(12.)).text_color(c(theme::TEXT_FAINT)).child("Not in this version").into_any_element(),
+                        }),
+                )
+        };
+        div()
+            .p(px(16.))
+            .flex()
+            .gap(px(16.))
+            .when(before.is_some(), |d| d.child(pane("Before", theme::DANGER, before)))
+            .child(pane(if after.is_some() { "After" } else { "Deleted" }, theme::OK, after))
+            .into_any_element()
+    }
+
     fn render_diff(&self, cx: &mut Context<Self>) -> AnyElement {
         let Sel::File(path) = &self.selected else { return div().into_any_element() };
+        if let Some(image) = &self.image {
+            return self.render_image(image);
+        }
         let state = match &self.diff {
             Load::Ready(s) => s.clone(),
             Load::Failed(e) => return div().p(px(20.)).text_size(px(12.5)).text_color(c(theme::DANGER)).child(e.clone()).into_any_element(),
@@ -2486,6 +2555,12 @@ pub(crate) fn table_loading(id: &'static str, label: &'static str) -> AnyElement
         .into_any_element()
 }
 
+/// Files the review shows as pictures rather than text.
+fn is_image(path: &str) -> bool {
+    let ext = Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2582,4 +2657,3 @@ mod tests {
         assert_eq!((files[0].additions(), files[0].deletions()), (2, 1));
     }
 }
-
