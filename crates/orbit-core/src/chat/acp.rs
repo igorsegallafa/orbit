@@ -15,8 +15,8 @@ pub fn start(name: &str, cwd: &Path, resume: Option<String>, key: &str, sink: im
     let (launch_args, launch_env) = crate::agent_hooks::session_launch(name, key, true, cwd);
     let mut cmd = crate::proc::cmd(name);
     cmd.arg("acp").args(launch_args).envs(launch_env).current_dir(cwd);
-    let mcp_servers = match (crate::agent_hooks::hook_url(key), std::env::current_exe()) {
-        (Some(url), Ok(exe)) => json!([{ "name": "orbit", "command": exe, "args": ["--orbit-mcp", url], "env": [] }]),
+    let mcp_servers = match (crate::agent_hooks::hook_url(key), crate::agent_hooks::exe()) {
+        (Some(url), Some(exe)) => json!([{ "name": "orbit", "command": exe, "args": ["--orbit-mcp", url], "env": [] }]),
         _ => json!([]),
     };
     let parser = Arc::new(Mutex::new(Parser { cwd: cwd.to_path_buf(), resume, mcp_servers, ..Parser::default() }));
