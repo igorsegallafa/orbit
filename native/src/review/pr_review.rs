@@ -2555,6 +2555,12 @@ pub(crate) fn table_loading(id: &'static str, label: &'static str) -> AnyElement
         .into_any_element()
 }
 
+/// Files the review shows as pictures rather than text.
+fn is_image(path: &str) -> bool {
+    let ext = Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2650,10 +2656,4 @@ mod tests {
         assert_eq!(files[0].path().as_ref(), "src/a.rs");
         assert_eq!((files[0].additions(), files[0].deletions()), (2, 1));
     }
-}
-
-/// Files the review shows as pictures rather than text.
-fn is_image(path: &str) -> bool {
-    let ext = Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
-    matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp")
 }
