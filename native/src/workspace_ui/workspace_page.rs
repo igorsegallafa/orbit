@@ -431,9 +431,15 @@ impl PageTab {
                             t.toast(ToastKind::Info, format!("Workspace {ws} removed; branches with unpushed work kept"), Some(kept.join("\n")), window, cx);
                         }
                         t.with_app(window, cx, move |a, w, cx| {
+                            // Collected before the reload, after which these tabs belong to no workspace.
+                            let mut doomed: Vec<String> =
+                                a.tabs.iter().filter(|tab| a.tab_scope(tab, cx).flatten().as_deref() == Some(ws.as_str())).map(|tab| tab.key(cx)).collect();
+                            doomed.push(key);
                             super::reload_workspaces(a, None, cx);
-                            if let Some(ix) = a.tab_index(&key, cx) {
-                                a.close_tab(ix, true, w, cx);
+                            for key in doomed {
+                                if let Some(ix) = a.tab_index(&key, cx) {
+                                    a.close_tab(ix, true, w, cx);
+                                }
                             }
                         });
                     }
