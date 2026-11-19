@@ -35,6 +35,9 @@ pub struct Workspace {
     /// Per repo, the branches of the workspace's open stacked PRs (an agent's): being on one isn't off-branch.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub stack_branches: BTreeMap<String, Vec<String>>,
+    /// Checked out from PRs to review them: its PRs are those, not the stack around them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub from_prs: bool,
 }
 
 impl Workspace {
@@ -591,9 +594,8 @@ pub fn create_from_prs(name: &str, base: &str, prs: &[PrCheckout]) -> Result<(Wo
     let repos = ready.iter().map(|(r, _)| r.clone()).collect();
     let mut ws = finish_create(name, &branch, base, repos, None)?;
     ws.repo_branches = ready.iter().filter(|(_, b)| *b != branch).cloned().collect();
-    if !ws.repo_branches.is_empty() {
-        save_meta(&ws_dir, &ws)?;
-    }
+    ws.from_prs = true;
+    save_meta(&ws_dir, &ws)?;
     let refs: Vec<PrRef> = prs
         .iter()
         .filter(|p| ready.iter().any(|(r, _)| r == &p.repo))
@@ -624,6 +626,7 @@ fn finish_create(
         agent: None,
         repo_branches: BTreeMap::new(),
         stack_branches: BTreeMap::new(),
+        from_prs: false,
     };
     let raw = serde_yaml::to_string(&ws).map_err(|e| e.to_string())?;
     std::fs::write(meta_path(&ws_dir), raw).map_err(|e| e.to_string())?;

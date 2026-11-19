@@ -955,8 +955,61 @@ fn fetch_content_at(owner_repo: &str, sha: &str, path: &str) -> Result<String, S
     decode_base64(b64)
 }
 
+/// An image of a PR at `sha` as a local file, None when it isn't there (added or deleted).
+/// A Git LFS pointer is resolved with `git lfs smudge` in `clone`, which has the credentials.
+pub fn pr_image(owner_repo: &str, sha: &str, path: &str, clone: Option<&std::path::Path>) -> Result<Option<std::path::PathBuf>, String> {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (owner_repo, sha, path).hash(&mut h);
+    let ext = std::path::Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or("img");
+    let file = std::env::temp_dir().join("orbit-pr-images").join(format!("{:x}.{ext}", h.finish()));
+    if file.exists() {
+        return Ok(Some(file));
+    }
+    let out = match run_gh(&["api", &format!("repos/{owner_repo}/contents/{path}?ref={sha}"), "--jq", ".content"]) {
+        Ok(o) => o,
+        Err(e) if e.contains("Not Found") || e.contains("404") => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let text = String::from_utf8_lossy(&out);
+    if text.trim().is_empty() {
+        return Err("too large to show (over 1MB)".into());
+    }
+    let mut bytes = decode_base64_bytes(text.trim())?;
+    if bytes.starts_with(b"version https://git-lfs.github.com/spec/") {
+        let dir = clone.filter(|d| d.exists()).ok_or("stored in Git LFS: clone the repository in Orbit to see it")?;
+        bytes = lfs_smudge(dir, &bytes)?;
+    }
+    std::fs::create_dir_all(file.parent().unwrap_or(&file)).map_err(|e| e.to_string())?;
+    std::fs::write(&file, bytes).map_err(|e| e.to_string())?;
+    Ok(Some(file))
+}
+
+/// The object an LFS pointer names, downloaded by git-lfs in `dir`.
+fn lfs_smudge(dir: &std::path::Path, pointer: &[u8]) -> Result<Vec<u8>, String> {
+    use std::io::Write;
+    let mut child = crate::proc::cmd("git")
+        .args(["lfs", "smudge"])
+        .current_dir(dir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("git lfs: {e}"))?;
+    child.stdin.take().ok_or("git lfs: no stdin")?.write_all(pointer).map_err(|e| e.to_string())?;
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(format!("git lfs smudge failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    Ok(out.stdout)
+}
+
 // Minimal base64 decode (no new deps).
 fn decode_base64(s: &str) -> Result<String, String> {
+    String::from_utf8(decode_base64_bytes(s)?).map_err(|_| "file is not valid UTF-8".into())
+}
+
+fn decode_base64_bytes(s: &str) -> Result<Vec<u8>, String> {
     let s: String = s.chars().filter(|c| !c.is_whitespace()).collect();
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut buf: Vec<u8> = Vec::with_capacity(s.len() / 4 * 3);
@@ -977,7 +1030,7 @@ fn decode_base64(s: &str) -> Result<String, String> {
             buf.push(((acc >> bits) & 0xFF) as u8);
         }
     }
-    String::from_utf8(buf).map_err(|_| "file is not valid UTF-8".into())
+    Ok(buf)
 }
 
 #[cfg(test)]

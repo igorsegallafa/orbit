@@ -314,21 +314,14 @@ impl SettingsPage {
         );
     }
 
+    /// Opens the add form on `repo`, to pick where it's cloned and how it's checked out.
     fn add_github(&mut self, repo: GithubRepo, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_form(None, window, cx);
+        let Some(f) = &self.repos.form else { return };
         // HTTPS: the gh login authenticates it; SSH would need a key set up.
         let url = format!("https://github.com/{}.git", repo.name_with_owner);
-        let name = repo.name.clone();
-        let n = name.clone();
-        self.edit(
-            "Couldn't add the repository",
-            move || settings::add_service(&n, &url, None),
-            move |t, window, cx| {
-                t.refresh_clone_status(window, cx);
-                t.host.toast(ToastKind::Success, format!("{name} added"), Some("Clone it from the list".into()), cx);
-            },
-            window,
-            cx,
-        );
+        f.name.update(cx, |i, cx| i.set_value(repo.name, window, cx));
+        f.url.update(cx, |i, cx| i.set_value(url, window, cx));
     }
 
     fn remove_repo(&mut self, svc: Service, window: &mut Window, cx: &mut Context<Self>) {
@@ -365,11 +358,16 @@ impl SettingsPage {
     }
 
     /// "Browse…": a native folder picker that fills `input`.
-    fn browse(&mut self, input: Entity<InputState>, window: &mut Window, cx: &mut Context<Self>) {
+    /// With `name`, a picked parent folder gets the repo's name appended (`clonePathFor`).
+    fn browse(&mut self, input: Entity<InputState>, name: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         let rx = cx.prompt_for_paths(gpui::PathPromptOptions { files: false, directories: true, multiple: false, prompt: None });
         cx.spawn_in(window, async move |_, cx| {
             let Ok(Ok(Some(paths))) = rx.await else { return };
-            let Some(path) = paths.first().map(|p| p.display().to_string()) else { return };
+            let Some(mut path) = paths.first().cloned() else { return };
+            if let Some(n) = name.filter(|n| !n.is_empty() && path.file_name().is_none_or(|f| f != n.as_str())) {
+                path.push(n);
+            }
+            let path = path.display().to_string();
             let _ = input.update_in(cx, |i, w, cx| i.set_value(path, w, cx));
         })
         .detach();
@@ -397,7 +395,7 @@ impl SettingsPage {
                         .child(kit::field(name, input, window, cx).font_family(theme::MONO_FONT))
                         .child(
                             kit::button(format!("{name}:browse"), "Browse…", Kind::Secondary)
-                                .on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.browse(i.clone(), w, cx))),
+                                .on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.browse(i.clone(), None, w, cx))),
                         ),
                 )
                 .child(div().text_size(px(11.)).line_height(px(15.4)).text_color(c(theme::TEXT_FAINT)).child(hint))
@@ -606,7 +604,18 @@ impl SettingsPage {
             }))
             .child(div().flex().gap(px(12.)).child(field("Name", name)).child(field("Repository URL", kit::field("form-url", &f.url, window, cx).into_any_element())));
         if !editing {
-            card = card.child(field("Local path", kit::field("form-path", &f.path, window, cx).font_family(theme::MONO_FONT).into_any_element()));
+            let (path, name) = (f.path.clone(), f.name.clone());
+            let row = div()
+                .flex()
+                .gap(px(8.))
+                .child(kit::field("form-path", &f.path, window, cx).font_family(theme::MONO_FONT))
+                .child(kit::button("form-path:browse", "Browse…", Kind::Secondary).on_click(cx.listener(move |t, _: &ClickEvent, w, cx| {
+                    let n = text(&name, cx);
+                    t.browse(path.clone(), Some(n), w, cx)
+                })));
+            card = card
+                .child(field("Local path", row.into_any_element()))
+                .child(kit::hint("Empty uses the clones folder. Pick an existing checkout to use it as is."));
         } else if let Some(p) = f.editing.as_ref().and_then(|s| s.path.clone()) {
             card = card.child(field("Local path", mono(if cloned { format!("{p} (cloned)") } else { p }).into_any_element()));
         }
@@ -670,7 +679,7 @@ impl SettingsPage {
                     t.repos.form = None;
                     cx.notify();
                 })))
-                .child(kit::button("form-save", if editing { "Save" } else { "Add repository" }, Kind::Primary).on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.save_form(w, cx)))),
+                .child(kit::button("form-save", if editing { "Save" } else if f.clone_now { "Add and clone" } else { "Add repository" }, Kind::Primary).on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.save_form(w, cx)))),
         )
         .into_any_element()
     }

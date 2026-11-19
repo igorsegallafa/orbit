@@ -164,6 +164,9 @@ impl Parser {
                     ChatEvent::Model(s(&v["model"])),
                 ]
             }
+            "system" if v["subtype"] == "background_tasks_changed" => {
+                vec![ChatEvent::Background(v["tasks"].as_array().into_iter().flatten().map(|t| s(&t["description"])).collect())]
+            }
             "rate_limit_event" => {
                 let windows = &v["rate_limit_info"]["unifiedWindows"];
                 crate::agent_hooks::save_rate_limits(windows);
@@ -360,6 +363,16 @@ mod tests {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/chat/claude").join(name);
         let mut p = Parser::default();
         std::fs::read_to_string(path).unwrap().lines().flat_map(|l| p.line(l)).collect()
+    }
+
+    #[test]
+    fn background_tasks_are_listed() {
+        let mut p = Parser::default();
+        assert_eq!(
+            p.line(r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b1","task_type":"local_bash","description":"Build and run tests"}]}"#),
+            vec![ChatEvent::Background(vec!["Build and run tests".into()])]
+        );
+        assert_eq!(p.line(r#"{"type":"system","subtype":"background_tasks_changed","tasks":[]}"#), vec![ChatEvent::Background(vec![])]);
     }
 
     #[test]

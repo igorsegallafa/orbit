@@ -196,6 +196,8 @@ pub struct ChatView {
     recalled: Option<usize>,
     /// A multiSelect question's ticked options, by permission id.
     ticked: HashMap<String, Vec<usize>>,
+    /// What the agent runs in the background, by description.
+    background: Vec<String>,
     /// The question card being answered in its own words ("Other…"): its index and input.
     other: Option<(usize, Entity<TextareaState>, Subscription)>,
     modes: Vec<orbit_core::chat::Choice>,
@@ -249,6 +251,7 @@ impl ChatView {
             queue: vec![],
             recalled: None,
             ticked: HashMap::new(),
+            background: vec![],
             other: None,
             modes: vec![],
             mode: None,
@@ -338,8 +341,17 @@ impl ChatView {
         self.backend.is_some() && (self.session_id.is_some() || self.agent == "claude")
     }
 
+    /// The card being asked: questions of one AskUserQuestion come one at a time, first unanswered first.
     fn pending(&self) -> Option<usize> {
-        self.items.iter().rposition(|i| matches!(i, Item::Permission { answer: None, .. }))
+        self.items.iter().position(|i| matches!(i, Item::Permission { answer: None, .. }))
+    }
+
+    /// Card `ix` is a later question of an AskUserQuestion whose earlier one is still unanswered.
+    fn queued(&self, ix: usize) -> bool {
+        let Some(Item::Permission { id, .. }) = self.items.get(ix) else { return false };
+        let Some((base, _)) = id.split_once('#') else { return false };
+        let prefix = format!("{base}#");
+        self.items[..ix].iter().any(|i| matches!(i, Item::Permission { id, answer: None, .. } if id.starts_with(&prefix)))
     }
 
     pub fn busy(&self) -> bool {
@@ -430,6 +442,28 @@ impl ChatView {
         (0..options.len()).filter(|&n| !question || matches!(options[n].kind.as_str(), "allow_once" | "pick_many" | "other")).collect()
     }
 
+    /// Denies every open card and marks it `label`.
+    fn close_pending(&mut self, label: &str, cx: &mut Context<Self>) {
+        let mut closed = false;
+        for item in &mut self.items {
+            if let Item::Permission { id, answer: answer @ None, .. } = item {
+                if let Some(b) = &self.backend {
+                    b.send(ChatInput::AnswerPermission { id: id.clone(), option_id: "deny".into() });
+                }
+                *answer = Some(label.into());
+                closed = true;
+            }
+        }
+        if !closed {
+            return;
+        }
+        self.ticked.clear();
+        self.other = None;
+        self.list.remeasure_items(0..self.items.len());
+        let key = self.key.clone();
+        crate::sessions::store(cx).update(cx, |s, cx| s.settle(&key, cx));
+    }
+
     /// Sends card `ix`'s answer and marks it answered.
     fn settle_card(&mut self, ix: usize, option_id: String, label: String, cx: &mut Context<Self>) {
         let Some(Item::Permission { id, answer: answer @ None, .. }) = self.items.get_mut(ix) else { return };
@@ -453,7 +487,7 @@ impl ChatView {
         if self.other.as_ref().is_some_and(|o| o.0 == ix) {
             self.other = None;
         }
-        self.list.remeasure_items(ix..ix + 1);
+        self.list.remeasure_items(ix..self.items.len());
         if self.pending().is_none() {
             let key = self.key.clone();
             crate::sessions::store(cx).update(cx, |s, cx| s.settle(&key, cx));
@@ -652,6 +686,8 @@ impl ChatView {
             ChatEvent::TextDelta { message_id, text } => self.append(false, message_id, &text, cx),
             ChatEvent::ThinkingDelta { message_id, text } => self.append(true, message_id, &text, cx),
             ChatEvent::TurnEnded { cost_usd, tokens, error } => {
+                // An interrupted turn leaves its questions behind: nothing waits on them anymore.
+                self.close_pending("not answered", cx);
                 if let Some(e) = error {
                     self.push(Item::Note(e));
                 }
@@ -741,6 +777,7 @@ impl ChatView {
                 self.live_limits = true;
                 self.limits = limits;
             }
+            ChatEvent::Background(tasks) => self.background = tasks,
             ChatEvent::Context { used, window } => {
                 let window = window.or(self.context.and_then(|c| c.1));
                 self.context = Some((used, window));
@@ -765,6 +802,7 @@ impl ChatView {
             }
             ChatEvent::Exited { error } => {
                 self.backend = None;
+                self.background.clear();
                 self.turn = None;
                 for item in &mut self.items {
                     if let Item::Permission { answer: answer @ None, .. } = item {
@@ -793,7 +831,13 @@ impl ChatView {
         let full = expand_pastes(&text, &std::mem::take(&mut self.pasted));
         self.refs = (0, 0);
         self.prompt.update(cx, |p, cx| p.set_value("", window, cx));
-        let queued = Queued { text, full, attached };
+        self.enqueue(Queued { text, full, attached }, cx);
+    }
+
+    /// Sends `queued` now, or after the running turn.
+    fn enqueue(&mut self, queued: Queued, cx: &mut Context<Self>) {
+        // The turn waits on an open question or permission: typing instead skips it, so the turn ends and this goes out.
+        self.close_pending("Skip", cx);
         if self.turn.is_some() {
             self.queue.push(queued);
             return cx.notify();
@@ -873,7 +917,19 @@ impl ChatView {
                         .gap_1()
                         .group("user-msg")
                         .when(!text.is_empty(), |d| {
-                            let copy = text.clone();
+                            let (copy, again) = (text.clone(), text.clone());
+                            let last = !self.items[ix + 1..].iter().any(|i| matches!(i, Item::User { .. }));
+                            let action = |id: &str, tip: &'static str, icon: &'static str| {
+                                div()
+                                    .id(SharedString::from(format!("{id}:{ix}")))
+                                    .p_1()
+                                    .rounded(px(4.))
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(c(theme::PANEL_HOVER)))
+                                    .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(tip).build(window, cx))
+                                    .child(crate::pages::kit::icon(icon, 13., c(theme::TEXT_DIM)))
+                                    .child(probe(format!("{id}:{ix}")))
+                            };
                             d.child(
                                 div()
                                     .px_3p5()
@@ -888,17 +944,18 @@ impl ChatView {
                             )
                             .child(
                                 div()
-                                    .id(SharedString::from(format!("user-copy:{ix}")))
-                                    .p_1()
-                                    .rounded(px(4.))
-                                    .cursor_pointer()
+                                    .flex()
                                     .invisible()
                                     .group_hover("user-msg", |s| s.visible())
-                                    .hover(|s| s.bg(c(theme::PANEL_HOVER)))
-                                    .tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("Copy").build(window, cx))
-                                    .child(crate::pages::kit::icon("copy", 13., c(theme::TEXT_DIM)))
-                                    .child(probe(format!("user-copy:{ix}")))
-                                    .on_click(move |_, _, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy.clone()))),
+                                    // shortcut: resends the bubble's text, so a long paste goes as its placeholder and images stay behind; keep `full` on the item if that bites.
+                                    .when(last, |d| {
+                                        d.child(action("user-resend", "Send again", "refresh").on_click(cx.listener(move |this, _, _, cx| {
+                                            if this.ready() {
+                                                this.enqueue(Queued { text: again.clone(), full: again.clone(), attached: vec![] }, cx);
+                                            }
+                                        })))
+                                    })
+                                    .child(action("user-copy", "Copy", "copy").on_click(move |_, _, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy.clone())))),
                             )
                         }),
                 )
@@ -1065,6 +1122,7 @@ impl ChatView {
                     .child(div().px_1p5().rounded(px(4.)).bg(crate::pages::kit::alpha(tone, 0.15)).text_color(c(tone)).child(answer.clone()))
                     .into_any_element()
             }
+            Item::Permission { answer: None, .. } if self.queued(ix) => div().into_any_element(),
             Item::Permission { id, title, detail, options, answer: None, .. } => {
                 use crate::pages::kit::{alpha, button, card, Kind};
                 let ticked = self.ticked.get(id).cloned().unwrap_or_default();
@@ -1586,6 +1644,35 @@ impl ChatView {
             )
     }
 
+    /// Background tasks outlive the turn and start another when they end.
+    fn background_bar(&self) -> Option<impl IntoElement> {
+        let first = self.background.first()?;
+        let more = match self.background.len() {
+            1 => String::new(),
+            n => format!(" +{}", n - 1),
+        };
+        let all = self.background.join("\n");
+        Some(
+            div().w_full().flex().justify_center().child(
+                div()
+                    .id("chat-background")
+                    .w_full()
+                    .max_w(px(COLUMN_W))
+                    .px_6()
+                    .py_1()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(12.))
+                    .text_color(c(theme::TEXT_DIM))
+                    .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(all.clone()).build(window, cx))
+                    .child(crate::workspace_ui::kit::spinner("chat-background-spin", 11., c(theme::TEXT_DIM)))
+                    .child(div().flex_none().child(format!("{} in the background", self.background.len())))
+                    .child(div().min_w_0().truncate().text_color(c(theme::TEXT_FAINT)).child(format!("· {first}{more}"))),
+            ),
+        )
+    }
+
     fn working(&self) -> Option<impl IntoElement> {
         let started = self.turn?;
         if self.pending().is_some() {
@@ -1895,6 +1982,7 @@ impl Render for ChatView {
                 }
             }))
             .child(body)
+            .children(self.background_bar())
             .children(self.working())
             .child(div().flex_none().w_full().flex().justify_center().pt_1().pb_3().child(composer))
             .children(self.lightbox.and_then(|ix| self.render_lightbox(ix, cx)))
