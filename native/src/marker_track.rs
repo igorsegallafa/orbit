@@ -10,9 +10,10 @@
 //! change's removed and added lines side by side. Opened folds and notes
 //! make it approximate; clicks always land on the line.
 use crate::theme::{self, hsla};
-use gpui::{canvas, fill, point, prelude::*, px, size, App, Bounds, Entity, Hsla, MouseDownEvent, Pixels, Window};
+use gpui::{canvas, div, fill, point, prelude::*, px, size, App, Bounds, ClickEvent, Entity, Hsla, Pixels, Window};
 use gpui_component::diff::{DiffLinePosition, DiffMode, DiffSide, DiffState};
 use gpui_component::scroll::Scrollbar;
+use std::cell::RefCell;
 use std::ops::Range;
 use std::rc::Rc;
 
@@ -34,6 +35,9 @@ pub struct Mark<T> {
     pub target: T,
 }
 
+/// A painted mark: its bounds, colour and the first mark it stands for.
+type Quad = (Bounds<Pixels>, Hsla, usize);
+
 /// `marks` over `rows` rows, in row order.
 pub struct Track<T> {
     pub rows: usize,
@@ -41,51 +45,63 @@ pub struct Track<T> {
 }
 
 /// Paints `track` over the right edge of a `relative()` parent, over its
-/// scrollbar; a click on a mark calls `on_click` with its target.
+/// scrollbar; a click (press and release) on a mark calls `on_click` with its
+/// target. The press still reaches the scrollbar, so its thumb drags over marks.
 pub fn render<T: 'static>(track: Track<T>, on_click: impl Fn(&T, &mut Window, &mut App) + 'static) -> impl IntoElement {
     let track = Rc::new(track);
-    let on_click = Rc::new(on_click);
-    canvas(
-        {
-            let track = track.clone();
-            move |bounds, _, _| layout(&track, bounds)
-        },
-        move |bounds, quads: Vec<(Bounds<Pixels>, Hsla, usize)>, window, _| {
-            for (b, color, _) in &quads {
-                window.paint_quad(fill(*b, *color));
+    let quads: Rc<RefCell<Vec<Quad>>> = Rc::default();
+    let (laid, marks) = (quads.clone(), track.clone());
+    div()
+        .id("marker-track")
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .right_0()
+        .w(Scrollbar::width())
+        .child(
+            canvas(
+                move |bounds, _, _| *laid.borrow_mut() = layout(&marks, bounds),
+                {
+                    let quads = quads.clone();
+                    move |_, _, window, _| {
+                        for (b, color, _) in quads.borrow().iter() {
+                            window.paint_quad(fill(*b, *color));
+                        }
+                    }
+                },
+            )
+            .size_full(),
+        )
+        .on_click(move |ev, window, cx| {
+            let ClickEvent::Mouse(m) = ev else { return };
+            let quads = quads.borrow();
+            let (down, up) = (hit(&quads, m.down.position.y), hit(&quads, m.up.position.y));
+            if let Some(ix) = down.filter(|_| down == up) {
+                on_click(&track.marks[ix].target, window, cx);
             }
-            let (track, on_click) = (track.clone(), on_click.clone());
-            window.on_mouse_event(move |ev: &MouseDownEvent, phase, window, cx| {
-                if !phase.bubble() || !bounds.contains(&ev.position) {
-                    return;
-                }
-                let hit = quads.iter().find(|(b, _, _)| {
-                    let grow = (px(HIT) - b.size.height).max(px(0.)) / 2.;
-                    (b.top() - grow..=b.bottom() + grow).contains(&ev.position.y)
-                });
-                if let Some((_, _, ix)) = hit {
-                    cx.stop_propagation();
-                    on_click(&track.marks[*ix].target, window, cx);
-                }
-            });
-        },
-    )
-    .absolute()
-    .top_0()
-    .bottom_0()
-    .right_0()
-    .w(Scrollbar::width())
+        })
+}
+
+/// The mark under `y`, short marks found within `HIT` px.
+fn hit(quads: &[Quad], y: Pixels) -> Option<usize> {
+    quads
+        .iter()
+        .find(|(b, _, _)| {
+            let grow = (px(HIT) - b.size.height).max(px(0.)) / 2.;
+            (b.top() - grow..=b.bottom() + grow).contains(&y)
+        })
+        .map(|(_, _, ix)| *ix)
 }
 
 /// Quads for the marks, adjacent ones of a colour and lane merged, each with
 /// the first mark it stands for.
-fn layout<T>(track: &Track<T>, bounds: Bounds<Pixels>) -> Vec<(Bounds<Pixels>, Hsla, usize)> {
+fn layout<T>(track: &Track<T>, bounds: Bounds<Pixels>) -> Vec<Quad> {
     if track.rows == 0 {
         return vec![];
     }
     let scale = bounds.size.height / track.rows as f32;
     let half = bounds.size.width / 2.;
-    let mut out: Vec<(Bounds<Pixels>, Hsla, usize)> = Vec::new();
+    let mut out: Vec<Quad> = Vec::new();
     for (ix, m) in track.marks.iter().enumerate() {
         let left = if m.lane == Lane::Left { px(0.) } else { half };
         let top = bounds.top() + scale * m.rows.start as f32;
