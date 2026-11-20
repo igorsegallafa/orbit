@@ -384,6 +384,36 @@ pub fn field_sized(name: impl Into<String>, state: &Entity<InputState>, h: f32, 
         .child(probe(name.into()))
 }
 
+/// A text field with a `▼` (probe `<name>-pick`) that calls `on_pick`, for a
+/// free value with suggestions: the caller's menu fills the field.
+pub fn combo(
+    name: impl Into<String>,
+    state: &Entity<InputState>,
+    on_pick: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+    window: &Window,
+    cx: &App,
+) -> Div {
+    let name = name.into();
+    let pick = format!("{name}-pick");
+    field(name, state, window, cx).pr(px(0.)).child(
+        div()
+            .id(SharedString::from(pick.clone()))
+            .relative()
+            .flex_none()
+            .h_full()
+            .px(px(10.))
+            .flex()
+            .items_center()
+            .cursor_pointer()
+            .text_size(px(9.))
+            .text_color(c(theme::TEXT_FAINT))
+            .hover(|s| s.text_color(c(theme::TEXT)))
+            .child("▼")
+            .child(probe(pick))
+            .on_click(on_pick),
+    )
+}
+
 /// `.tag`.
 pub fn tag(label: impl Into<SharedString>, muted: bool) -> Div {
     div()
