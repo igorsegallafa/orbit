@@ -7,7 +7,7 @@ use crate::probe::probe;
 use crate::theme::{self, c};
 use crate::toast::ToastKind;
 use gpui::{div, prelude::*, px, ClickEvent, Context, Entity, Focusable, FontWeight, Window};
-use gpui_component::input::{Textarea, TextareaState};
+use gpui_component::input::{InputState, Textarea, TextareaState};
 use orbit_core::workspace::Workspace;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -20,16 +20,26 @@ pub struct Contestant {
     pub model: String,
 }
 
+/// A contestant's row: the model is typed, or picked from the agent's list.
+pub struct Racer {
+    pub agent: String,
+    pub model: Entity<InputState>,
+}
+
 pub struct RaceForm {
     pub ws: Workspace,
     pub prompt: Entity<TextareaState>,
-    pub contestants: Vec<Contestant>,
+    pub racers: Vec<Racer>,
     pub models: BTreeMap<String, Vec<String>>,
 }
 
 impl RaceForm {
+    pub fn contestants(&self, cx: &gpui::App) -> Vec<Contestant> {
+        self.racers.iter().map(|r| Contestant { agent: r.agent.clone(), model: r.model.read(cx).value().trim().to_string() }).collect()
+    }
+
     pub fn dump(&self, out: &mut String, cx: &gpui::App) {
-        let cs: Vec<String> = self.contestants.iter().map(|c| format!("{}:{}", c.agent, c.model)).collect();
+        let cs: Vec<String> = self.contestants(cx).iter().map(|c| format!("{}:{}", c.agent, c.model)).collect();
         let _ = writeln!(out, "  race modal ({}): task {:?} agents {cs:?}", self.ws.name, self.prompt.read(cx).value());
     }
 }
@@ -44,6 +54,12 @@ pub fn labels(cs: &[Contestant]) -> Vec<String> {
             if *n == 1 { c.agent.clone() } else { format!("{}-{n}", c.agent) }
         })
         .collect()
+}
+
+fn racer(agent: &str, model: String, window: &mut Window, cx: &mut Context<PageTab>) -> Racer {
+    let model = cx.new(|cx| InputState::new(window, cx).placeholder("Pick or type a model").default_value(model));
+    super::watch(&model, window, cx);
+    Racer { agent: agent.into(), model }
 }
 
 fn agent_label(agent: &str) -> &str {
@@ -67,14 +83,10 @@ impl PageTab {
         let handle = prompt.read(cx).focus_handle(cx);
         window.focus(&handle, cx);
         let ai = orbit_core::config::Config::load().map(|c| c.ai).ok();
-        let contestants = match ai {
-            Some(ai) => {
-                let other = if ai.agent == "claude" { "opencode" } else { "claude" };
-                vec![Contestant { agent: ai.agent, model: ai.model }, Contestant { agent: other.into(), model: String::new() }]
-            }
-            None => vec![Contestant { agent: "claude".into(), model: String::new() }, Contestant { agent: "opencode".into(), model: String::new() }],
-        };
-        self.modal = Some(Modal::Race(Box::new(RaceForm { ws, prompt, contestants, models: BTreeMap::new() })));
+        let (first, model) = ai.map_or(("claude".to_string(), String::new()), |ai| (ai.agent, ai.model));
+        let other = if first == "claude" { "opencode" } else { "claude" };
+        let racers = vec![racer(&first, model, window, cx), racer(other, String::new(), window, cx)];
+        self.modal = Some(Modal::Race(Box::new(RaceForm { ws, prompt, racers, models: BTreeMap::new() })));
         spawn(
             window,
             cx,
@@ -90,7 +102,7 @@ impl PageTab {
 
     fn race_pick(&mut self, i: usize, model: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(f) = self.race_form() else { return };
-        let Some(cur) = f.contestants.get(i) else { return };
+        let Some(cur) = f.racers.get(i) else { return };
         let options: Vec<(String, String)> = if model {
             std::iter::once((String::new(), "Pick a model".to_string()))
                 .chain(f.models.get(&cur.agent).into_iter().flatten().map(|m| (m.clone(), m.clone())))
@@ -103,16 +115,15 @@ impl PageTab {
             .into_iter()
             .map(|(value, label)| {
                 let page = page.clone();
-                crate::overlay::MenuItem::new(label, move |_: &mut crate::app::OrbitApp, _: &mut Window, cx: &mut Context<crate::app::OrbitApp>| {
+                crate::overlay::MenuItem::new(label, move |_: &mut crate::app::OrbitApp, window: &mut Window, cx: &mut Context<crate::app::OrbitApp>| {
                     let value = value.clone();
                     let _ = page.update(cx, |t, cx| {
-                        if let Some(c) = t.race_form().and_then(|f| f.contestants.get_mut(i)) {
-                            if model {
-                                c.model = value;
-                            } else if c.agent != value {
-                                c.agent = value;
-                                c.model.clear();
-                            }
+                        let Some(r) = t.race_form().and_then(|f| f.racers.get_mut(i)) else { return };
+                        if model {
+                            r.model.update(cx, |s, cx| s.set_value(value, window, cx));
+                        } else if r.agent != value {
+                            r.agent = value;
+                            r.model.update(cx, |s, cx| s.set_value("", window, cx));
                         }
                         cx.notify();
                     });
@@ -126,7 +137,7 @@ impl PageTab {
     fn race_start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(f) = self.race_form() else { return };
         let prompt = f.prompt.read(cx).value().trim().to_string();
-        let cs = f.contestants.clone();
+        let cs = f.contestants(cx);
         if prompt.is_empty() || cs.len() < 2 || cs.iter().any(|c| c.model.trim().is_empty()) {
             return;
         }
@@ -173,9 +184,10 @@ impl PageTab {
         );
     }
 
-    pub(super) fn render_race(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_race(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(Modal::Race(f)) = &self.modal else { return div().into_any_element() };
-        let ready = !f.prompt.read(cx).value().trim().is_empty() && f.contestants.len() >= 2 && f.contestants.iter().all(|c| !c.model.trim().is_empty());
+        let cs = f.contestants(cx);
+        let ready = !f.prompt.read(cx).value().trim().is_empty() && cs.len() >= 2 && cs.iter().all(|c| !c.model.is_empty());
         let select = |id: String, label: String, w: Option<f32>| {
             div()
                 .id(gpui::ElementId::Name(id.clone().into()))
@@ -199,8 +211,8 @@ impl PageTab {
                 .child(div().text_size(px(9.)).text_color(c(theme::TEXT_FAINT)).child("▾"))
                 .child(probe(id))
         };
-        let rows = f.contestants.iter().enumerate().map(|(i, ct)| {
-            let can_remove = f.contestants.len() > 2;
+        let rows = f.racers.iter().enumerate().map(|(i, ct)| {
+            let can_remove = f.racers.len() > 2;
             div()
                 .flex()
                 .items_center()
@@ -209,15 +221,18 @@ impl PageTab {
                     select(format!("race-agent:{i}"), agent_label(&ct.agent).to_string(), Some(160.))
                         .on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.race_pick(i, false, w, cx))),
                 )
-                .child(
-                    select(format!("race-model:{i}"), if ct.model.is_empty() { "Pick a model".into() } else { ct.model.clone() }, None)
-                        .on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.race_pick(i, true, w, cx))),
-                )
+                .child(div().flex_1().min_w_0().child(crate::pages::kit::combo(
+                    format!("race-model:{i}"),
+                    &ct.model,
+                    cx.listener(move |t, _: &ClickEvent, w, cx| t.race_pick(i, true, w, cx)),
+                    window,
+                    cx,
+                )))
                 .child(
                     kit::hint(kit::disabled(kit::icon_button(format!("race-remove:{i}"), "trash", 28., 13., true), !can_remove), "Remove agent").when(can_remove, |b| {
                         b.on_click(cx.listener(move |t, _: &ClickEvent, _, cx| {
                             if let Some(f) = t.race_form() {
-                                f.contestants.remove(i);
+                                f.racers.remove(i);
                             }
                             cx.notify();
                         }))
@@ -252,7 +267,7 @@ impl PageTab {
                     .gap(px(8.))
                     .child(div().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(c(theme::TEXT_DIM)).child("AGENTS"))
                     .children(rows)
-                    .when(f.contestants.len() < 4, |d| {
+                    .when(f.racers.len() < 4, |d| {
                         d.child(
                             div()
                                 .id("race-add")
@@ -267,9 +282,10 @@ impl PageTab {
                                 .child(icon("plus", 12., c(theme::ACCENT)))
                                 .child("Add agent")
                                 .child(probe("race-add"))
-                                .on_click(cx.listener(|t, _: &ClickEvent, _, cx| {
+                                .on_click(cx.listener(|t, _: &ClickEvent, window, cx| {
+                                    let r = racer("claude", String::new(), window, cx);
                                     if let Some(f) = t.race_form() {
-                                        f.contestants.push(Contestant { agent: "claude".into(), model: String::new() });
+                                        f.racers.push(r);
                                     }
                                     cx.notify();
                                 })),
@@ -283,7 +299,7 @@ impl PageTab {
                 kit::modal_footer()
                     .child(kit::button("modal-cancel", "Cancel", Kind::Secondary, kit::NORMAL).on_click(cx.listener(|t, _: &ClickEvent, _, cx| t.close_modal(cx))))
                     .child(
-                        kit::disabled(kit::button("race-start", format!("Start {} agents", f.contestants.len()), Kind::Primary, kit::NORMAL), !ready)
+                        kit::disabled(kit::button("race-start", format!("Start {} agents", f.racers.len()), Kind::Primary, kit::NORMAL), !ready)
                             .when(ready, |b| b.on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.race_start(w, cx)))),
                     ),
             )

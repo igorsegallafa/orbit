@@ -205,7 +205,7 @@ impl Render for PageTab {
             Some(Modal::AddRepos(_)) => Some(self.render_add_repos(cx).into_any_element()),
             Some(Modal::Flow(_)) => Some(self.render_flow(cx).into_any_element()),
             Some(Modal::Plan(_)) => Some(self.render_plan(cx).into_any_element()),
-            Some(Modal::Race(_)) => Some(self.render_race(cx).into_any_element()),
+            Some(Modal::Race(_)) => Some(self.render_race(window, cx).into_any_element()),
         };
         div()
             .track_focus(&self.focus)

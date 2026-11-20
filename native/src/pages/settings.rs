@@ -146,6 +146,8 @@ pub struct SettingsPage {
     pub(super) repos: super::repos::ReposState,
     pub(super) groups: super::repos::GroupsState,
     models: Load<Vec<String>>,
+    /// The Model and Fast model fields, created on first render.
+    model_inputs: [Option<Entity<InputState>>; 2],
     test: Option<Load<()>>,
     languages: Load<LspStatus>,
     drafts: HashMap<String, Entity<InputState>>,
@@ -187,6 +189,7 @@ impl SettingsPage {
             filter,
             config: Load::Idle,
             models: Load::Idle,
+            model_inputs: [None, None],
             test: None,
             languages: Load::Idle,
             drafts: HashMap::new(),
@@ -311,6 +314,68 @@ impl SettingsPage {
             window,
             cx,
         );
+        self.sync_model_inputs(window, cx);
+    }
+
+    /// What an empty Model (`fast`: Fast model) field means for `ai`'s agent.
+    fn model_placeholder(ai: &AiSettings, fast: bool) -> String {
+        match (fast, ai.agent.as_str()) {
+            (true, "claude") => "Default (claude-haiku-5-5)".into(),
+            (true, _) => "Same as Model".into(),
+            (false, agent) => format!("Default ({})", orbit_core::settings::default_model(agent)),
+        }
+    }
+
+    fn model_value(ai: &AiSettings, fast: bool) -> String {
+        if fast { ai.fast_model.clone().unwrap_or_default() } else { ai.model.clone() }
+    }
+
+    /// The Model (`fast`: Fast model) field; a typed model is saved on Enter or blur.
+    fn model_input(&mut self, ai: &AiSettings, fast: bool, window: &mut Window, cx: &mut Context<Self>) -> Entity<InputState> {
+        if let Some(input) = &self.model_inputs[fast as usize] {
+            return input.clone();
+        }
+        let (placeholder, value) = (Self::model_placeholder(ai, fast), Self::model_value(ai, fast));
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder).default_value(value));
+        cx.subscribe_in(&input, window, move |t: &mut Self, input, ev: &InputEvent, window, cx| {
+            if !matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                return;
+            }
+            let typed = input.read(cx).value().trim().to_string();
+            let Some(ai) = t.ai() else { return };
+            if typed == Self::model_value(&ai, fast) {
+                return;
+            }
+            t.set_ai(
+                |ai| match fast {
+                    true => ai.fast_model = Some(typed).filter(|m| !m.is_empty()),
+                    false if typed.is_empty() => ai.model = orbit_core::settings::default_model(&ai.agent).into(),
+                    false => ai.model = typed,
+                },
+                false,
+                window,
+                cx,
+            );
+            t.sync_model_inputs(window, cx);
+        })
+        .detach();
+        self.model_inputs[fast as usize] = Some(input.clone());
+        input
+    }
+
+    /// Shows the saved models (and the agent's defaults) in the fields.
+    fn sync_model_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ai) = self.ai() else { return };
+        for (fast, input) in [false, true].into_iter().zip(self.model_inputs.clone()) {
+            let Some(input) = input else { continue };
+            let (placeholder, value) = (Self::model_placeholder(&ai, fast), Self::model_value(&ai, fast));
+            input.update(cx, |s, cx| {
+                if s.value() != value.as_str() {
+                    s.set_value(value, window, cx);
+                }
+                s.set_placeholder(placeholder, window, cx);
+            });
+        }
     }
 
     /// A menu of the agent's models; `fast` picks the fast model.
@@ -319,11 +384,7 @@ impl SettingsPage {
         let models = self.models.ready().cloned().unwrap_or_default();
         let mut options: Vec<(String, Option<String>)> = Vec::new();
         if fast {
-            let label = if ai.agent == "claude" { "Default (claude-haiku-4-5)" } else { "Same as Model" };
-            options.push((label.into(), None));
-        } else if !models.contains(&ai.model) {
-            // The saved model stays listed even when the agent doesn't list it.
-            options.push((ai.model.clone(), Some(ai.model.clone())));
+            options.push((Self::model_placeholder(&ai, true), None));
         }
         options.extend(models.into_iter().map(|m| (m.clone(), Some(m))));
         let me = cx.entity().downgrade();
@@ -343,7 +404,8 @@ impl SettingsPage {
                             false,
                             window,
                             cx,
-                        )
+                        );
+                        t.sync_model_inputs(window, cx);
                     });
                 });
                 (label, run)
@@ -496,7 +558,7 @@ impl SettingsPage {
         nav
     }
 
-    fn render_ai(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_ai(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let Some(ai) = self.ai() else {
             return kit::section().child(kit::skeleton(gpui::relative(0.4), 20.)).child(kit::skeleton(gpui::relative(1.), 34.)).into_any_element();
         };
@@ -512,15 +574,15 @@ impl SettingsPage {
             _ => "Passed to `claude --model`. Each AI feature uses it unless a run overrides it.",
         };
         let loading = matches!(self.models, Load::Loading);
-        let picker = |name: &'static str, label: String, fast: bool, cx: &mut Context<Self>| -> gpui::AnyElement {
+        let inputs = [false, true].map(|fast| self.model_input(&ai, fast, window, cx));
+        let picker = |name: &'static str, fast: bool, window: &mut Window, cx: &mut Context<Self>| -> gpui::AnyElement {
             let control = if loading {
                 kit::skeleton(gpui::relative(1.), 34.).into_any_element()
             } else {
-                kit::select(name, label).on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.model_menu(fast, w, cx))).into_any_element()
+                kit::combo(name, &inputs[fast as usize], cx.listener(move |t, _: &ClickEvent, w, cx| t.model_menu(fast, w, cx)), window, cx).into_any_element()
             };
             div().w(px(340.)).child(control).into_any_element()
         };
-        let fast_label = ai.fast_model.clone().unwrap_or_else(|| if ai.agent == "claude" { "Default (claude-haiku-4-5)".into() } else { "Same as Model".into() });
         let me = cx.entity().downgrade();
         let remote = kit::seg("ai-remote", &[(false, "Off"), (true, "On")], &ai.remote_control, move |on, w, cx| {
             let _ = me.update(cx, |t, cx| t.set_ai(|ai| ai.remote_control = on, false, w, cx));
@@ -551,8 +613,8 @@ impl SettingsPage {
             .on_click(cx.listener(|t, _: &ClickEvent, w, cx| t.test_agent(w, cx)));
         let mut rows = vec![
             kit::setting("Agent", kit::hint("The CLI Orbit runs for plans, commit messages, PR drafts, CI investigation and Ralph."), agent_seg),
-            kit::setting("Model", kit::hint(model_hint), picker("ai-model", ai.model.clone(), false, cx)),
-            kit::setting("Fast model", kit::hint("Used for commit messages and PR drafts, where speed matters more than depth."), picker("ai-fast-model", fast_label, true, cx)),
+            kit::setting("Model", kit::hint(model_hint), picker("ai-model", false, window, cx)),
+            kit::setting("Fast model", kit::hint("Used for commit messages and PR drafts, where speed matters more than depth."), picker("ai-fast-model", true, window, cx)),
         ];
         if ai.agent == "claude" {
             rows.push(kit::setting(
@@ -1091,7 +1153,7 @@ impl Render for SettingsPage {
         let body = match self.section {
             Section::Repos => self.render_repos(window, cx),
             Section::Groups => self.render_groups(window, cx),
-            Section::Ai => self.render_ai(cx),
+            Section::Ai => self.render_ai(window, cx),
             Section::Languages => self.render_languages(window, cx),
             Section::Appearance => self.render_appearance(cx),
             Section::Notifications => self.render_notifications(cx),

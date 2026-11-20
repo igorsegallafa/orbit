@@ -147,11 +147,15 @@ pub fn default_models(agent: &str) -> Vec<String> {
         _ => vec![
             "opus".into(),
             "sonnet".into(),
+            "mythos".into(),
+            "fable".into(),
+            "haiku".into(),
+            "claude-mythos-5-2".into(),
+            "claude-mythos-5-1".into(),
             "claude-opus-5-5".into(),
             "claude-sonnet-5-5".into(),
-            "claude-fable-5-1".into(),
-            "claude-opus-5".into(),
-            "claude-sonnet-5".into(),
+            "claude-fable-5-2".into(),
+            "claude-haiku-5-5".into(),
             "claude-haiku-4-5".into(),
         ],
     }

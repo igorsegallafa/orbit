@@ -211,7 +211,7 @@ impl AiSettings {
     pub fn draft_model(&self) -> String {
         match self.fast_model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
             Some(m) => m.to_string(),
-            None if self.agent_bin() == "claude" => "claude-haiku-4-5".into(),
+            None if self.agent_bin() == "claude" => "claude-haiku-5-5".into(),
             None => self.model.clone(),
         }
     }

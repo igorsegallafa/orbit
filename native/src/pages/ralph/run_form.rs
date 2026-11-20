@@ -48,8 +48,8 @@ pub struct RunForm {
     iterations: Entity<InputState>,
     stop_after: Option<String>,
     agent: Option<String>,
-    /// None: the agent's default (the AI settings' model with no agent picked).
-    model: Option<String>,
+    /// Empty: the agent's default (the AI settings' model with no agent picked).
+    model: Entity<InputState>,
     /// The picked agent's models, once listed.
     models: Vec<String>,
     extra: Entity<TextareaState>,
@@ -80,6 +80,14 @@ fn parse<T: std::str::FromStr + PartialOrd + Copy>(input: &Entity<InputState>, m
     }
 }
 
+/// The model an empty field runs with.
+fn default_model(agent: Option<&str>) -> String {
+    match agent {
+        Some(a) => format!("Default ({})", orbit_core::settings::default_model(a)),
+        None => "From AI settings".into(),
+    }
+}
+
 impl RunForm {
     pub fn new(config: &RunConfig, prompt: &str, prompt_custom: bool, window: &mut Window, cx: &mut Context<RalphPage>) -> Self {
         let l = &config.limits;
@@ -95,12 +103,15 @@ impl RunForm {
             s.set_value(prompt_text, window, cx);
             s
         });
+        let agent = config.agent.clone().filter(|a| !a.is_empty());
+        let (placeholder, model) = (default_model(agent.as_deref()), config.model.clone().unwrap_or_default());
+        let model = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder).default_value(model));
         let form = Self {
             until_complete: l.until_complete,
             iterations: num_input(l.max_iterations, window, cx),
             stop_after: None,
-            agent: config.agent.clone().filter(|a| !a.is_empty()),
-            model: config.model.clone().filter(|m| !m.is_empty()),
+            agent,
+            model,
             models: vec![],
             extra,
             show_prompt: false,
@@ -115,7 +126,7 @@ impl RunForm {
             limit_wait: num_input(l.limit_wait_min, window, cx),
             push: config.push,
         };
-        for input in [&form.iterations, &form.max_hours, &form.stall_after, &form.timeout, &form.idle, &form.grace, &form.limit_wait] {
+        for input in [&form.iterations, &form.max_hours, &form.stall_after, &form.timeout, &form.idle, &form.grace, &form.limit_wait, &form.model] {
             watch(input, window, cx);
         }
         form
@@ -135,7 +146,7 @@ impl RunForm {
         config.idle_timeout_min = parse(&self.idle, 0., config.idle_timeout_min, cx);
         config.exit_grace_sec = parse(&self.grace, 0, config.exit_grace_sec, cx);
         config.agent = self.agent.clone();
-        config.model = self.model.clone();
+        config.model = Some(self.model.read(cx).value().trim().to_string()).filter(|m| !m.is_empty());
         config.extra_instructions = self.extra.read(cx).value().to_string();
         config.push = self.push;
         config
@@ -337,10 +348,15 @@ impl RalphPage {
                         let Some(f) = t.run_form() else { return };
                         match pick {
                             Pick::StopAfter => f.stop_after = value,
-                            Pick::Model => f.model = value,
+                            Pick::Model => f.model.update(cx, |s, cx| s.set_value(value.unwrap_or_default(), window, cx)),
                             Pick::Agent if f.agent != value => {
                                 // A model names one agent's model: the new agent starts on its default.
-                                (f.agent, f.model, f.models) = (value, None, vec![]);
+                                let placeholder = default_model(value.as_deref());
+                                f.model.update(cx, |s, cx| {
+                                    s.set_value("", window, cx);
+                                    s.set_placeholder(placeholder, window, cx);
+                                });
+                                (f.agent, f.models) = (value, vec![]);
                                 t.load_run_models(window, cx);
                             }
                             Pick::Agent => {}
@@ -387,15 +403,8 @@ impl RalphPage {
             std::iter::once(("Don't stop early".to_string(), None)).chain(pending.iter().map(|s| (format!("{} · {}", s.id, s.title), Some(s.id.clone())))).collect();
         let agent_label = AGENTS.iter().find(|(v, _)| Some(*v) == f.agent.as_deref().or(Some(""))).map(|(_, l)| *l).unwrap_or("From AI settings");
         let agent_items: Vec<(String, Option<String>)> = AGENTS.iter().map(|(v, l)| (l.to_string(), Some(v.to_string()).filter(|v| !v.is_empty()))).collect();
-        let default_model = match f.agent.as_deref() {
-            Some(a) => format!("Default ({})", orbit_core::settings::default_model(a)),
-            None => "From AI settings".into(),
-        };
-        let model_label = f.model.clone().unwrap_or_else(|| default_model.clone());
-        let model_items: Vec<(String, Option<String>)> = std::iter::once((default_model, None))
-            .chain(f.model.iter().filter(|m| !f.models.contains(m)).map(|m| (m.clone(), Some(m.clone()))))
-            .chain(f.models.iter().map(|m| (m.clone(), Some(m.clone()))))
-            .collect();
+        let model_items: Vec<(String, Option<String>)> =
+            std::iter::once((default_model(f.agent.as_deref()), None)).chain(f.models.iter().map(|m| (m.clone(), Some(m.clone())))).collect();
 
         let scope = section("Scope")
             .child(
@@ -467,7 +476,7 @@ impl RalphPage {
                     .grid_cols(2)
                     .gap(px(12.))
                     .child(field("Agent", pkit::select("ralph-run-agent", agent_label).on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.pick_menu(agent_items.clone(), Pick::Agent, w, cx))), None))
-                    .child(field("Model", pkit::select("ralph-run-model", model_label).on_click(cx.listener(move |t, _: &ClickEvent, w, cx| t.pick_menu(model_items.clone(), Pick::Model, w, cx))), None)),
+                    .child(field("Model", pkit::combo("ralph-run-model", &f.model, cx.listener(move |t, _: &ClickEvent, w, cx| t.pick_menu(model_items.clone(), Pick::Model, w, cx)), window, cx), None)),
             )
             .child(field("Extra instructions for this run", div().id("ralph-run-extra").relative().child(Textarea::new(&f.extra)).child(probe("ralph-run-extra")), None))
             .children(prompt_link)
