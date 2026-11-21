@@ -1114,12 +1114,21 @@ impl ChatView {
                 let denied = answer.starts_with("Deny") || answer.starts_with("Reject") || answer == "Skip" || answer == "not answered";
                 let tone = if denied { theme::DANGER } else { theme::OK };
                 row.gap_2()
-                    .items_center()
+                    .items_start()
                     .text_size(px(12.))
                     .text_color(c(theme::TEXT_DIM))
-                    .child(crate::pages::kit::icon("bell", 12., c(theme::TEXT_FAINT)))
-                    .child(title.clone())
-                    .child(div().px_1p5().rounded(px(4.)).bg(crate::pages::kit::alpha(tone, 0.15)).text_color(c(tone)).child(answer.clone()))
+                    .child(crate::pages::kit::icon("bell", 12., c(theme::TEXT_FAINT)).flex_none().mt(px(3.)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .items_start()
+                            .gap_1()
+                            .child(div().w_full().child(title.clone()))
+                            .child(div().max_w_full().px_1p5().rounded(px(4.)).bg(crate::pages::kit::alpha(tone, 0.15)).text_color(c(tone)).child(answer.clone())),
+                    )
                     .into_any_element()
             }
             Item::Permission { answer: None, .. } if self.queued(ix) => div().into_any_element(),
@@ -1201,10 +1210,10 @@ impl ChatView {
                         .child(
                             div()
                                 .flex()
-                                .items_center()
+                                .items_start()
                                 .gap_2()
-                                .child(crate::pages::kit::icon("bell", 13., c(theme::WARN)))
-                                .child(div().text_color(c(theme::TEXT)).font_weight(gpui::FontWeight::SEMIBOLD).child(title.clone())),
+                                .child(crate::pages::kit::icon("bell", 13., c(theme::WARN)).flex_none().mt(px(3.)))
+                                .child(div().flex_1().min_w_0().text_color(c(theme::TEXT)).font_weight(gpui::FontWeight::SEMIBOLD).child(title.clone())),
                         )
                         .when(!detail.is_empty(), |d| {
                             d.child(div().p_2().rounded(px(4.)).bg(c(theme::BG)).font_family(theme::MONO_FONT).text_size(px(12.)).text_color(c(theme::TEXT_DIM)).child(detail.clone()))
